@@ -41,8 +41,8 @@
 
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
-import { withTimeout, isRetryableRpcError, isKnownTransactionError } from './evm-adapter-rpc.js';
-import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import { withTimeout, isRetryableRpcError, isKnownTransactionError, sleep } from './evm-adapter-rpc.js';
+import { errorCode, errorMessage, errorStatus } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
@@ -142,6 +142,9 @@ export interface RpcFailoverClientOptions {
   validateEndpoint?: ValidateEndpointFn;
   /** Endpoint-stickiness configuration (Mechanism B). */
   stickiness?: StickinessOptions;
+  /** Full-pool retries after every endpoint reports a transient throttle. */
+  readThrottleRetries?: number;
+  readThrottleBackoffMs?: number;
 }
 
 export interface StickinessOptions {
@@ -205,6 +208,8 @@ export class RpcFailoverClient {
   private readonly stickiness: EndpointStickiness;
   /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
   private readonly validateEndpoint?: ValidateEndpointFn;
+  private readonly readThrottleRetries: number;
+  private readonly readThrottleBackoffMs: number;
 
   constructor(
     private readonly getEndpoints: () => RpcEndpoint[],
@@ -219,6 +224,8 @@ export class RpcFailoverClient {
     options?: RpcFailoverClientOptions,
   ) {
     this.validateEndpoint = options?.validateEndpoint;
+    this.readThrottleRetries = options?.readThrottleRetries ?? 2;
+    this.readThrottleBackoffMs = options?.readThrottleBackoffMs ?? 250;
     const stickiness = options?.stickiness;
     const isEnabled = stickiness?.isEnabled
       ?? (stickiness?.enabled !== undefined ? () => stickiness.enabled as boolean : () => true);
@@ -288,14 +295,14 @@ export class RpcFailoverClient {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    const run = () => this.runAcrossProviders(
+    const run = () => this.withThrottleRetries(() => this.runAcrossProviders(
       label,
       fn,
       opts?.isRetryable ?? isRetryableRpcError,
       opts?.policy ?? 'pointRead',
       opts?.skipPreferred ?? false,
       opts?.isEmptyResult,
-    );
+    ));
     return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
@@ -325,14 +332,14 @@ export class RpcFailoverClient {
         const metrics = getMetrics();
         const startedAt = Date.now();
         try {
-          const out = await this.runAcrossProviders(
+          const out = await this.withThrottleRetries(() => this.runAcrossProviders(
             label,
             (p) => fn(this.rebindContract(contract, p)),
             opts?.isRetryable ?? isContractViewRetryable,
             opts?.policy ?? 'pointRead',
             opts?.skipPreferred ?? false,
             opts?.isEmptyResult,
-          );
+          ));
           this.recordRpcOutcome('eth_call', 'ok');
           return out;
         } catch (err) {
@@ -741,6 +748,21 @@ export class RpcFailoverClient {
       `${label} read failed: no configured RPC endpoints`,
       { rpcUrls: [] },
     );
+  }
+
+  private async withThrottleRetries<T>(run: () => Promise<T>): Promise<T> {
+    for (let retry = 0; ; retry += 1) {
+      try {
+        return await run();
+      } catch (error) {
+        const cause = error instanceof Error ? error.cause : undefined;
+        const status = errorStatus(cause ?? error);
+        const message = errorMessage(cause ?? error).toLowerCase();
+        const throttled = status === 429 || /\b429\b|too many requests|rate[ -]?limit|throttl/.test(message);
+        if (!throttled || retry >= this.readThrottleRetries) throw error;
+        await sleep(this.readThrottleBackoffMs * (2 ** retry));
+      }
+    }
   }
 
   /**

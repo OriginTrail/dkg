@@ -28,7 +28,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { RpcFailoverClient, type SignPopulatedFn } from '../src/rpc-failover-client.js';
+import { RpcFailoverClient, type RpcFailoverClientOptions, type SignPopulatedFn } from '../src/rpc-failover-client.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { getRpcFailoverStats, _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
@@ -79,11 +79,12 @@ const NEVER_SIGN: SignPopulatedFn = async () => {
  * is the exact shape the adapter constructs it with, minus the adapter — so a
  * read failover regression is caught without a god-object back-reference.
  */
-function makeClient(providers: unknown[], rpcUrls: string[], signPopulated: SignPopulatedFn = NEVER_SIGN): RpcFailoverClient {
+function makeClient(providers: unknown[], rpcUrls: string[], signPopulated: SignPopulatedFn = NEVER_SIGN, options?: RpcFailoverClientOptions): RpcFailoverClient {
   return new RpcFailoverClient(
     () => providers.map((p, i) => ({ provider: p as any, rpcUrl: rpcUrls[i] })),
     signPopulated,
     () => 'evm:31337',
+    options,
   );
 }
 
@@ -104,7 +105,9 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
   it('exhausts ALL endpoints → ChainRpcTransportError RPC_ENDPOINTS_EXHAUSTED, one attempt each', async () => {
     const primary = { read: recorder(async () => { throw retryable429(); }) };
     const backup = { read: recorder(async () => { throw retryable429(); }) };
-    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example']);
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+      readThrottleRetries: 0,
+    });
 
     let thrown: any;
     try { await client.read('unit read', (p: any) => p.read()); } catch (e) { thrown = e; }
@@ -115,6 +118,24 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
     expect(thrown.message).not.toContain('https://');
     expect(primary.read.calls).toHaveLength(1);
     expect(backup.read.calls).toHaveLength(1);
+  });
+
+  it('backs off and retries the full pool when every endpoint returns 429', async () => {
+    let round = 0;
+    const primary = { read: recorder(async () => { throw retryable429(); }) };
+    const backup = { read: recorder(async () => {
+      round += 1;
+      if (round === 1) throw retryable429();
+      return 'recovered';
+    }) };
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+      readThrottleRetries: 2,
+      readThrottleBackoffMs: 1,
+    });
+
+    await expect(client.read('getBlock', (provider: any) => provider.read())).resolves.toBe('recovered');
+    expect(primary.read.calls).toHaveLength(2);
+    expect(backup.read.calls).toHaveLength(2);
   });
 
   it('single-RPC: a retryable failure still stamps RPC_ENDPOINTS_EXHAUSTED but keeps the original message verbatim', async () => {
