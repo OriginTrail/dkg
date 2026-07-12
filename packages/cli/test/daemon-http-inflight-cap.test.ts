@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { request as httpRequest } from 'node:http';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 
 /**
@@ -11,13 +12,11 @@ import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from '.
  * http-admission-control.test.ts: it would fail if the limiter were never wired
  * into createServer, wired after an early return, or never released.
  *
- * Saturation is created with a 50-request burst against cap=1 rather than a
- * single held-open request. That is statistically deterministic — 50 concurrent
- * requests cannot all serialize through one slot without overlap — and avoids a
- * brittle blocking fixture (the daemon admits before the route reads the body,
- * so an unfinished-body "hold" does not reliably pin the slot). The precise
- * one-in/one-shed/release semantics are covered deterministically by the unit
- * tests; here we prove the wiring end-to-end.
+ * Saturation is created with a real HTTP request whose JSON body is deliberately
+ * left unfinished. The test then polls the admission-exempt status route until
+ * it observes the occupied slot before sending competing requests. This proves
+ * the production wiring without relying on a fast request burst happening to
+ * overlap on a particular runner.
  */
 describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
   let daemon: LiveDaemon | undefined;
@@ -46,24 +45,76 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
     });
   }
 
+  async function readAdmission(
+    d: LiveDaemon,
+  ): Promise<{ inFlight: number; max: number; rejectedTotal: number }> {
+    const res = await fetch(`${d.base}/api/status`, { headers: authHeaders(d) });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      admission?: { inFlight: number; max: number; rejectedTotal: number };
+    };
+    expect(body.admission).toBeDefined();
+    return body.admission!;
+  }
+
+  async function holdQuerySlot(d: LiveDaemon): Promise<{
+    release: () => void;
+    responseStatus: Promise<number>;
+  }> {
+    let released = false;
+    let req: ReturnType<typeof httpRequest>;
+    const responseStatus = new Promise<number>((resolve, reject) => {
+      req = httpRequest(
+        `${d.base}/api/query`,
+        {
+          method: 'POST',
+          headers: authHeaders(d),
+        },
+        (res) => {
+          res.resume();
+          res.once('end', () => resolve(res.statusCode ?? 0));
+        },
+      );
+      req.once('error', reject);
+      req.write('{"sparql":"SELECT * WHERE { ?s ?p ?o } LIMIT 1","hold":"');
+    });
+    const release = () => {
+      if (released) return;
+      released = true;
+      req.end('released"}');
+    };
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if ((await readAdmission(d)).inFlight === 1) {
+        return { release, responseStatus };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    release();
+    throw new Error('Timed out waiting for the held query to occupy the admission slot');
+  }
+
   it('sheds concurrent over-capacity requests with 503 + Retry-After, then recovers', async () => {
     const d = daemon!;
-    const results = await Promise.all(
-      Array.from({ length: 50 }, () =>
-        selectQuery(d)
-          .then((r) => ({ status: r.status, retryAfter: r.headers.get('retry-after') }))
-          .catch(() => ({ status: 0, retryAfter: null as string | null })),
-      ),
-    );
-    const shed = results.filter((r) => r.status === 503);
-    const ok = results.filter((r) => r.status === 200);
+    const held = await holdQuerySlot(d);
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 10 }, () =>
+          selectQuery(d)
+            .then((r) => ({ status: r.status, retryAfter: r.headers.get('retry-after') }))
+            .catch(() => ({ status: 0, retryAfter: null as string | null })),
+        ),
+      );
 
-    // Every result must be an EXPECTED status — never a network error (0) or an
-    // unexpected 4xx/5xx that would otherwise hide behind the >=1/>=1 counts.
-    expect(results.every((r) => r.status === 200 || r.status === 503)).toBe(true);
-    expect(ok.length).toBeGreaterThan(0); // at least one admitted
-    expect(shed.length).toBeGreaterThan(0); // cap enforced under concurrent load
-    expect(shed.every((r) => r.retryAfter === '1')).toBe(true); // Retry-After present on every 503
+      expect(results.every((r) => r.status === 503)).toBe(true);
+      expect(results.every((r) => r.retryAfter === '1')).toBe(true);
+
+      held.release();
+      expect(await held.responseStatus).toBe(200);
+    } finally {
+      held.release();
+    }
 
     // Slots are released after each handler completes → a fresh request succeeds.
     const recovered = await selectQuery(d);
@@ -72,58 +123,54 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
 
   it('keeps the exempt liveness path (/api/status) answerable even while saturated', async () => {
     const d = daemon!;
-    // Saturate with non-exempt query work; capture the burst results so we can
-    // PROVE the daemon was actually over capacity (>=1 shed) while the status
-    // probes ran — otherwise "status stayed 200" would be vacuous.
-    const burst = Promise.all(
-      Array.from({ length: 40 }, () =>
-        selectQuery(d).then((r) => r.status).catch(() => 0),
-      ),
-    );
-    // ...while hammering the exempt status endpoint, which must always answer 200.
-    const statuses = await Promise.all(
-      Array.from({ length: 12 }, () =>
-        fetch(`${d.base}/api/status`, { headers: authHeaders(d) })
-          .then((r) => r.status)
-          .catch(() => 0),
-      ),
-    );
-    const burstStatuses = await burst;
+    const held = await holdQuerySlot(d);
+    try {
+      const [statuses, burstStatuses] = await Promise.all([
+        Promise.all(
+          Array.from({ length: 12 }, () =>
+            fetch(`${d.base}/api/status`, { headers: authHeaders(d) })
+              .then((r) => r.status)
+              .catch(() => 0),
+          ),
+        ),
+        Promise.all(
+          Array.from({ length: 10 }, () =>
+            selectQuery(d).then((r) => r.status).catch(() => 0),
+          ),
+        ),
+      ]);
 
-    expect(statuses.every((s) => s === 200)).toBe(true); // exempt path never shed
-    expect(burstStatuses.filter((s) => s === 503).length).toBeGreaterThan(0); // saturation really happened
-    expect(burstStatuses.every((s) => s === 200 || s === 503)).toBe(true); // no unexpected failures
+      expect(statuses.every((s) => s === 200)).toBe(true);
+      expect(burstStatuses.every((s) => s === 503)).toBe(true);
+    } finally {
+      held.release();
+    }
+    expect(await held.responseStatus).toBe(200);
   }, 60_000);
 
   it('surfaces admission stats on /api/status (effective cap + per-burst shed delta)', async () => {
     const d = daemon!;
-    // Read the surfaced admission block off the exempt status endpoint.
-    const readAdmission = async (): Promise<{ inFlight: number; max: number; rejectedTotal: number }> => {
-      const res = await fetch(`${d.base}/api/status`, { headers: authHeaders(d) });
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as {
-        admission?: { inFlight: number; max: number; rejectedTotal: number };
-      };
-      expect(body.admission).toBeDefined();
-      return body.admission!;
-    };
-
     // Snapshot BEFORE this burst — earlier tests in this file already shed, so a
     // bare `rejectedTotal > 0` would pass without proving THIS burst moved the
     // counter (i.e. that the surfaced value still tracks live shedding).
-    const before = await readAdmission();
+    const before = await readAdmission(d);
     expect(before.max).toBe(1); // the pinned effective cap is surfaced
     expect(typeof before.inFlight).toBe('number');
 
-    // Saturate the non-exempt path so this burst provably sheds.
-    const burst = await Promise.all(
-      Array.from({ length: 50 }, () => selectQuery(d).then((r) => r.status).catch(() => 0)),
-    );
-    expect(burst.filter((s) => s === 503).length).toBeGreaterThan(0); // this burst really shed
+    const held = await holdQuerySlot(d);
+    try {
+      const burst = await Promise.all(
+        Array.from({ length: 10 }, () => selectQuery(d).then((r) => r.status).catch(() => 0)),
+      );
+      expect(burst.every((s) => s === 503)).toBe(true);
+    } finally {
+      held.release();
+    }
+    expect(await held.responseStatus).toBe(200);
 
     // /api/status is admission-exempt, so reading it doesn't perturb the counter:
     // `after` MUST exceed `before` by the sheds we just caused.
-    const after = await readAdmission();
+    const after = await readAdmission(d);
     expect(after.rejectedTotal).toBeGreaterThan(before.rejectedTotal);
   }, 60_000);
 });
