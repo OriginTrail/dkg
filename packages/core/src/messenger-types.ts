@@ -215,9 +215,11 @@ export interface ProtocolOutboxStore {
   pendingFor(peer: string): ProtocolOutboxEntry[];
 
   /**
-   * All entries whose `nextAttemptAt <= now`. Used by the periodic
-   * tick to find what's due for retry, regardless of peer
-   * reachability.
+   * Entries whose `nextAttemptAt <= now`, ordered by `nextAttemptAt`,
+   * `firstFailureAt`, then `(peer, protocol, messageId)` ascending. `limit` is
+   * already normalized by ProtocolOutbox to a non-negative integer (or omitted
+   * for all rows); store implementations must preserve the same semantics when
+   * called directly. Used by the periodic retry scheduler.
    */
   due(now: number, limit?: number): ProtocolOutboxEntry[];
 
@@ -248,6 +250,12 @@ export interface ProtocolOutboxStore {
    * send).
    */
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
+}
+
+/** Shared due-page normalization used at the wrapper and store boundaries. */
+export function normalizeProtocolOutboxDueLimit(limit: number | undefined): number | undefined {
+  if (limit === undefined || !Number.isFinite(limit)) return undefined;
+  return Math.max(0, Math.floor(limit));
 }
 
 /**

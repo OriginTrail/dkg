@@ -461,6 +461,34 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
     expect(router.send.calls).toHaveLength(3);
     expect(outboxStore.size()).toBe(2);
   });
+
+  it('waitForOutboxDrain stays pending until the active retry completes', async () => {
+    let release!: () => void;
+    const router = makeRouter(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return new Uint8Array([0x42]);
+    });
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    outboxStore.enqueue(PEER_A, PROTO, FIXED_MSG_ID, new Uint8Array([1]), 'offline', 0);
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+      backoffs: [10],
+    });
+
+    const tick = messenger.processOutboxTick(100);
+    let waitResolved = false;
+    const waiting = messenger.waitForOutboxDrain().then(() => { waitResolved = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(router.send.calls).toHaveLength(1);
+    expect(waitResolved).toBe(false);
+
+    release();
+    await Promise.all([tick, waiting]);
+    expect(waitResolved).toBe(true);
+    expect(outboxStore.size()).toBe(0);
+  });
 });
 
 describe('Messenger construction guardrails', () => {

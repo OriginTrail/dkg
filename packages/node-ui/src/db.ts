@@ -8,6 +8,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxStore,
+  normalizeProtocolOutboxDueLimit,
 } from '@origintrail-official/dkg-core';
 
 export {
@@ -2794,12 +2795,13 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   due(now: number, limit?: number): ProtocolOutboxEntry[] {
-    const boundedLimit = limit === undefined ? -1 : Math.max(0, Math.floor(limit));
+    const boundedLimit = normalizeProtocolOutboxDueLimit(limit) ?? -1;
     const rows = this.db
       .prepare(
         `SELECT * FROM protocol_outbox
          WHERE next_attempt_at <= ?
-         ORDER BY next_attempt_at ASC, first_failure_at ASC
+         ORDER BY next_attempt_at ASC, first_failure_at ASC,
+                  peer_id ASC, protocol ASC, message_id ASC
          LIMIT ?`,
       )
       .all(now, boundedLimit) as Array<{

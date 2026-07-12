@@ -5,7 +5,7 @@
 // unchanged), and no more than `limit` callbacks are ever in flight (so a
 // high-degree node's subscribe round can't flood its own store).
 import { describe, it, expect } from 'vitest';
-import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from '../src/sync/map-with-concurrency.js';
+import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from '../src/map-with-concurrency.js';
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 

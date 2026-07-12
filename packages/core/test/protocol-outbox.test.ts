@@ -146,6 +146,16 @@ describe('ProtocolOutbox.due / pendingFor', () => {
     expect(outbox.due(now, 2).map((entry) => entry.messageId)).toEqual(['first', 'second']);
   });
 
+  it('normalizes limits once and deterministically orders exact timestamp ties', () => {
+    const { outbox } = fixture();
+    outbox.enqueueFailure(PEER_A, PROTO, 'z-last', PAYLOAD, 'e', 1000);
+    outbox.enqueueFailure(PEER_A, PROTO, 'a-first', PAYLOAD, 'e', 1000);
+    const now = 1000 + DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[0];
+
+    expect(outbox.due(now, 1.9).map((entry) => entry.messageId)).toEqual(['a-first']);
+    expect(outbox.due(now, Number.NaN).map((entry) => entry.messageId)).toEqual(['a-first', 'z-last']);
+  });
+
   it('pendingFor returns all entries for a peer in firstFailureAt ascending order', () => {
     const { outbox } = fixture();
     outbox.enqueueFailure(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2000);

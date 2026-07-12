@@ -175,6 +175,7 @@ export {
   type MessageDirection,
   type IdempotencyCheckResult,
   type ProtocolOutboxStore,
+  normalizeProtocolOutboxDueLimit,
   type ProtocolOutboxEntry,
   type KaNumberStore,
   RESPONSE_CACHE_BYTES,

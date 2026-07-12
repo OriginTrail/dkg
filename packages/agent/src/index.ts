@@ -228,7 +228,7 @@ export {
 // (`/api/context-graph/subscribe` → `catchup-runner-worker-impl`) runs the same
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
-export { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
+export { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './map-with-concurrency.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.

@@ -11,7 +11,7 @@ import {
   type ProtocolOutboxEntry,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
-import { mapWithConcurrency } from '../sync/map-with-concurrency.js';
+import { mapWithConcurrency } from '../map-with-concurrency.js';
 
 /** Bytes payload the substrate uses to signal `RESPONSE_GONE` on the wire. */
 const RESPONSE_GONE_BYTES = new TextEncoder().encode(RESPONSE_GONE_MARKER);

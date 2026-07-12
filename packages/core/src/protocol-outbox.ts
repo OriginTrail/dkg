@@ -34,7 +34,7 @@ import type {
   ProtocolOutboxEntry,
   ProtocolOutboxStore,
 } from './messenger-types.js';
-import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
+import { RESPONSE_CACHE_BYTES, normalizeProtocolOutboxDueLimit } from './messenger-types.js';
 
 export interface ProtocolOutboxOptions {
   /**
@@ -201,9 +201,9 @@ export class ProtocolOutbox {
     return this.store.hasEntry(peer, protocol, messageId);
   }
 
-  /** Entries whose `nextAttemptAt <= now`. */
+  /** Ordered due page; normalization is centralized before crossing the store port. */
   due(now: number, limit?: number): ProtocolOutboxEntry[] {
-    return this.store.due(now, limit);
+    return this.store.due(now, normalizeProtocolOutboxDueLimit(limit));
   }
 
   /**
@@ -335,10 +335,15 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   due(now: number, limit?: number): ProtocolOutboxEntry[] {
+    const boundedLimit = normalizeProtocolOutboxDueLimit(limit);
     const entries = Array.from(this.entries.values())
       .filter((e) => e.nextAttemptAt <= now)
-      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt || a.firstFailureAt - b.firstFailureAt);
-    return (limit === undefined ? entries : entries.slice(0, Math.max(0, limit)))
+      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt
+        || a.firstFailureAt - b.firstFailureAt
+        || a.peer.localeCompare(b.peer)
+        || a.protocol.localeCompare(b.protocol)
+        || a.messageId.localeCompare(b.messageId));
+    return (boundedLimit === undefined ? entries : entries.slice(0, boundedLimit))
       .map(cloneOutboxEntry);
   }
 
