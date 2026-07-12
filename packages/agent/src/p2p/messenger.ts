@@ -798,24 +798,6 @@ export class Messenger {
     }
   }
 
-  /**
-   * Opportunistic-flush retry loop. The lifecycle.ts wiring (PR-3)
-   * calls this from a libp2p `connection:open` event for `peerId`:
-   * a reconnection is the signal we were waiting for, so attempt
-   * every pending entry for `peer` NOW even if `nextAttemptAt` is
-   * still in the future.
-   *
-   * Same guards as `processOutboxTick` — must check `hasEntry`
-   * after `tryBeginAttempt` to defend against the rc.9 #538 race.
-   */
-  async processOutboxOnConnect(peerId: string): Promise<void> {
-    if (!this.outbox) return;
-    const pending = this.outbox.pendingFor(peerId);
-    for (const entry of pending) {
-      await this.retryOutboxEntry(entry);
-    }
-  }
-
   private async retryOutboxEntry(entry: {
     peer: string;
     protocol: string;

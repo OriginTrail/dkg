@@ -2345,14 +2345,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
-      // rc.9 PR-10: the dedicated join-approval on-connect flush is
-      // gone. The substrate's `Messenger.processOutboxOnConnect` (a
-      // few lines further down in this handler) now covers join-
-      // approved retries too, since /dkg/10.0.1/join-request is now
-      // a substrate-managed protocol.
-
       // Reverse-path peerStore enrichment for inbound circuit-relay
-      // connections, then the symmetric chat-outbox flush.
+      // connections.
       //
       // Closes the "Window D" class from the May 2026 Miles↔Lex 6h
       // soak postmortem: an inbound circuit connection from peer P
@@ -2365,17 +2359,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // dialProtocol find an address and try it.
       //
       // User review on PR #536 caught the original ordering bug:
-      // running enrichment and the outbox flush in parallel
-      // fire-and-forget meant the first flush attempt could
-      // still hit `dialProtocol` against an EMPTY peerStore and
-      // fail with the same "no valid addresses" error this PR is
-      // meant to heal — pushing recovery onto the next 30s tick
-      // or another reconnect. Sequence the two: await enrichment
-      // first, then flush. Both stay wrapped in their own
-      // try/catch so an enrichment failure logs a warning and
-      // still lets the outbox flush proceed (it might succeed
-      // anyway via a stale-but-usable cached path).
-      //
       // The whole chain runs as a fire-and-forget IIFE so the
       // listener itself doesn't await — libp2p's
       // `connection:open` emitter is synchronous and we don't
@@ -2395,17 +2378,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
-        }
-        // Universal Messenger substrate (rc.9 PR-2/PR-3): drain
-        // the generic outbox for this peer. Replaces the rc.8
-        // chat-specific outbox flush — the substrate now carries
-        // chat (PR-3) and will carry every other short-message
-        // protocol after PR-8..PR-11.
-        try {
-          await this.messenger.processOutboxOnConnect(remotePeer);
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Opportunistic Messenger-outbox retry on connect failed for ${remotePeer}: ${message}`);
         }
         // PR-2 (SWM-fanout plan): drain pending sender-key packages
         // that were queued because the recipient had no advertised
@@ -2604,8 +2576,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // MESSAGE_OUTBOX_TICK_MS for the rationale (silent-drop on
     // transport failure used to lose operator-typed messages from
     // `dkg_send_message`; this is the safety-net retry loop that turns
-    // them into eventual successes, complemented by the
-    // opportunistic-on-reconnect path in the connection:open listener).
+    // them into eventual successes on their persisted retry schedule.
     // Universal Messenger substrate retry tick (rc.9 PR-2 +
     // PR-3). The rc.8 chat-specific tick was deleted in PR-3;
     // this is now the only outbox tick — chat (PR-3) and every

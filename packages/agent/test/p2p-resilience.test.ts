@@ -338,21 +338,7 @@ describe('p2p resilience hooks', () => {
       }
     }, 15_000);
 
-    // User review on PR #536: the `connection:open` listener used to
-    // call `enrichPeerStoreFromInboundCircuit` and the outbox flush
-    // in parallel fire-and-forget, which meant the first outbox
-    // flush attempt could still hit `dialProtocol` against an EMPTY
-    // peerStore — exact same "no valid addresses for peer" failure
-    // the PR is meant to heal. Fix wraps both in a sequential IIFE
-    // so the flush sees the freshly-merged reverse-path address.
-    //
-    // rc.9 PR-3 substrate cutover: the outbox flush moved from
-    // `processMessageOutboxOnConnect` (chat-specific, deleted) to
-    // `messenger.processOutboxOnConnect` (substrate, generic). The
-    // ordering invariant is the same — enrich BEFORE the substrate
-    // flush so the substrate's dialProtocol calls see the merged
-    // peerStore address.
-    it('awaits enrichment BEFORE the substrate outbox flush on inbound circuit open (PR #536 review, rc.9 substrate)', async () => {
+    it('enriches reverse paths without waking the Messenger outbox on connection open', async () => {
       const agent = await DKGAgent.create({
         name: 'ReversePathEnrichBeforeFlush',
         listenHost: '127.0.0.1',
@@ -363,6 +349,7 @@ describe('p2p resilience hooks', () => {
         allowAllNetworkAdmission(agent);
 
         const events: string[] = [];
+        let scheduledDrains = 0;
         let enrichResolve: (() => void) | null = null;
         const enrichDone = new Promise<void>((r) => { enrichResolve = r; });
 
@@ -372,9 +359,7 @@ describe('p2p resilience hooks', () => {
           events.push('enrich:end');
           enrichResolve?.();
         };
-        (agent as any).messenger.processOutboxOnConnect = async () => {
-          events.push('flush:start');
-        };
+        (agent as any).messenger.processOutboxTick = async () => { scheduledDrains += 1; };
 
         const remotePeer = freshPeerIdString();
         const relayPeer = freshPeerIdString();
@@ -391,23 +376,16 @@ describe('p2p resilience hooks', () => {
         } as any));
 
         await enrichDone;
-        // Give the IIFE one more tick to schedule the flush.
+        // Give the connection lifecycle's remaining async work time to settle.
         await new Promise(r => setTimeout(r, 50));
 
         expect(events).toContain('enrich:start');
         expect(events).toContain('enrich:end');
-        expect(events).toContain('flush:start');
-        expect(events.indexOf('enrich:end')).toBeLessThan(events.indexOf('flush:start'));
+        expect(scheduledDrains).toBe(0);
       } finally {
         await agent.stop().catch(() => {});
       }
     }, 15_000);
 
-    // Stale-snapshot guard regression: the equivalent test for the
-    // substrate's `Messenger.processOutboxOnConnect` lives in
-    // `messenger-substrate.test.ts` ("honours the stale-snapshot
-    // guard (rc.9 #538)") — same race, same fix, just at the
-    // generic substrate layer rather than the chat-specific one
-    // which was deleted in rc.9 PR-3.
   });
 });

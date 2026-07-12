@@ -716,8 +716,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       ctx,
       `join-approval for "${contextGraphId}" → ${agentAddress} not delivered now ` +
         `(error=${result.error ?? 'unknown'}). Curator-local state is correct; ` +
-        `substrate outbox holds the queued send and will retry on its backoff ` +
-        `ladder + on the invitee's next reconnect.`,
+        `substrate outbox holds the queued send and will retry on its backoff ladder.`,
     );
   }
 
@@ -727,8 +726,8 @@ export class JoinRequestMethods extends DKGAgentBase {
    * delivery state matters.
    *
    * Used by:
-   *   * The substrate's periodic outbox tick + on-connect flush —
-   *     both transparent to this call (rc.9 PR-10).
+   *   * The substrate's periodic outbox tick, transparent to this call
+   *     (rc.9 PR-10).
    *   * The operator-facing route `POST /api/context-graph/{id}/redeliver-approval`,
    *     which lets an operator (or peer agent via the chat MCP) re-poke
    *     the curator when the automated retry isn't fast enough.
@@ -856,8 +855,8 @@ export class JoinRequestMethods extends DKGAgentBase {
    */
   // rc.9 PR-10: processJoinApprovalRetryQueueTick +
   // processJoinApprovalRetryQueueOnConnect deleted. The substrate's
-  // Messenger.processOutboxTick + Messenger.processOutboxOnConnect
-  // cover /dkg/10.0.1/join-request automatically (same as chat in
+  // Messenger.processOutboxTick covers /dkg/10.0.1/join-request
+  // automatically (same as chat in
   // PR-3), so the two dedicated processors are obsolete. Operator
   // re-fire route POST /api/context-graph/{id}/redeliver-approval is
   // unchanged — it still calls redeliverJoinApproval which now
