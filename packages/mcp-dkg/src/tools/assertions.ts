@@ -15,6 +15,7 @@
  * assertion name.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { escapeRdfLiteral } from '@origintrail-official/dkg-rdf-utils';
 import { z } from 'zod';
 import type { DkgClient } from '../client.js';
 import { DkgHttpError } from '../client.js';
@@ -105,12 +106,10 @@ function validateAssertionName(name: string): { valid: boolean; reason?: string 
 
 /**
  * Object-term normalizer for the `dkg_knowledge_asset_create` one-shot `quads`
- * path. Replicated verbatim from `@origintrail-official/dkg-core`
- * `normalizeDkgPublisherObject` / `isDkgRdfTerm` / `escapeDkgRdfLiteral`
- * (`packages/core/src/publisher-extension.ts:212-239`) — MCP does not depend on
- * dkg-core (it is deliberately dependency-light; it inlines `validateAssertionName`
- * and the share-warning constants for the same reason), and core does not export the
- * normalizer from its package entry, so the rule is inlined here. OpenClaw + Hermes
+ * path. The term classifier and wrapper mirror `@origintrail-official/dkg-core`
+ * `normalizeDkgPublisherObject` / `isDkgRdfTerm`, while literal escaping delegates
+ * to the shared, dependency-free `@origintrail-official/dkg-rdf-utils` package.
+ * MCP remains independent of the full dkg-core runtime. OpenClaw + Hermes
  * route the SAME create-tool `quads` shape through that core normalizer, so a bare
  * literal object must auto-quote identically across all three runtimes
  * (portable-agent parity). A value that is already an http(s)/urn/did URI, a blank
@@ -121,8 +120,8 @@ function validateAssertionName(name: string): { valid: boolean; reason?: string 
  * DRIFT GUARD: the public contract of these three functions is pinned by a GOLDEN
  * conformance fixture in `packages/mcp-dkg/test/rdf-object-normalization-conformance.test.ts`
  * whose expected strings are HAND-WRITTEN (not derived from this impl). If core's
- * `normalizeDkgPublisherObject`/`escapeDkgRdfLiteral` changes, update this inline
- * copy AND that fixture together (core carries a back-pointer to that test).
+ * `normalizeDkgPublisherObject` changes, update this wrapper and that fixture
+ * together (core carries a back-pointer to that test).
  *
  * Exported so the conformance test can pin them directly.
  */
@@ -135,23 +134,7 @@ export function isRdfTerm(value: string): boolean {
 }
 
 export function escapeRdfLiteralBody(value: string): string {
-  // Byte-for-byte copy of dkg-core `escapeDkgRdfLiteral` (kept dep-light).
-  // Escape every remaining C0 control character (U+0000–U+001F) and DEL
-  // (U+007F) — raw controls produce an invalid N-Triples literal. The five with
-  // ECHAR short forms keep them (stable output); everything else → \uXXXX.
-  return value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/[\u0000-\u001F\u007F]/g, (ch) => {
-      switch (ch) {
-        case '\n': return '\\n';
-        case '\r': return '\\r';
-        case '\t': return '\\t';
-        case '\f': return '\\f';
-        case '\b': return '\\b';
-        default: return `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
-      }
-    });
+  return escapeRdfLiteral(value);
 }
 
 export function normalizeRdfObject(value: string): string {

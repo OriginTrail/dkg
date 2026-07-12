@@ -5,6 +5,5 @@
     "rootDir": "src",
     "composite": true
   },
-  "include": ["src"],
-  "references": [{ "path": "../rdf-utils" }]
+  "include": ["src"]
 }

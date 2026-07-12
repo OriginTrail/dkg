@@ -1,3 +1,5 @@
+import { escapeRdfLiteral } from '@origintrail-official/dkg-rdf-utils';
+
 export interface DkgPublisherExtensionQuadInput {
   subject: unknown;
   predicate: unknown;
@@ -146,10 +148,11 @@ export function normalizeDkgPublisherQuads(
   }));
 }
 
-// NOTE: the MCP adapter inlines a byte-for-byte copy of this normalizer (it is
-// deliberately dep-light and does not import dkg-core) as `normalizeRdfObject` in
-// `packages/mcp-dkg/src/tools/assertions.ts`. If you change the behavior here,
-// update that copy AND its golden fixture in
+// NOTE: the MCP adapter keeps a dependency-light copy of the term classifier and
+// wrapper as `normalizeRdfObject` in `packages/mcp-dkg/src/tools/assertions.ts`.
+// Both adapters delegate literal escaping to `@origintrail-official/dkg-rdf-utils`.
+// If you change the surrounding normalization behavior here, update the MCP copy
+// AND its golden fixture in
 // `packages/mcp-dkg/test/rdf-object-normalization-conformance.test.ts` so the
 // public `dkg_knowledge_asset_create({quads})` object contract stays identical
 // across the MCP / OpenClaw / Hermes adapters.
@@ -172,24 +175,7 @@ export function isDkgRdfTerm(value: string): boolean {
  * Returns only the escaped body; callers wrap it in quotes.
  */
 export function escapeDkgRdfLiteral(value: string): string {
-  return value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    // Escape every remaining C0 control character (U+0000–U+001F) and DEL
-    // (U+007F): an N-Triples/N-Quads STRING_LITERAL_QUOTED may not contain them
-    // raw, so a NUL / VT / DEL / etc. passing through produced an invalid literal
-    // that the store rejected or stored corrupted. The five with ECHAR short
-    // forms keep them (stable output); everything else becomes a \uXXXX UCHAR.
-    .replace(/[\u0000-\u001F\u007F]/g, (ch) => {
-      switch (ch) {
-        case '\n': return '\\n';
-        case '\r': return '\\r';
-        case '\t': return '\\t';
-        case '\f': return '\\f';
-        case '\b': return '\\b';
-        default: return `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
-      }
-    });
+  return escapeRdfLiteral(value);
 }
 
 export {
