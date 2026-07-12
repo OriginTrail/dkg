@@ -29,6 +29,10 @@ import {
   type OxigraphServerHandle,
   type OxigraphServerIo,
 } from './oxigraph-server.js';
+import {
+  normalizeOxigraphMemoryLimits,
+  type OxigraphMemoryLimits,
+} from './oxigraph-launch-strategy.js';
 
 /** Config value that opts a node into the daemon-managed local server. */
 export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
@@ -119,6 +123,8 @@ export interface ManagedOxigraphPlan {
   readyTimeoutMs?: number;
   /** Native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
   queryTimeoutS?: number;
+  /** Finite limits applied to an isolated systemd user scope. */
+  memoryLimits?: OxigraphMemoryLimits;
   /**
    * sharedMemoryPublicSnapshotStorage with a defaulted `directory`, set
    * only when the operator enabled it. Same rewrite hazard as
@@ -144,6 +150,10 @@ export function planManagedOxigraph(
   const port = resolveManagedOxigraphPort(options);
   const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
   const queryTimeoutS = resolvePositiveIntegerOption(options, 'queryTimeoutS');
+  const memoryLimits = normalizeOxigraphMemoryLimits({
+    highMiB: options.memoryHighMiB,
+    maxMiB: options.memoryMaxMiB,
+  });
   const location =
     typeof options.location === 'string' && options.location.trim()
       ? options.location
@@ -198,6 +208,7 @@ export function planManagedOxigraph(
     largeLiteralStorage,
     readyTimeoutMs,
     queryTimeoutS,
+    memoryLimits,
     sharedMemoryPublicSnapshotStorage,
   };
 }
@@ -255,6 +266,8 @@ export async function startManagedOxigraph(
     log,
     readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,
     queryTimeoutS: plan.queryTimeoutS,
+    memoryLimits: plan.memoryLimits,
+    platform: opts.platform,
     io: opts.serverIo,
   });
 
