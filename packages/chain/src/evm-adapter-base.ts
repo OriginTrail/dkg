@@ -574,6 +574,8 @@ export type SelectSignerSpec =
       contextGraphId: bigint;
       /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
       preferIdle?: boolean;
+      /** Throw an actionable whole-pool diagnostic instead of falling back to the best short wallet. */
+      requireFunded?: boolean;
     }
   | {
       txClass: 'rotatable-funded';
@@ -1886,7 +1888,12 @@ export class EVMChainAdapterBase {
 
       const chosen = this.fundedWalletSelectionDisabled
         ? eligible[0]
-        : await this.selectFundedSigner(eligible, spec.funding, spec.preferIdle ?? false);
+        : await this.selectFundedSigner(
+          eligible,
+          spec.funding,
+          spec.preferIdle ?? false,
+          spec.txClass === 'rotatable-policy' && spec.requireFunded === true,
+        );
 
       // Advance the cursor just past the chosen wallet so the next selection
       // rotates — preserving cross-wallet nonce concurrency (#953) when more
@@ -1906,7 +1913,11 @@ export class EVMChainAdapterBase {
    * agent). Idle preference is OFF for publish until soaked. Behaviour is
    * unchanged from the pre-`selectSigner` implementation.
    */
-  protected async nextAuthorizedSigner(contextGraphId: bigint, requiredTracWei: bigint = 0n): Promise<Wallet> {
+  protected async nextAuthorizedSigner(
+    contextGraphId: bigint,
+    requiredTracWei: bigint = 0n,
+    requireFunded = false,
+  ): Promise<Wallet> {
     return this.selectSigner({
       txClass: 'rotatable-policy',
       contextGraphId,
@@ -1918,6 +1929,7 @@ export class EVMChainAdapterBase {
         consultPca: true,
       },
       preferIdle: false,
+      requireFunded,
     });
   }
 
@@ -1987,6 +1999,7 @@ export class EVMChainAdapterBase {
     candidates: Wallet[],
     funding: FundingMode,
     preferIdle: boolean,
+    requireFunded = false,
   ): Promise<Wallet> {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
@@ -2016,6 +2029,20 @@ export class EVMChainAdapterBase {
         if (idle !== undefined) return candidates[idle];
       }
       return candidates[fundableIdx[0]];
+    }
+    if (requireFunded) {
+      throw new InsufficientPublisherFundsError(
+        formatNoFundedPublisherWalletMessage(candidates.map((signer, i) => ({
+          address: signer.address,
+          nativeWei: fundings[i].native,
+          tracWei: fundings[i].trac,
+        }))),
+        candidates.map((signer, i) => ({
+          address: signer.address,
+          nativeWei: fundings[i].native,
+          tracWei: fundings[i].trac,
+        })),
+      );
     }
     let bestIdx = 0;
     for (let i = 1; i < candidates.length; i += 1) {

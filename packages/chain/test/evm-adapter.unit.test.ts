@@ -3888,7 +3888,10 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 1n); tracByAddr.set(lc(walletB.address), 2n);
-    await expect(a.getAuthorizedPublisherAddress(CG, 1000n)).rejects.toMatchObject({
+    await expect(a.reservePublisherAddressForPublish({
+      contextGraphId: CG,
+      requiredTracWei: 1000n,
+    })).rejects.toMatchObject({
       code: 'NO_FUNDED_PUBLISHER_WALLET',
     });
   });

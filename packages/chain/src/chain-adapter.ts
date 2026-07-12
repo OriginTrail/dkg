@@ -1164,7 +1164,13 @@ export interface ChainAdapter {
    * publishers that need the off-chain signature address to match the eventual
    * tx signer.
    */
-  getAuthorizedPublisherAddress?(contextGraphId: bigint, requiredTracWei?: bigint): Promise<string>;
+  getAuthorizedPublisherAddress?(contextGraphId: bigint): Promise<string>;
+
+  /** Strict, cost-aware reservation used only once an exact publish quote exists. */
+  reservePublisherAddressForPublish?(request: {
+    contextGraphId: bigint;
+    requiredTracWei: bigint;
+  }): Promise<string>;
 
   /**
    * Sign with a specific adapter-held address. Adapters with signer pools

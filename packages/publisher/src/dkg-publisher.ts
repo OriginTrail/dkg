@@ -958,6 +958,87 @@ export class DKGPublisher implements Publisher {
     return address === ethers.ZeroAddress ? '0x0000000000000000000000000000000000000001' : address;
   }
 
+  /** Resolve every signer-dependent publish input as one coherent snapshot. */
+  private async resolvePublishPricingForSigner(input: {
+    signer: PublisherSigner;
+    explicitPublishEpochs: number | undefined;
+    effectiveByteSize: bigint;
+    ctx: OperationContext;
+  }): Promise<{ publishEpochs: number; precomputedTokenAmount: bigint }> {
+    let publishEpochs = input.explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
+    if (
+      input.explicitPublishEpochs === undefined
+      && typeof this.chain.getConvictionAgentAccountId === 'function'
+      && typeof this.chain.getConvictionAccountLockDurationEpochs === 'function'
+    ) {
+      try {
+        const accountId = await this.chain.getConvictionAgentAccountId(input.signer.address);
+        if (accountId > 0n) {
+          const lockEpochs = await this.chain.getConvictionAccountLockDurationEpochs(accountId);
+          if (lockEpochs > 0) {
+            let canFundDiscount = true;
+            if (typeof this.chain.convictionAccountCanCover === 'function') {
+              if (typeof this.chain.getRequiredPublishTokenAmount !== 'function') {
+                canFundDiscount = false;
+              } else {
+                try {
+                  const quoted = await this.chain.getRequiredPublishTokenAmount(input.effectiveByteSize, lockEpochs);
+                  const prospectiveBaseCost = quoted > BigInt(lockEpochs) ? quoted : BigInt(lockEpochs);
+                  canFundDiscount = await this.chain.convictionAccountCanCover(accountId, prospectiveBaseCost);
+                } catch {
+                  canFundDiscount = false;
+                }
+              }
+            }
+            if (canFundDiscount) {
+              publishEpochs = lockEpochs;
+              this.log.info(
+                input.ctx,
+                `PCA-funded publish detected (signer=${input.signer.address}, accountId=${accountId}) — coercing publishEpochs to lockDurationEpochs=${lockEpochs}`,
+              );
+            } else {
+              this.log.info(
+                input.ctx,
+                `Signer ${input.signer.address} is a registered PCA agent (accountId=${accountId}) but funding for this publish's discounted cost could not be confirmed — NOT coercing publishEpochs; publishing at requested lifetime=${publishEpochs} via direct spend`,
+              );
+            }
+          }
+        }
+      } catch (err) {
+        this.log.warn(
+          input.ctx,
+          `PCA epochs probe failed — falling back to publishEpochs=${publishEpochs}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    let precomputedTokenAmount = BigInt(publishEpochs);
+    if (typeof this.chain.getRequiredPublishTokenAmount === 'function') {
+      try {
+        precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(
+          input.effectiveByteSize,
+          publishEpochs,
+        );
+        const minimum = BigInt(publishEpochs);
+        if (precomputedTokenAmount < minimum) {
+          this.log.warn(
+            input.ctx,
+            `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${input.effectiveByteSize}, epochs=${publishEpochs} — using ${minimum} as minimum so per-epoch CG value stays non-zero`,
+          );
+          precomputedTokenAmount = minimum;
+        }
+      } catch (err) {
+        this.log.warn(
+          input.ctx,
+          `getRequiredPublishTokenAmount failed — publish will fall back to tentative if on-chain submit cannot proceed: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return { publishEpochs, precomputedTokenAmount };
+  }
+
   private isChainV10Ready(): boolean {
     return this.chain.chainId !== 'none' &&
       typeof this.chain.isV10Ready === 'function' &&
@@ -2493,104 +2574,14 @@ export class DKGPublisher implements Publisher {
     // of truth so ACK pricing == chain tx pricing. Resolved BEFORE the PCA
     // coercion below so the fundability probe can price the lock-lifetime publish.
     const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
-    let publishEpochs = explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
-    if (
-      explicitPublishEpochs === undefined &&
-      canAttemptOnChainPublish &&
-      publisherSigner !== undefined &&
-      typeof this.chain.getConvictionAgentAccountId === 'function' &&
-      typeof this.chain.getConvictionAccountLockDurationEpochs === 'function'
-    ) {
-      try {
-        const accountId = await this.chain.getConvictionAgentAccountId(publisherSigner.address);
-        if (accountId > 0n) {
-          const lockEpochs = await this.chain.getConvictionAccountLockDurationEpochs(accountId);
-          if (lockEpochs > 0) {
-            // Only snap the lifetime to the PCA lock if the account can
-            // actually cover THIS publish's discounted cost right now. Agent
-            // registration is consent-free (RFC-001 §3.6), so a third party
-            // can squat this signer against an underfunded PCA; since the
-            // contract's conviction branch now falls through to direct spend
-            // instead of reverting, coercing an unfundable account would
-            // publish at the PCA-lock lifetime AND full price rather than the
-            // caller's default. Price the prospective lock-lifetime publish
-            // (the exact base cost the coerced tx would carry) and ask the
-            // chain whether the PCA covers its discounted cost — a coarse
-            // "balance > 0" gate is not enough, since a nonzero-but-short
-            // account (or a few-wei squat) would still be coerced and then
-            // fall through to full-price direct spend. Adapters without the
-            // probe keep the legacy unconditional coercion.
-            let canFundDiscount = true;
-            if (typeof this.chain.convictionAccountCanCover === 'function') {
-              // The coverage probe is only meaningful against the REAL
-              // publish price. If we cannot price the prospective
-              // lock-lifetime publish — adapter lacks the quote, or the
-              // quote call reverts — treat the publish as "funding
-              // unverifiable" and do NOT coerce. Falling back to the
-              // protocol minimum (`lockEpochs` wei) would let a partial or
-              // squatted PCA pass the probe against that lower bound and
-              // then fall through to full-price direct spend at the wrong
-              // lifetime — the exact regression this gate exists to prevent.
-              if (typeof this.chain.getRequiredPublishTokenAmount !== 'function') {
-                canFundDiscount = false;
-              } else {
-                try {
-                  const quoted = await this.chain.getRequiredPublishTokenAmount(effectiveByteSize, lockEpochs);
-                  // Mirror the min-clamp applied to the real tx below.
-                  const prospectiveBaseCost = quoted > BigInt(lockEpochs) ? quoted : BigInt(lockEpochs);
-                  canFundDiscount = await this.chain.convictionAccountCanCover(accountId, prospectiveBaseCost);
-                } catch {
-                  canFundDiscount = false;
-                }
-              }
-            }
-            if (canFundDiscount) {
-              publishEpochs = lockEpochs;
-              this.log.info(
-                ctx,
-                `PCA-funded publish detected (signer=${publisherSigner.address}, accountId=${accountId}) — coercing publishEpochs to lockDurationEpochs=${lockEpochs}`,
-              );
-            } else {
-              this.log.info(
-                ctx,
-                `Signer ${publisherSigner.address} is a registered PCA agent (accountId=${accountId}) but funding for this publish's discounted cost could not be confirmed — NOT coercing publishEpochs; publishing at requested lifetime=${publishEpochs} via direct spend`,
-              );
-            }
-          }
-        }
-      } catch (err) {
-        // PCA probe is best-effort. On any RPC hiccup we keep the
-        // already-resolved publish lifetime. The contract is still the source
-        // of truth: if the signer turns out to be a PCA agent but
-        // `p.epochs != lockDurationEpochs`, the publish silently
-        // falls through to direct spend at full price (no revert).
-        // That degraded path is acceptable for a hot publish — the
-        // missed discount is observable via the lack of a
-        // `CostCovered` event on the receipt.
-        this.log.warn(
-          ctx,
-          `PCA epochs probe failed — falling back to publishEpochs=${publishEpochs}: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-    let precomputedTokenAmount = canAttemptOnChainPublish ? BigInt(publishEpochs) : 0n;
-    if (canAttemptOnChainPublish && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
-      try {
-        precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(effectiveByteSize, publishEpochs);
-        const minTokenAmount = BigInt(publishEpochs);
-        if (precomputedTokenAmount < minTokenAmount) {
-          this.log.warn(ctx, `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${effectiveByteSize}, epochs=${publishEpochs} — using ${minTokenAmount} as minimum so per-epoch CG value stays non-zero`);
-          precomputedTokenAmount = minTokenAmount;
-        }
-      } catch (err) {
-        this.log.warn(
-          ctx,
-          `getRequiredPublishTokenAmount failed — publish will fall back to tentative if on-chain submit cannot proceed: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    let { publishEpochs, precomputedTokenAmount } = canAttemptOnChainPublish && publisherSigner
+      ? await this.resolvePublishPricingForSigner({
+        signer: publisherSigner,
+        explicitPublishEpochs,
+        effectiveByteSize,
+        ctx,
+      })
+      : { publishEpochs: explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS, precomputedTokenAmount: 0n };
 
     // Re-pin once the exact publish cost is known, before ACK collection and
     // remote staging. The initial address probe above is necessarily cost-blind
@@ -2598,13 +2589,13 @@ export class DKGPublisher implements Publisher {
     if (
       canAttemptOnChainPublish &&
       publisherContextGraphId !== undefined &&
-      typeof this.chain.getAuthorizedPublisherAddress === 'function'
+      typeof this.chain.reservePublisherAddressForPublish === 'function'
     ) {
       const fundedAddress = coercePublisherAddress(
-        await this.chain.getAuthorizedPublisherAddress(
-          publisherContextGraphId,
-          precomputedTokenAmount,
-        ),
+        await this.chain.reservePublisherAddressForPublish({
+          contextGraphId: publisherContextGraphId,
+          requiredTracWei: precomputedTokenAmount,
+        }),
       );
       const fundedSigner = await this.getPublisherSigner(fundedAddress);
       if (!fundedAddress || !fundedSigner) {
@@ -2613,6 +2604,20 @@ export class DKGPublisher implements Publisher {
       resolvedPublisherAddress = fundedAddress;
       publisherSigner = fundedSigner;
       publisherAddress = fundedAddress;
+      // PCA lifetime and price are signer-dependent. If strict fundability chose
+      // a different wallet, rebuild them before ACK digest/tx construction.
+      ({ publishEpochs, precomputedTokenAmount } = await this.resolvePublishPricingForSigner({
+        signer: fundedSigner,
+        explicitPublishEpochs,
+        effectiveByteSize,
+        ctx,
+      }));
+      // Chunked encryption may have allocated the tentative operation id before
+      // pricing; keep its UAL address coherent with the one immutable signer now
+      // used by ACKs and the chain transaction.
+      if (publishOperationId.length > 0) {
+        ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
+      }
     }
 
     // Identifier split for V10 publishes.

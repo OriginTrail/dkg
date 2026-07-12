@@ -382,6 +382,74 @@ class ContextAwareAdapterSigningChain extends MockChainAdapter {
   }
 }
 
+class CostAwareRepinChain extends MockChainAdapter {
+  readonly reserveRequests: Array<{ contextGraphId: bigint; requiredTracWei: bigint }> = [];
+  capturedCreateParams?: V10PublishDirectParams;
+
+  constructor(
+    private readonly initialWallet: ethers.Wallet,
+    private readonly fundedPcaWallet: ethers.Wallet,
+  ) {
+    super('mock:31337', initialWallet.address);
+    this.seedIdentity(initialWallet.address, 7n);
+    this.seedIdentity(fundedPcaWallet.address, 7n);
+    this.minimumRequiredSignatures = 1;
+  }
+
+  async getAuthorizedPublisherAddress(): Promise<string> {
+    return this.initialWallet.address;
+  }
+
+  async reservePublisherAddressForPublish(request: {
+    contextGraphId: bigint;
+    requiredTracWei: bigint;
+  }): Promise<string> {
+    this.reserveRequests.push(request);
+    return this.fundedPcaWallet.address;
+  }
+
+  async getRequiredPublishTokenAmount(_bytes: bigint, epochs: number): Promise<bigint> {
+    return BigInt(epochs);
+  }
+
+  async getConvictionAgentAccountId(address: string): Promise<bigint> {
+    return address.toLowerCase() === this.fundedPcaWallet.address.toLowerCase() ? 9n : 0n;
+  }
+
+  async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
+    return accountId === 9n ? 24 : 0;
+  }
+
+  async convictionAccountCanCover(accountId: bigint, required: bigint): Promise<boolean> {
+    return accountId === 9n && required <= 24n;
+  }
+
+  async signMessageAs(address: string, messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    const wallet = [this.initialWallet, this.fundedPcaWallet]
+      .find((candidate) => candidate.address.toLowerCase() === address.toLowerCase());
+    if (!wallet) throw new Error(`unexpected signer ${address}`);
+    const sig = ethers.Signature.from(await wallet.signMessage(messageHash));
+    return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+  }
+
+  async signTypedDataAs(
+    address: string,
+    domain: ethers.TypedDataDomain,
+    types: Record<string, Array<{ name: string; type: string }>>,
+    value: Record<string, unknown>,
+  ): Promise<string> {
+    const wallet = [this.initialWallet, this.fundedPcaWallet]
+      .find((candidate) => candidate.address.toLowerCase() === address.toLowerCase());
+    if (!wallet) throw new Error(`unexpected typed-data signer ${address}`);
+    return wallet.signTypedData(domain, types, value);
+  }
+
+  override async createKnowledgeAssets(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+    this.capturedCreateParams = params;
+    return super.createKnowledgeAssets(params);
+  }
+}
+
 class AdapterManagedUpdateChain implements ChainAdapter {
   readonly chainId = 'mock:31337';
   capturedPublisherAddress?: string;
@@ -962,6 +1030,38 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(ack.tokenAmount).toBe(24n);
     expect(chain.capturedCreateParams?.epochs).toBe(24);
     expect(chain.capturedCreateParams?.tokenAmount).toBe(24n);
+  });
+
+  it('rebuilds PCA pricing and keeps ACK/tx identity coherent when strict reservation changes wallet', async () => {
+    const initial = new ethers.Wallet(TEST_KEY);
+    const fundedPca = new ethers.Wallet(TEST_KEY_ALT);
+    const chain = new CostAwareRepinChain(initial, fundedPca);
+    const keypair = await generateEd25519Keypair();
+    const publisher = await sealForWallet(new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherNodeIdentityId: 7n,
+    }), fundedPca, chain);
+    const ack: AckEpochCapture = {};
+
+    const result = await publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('cost-aware-pca-repin'),
+      v10ACKProvider: captureACKInputs(ack),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(chain.reserveRequests).toHaveLength(1);
+    expect(chain.reserveRequests[0]).toMatchObject({ contextGraphId: 1n });
+    expect(chain.reserveRequests[0].requiredTracWei).toBeGreaterThan(0n);
+    expect(ack).toMatchObject({ epochs: 24, tokenAmount: 24n });
+    expect(chain.capturedCreateParams).toMatchObject({
+      publisherAddress: fundedPca.address,
+      epochs: 24,
+      tokenAmount: 24n,
+    });
   });
 
   it('keeps explicit publishEpochs when the publisher is also a PCA agent', async () => {

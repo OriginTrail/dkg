@@ -15,8 +15,6 @@ import {
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from './evm-adapter-base.js';
 import {
-  formatNoFundedPublisherWalletMessage,
-  InsufficientPublisherFundsError,
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
@@ -182,16 +180,21 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    * `createKnowledgeAssets` (the no-`publisherAddress` path), and pin-time
    * pricing is tracked as a follow-up (#1328).
    */
-  async getAuthorizedPublisherAddress(contextGraphId: bigint, requiredTracWei: bigint = 0n): Promise<string> {
+  async getAuthorizedPublisherAddress(contextGraphId: bigint): Promise<string> {
     await this.init();
-    if (requiredTracWei > 0n && !(await this.poolHasFundableSigner(contextGraphId, requiredTracWei))) {
-      const balances = await this.snapshotPublisherWalletBalances();
-      throw new InsufficientPublisherFundsError(
-        formatNoFundedPublisherWalletMessage(balances),
-        balances,
-      );
-    }
-    return (await this.nextAuthorizedSigner(contextGraphId, requiredTracWei)).address;
+    return (await this.nextAuthorizedSigner(contextGraphId)).address;
+  }
+
+  async reservePublisherAddressForPublish(request: {
+    contextGraphId: bigint;
+    requiredTracWei: bigint;
+  }): Promise<string> {
+    await this.init();
+    return (await this.nextAuthorizedSigner(
+      request.contextGraphId,
+      request.requiredTracWei,
+      true,
+    )).address;
   }
 
   // =====================================================================
