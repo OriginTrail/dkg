@@ -29,6 +29,7 @@ import {
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
+import { supportedBackendList } from '../store-backends.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
@@ -157,7 +158,7 @@ mcpCmd
   .option('--yes', 'Auto-confirm per-client registrations (default false: prompt interactively in TTY mode; non-TTY auto-confirms — pass `--yes` in scripts for the safer scripted-environment posture)')
   .option(
     '--store <backend>',
-    'Triple-store backend (oxigraph-server | oxigraph | blazegraph | sparql-http). Validates the URL and persists the store block after setup.',
+    `Triple-store backend (${supportedBackendList(' | ')}). Validates the URL and persists the store block after setup.`,
   )
   .option(
     '--store-url <url>',

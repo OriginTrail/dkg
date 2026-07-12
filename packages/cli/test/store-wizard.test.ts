@@ -28,6 +28,7 @@
 import { describe, it, expect } from 'vitest';
 import { applyStoreFlagsToConfig, promptStoreBackend } from '../src/store-wizard.js';
 import type { DkgConfig } from '../src/config.js';
+import { STORE_BACKENDS, menuBackendChoices, supportedBackendList, supportedBackendNames } from '../src/store-backends.js';
 
 function mockFetch(handler: (input: any, init?: any) => Response | Promise<Response>) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -54,6 +55,15 @@ function mockAsk(scriptedAnswers: string[]): (q: string, def?: string) => Promis
 // ---------------------------------------------------------------------
 
 describe('promptStoreBackend', () => {
+  it('keeps the advertised backend list aligned with the parser policy', () => {
+    const advertised = supportedBackendList().split(', ');
+    expect(advertised).toEqual(supportedBackendNames());
+    expect(advertised).toEqual(['oxigraph-server', 'oxigraph', 'oxigraph-persistent', 'blazegraph', 'sparql-http']);
+    expect(advertised).not.toContain('oxigraph-worker');
+    expect(menuBackendChoices()).toEqual(['oxigraph-server', 'oxigraph', 'blazegraph']);
+    expect(Object.keys(STORE_BACKENDS)).toContain('oxigraph-worker');
+  });
+
   it('defaults to oxigraph-server when the operator accepts the default', async () => {
     const { fn, calls } = mockFetch(() => new Response(null, { status: 200 }));
     const result = await promptStoreBackend({

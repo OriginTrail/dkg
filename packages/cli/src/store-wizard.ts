@@ -26,6 +26,18 @@ import {
   type ProvisionBlazegraphDockerOptions,
   type ProvisionBlazegraphDockerResult,
 } from './daemon/blazegraph-docker.js';
+import {
+  DEFAULT_STORE_BACKEND,
+  STORE_BACKENDS,
+  UNSUPPORTED_WORKER_BACKEND,
+  isKnownStoreBackend,
+  isSupportedStoreBackend,
+  menuBackendChoices,
+  supportedBackendList,
+  type ExternalStoreBackend,
+  type MenuStoreBackend,
+  type SupportedStoreBackend,
+} from './store-backends.js';
 
 export interface PromptStoreBackendOptions {
   /** `ask` callback that closes over a shared readline interface. */
@@ -129,78 +141,8 @@ function externalStoreBlock(
   };
 }
 
-const STORE_BACKENDS = {
-  'oxigraph-server': {
-    kind: 'managed-local',
-    retired: false,
-    menu: true,
-    label: 'oxigraph-server  (managed local server — recommended)',
-  },
-  oxigraph: {
-    kind: 'local',
-    retired: false,
-    menu: true,
-    label: 'oxigraph         (embedded in-memory store — development only)',
-    requiresExistingPath: false,
-  },
-  'oxigraph-persistent': {
-    kind: 'local',
-    retired: false,
-    menu: false,
-    requiresExistingPath: true,
-  },
-  blazegraph: {
-    kind: 'external',
-    retired: false,
-    menu: true,
-    label: 'blazegraph       (external SPARQL endpoint)',
-  },
-  'sparql-http': {
-    kind: 'external',
-    retired: false,
-    menu: false,
-  },
-  'oxigraph-worker': {
-    kind: 'retired',
-    retired: true,
-    menu: false,
-  },
-} as const;
-
-type StoreBackend = keyof typeof STORE_BACKENDS;
-type SupportedStoreBackend = Exclude<StoreBackend, 'oxigraph-worker'>;
-type MenuStoreBackend = 'oxigraph-server' | 'oxigraph' | 'blazegraph';
-type ExternalStoreBackend = 'blazegraph' | 'sparql-http';
-
-const DEFAULT_STORE_BACKEND: SupportedStoreBackend = 'oxigraph-server';
-const UNSUPPORTED_WORKER_BACKEND: StoreBackend = 'oxigraph-worker';
-
-function storeBackendNames(): StoreBackend[] {
-  return Object.keys(STORE_BACKENDS) as StoreBackend[];
-}
-
-function supportedBackendNames(): SupportedStoreBackend[] {
-  return storeBackendNames().filter((backend): backend is SupportedStoreBackend => (
-    !STORE_BACKENDS[backend].retired
-  ));
-}
-
-function supportedBackendList(): string {
-  return supportedBackendNames().join(', ');
-}
-
-function menuBackendChoices(): MenuStoreBackend[] {
-  return storeBackendNames().filter((backend): backend is MenuStoreBackend => (
-    !STORE_BACKENDS[backend].retired && STORE_BACKENDS[backend].menu
-  ));
-}
-
-function isKnownStoreBackend(backend: string | undefined): backend is StoreBackend {
-  return backend !== undefined && Object.prototype.hasOwnProperty.call(STORE_BACKENDS, backend);
-}
-
 function isSupportedExistingBackend(backend: string | undefined): backend is SupportedStoreBackend {
-  return isKnownStoreBackend(backend) && !STORE_BACKENDS[backend].retired;
+  return isSupportedStoreBackend(backend);
 }
 
 function unsupportedWorkerBackendError(source: string): Error {

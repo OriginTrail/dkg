@@ -19,6 +19,7 @@ import {
   STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
+import { isExternalStoreBackend, supportedBackendList } from './store-backends.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -1836,16 +1837,10 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
       field: 'store.backend',
       message:
         `${EXTERNAL_VALIDATION_PREFIX} "oxigraph-worker" is no longer supported. ` +
-        `Set store.backend to "oxigraph-server" for the daemon-managed local store, ` +
-        `"sparql-http" or "blazegraph" for an external store, or "oxigraph" ` +
-        `for an embedded development store.`,
+        `Use one of: ${supportedBackendList()}.`,
     }];
   }
-  // Mirror of `isExternalBackend` from @origintrail-official/dkg-storage.
-  // Duplicated here to keep config.ts free of upward dependencies on the
-  // storage package (config.ts is leaf-imported by many other modules).
-  const isExternal = backend === 'blazegraph' || backend === 'sparql-http';
-  if (!isExternal) return errors;
+  if (!isExternalStoreBackend(backend)) return errors;
 
   const opts = (config.store?.options ?? {}) as Record<string, unknown>;
 

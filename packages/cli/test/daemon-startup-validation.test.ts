@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
+  checkExternalStoreReachable: vi.fn(),
+  checkOrSetStoreIdentity: vi.fn(),
   startManagedOxigraph: vi.fn(),
 }));
 
@@ -38,6 +40,15 @@ vi.mock('../src/daemon/oxigraph-managed.js', async importOriginal => {
   };
 });
 
+vi.mock('../src/daemon/store-health-check.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/store-health-check.js')>();
+  return {
+    ...actual,
+    checkExternalStoreReachable: mocks.checkExternalStoreReachable,
+    checkOrSetStoreIdentity: mocks.checkOrSetStoreIdentity,
+  };
+});
+
 const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
 
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
@@ -60,6 +71,8 @@ describe('daemon startup network validation', () => {
     mocks.loadNetworkConfig.mockResolvedValue(undefined);
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
     mocks.startManagedOxigraph.mockResolvedValue(null);
+    mocks.checkExternalStoreReachable.mockResolvedValue({ ok: true, backend: 'sparql-http', endpoint: 'http://127.0.0.1:12001/query' });
+    mocks.checkOrSetStoreIdentity.mockResolvedValue({ ok: true, action: 'matched', nodeName: 'test-node' });
   });
 
   afterEach(async () => {
@@ -126,6 +139,19 @@ describe('daemon startup network validation', () => {
     const stdoutSpy = await useTempHome('dkg-legacy-store-ack-');
     process.env.DKG_ACCEPT_STORE_RESET = '1';
     await writeFile(join(tempHome!, 'store.nq'), '<s> <p> <o> .');
+    mocks.startManagedOxigraph.mockResolvedValue({
+      handle: { queryEndpoint: 'http://127.0.0.1:12001/query', updateEndpoint: 'http://127.0.0.1:12001/update', killSync: vi.fn() },
+      storeConfig: {
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://127.0.0.1:12001/query',
+          updateEndpoint: 'http://127.0.0.1:12001/update',
+          managedByDkg: true,
+        },
+      },
+      largeLiteralStorage: { enabled: true, directory: join(tempHome!, 'literal-blobs') },
+      sharedMemoryPublicSnapshotStorage: { enabled: true, directory: join(tempHome!, 'swm-public-snapshots') },
+    });
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
 
     await expect(runDaemonInner(true, {
@@ -145,7 +171,73 @@ describe('daemon startup network validation', () => {
     });
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     expect(mocks.agentCreate.mock.calls[0]?.[0]).toMatchObject({
-      storeConfig: { backend: 'oxigraph-server', options: {} },
+      storeConfig: {
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://127.0.0.1:12001/query',
+          updateEndpoint: 'http://127.0.0.1:12001/update',
+          managedByDkg: true,
+        },
+      },
+      largeLiteralStorage: { enabled: true, directory: join(tempHome!, 'literal-blobs') },
+      sharedMemoryPublicSnapshotStorage: { enabled: true, directory: join(tempHome!, 'swm-public-snapshots') },
+    });
+  });
+
+  it('blocks a wizard-rewritten oxigraph-server config with legacy store.nq and no backend marker', async () => {
+    const stdoutSpy = await useTempHome('dkg-rewritten-legacy-store-gate-');
+    await writeFile(join(tempHome!, 'store.nq'), '<s> <p> <o> .');
+    vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((code?: string | number | null) => {
+        throw new Error(`process.exit:${code}`);
+      }) as never);
+
+    await expect(runDaemonInner(true, {
+      name: 'rewritten-legacy-store-gate-test',
+      listenPort: 0,
+      nodeRole: 'edge',
+      store: { backend: 'oxigraph-server', options: {} },
+    } as any, Date.now())).rejects.toThrow('process.exit:1');
+
+    const output = stdoutSpy.mock.calls.map(call => String(call[0])).join('');
+    expect(output).toContain('legacy store.nq from the old worker-backed store');
+    expect(output).toContain('DKG_ACCEPT_STORE_RESET=1');
+    expect(mocks.startManagedOxigraph).not.toHaveBeenCalled();
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+  });
+
+  it('migrates an explicit legacy worker config after reset acknowledgement', async () => {
+    await useTempHome('dkg-explicit-legacy-store-ack-');
+    process.env.DKG_ACCEPT_STORE_RESET = '1';
+    await writeFile(join(tempHome!, 'store.nq'), '<s> <p> <o> .');
+    mocks.startManagedOxigraph.mockResolvedValue({
+      handle: { queryEndpoint: 'http://127.0.0.1:12001/query', updateEndpoint: 'http://127.0.0.1:12001/update', killSync: vi.fn() },
+      storeConfig: {
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://127.0.0.1:12001/query',
+          updateEndpoint: 'http://127.0.0.1:12001/update',
+          managedByDkg: true,
+        },
+      },
+      largeLiteralStorage: { enabled: true, directory: join(tempHome!, 'literal-blobs') },
+      sharedMemoryPublicSnapshotStorage: { enabled: true, directory: join(tempHome!, 'swm-public-snapshots') },
+    });
+    mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
+
+    await expect(runDaemonInner(true, {
+      name: 'explicit-legacy-store-ack-test',
+      listenPort: 0,
+      nodeRole: 'edge',
+      store: { backend: 'oxigraph-worker' },
+    } as any, Date.now())).rejects.toThrow('after-agent-create');
+
+    expect(mocks.startManagedOxigraph.mock.calls[0]?.[0]).toMatchObject({
+      config: { store: { backend: 'oxigraph-server', options: {} } },
+    });
+    expect(mocks.agentCreate.mock.calls[0]?.[0]).toMatchObject({
+      storeConfig: { backend: 'sparql-http' },
     });
   });
 

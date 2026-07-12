@@ -36,6 +36,7 @@ import {
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
+import { supportedBackendList } from '../store-backends.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
@@ -216,7 +217,7 @@ program
   )
   .option(
     '--store <backend>',
-    'Pre-fill the triple-store backend prompt (oxigraph-server | oxigraph | blazegraph | sparql-http).',
+    `Pre-fill the triple-store backend prompt (${supportedBackendList(' | ')}).`,
   )
   .option(
     '--store-url <url>',

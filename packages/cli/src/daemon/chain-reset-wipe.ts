@@ -240,6 +240,20 @@ function loadState(dataDir: string): PersistedNetworkState | null {
   }
 }
 
+/**
+ * Return the backend accepted by the daemon's boot-selection gate, or `null` for
+ * first-boot / pre-backend-marker state. The legacy store migration gate uses
+ * this to distinguish an unacknowledged worker-to-server cutover from a stale
+ * `store.nq` file deliberately left behind after an earlier acknowledged
+ * cutover.
+ */
+export function readPersistedStoreBackend(dataDir: string): string | null {
+  const state = loadState(dataDir);
+  return typeof state?.lastBackend === 'string' && state.lastBackend.length > 0
+    ? state.lastBackend
+    : null;
+}
+
 function saveState(dataDir: string, marker: string | null): void {
   // Preserve any sibling fields (lastBackend) that `detectBackendSwitch`
   // may have written. Otherwise a chain-reset wipe would clobber a
@@ -750,11 +764,7 @@ export function detectBackendSwitch(
   opts: BackendSwitchDetectOptions,
 ): BackendSwitchDetectResult {
   const log = opts.log ?? (() => {});
-  const prev = loadState(opts.dataDir);
-  const previous =
-    typeof prev?.lastBackend === 'string' && prev.lastBackend.length > 0
-      ? prev.lastBackend
-      : null;
+  const previous = readPersistedStoreBackend(opts.dataDir);
 
   // First boot or legacy state file: silently record and move on. We
   // explicitly do NOT treat null-previous as a "switch from the old

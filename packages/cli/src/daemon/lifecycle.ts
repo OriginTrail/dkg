@@ -1991,7 +1991,7 @@ export async function runDaemonInner(
         try {
           const runtime = await startPublisherRuntimeIfEnabled({
             dataDir: dkgDir(),
-            config: storeBoot.effectiveConfig,
+            config: runtimeStoreConfig,
             store: agent.store,
             keypair: agent.wallet.keypair,
             chainBase: publisherChainBase,
@@ -3372,7 +3372,7 @@ export async function runDaemonInner(
         agent,
         publisherControl,
         publisherRuntime,
-        storeBoot.effectiveConfig,
+        storeBoot.operatorConfig,
         startedAt,
         dashDb,
         opWallets,

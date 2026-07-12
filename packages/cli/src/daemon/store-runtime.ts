@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DkgConfig } from '../config.js';
+import { readPersistedStoreBackend } from './chain-reset-wipe.js';
 import type { ManagedOxigraphResult } from './oxigraph-managed.js';
 
 type StoreConfig = NonNullable<DkgConfig['store']>;
@@ -39,24 +40,51 @@ export function resolveDaemonStoreBootPlan(opts: {
   acceptStoreReset: boolean;
 }): DaemonStoreBootPlan {
   const { config, dataDir, acceptStoreReset } = opts;
-  const effectiveStore = config.store ?? defaultDaemonStore();
-  const effectiveConfig = config.store ? config : { ...config, store: effectiveStore };
   const legacyStorePath = join(dataDir, 'store.nq');
+  const legacyStoreExists = existsSync(legacyStorePath);
+  const legacyWorkerConfigured = config.store?.backend === 'oxigraph-worker';
+  const configuredForManagedServer = !config.store || config.store.backend === 'oxigraph-server';
+  const previousBackend = readPersistedStoreBackend(dataDir);
+  const legacyCutoverAlreadyRecorded = previousBackend === 'oxigraph-server';
+  const legacyCutoverRequired = legacyStoreExists
+    && (configuredForManagedServer || legacyWorkerConfigured)
+    && !legacyCutoverAlreadyRecorded;
+  const migrateAcknowledgedWorker = legacyWorkerConfigured
+    && legacyCutoverRequired
+    && acceptStoreReset;
+  const effectiveStore = migrateAcknowledgedWorker
+    ? defaultDaemonStore()
+    : config.store ?? defaultDaemonStore();
+  const effectiveConfig = config.store && !migrateAcknowledgedWorker
+    ? config
+    : { ...config, store: effectiveStore };
 
   const plan: DaemonStoreBootPlan = {
     operatorConfig: config,
     effectiveConfig,
     effectiveStore,
-    validateOperatorConfigFirst: config.store?.backend === 'oxigraph-worker',
+    // A retired worker config with legacy data reaches the migration gate
+    // before normal validation, so the operator sees the reset acknowledgement
+    // path. Every other explicit worker config must fail normal validation.
+    validateOperatorConfigFirst: legacyWorkerConfigured && !legacyCutoverRequired,
   };
 
-  if (!config.store && existsSync(legacyStorePath) && !acceptStoreReset) {
+  if (legacyCutoverRequired && !acceptStoreReset) {
+    const legacySource = legacyWorkerConfigured
+      ? 'worker backend'
+      : config.store
+        ? 'worker-backed store'
+        : 'implicit worker default';
     plan.abortMessage =
       `[STORE] oxigraph-worker support has been removed, but this node has a legacy ` +
-      `store.nq from the old implicit worker default.\n` +
+      `store.nq from the old ${legacySource}.\n` +
       `Set store.backend to "oxigraph-server" (or an external SPARQL backend) and ` +
       `restart with DKG_ACCEPT_STORE_RESET=1 to acknowledge the fresh-store cutover. ` +
       `The legacy store.nq file is left untouched for manual backup or migration.`;
+  } else if (legacyCutoverRequired && acceptStoreReset) {
+    plan.notice = legacyWorkerConfigured
+      ? '[STORE] explicit oxigraph-worker is retired; using oxigraph-server after reset acknowledgement. Legacy store.nq is left untouched.'
+      : '[STORE] using oxigraph-server after reset acknowledgement. Legacy store.nq is left untouched.';
   } else if (!config.store && acceptStoreReset) {
     plan.notice =
       '[STORE] no store block found; using oxigraph-server. Legacy store.nq, if present, is left untouched.';
