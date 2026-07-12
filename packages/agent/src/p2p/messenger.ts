@@ -11,6 +11,7 @@ import {
   type ProtocolOutboxEntry,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
+import { mapWithConcurrency } from '../sync/map-with-concurrency.js';
 
 /** Bytes payload the substrate uses to signal `RESPONSE_GONE` on the wire. */
 const RESPONSE_GONE_BYTES = new TextEncoder().encode(RESPONSE_GONE_MARKER);
@@ -836,17 +837,11 @@ export class Messenger {
 
   private async drainDueOutbox(now: number): Promise<void> {
     const due = this.outbox!.due(now, this.outboxDrainBatchSize);
-    let cursor = 0;
-    const workers = Array.from(
-      { length: Math.min(this.outboxDrainConcurrency, due.length) },
-      async () => {
-        while (cursor < due.length) {
-          const entry = due[cursor++];
-          await this.retryOutboxEntry(entry);
-        }
-      },
+    await mapWithConcurrency(
+      due,
+      this.outboxDrainConcurrency,
+      (entry) => this.retryOutboxEntry(entry),
     );
-    await Promise.all(workers);
   }
 
   /**
@@ -903,20 +898,20 @@ export class Messenger {
       this.clearDhtWalkRateLimitIfDrained(entry.peer);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      const updated = outbox.enqueueFailure(
+        entry.peer,
+        entry.protocol,
+        entry.messageId,
+        entry.payload,
+        errMsg,
+        this.clock(),
+      );
       if (isRecoverableMessengerSendError(err, errMsg)) {
-        const updated = outbox.enqueueFailure(
-          entry.peer,
-          entry.protocol,
-          entry.messageId,
-          entry.payload,
-          errMsg,
-          this.clock(),
-        );
         this.maybeScheduleDhtWalk(entry.peer, updated.attempts, errMsg);
       }
-      // Non-recoverable: leave the entry alone. `dropExpired` will
-      // age it out; an operator-facing diagnostic surface (PR-12)
-      // will surface stuck entries so a human can intervene.
+      // A non-recoverable retry remains visible for operator intervention, but
+      // advances on the backoff ladder so it cannot permanently occupy the
+      // front of every bounded due page and starve later deliverable rows.
     } finally {
       outbox.endAttempt(entry.peer, entry.protocol, entry.messageId);
     }

@@ -58,7 +58,9 @@ interface RouterDouble {
   inboundHandler?: StreamHandler;
 }
 
-function makeRouter(sendImpl?: () => Promise<Uint8Array>): RouterDouble {
+function makeRouter(
+  sendImpl?: (...args: [string, string, Uint8Array, ...unknown[]]) => Promise<Uint8Array>,
+): RouterDouble {
   const send = recorder(
     (sendImpl ?? (async () => new Uint8Array([0x10]))) as (
       ...args: [string, string, Uint8Array, ...unknown[]]
@@ -431,6 +433,31 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
     releases.splice(0).forEach((release) => release());
     await Promise.all([first, overlapping]);
 
+    expect(router.send.calls).toHaveLength(3);
+    expect(outboxStore.size()).toBe(2);
+  });
+
+  it('moves terminal failures behind later due rows instead of starving the next page', async () => {
+    const router = makeRouter(async (_peer, _protocol, payload) => {
+      if (payload[0] < 2) throw new Error('Invalid payload');
+      return new Uint8Array([0x42]);
+    });
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    for (let i = 0; i < 3; i += 1) {
+      outboxStore.enqueue(PEER_A, PROTO, `terminal-${i}`, new Uint8Array([i]), 'offline', 0);
+    }
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+      backoffs: [10],
+      clock: () => 100,
+      outboxDrainBatchSize: 2,
+      outboxDrainConcurrency: 1,
+    });
+
+    await messenger.processOutboxTick(100);
+    await messenger.processOutboxTick(100);
     expect(router.send.calls).toHaveLength(3);
     expect(outboxStore.size()).toBe(2);
   });
