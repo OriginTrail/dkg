@@ -59,10 +59,10 @@ export class BlazegraphStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.insert',
     });
-    // ASCII-safe body: Blazegraph's N-Quads parser reads the request body
-    // byte-wise as ASCII (charset is ignored), so raw non-ASCII UTF-8 is
-    // corrupted to U+FFFD on write. See toBlazegraphAsciiSafeNQuads.
-    const nquads = quads.map((q) => toBlazegraphAsciiSafeNQuads(quadToNQuad(q))).join('\n') + '\n';
+    // Blazegraph's bulk-insert wire serializer (ASCII-safe N-Quads). See
+    // quadToBlazegraphNQuad / toBlazegraphAsciiSafeNQuads for why Blazegraph
+    // requires this.
+    const nquads = quads.map(quadToBlazegraphNQuad).join('\n') + '\n';
     const res = await this.runStoreWork('insert', {
       ...options,
       source: options?.source ?? 'blazegraph.insert',
@@ -384,6 +384,21 @@ function quadToNQuad(q: DKGQuad): string {
   const o = formatTerm(q.object);
   const g = q.graph ? ` <${q.graph}>` : '';
   return `${s} ${p} ${o}${g} .`;
+}
+
+/**
+ * N-Quads serializer for Blazegraph's bulk-insert wire format: a standard
+ * N-Quads line ({@link quadToNQuad}) made ASCII-safe
+ * ({@link toBlazegraphAsciiSafeNQuads}). This is the single serialization
+ * entry point for the adapter's write path, so the Blazegraph wire-format
+ * invariant lives at the serialization boundary rather than as a separate
+ * post-processing pass a caller must remember to apply. The ASCII-safe pass
+ * operates on the assembled line by design: it normalizes `\U` escapes and
+ * relies on backslash parity across the whole line, both of which are
+ * line-level properties of the rendered N-Quads, not of an individual term.
+ */
+function quadToBlazegraphNQuad(q: DKGQuad): string {
+  return toBlazegraphAsciiSafeNQuads(quadToNQuad(q));
 }
 
 /**
