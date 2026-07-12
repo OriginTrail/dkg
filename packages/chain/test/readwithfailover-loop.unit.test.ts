@@ -133,11 +133,24 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
       readThrottleBackoffMs: 1,
     });
 
-    await expect(client.read('getBlock', (provider: any) => provider.read(), {
-      retryOnThrottleExhaustion: true,
-    })).resolves.toBe('recovered');
+    await expect(client.readReceiptBlock('getBlock', (provider: any) => provider.read()))
+      .resolves.toBe('recovered');
     expect(primary.read.calls).toHaveLength(2);
     expect(backup.read.calls).toHaveLength(2);
+  });
+
+  it('does not retry a mixed timeout plus 429 endpoint exhaustion', async () => {
+    const primary = { read: recorder(async () => { const error: any = new Error('timed out'); error.code = 'TIMEOUT'; throw error; }) };
+    const backup = { read: recorder(async () => { throw retryable429(); }) };
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+      readThrottleRetries: 2,
+      readThrottleBackoffMs: 1,
+    });
+
+    await expect(client.readReceiptBlock('getBlock', (provider: any) => provider.read()))
+      .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED', allEndpointsThrottled: false });
+    expect(primary.read.calls).toHaveLength(1);
+    expect(backup.read.calls).toHaveLength(1);
   });
 
   it('single-RPC: a retryable failure still stamps RPC_ENDPOINTS_EXHAUSTED but keeps the original message verbatim', async () => {
