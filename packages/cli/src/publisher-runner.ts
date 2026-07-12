@@ -24,6 +24,50 @@ export interface PublisherRuntimeWallet {
   readonly identityId: bigint;
 }
 
+export type AsyncPublisherUnavailableReason =
+  | 'publisher_disabled'
+  | 'publisher_starting'
+  | 'no_publisher_wallets'
+  | 'publisher_startup_failed';
+
+export type AsyncPublisherAvailability =
+  | { available: true }
+  | {
+      available: false;
+      reason: AsyncPublisherUnavailableReason;
+      retryable: boolean;
+      operatorActionRequired: boolean;
+    };
+
+/**
+ * Canonical readiness boundary for every async-ingress route. Lifecycle may
+ * supply an explicit starting/failure state; otherwise the runtime/config
+ * shape is classified consistently for direct route tests and embedded users.
+ */
+export function resolveAsyncPublisherAvailability(args: {
+  config: DkgConfig;
+  runtime: PublisherRuntime | null;
+  lifecycleReason?: AsyncPublisherUnavailableReason;
+  lifecycleAvailability?: AsyncPublisherAvailability;
+}): AsyncPublisherAvailability {
+  if (args.lifecycleAvailability) return args.lifecycleAvailability;
+  if (args.runtime?.wallets.length) return { available: true };
+  const reason = args.lifecycleReason
+    ?? (args.runtime
+      ? 'no_publisher_wallets'
+      : args.config.publisher?.enabled
+        ? 'publisher_startup_failed'
+        : 'publisher_disabled');
+  return {
+    available: false,
+    reason,
+    // Only the in-progress state can recover from the same client retry without
+    // operator/config/daemon intervention.
+    retryable: reason === 'publisher_starting',
+    operatorActionRequired: reason !== 'publisher_starting',
+  };
+}
+
 export interface PublisherInspector {
   readonly publisher: AsyncLiftPublisher;
   readonly stop: () => Promise<void>;

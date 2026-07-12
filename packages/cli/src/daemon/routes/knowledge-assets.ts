@@ -49,6 +49,7 @@ import {
   SMALL_BODY_BYTES,
 } from "../http-utils.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
+import { resolveAsyncPublisherAvailability } from "../../publisher-runner.js";
 import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
 import {
   handleKaImportArtifactResolve,
@@ -1347,16 +1348,18 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // to 400 (parity with the legacy publish path).
     if (layer === "vm" && verb === "publish-async") {
       try {
-        if (!ctx.publisherRuntime || ctx.publisherRuntime.wallets.length === 0) {
-          const reason = !ctx.publisherRuntime
-            ? (ctx.config.publisher?.enabled ? "publisher_startup_failed" : "publisher_disabled")
-            : "no_publisher_wallets";
+        const publisherAvailability = resolveAsyncPublisherAvailability({
+          config: ctx.config,
+          runtime: ctx.publisherRuntime,
+          lifecycleAvailability: ctx.publisherAvailability,
+        });
+        if (!publisherAvailability.available) {
           return jsonResponse(res, 503, {
             code: "async_publisher_unavailable",
             error: "The asynchronous publisher cannot accept jobs on this node.",
-            reason,
-            retryable: reason === "publisher_startup_failed",
-            operatorActionRequired: reason !== "publisher_startup_failed",
+            reason: publisherAvailability.reason,
+            retryable: publisherAvailability.retryable,
+            operatorActionRequired: publisherAvailability.operatorActionRequired,
           });
         }
         const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
