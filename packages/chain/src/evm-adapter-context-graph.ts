@@ -188,12 +188,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async reservePublisherAddressForPublish(request: {
     contextGraphId: bigint;
     requiredTracWei: bigint;
+    publishEpochs: number;
   }): Promise<string> {
     await this.init();
     return (await this.nextAuthorizedSigner(
       request.contextGraphId,
       request.requiredTracWei,
-      true,
+      { unfundedPolicy: 'throw-diagnostic', publishEpochs: request.publishEpochs },
     )).address;
   }
 

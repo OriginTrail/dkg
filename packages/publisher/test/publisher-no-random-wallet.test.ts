@@ -23,7 +23,7 @@
  * no EVM publisher address exists, they use a deterministic non-zero address
  * derived from the agent keypair solely for tentative metadata/UAL scoping.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { DEFAULT_PUBLISH_EPOCHS, type V10ACKProvider, type V10ACKProviderParams } from '../src/publisher.js';
 import { generateConfirmedFullMetadata } from '../src/metadata.js';
@@ -157,6 +157,14 @@ class EpochCapturingChain extends AdapterSigningChain {
 
   override async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
     return this.pcaLockDurationEpochs ?? super.getConvictionAccountLockDurationEpochs(accountId);
+  }
+}
+
+class NoFundedReservationChain extends EpochCapturingChain {
+  async reservePublisherAddressForPublish(): Promise<string> {
+    const error = new Error('No configured publisher wallet can fund this publish') as Error & { code: string };
+    error.code = 'NO_FUNDED_PUBLISHER_WALLET';
+    throw error;
   }
 }
 
@@ -383,7 +391,7 @@ class ContextAwareAdapterSigningChain extends MockChainAdapter {
 }
 
 class CostAwareRepinChain extends MockChainAdapter {
-  readonly reserveRequests: Array<{ contextGraphId: bigint; requiredTracWei: bigint }> = [];
+  readonly reserveRequests: Array<{ contextGraphId: bigint; requiredTracWei: bigint; publishEpochs: number }> = [];
   capturedCreateParams?: V10PublishDirectParams;
 
   constructor(
@@ -403,6 +411,7 @@ class CostAwareRepinChain extends MockChainAdapter {
   async reservePublisherAddressForPublish(request: {
     contextGraphId: bigint;
     requiredTracWei: bigint;
+    publishEpochs: number;
   }): Promise<string> {
     this.reserveRequests.push(request);
     return this.fundedPcaWallet.address;
@@ -1049,12 +1058,13 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     const result = await publisher.publish({
       contextGraphId: '1',
       quads: epochTestQuads('cost-aware-pca-repin'),
+      publishEpochs: 24,
       v10ACKProvider: captureACKInputs(ack),
     });
 
     expect(result.status).toBe('confirmed');
     expect(chain.reserveRequests).toHaveLength(1);
-    expect(chain.reserveRequests[0]).toMatchObject({ contextGraphId: 1n });
+    expect(chain.reserveRequests[0]).toMatchObject({ contextGraphId: 1n, publishEpochs: 24 });
     expect(chain.reserveRequests[0].requiredTracWei).toBeGreaterThan(0n);
     expect(ack).toMatchObject({ epochs: 24, tokenAmount: 24n });
     expect(chain.capturedCreateParams).toMatchObject({
@@ -1062,6 +1072,22 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       epochs: 24,
       tokenAmount: 24n,
     });
+  });
+
+  it('surfaces strict reservation failure before collecting StorageACKs', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new NoFundedReservationChain(wallet);
+    const publisher = await makeEpochPublisher(chain, wallet);
+    const ackProvider = vi.fn(async () => {
+      throw new Error('ACK collection must not run');
+    });
+
+    await expect(publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('no-funded-wallet-pre-ack'),
+      v10ACKProvider: ackProvider,
+    })).rejects.toMatchObject({ code: 'NO_FUNDED_PUBLISHER_WALLET' });
+    expect(ackProvider).not.toHaveBeenCalled();
   });
 
   it('keeps explicit publishEpochs when the publisher is also a PCA agent', async () => {

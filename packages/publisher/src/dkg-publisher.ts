@@ -2439,7 +2439,6 @@ export class DKGPublisher implements Publisher {
       // confirmed states for this publish so the `dkg:Publication` subject
       // emitted in metadata stays the same after on-chain confirmation.
       publishOperationId = `${this.sessionId}-${tentativeSeq}`;
-      ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
     };
 
     // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
@@ -2595,6 +2594,7 @@ export class DKGPublisher implements Publisher {
         await this.chain.reservePublisherAddressForPublish({
           contextGraphId: publisherContextGraphId,
           requiredTracWei: precomputedTokenAmount,
+          publishEpochs,
         }),
       );
       const fundedSigner = await this.getPublisherSigner(fundedAddress);
@@ -2612,12 +2612,6 @@ export class DKGPublisher implements Publisher {
         effectiveByteSize,
         ctx,
       }));
-      // Chunked encryption may have allocated the tentative operation id before
-      // pricing; keep its UAL address coherent with the one immutable signer now
-      // used by ACKs and the chain transaction.
-      if (publishOperationId.length > 0) {
-        ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
-      }
     }
 
     // Identifier split for V10 publishes.
@@ -2945,6 +2939,9 @@ export class DKGPublisher implements Publisher {
     let onChainResult: OnChainPublishResult | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
     ensurePublishOperationIdentity();
+    // The operation id may be needed earlier as an encryption nonce domain,
+    // but its UAL is derived exactly once, after signer reservation is final.
+    ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
 
     // Resolve the on-chain attribution target from the per-call override
     // (computed above) or fall back to the daemon's persistent identity.

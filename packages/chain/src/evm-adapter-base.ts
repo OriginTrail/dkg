@@ -550,6 +550,8 @@ export type FundingMode =
       tracFloorWei: bigint;
       requiredTracWei: bigint;
       consultPca: boolean;
+      /** Submitted lifetime; PCA coverage is valid only when its lock matches. */
+      pcaPublishEpochs?: number;
     };
 
 export type NativeOnlyFundingMode = Extract<FundingMode, { kind: 'native-only' }>;
@@ -574,8 +576,8 @@ export type SelectSignerSpec =
       contextGraphId: bigint;
       /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
       preferIdle?: boolean;
-      /** Throw an actionable whole-pool diagnostic instead of falling back to the best short wallet. */
-      requireFunded?: boolean;
+      /** Explicit contract for the no-fundable-wallet case. */
+      unfundedPolicy: 'best-effort' | 'throw-diagnostic';
     }
   | {
       txClass: 'rotatable-funded';
@@ -1891,8 +1893,12 @@ export class EVMChainAdapterBase {
         : await this.selectFundedSigner(
           eligible,
           spec.funding,
-          spec.preferIdle ?? false,
-          spec.txClass === 'rotatable-policy' && spec.requireFunded === true,
+          {
+            preferIdle: spec.preferIdle ?? false,
+            unfundedPolicy: spec.txClass === 'rotatable-policy'
+              ? spec.unfundedPolicy
+              : 'best-effort',
+          },
         );
 
       // Advance the cursor just past the chosen wallet so the next selection
@@ -1916,7 +1922,10 @@ export class EVMChainAdapterBase {
   protected async nextAuthorizedSigner(
     contextGraphId: bigint,
     requiredTracWei: bigint = 0n,
-    requireFunded = false,
+    options: {
+      unfundedPolicy?: 'best-effort' | 'throw-diagnostic';
+      publishEpochs?: number;
+    } = {},
   ): Promise<Wallet> {
     return this.selectSigner({
       txClass: 'rotatable-policy',
@@ -1927,9 +1936,10 @@ export class EVMChainAdapterBase {
         tracFloorWei: this.minPublisherTracWei,
         requiredTracWei,
         consultPca: true,
+        pcaPublishEpochs: options.publishEpochs,
       },
       preferIdle: false,
-      requireFunded,
+      unfundedPolicy: options.unfundedPolicy ?? 'best-effort',
     });
   }
 
@@ -1998,8 +2008,10 @@ export class EVMChainAdapterBase {
   protected async selectFundedSigner(
     candidates: Wallet[],
     funding: FundingMode,
-    preferIdle: boolean,
-    requireFunded = false,
+    policy: {
+      preferIdle: boolean;
+      unfundedPolicy: 'best-effort' | 'throw-diagnostic';
+    },
   ): Promise<Wallet> {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
@@ -2024,23 +2036,37 @@ export class EVMChainAdapterBase {
       // deadline-bound write doesn't queue behind a slow in-flight send. Falls
       // straight through to the first funded candidate when none is idle or the
       // preference is off — so it can never EXCLUDE a wallet, only reorder.
-      if (preferIdle && !this.idleAwareSelectionDisabled) {
+      if (policy.preferIdle && !this.idleAwareSelectionDisabled) {
         const idle = fundableIdx.find((i) => !this.signerTxSerializer.isActive(candidates[i].address));
         if (idle !== undefined) return candidates[idle];
       }
       return candidates[fundableIdx[0]];
     }
-    if (requireFunded) {
+    if (policy.unfundedPolicy === 'throw-diagnostic') {
+      // Cached balances are appropriate for soft routing, but a terminal
+      // whole-pool claim must be based on a fresh snapshot. Operators commonly
+      // fund a wallet and retry immediately, inside the advisory cache TTL.
+      const refreshed = await Promise.all(
+        candidates.map((s) => this.getWalletFunding(s.address, {
+          forceRefresh: true,
+          metrics: funding.kind,
+        })),
+      );
+      const refreshedFundable = await Promise.all(
+        candidates.map((s, i) => this.isWalletFundable(s.address, refreshed[i], funding)),
+      );
+      const refreshedIdx = refreshedFundable.findIndex(Boolean);
+      if (refreshedIdx >= 0) return candidates[refreshedIdx];
       throw new InsufficientPublisherFundsError(
         formatNoFundedPublisherWalletMessage(candidates.map((signer, i) => ({
           address: signer.address,
-          nativeWei: fundings[i].native,
-          tracWei: fundings[i].trac,
+          nativeWei: refreshed[i].native,
+          tracWei: refreshed[i].trac,
         }))),
         candidates.map((signer, i) => ({
           address: signer.address,
-          nativeWei: fundings[i].native,
-          tracWei: fundings[i].trac,
+          nativeWei: refreshed[i].native,
+          tracWei: refreshed[i].trac,
         })),
       );
     }
@@ -2078,7 +2104,9 @@ export class EVMChainAdapterBase {
     const ownTracOk = f.trac === null
       || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
     if (ownTracOk) return true;
-    return funding.consultPca ? this.isConvictionFundedAgent(address, funding.requiredTracWei) : false;
+    return funding.consultPca
+      ? this.isConvictionFundedAgent(address, funding.requiredTracWei, funding.pcaPublishEpochs)
+      : false;
   }
 
   /**
@@ -2114,7 +2142,11 @@ export class EVMChainAdapterBase {
    * loss. When the real cost is threaded (the createKnowledgeAssets paths) the
    * probe prices the actual publish and rejects such squats.
    */
-  protected async isConvictionFundedAgent(address: string, requiredCostWei: bigint): Promise<boolean> {
+  protected async isConvictionFundedAgent(
+    address: string,
+    requiredCostWei: bigint,
+    publishEpochs?: number,
+  ): Promise<boolean> {
     if (!this.contracts.dkgPublishingConvictionNFT) return false;
     // Typed against the shared ConvictionReader interface that ConvictionMethods
     // `implements`, so a rename/signature change in the mixin is a compile error.
@@ -2126,6 +2158,14 @@ export class EVMChainAdapterBase {
         'pca agent account lookup',
       );
       if (accountId <= 0n) return false;
+      if (publishEpochs !== undefined) {
+        const lockEpochs = await withTimeout(
+          conv.getConvictionAccountLockDurationEpochs(accountId),
+          RPC_READ_STALL_TIMEOUT_MS,
+          'pca account lock-duration probe',
+        );
+        if (lockEpochs !== publishEpochs) return false;
+      }
       return await withTimeout(
         conv.convictionAccountCanCover(accountId, requiredCostWei > 0n ? requiredCostWei : 1n),
         RPC_READ_STALL_TIMEOUT_MS,
@@ -3289,6 +3329,7 @@ export class EVMChainAdapterBase {
       txSigner = await this.nextAuthorizedSigner(
         params.contextGraphId,
         floorPublishTokenAmount(params.tokenAmount),
+        { publishEpochs: params.epochs },
       );
     }
     const ka = this.contracts.knowledgeAssetsLifecycle.connect(txSigner) as Contract;

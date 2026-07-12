@@ -10,6 +10,7 @@ import type { RpcUsageWindow } from './rpc-usage.js';
  */
 export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
+  getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number>;
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
@@ -1173,6 +1174,7 @@ export interface ChainAdapter {
   reservePublisherAddressForPublish?(request: {
     contextGraphId: bigint;
     requiredTracWei: bigint;
+    publishEpochs: number;
   }): Promise<string>;
 
   /**
