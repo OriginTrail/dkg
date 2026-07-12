@@ -62,6 +62,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     agentOverrides: Record<string, unknown> = {},
     routeOverrides: { requestToken?: string; requestAgentAddress?: string } = {},
     publisherControl: Record<string, unknown> = {},
+    publisherRuntime: unknown = { wallets: [{ address: '0x1111111111111111111111111111111111111111' }] },
   ) {
     const agent = {
       async listContextGraphs() {
@@ -90,7 +91,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           res,
           agent,
           publisherControl,
-          publisherRuntime: null,
+          publisherRuntime,
           config: {},
           startedAt: Date.now(),
           dashDb: { insertNotification: () => 1 },
@@ -380,6 +381,26 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
     expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async rejects before persisting when no runtime can claim jobs', async () => {
+    let resolved = 0;
+    let enqueued = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => { resolved += 1; },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
+    }, null);
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'async_publisher_unavailable',
+      reason: 'publisher_disabled',
+      retryable: true,
+    });
+    expect(resolved).toBe(0);
+    expect(enqueued).toBe(0);
   });
 
   it('vm/publish-async rejects a missing real share snapshot before enqueue', async () => {

@@ -1347,6 +1347,17 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // to 400 (parity with the legacy publish path).
     if (layer === "vm" && verb === "publish-async") {
       try {
+        if (!ctx.publisherRuntime || ctx.publisherRuntime.wallets.length === 0) {
+          const reason = !ctx.publisherRuntime
+            ? (ctx.config.publisher?.enabled ? "publisher_startup_failed" : "publisher_disabled")
+            : "no_publisher_wallets";
+          return jsonResponse(res, 503, {
+            code: "async_publisher_unavailable",
+            error: "The asynchronous publisher cannot accept jobs on this node.",
+            reason,
+            retryable: true,
+          });
+        }
         const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
         if (opts === null) return;
         const publishOptions = opts;
