@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type EVMAdapterConfig, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -8,6 +8,23 @@ import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './co
 import { loadPublisherWallets } from './publisher-wallets.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
+
+export type PublisherRuntimeChainConfig = Pick<
+  EVMAdapterConfig,
+  | 'rpcUrl' | 'rpcUrls' | 'walletRpcUrls' | 'hubAddress' | 'tokenAddress'
+  | 'chainId' | 'receiptTimeoutMs' | 'approvalPolicy' | 'cgRegistryScanPageSize'
+  | 'minPublisherNativeWei' | 'minPublisherTracWei'
+>;
+
+/** Single construction boundary for every async-publisher wallet adapter. */
+export function createPublisherWalletChain(
+  chainBase: PublisherRuntimeChainConfig | undefined,
+  privateKey: string,
+): ChainAdapter {
+  return chainBase
+    ? new EVMChainAdapter({ ...chainBase, privateKey, allowNoAdminSigner: true })
+    : new NoChainAdapter();
+}
 
 export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
@@ -45,13 +62,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   config: DkgConfig;
   store: TripleStore;
   keypair: Ed25519Keypair;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
+  chainBase?: PublisherRuntimeChainConfig;
   log: (message: string) => void;
   ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
@@ -96,13 +107,7 @@ interface PublisherRuntimeBaseArgs {
   dataDir: string;
   keypair: Ed25519Keypair;
   store: TripleStore;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
+  chainBase?: PublisherRuntimeChainConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
@@ -187,13 +192,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   dataDir: string;
   store: TripleStore;
   keypair: Ed25519Keypair;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
+  chainBase?: PublisherRuntimeChainConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
@@ -232,17 +231,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   const wallets: ConfiguredPublisherWallet[] = [];
 
   for (const wallet of publisherWallets.wallets) {
-    const chain = args.chainBase
-      ? new EVMChainAdapter({
-          rpcUrl: args.chainBase.rpcUrl,
-          rpcUrls: args.chainBase.rpcUrls,
-          privateKey: wallet.privateKey,
-          hubAddress: args.chainBase.hubAddress,
-          tokenAddress: args.chainBase.tokenAddress,
-          chainId: args.chainBase.chainId,
-          allowNoAdminSigner: true,
-        })
-      : new NoChainAdapter();
+    const chain = createPublisherWalletChain(args.chainBase, wallet.privateKey);
     const identityId = await chain.getIdentityId();
     wallets.push({
       address: wallet.address,

@@ -1399,7 +1399,9 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       const provider = {
         name: 'primary',
         broadcastTransaction: recorder(async () => ({ hash: txHash })),
-        getTransactionReceipt: recorder(async () => null),
+        // Hung lower-level receipt attempt: the overall 1s budget must win over
+        // the transport's normal 5s per-attempt cap.
+        getTransactionReceipt: recorder(async () => new Promise<never>(() => {})),
       };
       const signer = new ethers.Wallet(DEPLOYER_PK, provider as any);
       const populated = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };

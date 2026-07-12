@@ -19,6 +19,7 @@ import {
   STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
+import { requireReceiptTimeoutMs } from '@origintrail-official/dkg-chain';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -1461,10 +1462,7 @@ export function resolveChainConfig(
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
   const receiptTimeoutMs = cfg?.receiptTimeoutMs ?? net?.receiptTimeoutMs;
   if (receiptTimeoutMs !== undefined) {
-    if (!Number.isFinite(receiptTimeoutMs) || receiptTimeoutMs < 1_000) {
-      throw new Error('chain.receiptTimeoutMs must be a finite number >= 1000');
-    }
-    merged.receiptTimeoutMs = Math.floor(receiptTimeoutMs);
+    merged.receiptTimeoutMs = requireReceiptTimeoutMs(receiptTimeoutMs);
   }
   // Funding floors: local config wins, else the network overlay's per-chain
   // default (both default 0n downstream in the adapter when unset). Persisted

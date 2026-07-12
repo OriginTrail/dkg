@@ -38,7 +38,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, normalizeReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -1013,9 +1013,7 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
-    this.receiptTimeoutMs = Number.isFinite(config.receiptTimeoutMs) && (config.receiptTimeoutMs ?? 0) >= 1_000
-      ? Math.floor(config.receiptTimeoutMs as number)
-      : RPC_RECEIPT_TIMEOUT_MS;
+    this.receiptTimeoutMs = normalizeReceiptTimeoutMs(config.receiptTimeoutMs);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1413,8 +1411,14 @@ export class EVMChainAdapterBase {
     const deadline = Date.now() + this.receiptTimeoutMs;
     let lastError: unknown;
     while (Date.now() < deadline) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
       try {
-        const receipt = await this.getTransactionReceiptWithFailover(txHash);
+        const receipt = await withTimeout(
+          this.getTransactionReceiptWithFailover(txHash),
+          remainingMs,
+          `${label} receipt deadline`,
+        );
         if (receipt) {
           assertSuccessfulReceipt(receipt, label);
           return receipt;
@@ -1423,7 +1427,8 @@ export class EVMChainAdapterBase {
         if (!isRetryableRpcError(err)) throw err;
         lastError = err;
       }
-      await sleep(RPC_RECEIPT_POLL_INTERVAL_MS);
+      const sleepMs = Math.min(RPC_RECEIPT_POLL_INTERVAL_MS, deadline - Date.now());
+      if (sleepMs > 0) await sleep(sleepMs);
     }
     throw createRpcTimeoutError(
       `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
