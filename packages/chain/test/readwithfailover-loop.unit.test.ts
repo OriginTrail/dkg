@@ -133,7 +133,9 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
       readThrottleBackoffMs: 1,
     });
 
-    await expect(client.read('getBlock', (provider: any) => provider.read())).resolves.toBe('recovered');
+    await expect(client.read('getBlock', (provider: any) => provider.read(), {
+      retryOnThrottleExhaustion: true,
+    })).resolves.toBe('recovered');
     expect(primary.read.calls).toHaveLength(2);
     expect(backup.read.calls).toHaveLength(2);
   });
