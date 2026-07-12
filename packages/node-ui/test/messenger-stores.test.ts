@@ -180,7 +180,7 @@ describe('SqliteProtocolOutboxStore', () => {
     payload[0] = 9;
     entry.payload[1] = 8;
 
-    const pending = store.pendingFor(PEER_A);
+    const pending = store.snapshot().filter((entry) => entry.peer === PEER_A);
     expect(Array.from(pending[0].payload)).toEqual([1, 2, 3]);
 
     pending[0].payload[2] = 7;
@@ -207,13 +207,14 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(store.markDelivered(PEER_A, PROTO, MSG_1)).toBe(false);
   });
 
-  it('pendingFor returns entries sorted by firstFailureAt ascending', () => {
+  it('hasPendingFor reports whether a peer owns any durable row', () => {
     const store = new SqliteProtocolOutboxStore(db);
     store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2000);
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1000);
     store.enqueue(PEER_B, PROTO, MSG_1, PAYLOAD, 'e', 500);
-    expect(store.pendingFor(PEER_A).map((e) => e.messageId)).toEqual([MSG_1, MSG_2]);
-    expect(store.pendingFor(PEER_B)).toHaveLength(1);
+    expect(store.hasPendingFor(PEER_A)).toBe(true);
+    expect(store.hasPendingFor(PEER_B)).toBe(true);
+    expect(store.hasPendingFor('peer-c')).toBe(false);
   });
 
   it('due returns entries with nextAttemptAt <= now', () => {
@@ -259,7 +260,7 @@ describe('SqliteProtocolOutboxStore', () => {
     db.close();
     db = new DashboardDB({ dataDir: dir });
     const reopened = new SqliteProtocolOutboxStore(db);
-    const pending = reopened.pendingFor(PEER_A);
+    const pending = reopened.snapshot().filter((entry) => entry.peer === PEER_A);
     expect(pending).toHaveLength(1);
     expect(pending[0].lastError).toBe('crash-before-delivery');
     expect(Array.from(pending[0].payload)).toEqual(Array.from(PAYLOAD));

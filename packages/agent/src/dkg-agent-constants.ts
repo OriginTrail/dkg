@@ -172,27 +172,18 @@ export const STORAGE_ACK_REGISTRATION_RETRY_MS = 30_000;
  * the local curator state is correct but the invitee never learns to
  * sync, and their own retries can't help because they don't yet hold the
  * delegation that would let private-sync auth succeed. The tick walks the
- * queue's `due()` entries with exponential backoff. Opportunistic retries
- * also fire from `connection:open` when the invitee's peer reconnects,
- * which usually wins the race; the timer is the safety net for cases
- * where reconnect events are missed (e.g. relayed reconnects that don't
- * surface a fresh `connection:open` on the curator).
+ * queue's `due()` entries with exponential backoff. This separate join queue
+ * retains its own peer lifecycle policy; Universal Messenger rows below are
+ * scheduled-only.
  */
 export const JOIN_APPROVAL_RETRY_TICK_MS = 30_000;
 
 /**
  * Tick interval for the chat outbox retry queue. Same 30s cadence as
  * the join-approval queue (`JOIN_APPROVAL_RETRY_TICK_MS`). The cadence
- * doesn't gate the FIRST retry — a backoff-due entry that's been
- * waiting since 5s after first failure may sit idle for up to 25s
- * before this tick picks it up — but the dominant retry trigger in
- * practice is the `connection:open` opportunistic flush
- * (`processMessageOutboxOnConnect`), which fires the moment the
- * recipient peer becomes reachable again. The tick is the safety net
- * for cases where reconnect events are missed (e.g. relayed reconnects
- * that don't surface a fresh `connection:open` on the sender) or
- * where the recipient was reachable all along but transport failures
- * are coming from somewhere upstream of libp2p.
+ * is the sole automatic trigger: reconnect churn must not bypass a row's
+ * persisted `nextAttemptAt`. A due entry may sit for up to one tick interval
+ * before the scheduler picks it up.
  */
 export const MESSAGE_OUTBOX_TICK_MS = 30_000;
 

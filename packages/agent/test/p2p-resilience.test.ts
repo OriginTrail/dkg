@@ -349,10 +349,25 @@ describe('p2p resilience hooks', () => {
         allowAllNetworkAdmission(agent);
 
         const events: string[] = [];
-        let scheduledDrains = 0;
-        let opportunisticDrains = 0;
+        const wireProtocols: string[] = [];
         let enrichResolve: (() => void) | null = null;
         const enrichDone = new Promise<void>((r) => { enrichResolve = r; });
+        const remotePeer = freshPeerIdString();
+        const testProtocol = '/dkg/test/scheduled-only';
+        const queuedAt = Date.now();
+        const messenger = (agent as any).messenger;
+        messenger.outbox.enqueueFailure(
+          remotePeer,
+          testProtocol,
+          'scheduled-only-message',
+          new Uint8Array([1, 2, 3]),
+          'offline',
+          queuedAt,
+        );
+        messenger.router.send = async (_peer: string, protocol: string) => {
+          wireProtocols.push(protocol);
+          return new Uint8Array([0x42]);
+        };
 
         (agent as any).enrichPeerStoreFromInboundCircuit = async () => {
           events.push('enrich:start');
@@ -360,10 +375,6 @@ describe('p2p resilience hooks', () => {
           events.push('enrich:end');
           enrichResolve?.();
         };
-        (agent as any).messenger.processOutboxTick = async () => { scheduledDrains += 1; };
-        (agent as any).messenger.processOutboxOnConnect = async () => { opportunisticDrains += 1; };
-
-        const remotePeer = freshPeerIdString();
         const relayPeer = freshPeerIdString();
         agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
           detail: {
@@ -383,8 +394,13 @@ describe('p2p resilience hooks', () => {
 
         expect(events).toContain('enrich:start');
         expect(events).toContain('enrich:end');
-        expect(scheduledDrains).toBe(0);
-        expect(opportunisticDrains).toBe(0);
+        expect(wireProtocols).not.toContain(testProtocol);
+
+        // The same row remains deliverable by the sole automatic trigger once
+        // its persisted backoff has elapsed.
+        await messenger.processOutboxTick(queuedAt + 10_000);
+        expect(wireProtocols.filter((protocol) => protocol === testProtocol)).toHaveLength(1);
+        expect(messenger.outbox.hasPendingFor(remotePeer)).toBe(false);
       } finally {
         await agent.stop().catch(() => {});
       }
