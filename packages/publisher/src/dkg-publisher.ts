@@ -1712,56 +1712,17 @@ export class DKGPublisher implements Publisher {
     // `ctxGraphId ?? chainCgId`.
     const targetCgId = ctxGraphId ?? chainCgId;
     if (targetCgId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
-      // V10 publishDirect already registers the KC to the context graph
-      // via an internal call to ContextGraphs.registerKnowledgeAsset
-      // (Hub-authorized only — EOAs cannot call it directly). The legacy
-      // V9 flow required a separate addBatchToContextGraph tx; that path
-      // is no longer available. Attempt the explicit verify call as a
-      // fallback for non-V10 chains, but treat "Only Contracts in Hub"
-      // rejections as success (V10 already handled it).
-      let registered = false;
-      if (typeof this.chain.verify === 'function') {
-        let participantSigs = options?.contextGraphSignatures ?? [];
-        if (participantSigs.length === 0 && typeof this.chain.signMessage === 'function') {
-          const identityId = this.publisherNodeIdentityId;
-          if (identityId > 0n) {
-            const digest = ethers.solidityPackedKeccak256(
-              ['uint256', 'bytes32'],
-              [BigInt(targetCgId), ethers.hexlify(publishResult.merkleRoot)],
-            );
-            const sig = await this.chain.signMessage(ethers.getBytes(digest));
-            participantSigs = [{ identityId, ...sig }];
-          }
-        }
-
-        const sortedSigs = [...participantSigs]
-          .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
-          .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
-
-        try {
-          const txResult = await this.chain.verify({
-            contextGraphId: BigInt(targetCgId),
-            batchId: publishResult.onChainResult.batchId,
-            merkleRoot: publishResult.merkleRoot,
-            signerSignatures: sortedSigs,
-          });
-          if (txResult && typeof txResult === 'object' && 'success' in txResult && txResult.success) {
-            registered = true;
-            this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} verified on context graph ${targetCgId}`);
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // V10 publishDirect handles registration internally via a
-          // Hub-authorized call. Any revert here (typically
-          // "Only Contracts in Hub" / CALL_EXCEPTION) means the
-          // explicit verify path is not applicable — treat as success.
-          registered = true;
-          this.log.info(ctx, `Explicit verify not needed (V10 auto-registered): ${msg.slice(0, 120)}`);
-        }
-      } else {
-        registered = true;
-        this.log.info(ctx, `No verify function on chain adapter — assuming V10 auto-registration for context graph ${targetCgId}`);
-      }
+      // V10 publishDirect already registered the KC to the context graph
+      // inside publishDirect, via a Hub-authorized internal call to
+      // ContextGraphs.registerKnowledgeAsset (EOAs cannot call it directly),
+      // which emits KnowledgeAssetRegisteredToContextGraph. The legacy V9
+      // explicit chain.verify() fallback that used to run here always reverted
+      // on V10 ("Only Contracts in Hub" / CALL_EXCEPTION) — i.e. a doomed
+      // on-chain call plus an estimateGas round-trip, and serializer occupancy,
+      // on EVERY confirmed publish (#1575). Registration is already done, so
+      // skip the verify attempt entirely and proceed to the data promotion.
+      const registered = true;
+      this.log.debug(ctx, `V10 auto-registered KC to context graph ${targetCgId}; explicit verify skipped`);
 
       if (registered) {
         const ctxDataGraph = contextGraphDataUri(contextGraphId, targetCgId);

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -334,6 +334,21 @@ describe('DKGPublisher', () => {
     expect(result.onChainResult!.publisherAddress).toBeTypeOf('string');
     expect(result.onChainResult!.startKAId).toBeDefined();
     expect(result.onChainResult!.endKAId).toBeDefined();
+  });
+
+  it('does NOT call chain.verify on a confirmed V10 publish (#1575 — registration is internal to publishDirect)', async () => {
+    // publishDirect already registers the KC to the context graph via a
+    // Hub-authorized internal call; the legacy explicit chain.verify() tail
+    // always reverted on V10 and must not run per confirmed publish.
+    const verifySpy = vi.spyOn(chain, 'verify');
+    const result = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
+    });
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(verifySpy).not.toHaveBeenCalled();
+    verifySpy.mockRestore();
   });
 
   it('generates address-based UAL format', async () => {
