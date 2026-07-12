@@ -33,6 +33,7 @@ import type {
   StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
@@ -237,7 +238,7 @@ export class SparqlHttpStore implements TripleStore {
     const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
     const res = await fetch(this.queryEndpoint, {
       method: 'POST',
-      headers: { ...this.headers, 'Content-Type': 'application/sparql-query; charset=utf-8', Accept: accept },
+      headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
       body: sparql,
       signal,
     });
@@ -260,7 +261,7 @@ export class SparqlHttpStore implements TripleStore {
       // literals and DELETE DATA patterns silently stop matching.
       return fetch(this.updateEndpoint, {
         method: 'POST',
-        headers: { ...this.headers, 'Content-Type': 'application/sparql-update; charset=utf-8' },
+        headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
         body: update,
         signal,
       });
