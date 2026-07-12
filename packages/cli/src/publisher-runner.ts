@@ -51,7 +51,7 @@ export function resolveAsyncPublisherAvailability(args: {
   lifecycleAvailability?: AsyncPublisherAvailability;
 }): AsyncPublisherAvailability {
   if (args.lifecycleAvailability) return args.lifecycleAvailability;
-  if (args.runtime?.wallets.length) return { available: true };
+  if (args.runtime?.walletIds.length) return { available: true };
   const reason = args.lifecycleReason
     ?? (args.runtime
       ? 'no_publisher_wallets'

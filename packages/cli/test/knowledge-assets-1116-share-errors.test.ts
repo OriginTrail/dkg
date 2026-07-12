@@ -62,7 +62,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     agentOverrides: Record<string, unknown> = {},
     routeOverrides: { requestToken?: string; requestAgentAddress?: string } = {},
     publisherControl: Record<string, unknown> = {},
-    publisherRuntime: unknown = { wallets: [{ address: '0x1111111111111111111111111111111111111111' }] },
+    publisherRuntime: unknown = {
+      walletIds: ['0x1111111111111111111111111111111111111111'],
+      wallets: [{ address: '0x1111111111111111111111111111111111111111' }],
+    },
+    config: Record<string, unknown> = {},
+    publisherAvailability?: unknown,
   ) {
     const agent = {
       async listContextGraphs() {
@@ -92,7 +97,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           agent,
           publisherControl,
           publisherRuntime,
-          config: {},
+          config,
+          publisherAvailability,
           startedAt: Date.now(),
           dashDb: { insertNotification: () => 1 },
           opWallets: {},
@@ -408,7 +414,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     let enqueued = 0;
     await startWith({}, {}, {}, {
       enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
-    }, { wallets: [] });
+    }, { walletIds: [], wallets: [] });
 
     const res = await post('vm/publish-async', { contextGraphId: CG_ID });
     expect(res.status).toBe(503);
@@ -419,6 +425,35 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       operatorActionRequired: true,
     });
     expect(enqueued).toBe(0);
+  });
+
+  it('vm/publish-async uses lifecycle no-wallet state when the runtime is null', async () => {
+    let enqueued = 0;
+    await startWith({}, {}, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
+    }, null, { publisher: { enabled: true } }, {
+      available: false,
+      reason: 'no_publisher_wallets',
+      retryable: false,
+      operatorActionRequired: true,
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      reason: 'no_publisher_wallets', retryable: false, operatorActionRequired: true,
+    });
+    expect(enqueued).toBe(0);
+  });
+
+  it('vm/publish-async classifies an unknown startup failure as operator-actionable', async () => {
+    await startWith({}, {}, {}, {}, null, { publisher: { enabled: true } });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      reason: 'publisher_startup_failed', retryable: false, operatorActionRequired: true,
+    });
   });
 
   it('vm/publish-async rejects a missing real share snapshot before enqueue', async () => {
