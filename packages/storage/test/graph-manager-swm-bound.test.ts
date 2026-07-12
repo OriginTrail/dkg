@@ -297,6 +297,9 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     expect(storageIndex).not.toHaveProperty('resolveKaBoundedSharedMemoryReadGraphs');
     // The safe, fallback-owning primitive IS public.
     expect(typeof storageIndex.loadSharedMemorySliceWithKaBoundFallback).toBe('function');
+    // Named publish flows get a purpose-built exact identity API, not a generic
+    // range-pruning primitive.
+    expect(typeof storageIndex.loadNamedKnowledgeAssetSharedMemoryQuads).toBe('function');
   });
 });
 

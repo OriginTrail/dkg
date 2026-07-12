@@ -101,7 +101,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadKaBoundedSharedMemoryQuads, loadSelectedSharedMemoryQuads, type SwmKaGraphBound, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadNamedKnowledgeAssetSharedMemoryQuads, loadSelectedSharedMemoryQuads, type SwmKaGraphBound, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3331,7 +3331,10 @@ export class PublishMethods extends DKGAgentBase {
       ),
     } as const;
     return swmKaGraphBound
-      ? loadKaBoundedSharedMemoryQuads(this.store, swmGraph, selection, swmKaGraphBound, options)
+      ? loadNamedKnowledgeAssetSharedMemoryQuads(this.store, swmGraph, selection, {
+          agentAddress: swmKaGraphBound.agentAddress,
+          kaNumber: swmKaGraphBound.startNumber,
+        }, options)
       : loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, options);
   }
 

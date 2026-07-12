@@ -47,6 +47,12 @@ export interface SwmKaGraphBound {
   endNumber: bigint;
 }
 
+/** Exact identity of one named KA lifecycle's shared-memory graph. */
+export interface NamedKnowledgeAssetGraphIdentity {
+  agentAddress: string;
+  kaNumber: bigint;
+}
+
 const SWM_CHILD_AGENT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SWM_CHILD_KA_NUMBER = /^\d+$/;
 
@@ -146,9 +152,10 @@ async function listGraphsByPrefix(
  * paths (recompute mismatch → reject/retry, never accept-with-wrong-data).
  *
  * This resolver is COMPLETE and therefore safe everywhere, including the
- * merkle-defining publish reads and the StorageACK decline lanes. Pruning lives in
- * `resolveKaBoundedSharedMemoryReadGraphs`, which is not part of the package's
- * public surface — read its contract before reaching for it.
+ * merkle-defining publish reads and the StorageACK decline lanes. Generic pruning
+ * lives in `resolveKaBoundedSharedMemoryReadGraphs`, which is not part of the
+ * package's public surface. The public exact-named-lifecycle API below is a
+ * separate semantic boundary, not a range-pruning escape hatch.
  */
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
@@ -255,6 +262,30 @@ export async function loadKaBoundedSharedMemoryQuads(
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
   return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, kaGraphBound);
+}
+
+/**
+ * Load one exact named KA lifecycle from shared memory.
+ *
+ * Unlike the deliberately private range primitive above, this public API cannot
+ * express an arbitrary window: its identity is exactly one author + KA number.
+ * It is intended only for flows that have already selected that named lifecycle
+ * (publish/update/cleanup preflight). Those flows intentionally exclude foreign
+ * co-resident per-KA graphs even when they contain the same root subject; generic
+ * merkle or StorageACK reads must continue to use the complete/fallback APIs.
+ */
+export async function loadNamedKnowledgeAssetSharedMemoryQuads(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  identity: NamedKnowledgeAssetGraphIdentity,
+  options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
+    agentAddress: identity.agentAddress,
+    startNumber: identity.kaNumber,
+    endNumber: identity.kaNumber,
+  });
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */
