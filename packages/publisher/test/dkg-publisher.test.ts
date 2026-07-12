@@ -336,19 +336,28 @@ describe('DKGPublisher', () => {
     expect(result.onChainResult!.endKAId).toBeDefined();
   });
 
-  it('does NOT call chain.verify on a confirmed V10 publish (#1575 — registration is internal to publishDirect)', async () => {
-    // publishDirect already registers the KC to the context graph via a
-    // Hub-authorized internal call; the legacy explicit chain.verify() tail
-    // always reverted on V10 and must not run per confirmed publish.
-    const verifySpy = vi.spyOn(chain, 'verify');
-    const result = await publishWS({
-      contextGraphId: CONTEXT_GRAPH,
-      quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
+  it('does NOT call chain.verify after a confirmed V10 SWM publish (#1575)', async () => {
+    const quad = q(ENTITY, 'http://schema.org/name', '"ImageBot"');
+    await publisher.share(CONTEXT_GRAPH, [quad], {
+      publisherPeerId: 'peer-no-legacy-verify',
+      localOnly: true,
     });
+    await seedContextGraphRegistration(store, CONTEXT_GRAPH);
+
+    const verifySpy = vi.spyOn(chain, 'verify');
+    const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: CONTEXT_GRAPH,
+      precomputedAttestation: await buildSeal({
+        quads: [{ ...quad, graph: GRAPH }],
+        author: _author,
+        contextGraphId: CONTEXT_GRAPH,
+        ctx: { provider: _provider, kav10Address: _kav10Address },
+      }),
+    });
+
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
     expect(verifySpy).not.toHaveBeenCalled();
-    verifySpy.mockRestore();
   });
 
   it('generates address-based UAL format', async () => {

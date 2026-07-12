@@ -1721,10 +1721,8 @@ export class DKGPublisher implements Publisher {
       // on-chain call plus an estimateGas round-trip, and serializer occupancy,
       // on EVERY confirmed publish (#1575). Registration is already done, so
       // skip the verify attempt entirely and proceed to the data promotion.
-      const registered = true;
       this.log.debug(ctx, `V10 auto-registered KC to context graph ${targetCgId}; explicit verify skipped`);
 
-      if (registered) {
         const ctxDataGraph = contextGraphDataUri(contextGraphId, targetCgId);
         const ctxMetaGraph = contextGraphMetaUri(contextGraphId, targetCgId);
         const defaultDataGraph = this.graphManager.dataGraphUri(contextGraphId);
@@ -1844,7 +1842,6 @@ export class DKGPublisher implements Publisher {
         this.log.info(ctx, `Promoted ${publishResult.kaManifest.length} KAs from default graph to context graph ${targetCgId}`);
         }
         });
-      }
     }
 
     // SWM cleanup: ALWAYS remove published triples from SWM after chain confirmation.
