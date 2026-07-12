@@ -117,6 +117,12 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'hasOperationalPurpose',
   'resolveContract',
   'resolveAssetStorage',
+  // #1583 resolved-address memo internals: `resolveContract` delegates address
+  // resolution to `resolveContractAddress` (memo lookup) → `readHubContractAddress`
+  // (the raw `Hub.getContractAddress` read). EVM-only Hub plumbing — the mock has
+  // no Hub — same category as `resolveContract` / `resolveAssetStorage` above.
+  'resolveContractAddress',
+  'readHubContractAddress',
   'init',
   'initContracts',          // TS-private: init() body extracted so RPC-exhaustion can be wrapped as RPC_ENDPOINTS_EXHAUSTED
   'requireV9',
