@@ -2591,10 +2591,14 @@ export class EVMChainAdapterBase {
     // endpoint that has it; best-effort `0` only when EVERY endpoint lacks it and
     // no transport error occurred. Non-retryable / transport-exhaustion errors
     // propagate (never masked as a bogus `0`). Order-independent — see the helper.
-    const block = await this.rpcFailover.readReceiptBlock(
+    const block = await this.rpcFailover.read(
       'getBlock',
       (p) => p.getBlock(blockNumber),
-      { rpcUsageConsumer: 'getBlock', isEmptyResult: (value) => value == null },
+      {
+        rpcUsageConsumer: 'getBlock',
+        isEmptyResult: (value) => value == null,
+        endpointSetRetry: 'all-throttled',
+      },
     );
     return block?.timestamp != null ? Number(block.timestamp) : 0;
   }

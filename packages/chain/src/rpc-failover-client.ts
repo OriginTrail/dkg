@@ -117,6 +117,21 @@ export interface ReadOpts {
    * sentinel polluting stickiness or telemetry.
    */
   isEmptyResult?: (value: unknown) => boolean;
+  /** Retry a complete endpoint pass only when every failure was a throttle. */
+  endpointSetRetry?: 'all-throttled';
+}
+
+type ProviderSetExhaustionKind = 'all-throttled' | 'mixed';
+
+/** Internal exhaustion detail used only while deciding whether to retry a pass. */
+class ProviderSetExhaustedError extends ChainRpcTransportError {
+  constructor(
+    message: string,
+    readonly exhaustionKind: ProviderSetExhaustionKind,
+    opts: { cause: unknown; rpcUrls: readonly string[] },
+  ) {
+    super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
+  }
 }
 
 /**
@@ -295,7 +310,7 @@ export class RpcFailoverClient {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    const run = () => this.runAcrossProviders(
+    const runPass = () => this.runAcrossProviders(
       label,
       fn,
       opts?.isRetryable ?? isRetryableRpcError,
@@ -303,26 +318,9 @@ export class RpcFailoverClient {
       opts?.skipPreferred ?? false,
       opts?.isEmptyResult,
     );
-    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
-  }
-
-  /**
-   * Narrow publish-critical receipt-block read. Unlike generic reads, it retries
-   * a full pool pass only when every endpoint in that pass was throttled.
-   */
-  readReceiptBlock<T>(
-    label: string,
-    fn: (provider: JsonRpcProvider) => Promise<T>,
-    opts?: ReadOpts,
-  ): Promise<T> {
-    const run = () => this.withThrottleRetries(() => this.runAcrossProviders(
-      label,
-      fn,
-      opts?.isRetryable ?? isRetryableRpcError,
-      opts?.policy ?? 'pointRead',
-      opts?.skipPreferred ?? false,
-      opts?.isEmptyResult,
-    ));
+    const run = opts?.endpointSetRetry === 'all-throttled'
+      ? () => this.withThrottleRetries(runPass)
+      : runPass;
     return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
@@ -755,10 +753,9 @@ export class RpcFailoverClient {
         ? errorMessage(lastRetryable)
         : `${label} read failed on all configured RPC endpoints ` +
           `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
-      throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
+      throw new ProviderSetExhaustedError(message, allEndpointsThrottled ? 'all-throttled' : 'mixed', {
         cause: lastRetryable,
         rpcUrls: canonical.map((e) => e.rpcUrl),
-        allEndpointsThrottled,
       });
     }
     // Every endpoint returned an empty result and none errored → the empty value
@@ -782,10 +779,9 @@ export class RpcFailoverClient {
         // A raw 429 from a caller-supplied non-retryable classifier must retain
         // its no-failover/no-retry contract. Only retry a typed FULL-POOL
         // exhaustion produced by runAcrossProviders.
-        if (errorCode(error) !== 'RPC_ENDPOINTS_EXHAUSTED') throw error;
-        const allThrottled = error instanceof ChainRpcTransportError
-          && error.allEndpointsThrottled === true;
-        if (!allThrottled || retry >= this.readThrottleRetries) throw error;
+        if (!(error instanceof ProviderSetExhaustedError)
+          || error.exhaustionKind !== 'all-throttled'
+          || retry >= this.readThrottleRetries) throw error;
         await sleep(this.readThrottleBackoffMs * (2 ** retry));
       }
     }

@@ -133,7 +133,9 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
       readThrottleBackoffMs: 1,
     });
 
-    await expect(client.readReceiptBlock('getBlock', (provider: any) => provider.read()))
+    await expect(client.read('getBlock', (provider: any) => provider.read(), {
+      endpointSetRetry: 'all-throttled',
+    }))
       .resolves.toBe('recovered');
     expect(primary.read.calls).toHaveLength(2);
     expect(backup.read.calls).toHaveLength(2);
@@ -147,8 +149,9 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
       readThrottleBackoffMs: 1,
     });
 
-    await expect(client.readReceiptBlock('getBlock', (provider: any) => provider.read()))
-      .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED', allEndpointsThrottled: false });
+    await expect(client.read('getBlock', (provider: any) => provider.read(), {
+      endpointSetRetry: 'all-throttled',
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
     expect(primary.read.calls).toHaveLength(1);
     expect(backup.read.calls).toHaveLength(1);
   });
