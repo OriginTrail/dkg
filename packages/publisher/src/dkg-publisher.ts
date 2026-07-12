@@ -2065,16 +2065,16 @@ export class DKGPublisher implements Publisher {
     const willAttemptOnChainPublish = publisherContextGraphId !== undefined;
     const chainV10Ready = await this.refreshChainV10Readiness();
     const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
-    const resolvedPublisherAddress = canResolveOnChainPublisher
+    let resolvedPublisherAddress = canResolveOnChainPublisher
       ? await this.resolvePublisherAddress(publisherContextGraphId)
       : await this.resolvePublisherAddress(undefined, {
         includeReservingPublisherProbe: false,
         includeGenericSignMessageProbe: false,
       });
-    const publisherSigner = canResolveOnChainPublisher
+    let publisherSigner = canResolveOnChainPublisher
       ? await this.getPublisherSigner(resolvedPublisherAddress)
       : undefined;
-    const publisherAddress = resolvedPublisherAddress ?? this.localTentativePublisherAddress();
+    let publisherAddress = resolvedPublisherAddress ?? this.localTentativePublisherAddress();
     const canAttemptOnChainPublish = willAttemptOnChainPublish &&
       chainV10Ready &&
       publisherSigner !== undefined;
@@ -2590,6 +2590,29 @@ export class DKGPublisher implements Publisher {
           `${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+
+    // Re-pin once the exact publish cost is known, before ACK collection and
+    // remote staging. The initial address probe above is necessarily cost-blind
+    // because pricing depends on the finalized payload and lifetime.
+    if (
+      canAttemptOnChainPublish &&
+      publisherContextGraphId !== undefined &&
+      typeof this.chain.getAuthorizedPublisherAddress === 'function'
+    ) {
+      const fundedAddress = coercePublisherAddress(
+        await this.chain.getAuthorizedPublisherAddress(
+          publisherContextGraphId,
+          precomputedTokenAmount,
+        ),
+      );
+      const fundedSigner = await this.getPublisherSigner(fundedAddress);
+      if (!fundedAddress || !fundedSigner) {
+        throw new PublisherWalletRequiredError('publish');
+      }
+      resolvedPublisherAddress = fundedAddress;
+      publisherSigner = fundedSigner;
+      publisherAddress = fundedAddress;
     }
 
     // Identifier split for V10 publishes.

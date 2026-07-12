@@ -14,7 +14,11 @@ import {
   CG_REGISTRY_MAX_SCAN_PAGES,
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from './evm-adapter-base.js';
-import { isTooLowAllowanceError } from './evm-adapter-errors.js';
+import {
+  formatNoFundedPublisherWalletMessage,
+  InsufficientPublisherFundsError,
+  isTooLowAllowanceError,
+} from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -178,10 +182,16 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    * `createKnowledgeAssets` (the no-`publisherAddress` path), and pin-time
    * pricing is tracked as a follow-up (#1328).
    */
-  async getAuthorizedPublisherAddress(contextGraphId: bigint): Promise<string> {
+  async getAuthorizedPublisherAddress(contextGraphId: bigint, requiredTracWei: bigint = 0n): Promise<string> {
     await this.init();
-
-    return (await this.nextAuthorizedSigner(contextGraphId)).address;
+    if (requiredTracWei > 0n && !(await this.poolHasFundableSigner(contextGraphId, requiredTracWei))) {
+      const balances = await this.snapshotPublisherWalletBalances();
+      throw new InsufficientPublisherFundsError(
+        formatNoFundedPublisherWalletMessage(balances),
+        balances,
+      );
+    }
+    return (await this.nextAuthorizedSigner(contextGraphId, requiredTracWei)).address;
   }
 
   // =====================================================================

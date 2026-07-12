@@ -3870,6 +3870,29 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(caught.code).toBe('NO_FUNDED_PUBLISHER_WALLET');
   });
 
+  it('classifies the V10 TooLowBalance custom error as insufficient funds', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const error: any = new Error('execution reverted: TooLowBalance(0xabc, 1000, 2000)');
+      error.code = 'CALL_EXCEPTION';
+      throw error;
+    });
+    await expect(a.createKnowledgeAssets(makeV10PublishParams())).rejects.toMatchObject({
+      code: 'NO_FUNDED_PUBLISHER_WALLET',
+    });
+  });
+
+  it('fails a priced publisher reservation before transaction work when no wallet can cover it', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 1n); tracByAddr.set(lc(walletB.address), 2n);
+    await expect(a.getAuthorizedPublisherAddress(CG, 1000n)).rejects.toMatchObject({
+      code: 'NO_FUNDED_PUBLISHER_WALLET',
+    });
+  });
+
   it('expires the funding cache past the TTL: a newly funded wallet is re-read and selected', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     // walletA (head) unfunded (0 TRAC); walletB funded → B chosen first.

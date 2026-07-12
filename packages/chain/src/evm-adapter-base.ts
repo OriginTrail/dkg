@@ -2272,7 +2272,7 @@ export class EVMChainAdapterBase {
     if (/receipt is null|receipt was null|replaced or dropped|write-?ahead/.test(msg)) {
       return false;
     }
-    return /transfer amount exceeds balance|erc20insufficientbalance|insufficient allowance|toolowallowance|insufficient funds/.test(msg);
+    return /transfer amount exceeds balance|erc20insufficientbalance|insufficient allowance|toolowallowance|toolowbalance|insufficient funds/.test(msg);
   }
 
   /** All operational wallet addresses (for display / funding). */
