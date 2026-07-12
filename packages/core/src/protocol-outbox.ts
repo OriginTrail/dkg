@@ -202,8 +202,8 @@ export class ProtocolOutbox {
   }
 
   /** Entries whose `nextAttemptAt <= now`. */
-  due(now: number): ProtocolOutboxEntry[] {
-    return this.store.due(now);
+  due(now: number, limit?: number): ProtocolOutboxEntry[] {
+    return this.store.due(now, limit);
   }
 
   /**
@@ -334,9 +334,11 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
       .map(cloneOutboxEntry);
   }
 
-  due(now: number): ProtocolOutboxEntry[] {
-    return Array.from(this.entries.values())
+  due(now: number, limit?: number): ProtocolOutboxEntry[] {
+    const entries = Array.from(this.entries.values())
       .filter((e) => e.nextAttemptAt <= now)
+      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt || a.firstFailureAt - b.firstFailureAt);
+    return (limit === undefined ? entries : entries.slice(0, Math.max(0, limit)))
       .map(cloneOutboxEntry);
   }
 

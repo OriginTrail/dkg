@@ -219,7 +219,7 @@ export interface ProtocolOutboxStore {
    * tick to find what's due for retry, regardless of peer
    * reachability.
    */
-  due(now: number): ProtocolOutboxEntry[];
+  due(now: number, limit?: number): ProtocolOutboxEntry[];
 
   /**
    * Drop entries whose `firstFailureAt` is older than the

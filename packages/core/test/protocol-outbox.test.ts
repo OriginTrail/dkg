@@ -137,6 +137,15 @@ describe('ProtocolOutbox.due / pendingFor', () => {
     expect(outbox.due(expectedNext)).toHaveLength(1);
   });
 
+  it('bounds due snapshots in retry-time order', () => {
+    const { outbox } = fixture();
+    outbox.enqueueFailure(PEER_A, PROTO, 'third', PAYLOAD, 'e', 3000);
+    outbox.enqueueFailure(PEER_A, PROTO, 'first', PAYLOAD, 'e', 1000);
+    outbox.enqueueFailure(PEER_A, PROTO, 'second', PAYLOAD, 'e', 2000);
+    const now = 3000 + DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[0];
+    expect(outbox.due(now, 2).map((entry) => entry.messageId)).toEqual(['first', 'second']);
+  });
+
   it('pendingFor returns all entries for a peer in firstFailureAt ascending order', () => {
     const { outbox } = fixture();
     outbox.enqueueFailure(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2000);

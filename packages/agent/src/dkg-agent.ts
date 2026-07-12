@@ -1548,6 +1548,7 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
     }
+    await this.messenger.waitForOutboxDrain().catch(() => {});
     if (this.swmAckQuorumTimer) {
       clearInterval(this.swmAckQuorumTimer);
       this.swmAckQuorumTimer = null;

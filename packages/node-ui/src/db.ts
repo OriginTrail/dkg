@@ -2793,12 +2793,16 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     return rows.map(SqliteProtocolOutboxStore.rowToEntry);
   }
 
-  due(now: number): ProtocolOutboxEntry[] {
+  due(now: number, limit?: number): ProtocolOutboxEntry[] {
+    const boundedLimit = limit === undefined ? -1 : Math.max(0, Math.floor(limit));
     const rows = this.db
       .prepare(
-        `SELECT * FROM protocol_outbox WHERE next_attempt_at <= ?`,
+        `SELECT * FROM protocol_outbox
+         WHERE next_attempt_at <= ?
+         ORDER BY next_attempt_at ASC, first_failure_at ASC
+         LIMIT ?`,
       )
-      .all(now) as Array<{
+      .all(now, boundedLimit) as Array<{
       peer_id: string;
       protocol: string;
       message_id: string;

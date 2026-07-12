@@ -223,6 +223,14 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(store.due(1_005_000)).toHaveLength(1);
   });
 
+  it('due applies a stable database-level batch limit', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
+    store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2_000);
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
+    expect(store.due(10_000, 1).map((entry) => entry.messageId)).toEqual([MSG_1]);
+    expect(store.due(10_000, 0)).toEqual([]);
+  });
+
   it('dropExpired removes entries older than maxAgeMs and returns them', () => {
     const store = new SqliteProtocolOutboxStore(db, {
       maxAgeMs: 60_000,

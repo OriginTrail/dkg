@@ -395,6 +395,45 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
     await messenger.processOutboxTick(clock() + 100);
     expect(router.send.calls.length).toBe(sendCallsBefore);
   });
+
+  it('coalesces overlapping ticks and bounds batch size and retry concurrency', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const releases: Array<() => void> = [];
+    const router = makeRouter(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return new Uint8Array([0x42]);
+    });
+    const idempotencyStore = new InMemoryMessageIdempotencyStore();
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    for (let i = 0; i < 5; i += 1) {
+      outboxStore.enqueue(PEER_A, PROTO, `message-${i}`, new Uint8Array([i]), 'offline', 0);
+    }
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore,
+      outboxStore,
+      backoffs: [10],
+      outboxDrainBatchSize: 3,
+      outboxDrainConcurrency: 2,
+    });
+
+    const first = messenger.processOutboxTick(100);
+    const overlapping = messenger.processOutboxTick(100);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(router.send.calls).toHaveLength(2);
+    expect(maxActive).toBe(2);
+    releases.splice(0).forEach((release) => release());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releases.splice(0).forEach((release) => release());
+    await Promise.all([first, overlapping]);
+
+    expect(router.send.calls).toHaveLength(3);
+    expect(outboxStore.size()).toBe(2);
+  });
 });
 
 describe('Messenger construction guardrails', () => {

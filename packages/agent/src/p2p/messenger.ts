@@ -324,6 +324,16 @@ export interface SloProtocolStats {
  * via `sloWindowSamples` in `MessengerDeps`.
  */
 export const DEFAULT_SLO_WINDOW_SAMPLES = 1000;
+export const DEFAULT_OUTBOX_DRAIN_BATCH_SIZE = 100;
+export const DEFAULT_OUTBOX_DRAIN_CONCURRENCY = 4;
+
+function positiveInteger(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isInteger(resolved) || resolved <= 0) {
+    throw new Error(`Messenger: ${name} must be a positive integer`);
+  }
+  return resolved;
+}
 
 export class Messenger {
   private readonly router: ProtocolRouter;
@@ -331,6 +341,9 @@ export class Messenger {
   private readonly outbox?: ProtocolOutbox;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
+  private readonly outboxDrainBatchSize: number;
+  private readonly outboxDrainConcurrency: number;
+  private activeOutboxDrain: Promise<void> | null = null;
 
   /**
    * Application handlers registered via `register`. Stored separately
@@ -402,7 +415,11 @@ export class Messenger {
    */
   private readonly deliveredResponseClassifiers = new Map<string, (response: Uint8Array) => boolean>();
 
-  constructor(deps: MessengerDeps & { sloWindowSamples?: number }) {
+  constructor(deps: MessengerDeps & {
+    sloWindowSamples?: number;
+    outboxDrainBatchSize?: number;
+    outboxDrainConcurrency?: number;
+  }) {
     this.router = deps.router;
     this.idempotencyStore = deps.idempotencyStore;
     if (deps.outboxStore) {
@@ -414,6 +431,16 @@ export class Messenger {
     this.clock = deps.clock ?? (() => Date.now());
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
+    this.outboxDrainBatchSize = positiveInteger(
+      deps.outboxDrainBatchSize,
+      DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+      'outboxDrainBatchSize',
+    );
+    this.outboxDrainConcurrency = positiveInteger(
+      deps.outboxDrainConcurrency,
+      DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
+      'outboxDrainConcurrency',
+    );
   }
 
   /**
@@ -790,12 +817,36 @@ export class Messenger {
    * `dropExpired(now)` evicts it on age — recovering an encoding
    * bug requires operator action (manual replay or shutdown).
    */
-  async processOutboxTick(now: number): Promise<void> {
-    if (!this.outbox) return;
-    const due = this.outbox.due(now);
-    for (const entry of due) {
-      await this.retryOutboxEntry(entry);
-    }
+  processOutboxTick(now: number): Promise<void> {
+    if (!this.outbox) return Promise.resolve();
+    if (this.activeOutboxDrain) return this.activeOutboxDrain;
+
+    const drain = this.drainDueOutbox(now);
+    this.activeOutboxDrain = drain;
+    void drain.finally(() => {
+      if (this.activeOutboxDrain === drain) this.activeOutboxDrain = null;
+    }).catch(() => {});
+    return drain;
+  }
+
+  /** Await the currently active periodic drain during graceful shutdown. */
+  async waitForOutboxDrain(): Promise<void> {
+    await this.activeOutboxDrain;
+  }
+
+  private async drainDueOutbox(now: number): Promise<void> {
+    const due = this.outbox!.due(now, this.outboxDrainBatchSize);
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(this.outboxDrainConcurrency, due.length) },
+      async () => {
+        while (cursor < due.length) {
+          const entry = due[cursor++];
+          await this.retryOutboxEntry(entry);
+        }
+      },
+    );
+    await Promise.all(workers);
   }
 
   /**
