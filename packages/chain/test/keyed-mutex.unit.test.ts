@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { KeyedSerializer, KeyedSerializerAcquireTimeoutError } from '../src/keyed-mutex.js';
+import { SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 
 const tick = (ms = 0) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -94,14 +95,12 @@ describe('KeyedSerializer', () => {
   });
 
   it('times out queued callers with the key and depth, then skips their work', async () => {
-    const s = new KeyedSerializer(15);
+    const s = new KeyedSerializer({ acquireTimeoutMs: 15, laneLabel: 'test lane' });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const first = s.run('0xwallet', async () => gate);
     let ran = false;
     const second = s.run('0xwallet', async () => { ran = true; });
-    expect(s.queueDepth('0xwallet')).toBe(2);
-
     await expect(second).rejects.toMatchObject({
       name: 'KeyedSerializerAcquireTimeoutError',
       code: 'KEYED_SERIALIZER_ACQUIRE_TIMEOUT',
@@ -112,22 +111,25 @@ describe('KeyedSerializer', () => {
     await first;
     await tick(0);
     expect(ran).toBe(false);
-    expect(s.queueDepth('0xwallet')).toBe(0);
+    expect(s.isActive('0xwallet')).toBe(false);
   });
 
-  it('does not drop a queued write after 60s while its predecessor is within the receipt window', async () => {
+  it('keeps an EVM signer write queued beyond the full 180s receipt window', async () => {
     vi.useFakeTimers();
     try {
-      const s = new KeyedSerializer();
+      const s = new KeyedSerializer({
+        acquireTimeoutMs: SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS,
+        laneLabel: 'transaction lane',
+      });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
       const first = s.run('0xslow-wallet', async () => gate);
       let ran = false;
       const second = s.run('0xslow-wallet', async () => { ran = true; return 'sent'; });
 
-      await vi.advanceTimersByTimeAsync(65_000);
+      await vi.advanceTimersByTimeAsync(181_000);
       expect(ran).toBe(false);
-      expect(s.queueDepth('0xslow-wallet')).toBe(2);
+      expect(s.isActive('0xslow-wallet')).toBe(true);
       release();
       await first;
       await expect(second).resolves.toBe('sent');

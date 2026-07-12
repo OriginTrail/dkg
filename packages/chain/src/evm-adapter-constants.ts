@@ -87,6 +87,11 @@ export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 
 export const RPC_RECEIPT_TIMEOUT_MS = 180_000;
 
+// One serialized transaction may legitimately occupy its signer lane for the
+// full receipt window plus populate/broadcast overhead. Deeper queue positions
+// receive one such budget per predecessor in KeyedSerializer.
+export const SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS = 240_000;
+
 /**
  * Bounded "retry the whole endpoint set" for the BROADCAST phase (S2). After a
  * full per-endpoint broadcast pass exhausts with a retryable error (e.g. a brief

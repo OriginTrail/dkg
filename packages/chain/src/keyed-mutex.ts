@@ -6,19 +6,15 @@
  * rejecting operation does not wedge its key's queue — the next operation
  * still runs.
  *
- * The EVM adapter uses this to serialize the nonce-critical send window
- * (populate → sign → broadcast → confirm) PER operational wallet. The
- * round-robin signer pool can route two concurrent writes to the SAME
- * wallet; without serialization both populate against the same `pending`
- * nonce before either is broadcast, so the second to land reverts
- * `Nonce too low` and the publish degrades to `tentative kaId:0`
- * (OriginTrail/dkg#953). Serializing per wallet keeps the nonce monotonic
- * while preserving cross-wallet concurrency.
+ * Callers own the timeout and diagnostic policy for their domain. This class
+ * only provides keyed, bounded acquisition and queue cleanup.
  */
-// One serialized write may legitimately hold the lane for the 180s receipt
-// window plus populate/broadcast overhead. Keep one queue-position budget above
-// that bound; deeper callers receive one budget per predecessor.
-export const DEFAULT_KEYED_SERIALIZER_ACQUIRE_TIMEOUT_MS = 240_000;
+const DEFAULT_KEYED_SERIALIZER_ACQUIRE_TIMEOUT_MS = 60_000;
+
+export interface KeyedSerializerOptions {
+  acquireTimeoutMs?: number;
+  laneLabel?: string;
+}
 
 interface SerializerLane {
   tail: Promise<void>;
@@ -32,19 +28,22 @@ export class KeyedSerializerAcquireTimeoutError extends Error {
     readonly key: string,
     readonly waitMs: number,
     readonly queueDepth: number,
+    laneLabel: string,
   ) {
-    super(`Timed out after ${waitMs}ms waiting for transaction lane ${key} (queue depth ${queueDepth})`);
+    super(`Timed out after ${waitMs}ms waiting for ${laneLabel} ${key} (queue depth ${queueDepth})`);
     this.name = 'KeyedSerializerAcquireTimeoutError';
   }
 }
 
 export class KeyedSerializer {
   private readonly lanes = new Map<string, SerializerLane>();
+  private readonly acquireTimeoutMs: number;
+  private readonly laneLabel: string;
 
-  constructor(
-    private readonly acquireTimeoutMs = DEFAULT_KEYED_SERIALIZER_ACQUIRE_TIMEOUT_MS,
-  ) {
-    if (!Number.isFinite(acquireTimeoutMs) || acquireTimeoutMs <= 0) {
+  constructor(options: KeyedSerializerOptions = {}) {
+    this.acquireTimeoutMs = options.acquireTimeoutMs ?? DEFAULT_KEYED_SERIALIZER_ACQUIRE_TIMEOUT_MS;
+    this.laneLabel = options.laneLabel ?? 'serializer lane';
+    if (!Number.isFinite(this.acquireTimeoutMs) || this.acquireTimeoutMs <= 0) {
       throw new Error('KeyedSerializer acquireTimeoutMs must be positive');
     }
   }
@@ -77,39 +76,35 @@ export class KeyedSerializer {
     prev: Promise<void>,
     fn: () => Promise<T>,
   ): { result: Promise<T>; tail: Promise<void> } {
-    let acquired = false;
     let timedOut = false;
-    let resolveResult!: (value: T) => void;
-    let rejectResult!: (reason: unknown) => void;
-    const result = new Promise<T>((resolve, reject) => {
-      resolveResult = resolve;
-      rejectResult = reject;
+    let cancelTimeout!: () => void;
+    const acquireTimeout = new Promise<never>((_resolve, reject) => {
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        reject(new KeyedSerializerAcquireTimeoutError(
+          key,
+          waitMs,
+          queueDepth,
+          this.laneLabel,
+        ));
+      }, waitMs);
+      timeout.unref?.();
+      cancelTimeout = () => clearTimeout(timeout);
     });
-    const timeout = setTimeout(() => {
-      if (acquired) return;
-      timedOut = true;
-      rejectResult(new KeyedSerializerAcquireTimeoutError(key, waitMs, queueDepth));
-    }, waitMs);
-    timeout.unref?.();
 
     // `prev` is a non-rejecting queue tail. A caller that times out is skipped
     // when it eventually reaches the front, so abandoned writes never execute.
     const execution = prev.then(async () => {
       if (timedOut) return;
-      acquired = true;
-      clearTimeout(timeout);
-      try {
-        resolveResult(await fn());
-      } catch (error) {
-        rejectResult(error);
-      }
+      cancelTimeout();
+      return fn();
     });
     // The queue tail never rejects, so chaining the next op off it is safe.
     return {
-      result,
+      result: Promise.race([execution, acquireTimeout]) as Promise<T>,
       tail: execution.then(
-      () => undefined,
-      () => undefined,
+        () => undefined,
+        () => undefined,
       ),
     };
   }
@@ -122,10 +117,5 @@ export class KeyedSerializer {
   /** Number of keys with an in-flight or queued operation. */
   get activeKeyCount(): number {
     return this.lanes.size;
-  }
-
-  /** In-flight plus queued operations for one key. */
-  queueDepth(key: string): number {
-    return this.lanes.get(key)?.depth ?? 0;
   }
 }

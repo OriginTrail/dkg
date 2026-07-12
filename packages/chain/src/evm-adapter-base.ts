@@ -38,7 +38,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -655,7 +655,10 @@ export class EVMChainAdapterBase {
    * `Nonce too low` (OriginTrail/dkg#953). Cross-wallet concurrency is
    * preserved.
    */
-  protected readonly signerTxSerializer = new KeyedSerializer();
+  protected readonly signerTxSerializer = new KeyedSerializer({
+    acquireTimeoutMs: SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS,
+    laneLabel: 'transaction lane',
+  });
 
   /**
    * Lowercased addresses of operational wallets CONFIRMED registered on-chain
