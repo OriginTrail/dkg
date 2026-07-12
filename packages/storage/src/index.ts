@@ -72,6 +72,7 @@ export {
   ContextGraphManager,
   GraphManager,
   loadSelectedSharedMemoryQuads,
+  loadKaBoundedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   loadSelectedVerifiableMemoryQuads,
   resolveSharedMemoryReadGraphs,

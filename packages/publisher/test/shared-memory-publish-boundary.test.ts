@@ -23,6 +23,7 @@ const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const SWM_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/1`;
+const FOREIGN_PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x2222222222222222222222222222222222222222/9`;
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const ON_CHAIN_ID_PREDICATE = 'https://dkg.network/ontology#ContextGraphOnChainId';
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
@@ -203,6 +204,30 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(publishSpy.calls).toHaveLength(1);
     expect(publishSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
+    ]);
+  });
+
+  it('named-KA scope excludes a foreign share with the same subject IRI', async () => {
+    const { publisher, store, publishSpy } = await makePublisher();
+    await store.insert([
+      q('urn:test:root:one', 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q('urn:test:root:one', 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
+    ]);
+
+    await publisher.publishFromSharedMemory(
+      CONTEXT_GRAPH,
+      { rootEntities: ['urn:test:root:one'] },
+      {
+        swmKaGraphBound: {
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          startNumber: 1n,
+          endNumber: 1n,
+        },
+      },
+    );
+
+    expect(publishSpy.calls[0][0].quads).toEqual([
+      { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"local"', graph: '' },
     ]);
   });
 

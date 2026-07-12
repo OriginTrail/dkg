@@ -236,7 +236,9 @@ export async function loadSelectedSharedMemoryQuads(
 /**
  * Load the SWM quad slice pruned to ONE author's per-KA under-graphs (#1549).
  *
- * UNSAFE ON ITS OWN, and deliberately NOT re-exported from `src/index.ts`. The
+ * UNSAFE as a generic merkle accelerator. It is publicly exported only for
+ * callers that own an exact named-KA graph boundary; generic merkle callers
+ * must use the widening wrapper below. The
  * pruned graph set is a strict subset of the set `loadSelectedSharedMemoryQuads`
  * reads, and INV-1 — "a root's quads live only under its own KA number" — is
  * REFUTED under root recurrence, so this read can legitimately miss quads the

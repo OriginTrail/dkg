@@ -101,7 +101,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadSelectedSharedMemoryQuads, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadKaBoundedSharedMemoryQuads, loadSelectedSharedMemoryQuads, type SwmKaGraphBound, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3317,18 +3317,22 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     subGraphName?: string,
+    swmKaGraphBound?: SwmKaGraphBound,
   ): Promise<Quad[]> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-    return loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
+    const options = {
       querySource: 'agent.resolveLiftWorkspaceSlice',
-      rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
+      rootEntitiesErrorMessage: ({ inputCount, hadInput }: { inputCount: number; hadInput: boolean }) => (
         hadInput
           ? `_loadSelectedSWMQuads: no valid rootEntities provided ` +
               `(all ${inputCount} entries failed IRI validation) ` +
               `for context graph ${contextGraphId}`
           : `_loadSelectedSWMQuads: no rootEntities supplied for context graph ${contextGraphId}`
       ),
-    });
+    } as const;
+    return swmKaGraphBound
+      ? loadKaBoundedSharedMemoryQuads(this.store, swmGraph, selection, swmKaGraphBound, options)
+      : loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, options);
   }
 
   /**
@@ -4264,6 +4268,15 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
+    const namedKaId = seal.reservedKaId ?? packedKaId;
+    const namedKaNumber = namedKaId === undefined ? undefined : namedKaId & ((1n << 96n) - 1n);
+    const namedKaGraphBound: SwmKaGraphBound | undefined = namedKaNumber === undefined
+      ? undefined
+      : {
+          agentAddress: seal.authorAddress,
+          startNumber: namedKaNumber,
+          endNumber: namedKaNumber,
+        };
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
 
@@ -4279,6 +4292,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         { rootEntities: seal.rootEntities },
         opts?.subGraphName,
+        namedKaGraphBound,
       );
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
@@ -4311,6 +4325,7 @@ export class PublishMethods extends DKGAgentBase {
             seal.rootEntities,
             opts?.subGraphName,
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+            namedKaGraphBound,
           );
         } catch (err) {
           this.log.warn(
@@ -4397,6 +4412,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         { rootEntities: seal.rootEntities },
         opts?.subGraphName,
+        namedKaGraphBound,
       );
       if (sealedSwmQuads.length === 0) {
         throw new Error(
@@ -4414,6 +4430,7 @@ export class PublishMethods extends DKGAgentBase {
           publishEpochs: opts?.publishEpochs,
           clearSharedMemoryAfter: opts?.clearSharedMemoryAfter,
           reservedKaId: recoveredReservedKaId,
+          swmKaGraphBound: namedKaGraphBound,
           // Wired through to the inner publisher.publish() via
           // publishFromSharedMemory's `precomputedAttestation` option.
           // Skips the publisher's signing entirely.
@@ -4844,6 +4861,7 @@ export class PublishMethods extends DKGAgentBase {
        * publisher then keeps its existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
+      swmKaGraphBound?: SwmKaGraphBound;
       /**
        * RFC-001 §9.x — pre-computed attestation captured by
        * `agent.assertion.finalize()`. When the caller has already
@@ -4940,6 +4958,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         selection,
         options?.subGraphName,
+        options?.swmKaGraphBound,
       );
       if (swmQuads.length > 0) {
         resolvedSeal = await this._buildPrecomputedAttestationForSelection(
@@ -5019,6 +5038,7 @@ export class PublishMethods extends DKGAgentBase {
       precomputedAttestation: resolvedSeal,
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
+      swmKaGraphBound: options?.swmKaGraphBound,
       encryptInlinePayload,
       encryptInlineChunked,
     });
