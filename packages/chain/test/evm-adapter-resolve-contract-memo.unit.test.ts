@@ -20,10 +20,10 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
 
-// PREFLIGHT_TTL_MS is a protected static on the adapter base; read it through the
+// The memo TTL is a protected static on the adapter base; read it through the
 // class so the TTL-backstop test stays coupled to the production constant.
-const PREFLIGHT_TTL_MS = ((EVMChainAdapter as unknown as { PREFLIGHT_TTL_MS?: number })
-  .PREFLIGHT_TTL_MS) ?? 60 * 60 * 1000;
+const MEMO_TTL_MS = ((EVMChainAdapter as unknown as { RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS?: number })
+  .RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS) ?? 30_000;
 
 const ADDR_BY_NAME: Record<string, string> = {
   IdentityStorage: '0x00000000000000000000000000000000000000A1',
@@ -33,6 +33,9 @@ const ADDR_BY_NAME: Record<string, string> = {
   RandomSampling: '0x00000000000000000000000000000000000000A5',
   RandomSamplingStorage: '0x00000000000000000000000000000000000000A6',
   Foo: '0x00000000000000000000000000000000000000A7',
+  PublishingConviction: '0x00000000000000000000000000000000000000A8',
+  ShardingTable: '0x00000000000000000000000000000000000000A9',
+  DKGStakingConvictionNFT: '0x00000000000000000000000000000000000000Aa',
 };
 const RECOVERED = ethers.getAddress('0x00000000000000000000000000000000000000ab');
 
@@ -140,7 +143,7 @@ describe('resolveContract address memo (#1583)', () => {
     expect(hubReads(rc)).toBe(2);
   });
 
-  it('re-resolves after the PREFLIGHT_TTL_MS backstop even with no invalidation hook', async () => {
+  it('re-resolves after the 30s memo-TTL backstop even with no invalidation hook', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const a = makeAdapter();
@@ -151,12 +154,13 @@ describe('resolveContract address memo (#1583)', () => {
     expect(hubReads(rc)).toBe(1);
 
     // Just inside the TTL — still served from the memo.
-    vi.setSystemTime(PREFLIGHT_TTL_MS - 1);
+    vi.setSystemTime(MEMO_TTL_MS - 1);
     await a.resolveContractAddress('IdentityStorage');
     expect(hubReads(rc)).toBe(1);
 
-    // Past the TTL — re-resolves.
-    vi.setSystemTime(PREFLIGHT_TTL_MS + 1);
+    // Past the TTL — re-resolves. This backstop is what bounds a poller-missed
+    // Hub rotation to ≤30s (see readIdentityIdFromStorage / the memo TTL const).
+    vi.setSystemTime(MEMO_TTL_MS + 1);
     await a.resolveContractAddress('IdentityStorage');
     expect(hubReads(rc)).toBe(2);
   });
@@ -198,16 +202,56 @@ describe('resolveContract address memo (#1583)', () => {
     expect(hubReads(rc)).toBe(2);
   });
 
-  it('excluded names (ShardingTableStorage, RandomSampling*) ALWAYS resolve fresh', async () => {
+  it('excluded names (RandomSampling*, PCA cold paths) ALWAYS resolve fresh', async () => {
     const a = makeAdapter();
     const rc = spyByName(a);
-    for (const name of ['ShardingTableStorage', 'RandomSampling', 'RandomSamplingStorage']) {
+    for (const name of ['RandomSampling', 'RandomSamplingStorage',
+      // PR #1615 review axis-1: hookless, no-self-heal cold paths — always fresh.
+      'PublishingConviction', 'ShardingTable', 'DKGStakingConvictionNFT']) {
       for (let i = 0; i < 4; i++) {
         await expect(a.resolveContractAddress(name)).resolves.toBe(ADDR_BY_NAME[name]);
       }
       // Every call re-hits the Hub — these are deliberately NOT memoized.
       expect(hubReads(rc, name)).toBe(4);
     }
+  });
+
+  it('ShardingTableStorage — the ACK-verify twin of IdentityStorage — IS memoized (#1615 axis-1 reversal)', async () => {
+    // First cut excluded ShardingTableStorage while memoizing its per-ACK twin
+    // IdentityStorage — inconsistent, and it left ~half of ACK-verify address
+    // amplification uncut. Both are now memoized (30s TTL, RESULTS stay live).
+    const a = makeAdapter();
+    const rc = spyByName(a);
+    for (let i = 0; i < 5; i++) {
+      await expect(a.resolveContractAddress('ShardingTableStorage'))
+        .resolves.toBe(ADDR_BY_NAME.ShardingTableStorage);
+    }
+    expect(hubReads(rc, 'ShardingTableStorage')).toBe(1);
+  });
+
+  // PR #1615 review axis-2: the behaviour callers actually depend on is that
+  // `resolveContract()` (the public path — used by getIdentityStorage, ACK
+  // verification, every hot read) inherits the memo, not just the extracted
+  // `resolveContractAddress` helper. These two exercise the caller path end to
+  // end (real Contract build over `loadAbi`, no stub of resolveContract).
+  it('resolveContract() — the real caller path — serves repeats from the memo (ONE Hub read)', async () => {
+    const a = makeAdapter();
+    const rc = spyByName(a);
+    const handles = [];
+    for (let i = 0; i < 5; i++) handles.push(await a.resolveContract('IdentityStorage'));
+    // One Hub address-resolve for all five; each build is a fresh handle bound to
+    // the memoized address (reads staticCall, writes .connect() a signer).
+    expect(hubReads(rc, 'IdentityStorage')).toBe(1);
+    for (const h of handles) {
+      expect((await h.getAddress()).toLowerCase()).toBe(ADDR_BY_NAME.IdentityStorage.toLowerCase());
+    }
+  });
+
+  it('resolveContract() honours the exclusion set — excluded names re-hit the Hub each call', async () => {
+    const a = makeAdapter();
+    const rc = spyByName(a);
+    for (let i = 0; i < 3; i++) await a.resolveContract('RandomSampling');
+    expect(hubReads(rc, 'RandomSampling')).toBe(3);
   });
 });
 

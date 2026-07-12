@@ -224,44 +224,46 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     expect(a.readContract.calls[1][0]).toBe(identityStorage);
   });
 
-  it('identity id misses reuse the cached IdentityStorage binding — no per-miss re-resolve (#1583)', async () => {
-    // Pre-#1583 `readIdentityIdFromStorage` forced `getIdentityStorage({ refresh:
-    // true })`, re-resolving the IdentityStorage ADDRESS through the Hub on EVERY
-    // identity-id miss — a major publish-burst RPC amplifier. It now reuses the
-    // cached lazy binding; rotation safety rests on the invalidation hooks (below
-    // and in the following cases), NOT a per-miss refresh.
+  it('identity-id misses re-resolve the memo-served binding and auto-heal a rotated address without an explicit hook (#1583)', async () => {
+    // #1583 keeps `getIdentityStorage({ refresh: true })` on every identity-id
+    // miss. The re-resolve is memo-served — the ADDRESS is cached in
+    // `resolveContractAddress`, so no Hub RPC on the hot path — which is what
+    // makes it cheap. What it buys back: a Hub rotation the event poller MISSES
+    // is still picked up when the address memo TTL-expires (≤30s), WITHOUT
+    // relying on an explicit invalidation hook firing. Here `resolveContract` is
+    // stubbed to stand in for the memo: it returns the same handle until the
+    // test rotates it.
+    const ADDR3 = '0x00000000000000000000000000000000000000a3';
     const a: any = new EVMChainAdapter(minimalConfig());
     const oldIdentityStorage = { target: '0x0000000000000000000000000000000000000101' };
     const newIdentityStorage = { target: '0x0000000000000000000000000000000000000102' };
-    let resolveCount = 0;
+    let current = oldIdentityStorage;
     a.initialized = true;
     a.init = async () => { a.initialized = true; };
-    a.resolveContract = recorder(async () => {
-      resolveCount += 1;
-      return resolveCount === 1 ? oldIdentityStorage : newIdentityStorage;
-    });
+    a.resolveContract = recorder(async () => current);
     // VALUE read keys off the WALLET address (not the contract), so each distinct
-    // address is a fresh/uncached read even though the binding is shared.
+    // wallet is a fresh/uncached read even though the binding is shared.
     a.readContract = recorder(async (_c: unknown, _l: string, _m: string, addr: string) => (
       addr === ethers.getAddress(ADDR) ? 7n : 9n
     ));
 
-    // Two distinct-address misses resolve IdentityStorage exactly ONCE; the
-    // `getIdentityId` VALUE read stays fresh/uncached (one readContract each).
+    // Two distinct-wallet misses each re-resolve (refresh: true), but the memo
+    // returns the SAME address, so the binding is stable and no cache is flushed;
+    // the `getIdentityId` VALUE read stays fresh/uncached (one readContract each).
     await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
     expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
     await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(9n);
     expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
-    expect(a.resolveContract.calls).toHaveLength(1);
+    expect(a.resolveContract.calls).toHaveLength(2);
     expect(a.readContract.calls).toHaveLength(2);
 
-    // A dropped binding (Hub-rotation hook) forces the next miss to re-resolve
-    // fresh, so a rotated IdentityStorage cannot pin stale reads.
-    (a as any).invalidateIdentityStorageBinding();
-    expect(a.contracts.identityStorage).toBeUndefined();
-    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+    // The memo rotates (TTL expiry surfacing a poller-missed Hub rotation). The
+    // next miss re-resolves to the new address; the address-change guard flushes
+    // the identity caches and rebinds — no explicit invalidation hook required.
+    current = newIdentityStorage;
+    await expect(a.getIdentityIdForAddress(ADDR3)).resolves.toBe(9n);
     expect(a.contracts.identityStorage).toBe(newIdentityStorage);
-    expect(a.resolveContract.calls).toHaveLength(2);
+    expect(a.resolveContract.calls).toHaveLength(3);
     expect(a.readContract.calls).toHaveLength(3);
   });
 
