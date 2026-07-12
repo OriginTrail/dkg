@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY, awaitTailWithGrace, resolvePublishTailGraceMs } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, loadSelectedSharedMemoryQuads } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -1891,11 +1891,30 @@ export class DKGPublisher implements Publisher {
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
       const kaMap = skolemizeByEntity(quads);
-      await this.clearPublishedSwmRoots(contextGraphId, [...kaMap.keys()], options?.subGraphName, ctx);
-      // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
-      // Default is false: unpublished entities stay in SWM for future publishes.
-      if (options?.clearSharedMemoryAfter === true) {
-        await this.clearRemainingSharedMemory(contextGraphId, options?.subGraphName, ctx);
+      // GH #1572: the cleanup sweep scales with the accumulated SWM graph and
+      // runs on the store queue with no deadline — on a congested node it can
+      // take minutes and must not gate the caller's publish response. Give it
+      // a bounded grace (a healthy node finishes well inside it, keeping
+      // today's behavior — including error propagation — byte-identical),
+      // then let it finish detached with its settlement logged.
+      const swmCleanup = (async () => {
+        await this.clearPublishedSwmRoots(contextGraphId, [...kaMap.keys()], options?.subGraphName, ctx);
+        // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
+        // Default is false: unpublished entities stay in SWM for future publishes.
+        if (options?.clearSharedMemoryAfter === true) {
+          await this.clearRemainingSharedMemory(contextGraphId, options?.subGraphName, ctx);
+        }
+      })();
+      const graceMs = resolvePublishTailGraceMs();
+      const outcome = await awaitTailWithGrace(graceMs, swmCleanup, (err) => {
+        if (err !== undefined) {
+          this.log.warn(ctx, `Detached SWM cleanup failed after confirmed publish (GH #1572): ${err instanceof Error ? err.message : String(err)}`);
+        } else {
+          this.log.info(ctx, 'Detached SWM cleanup completed after confirmed publish (GH #1572)');
+        }
+      });
+      if (outcome === 'detached') {
+        this.log.info(ctx, `SWM cleanup still running after ${graceMs}ms grace — continuing detached so the publish response is not delayed (GH #1572)`);
       }
     }
 

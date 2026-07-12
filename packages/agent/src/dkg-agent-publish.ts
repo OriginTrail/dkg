@@ -99,6 +99,8 @@ import {
   withSpan,
   getMetrics,
   assertQuadLiteralsMutf8Safe,
+  awaitTailWithGrace,
+  resolvePublishTailGraceMs,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import { GraphManager, PrivateContentStore, createTripleStore, loadSelectedSharedMemoryQuads, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
@@ -4453,6 +4455,14 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    // GH #1572: everything from here to the return is eventual `_meta`
+    // bookkeeping (VM-pointer stamps, memoryLayer/state flips, publishedUal,
+    // assertion-graph re-stamps, swmShareComplete clearing) — the caller's
+    // result is already complete. Run it with a bounded grace so a congested
+    // store queue cannot hold the publish response hostage; on a healthy node
+    // it finishes inside the grace and behavior is unchanged, including error
+    // propagation.
+    const metaTail = (async () => {
     // OT-RFC-43 A2 (decision 2) — stamp the VM pointer on the lifecycle URN
     // whenever the publish/update is confirmed. (For the mint path this is the
     // first VM pointer; for the update path the DELETE/INSERT above already set
@@ -4593,6 +4603,21 @@ export class PublishMethods extends DKGAgentBase {
           `Failed to clear swmShareComplete after confirmed publish of <${lifecycleUri}>: ` +
             (err instanceof Error ? err.message : String(err)),
         );
+      }
+    }
+    })();
+    {
+      const tailCtx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
+      const graceMs = resolvePublishTailGraceMs();
+      const outcome = await awaitTailWithGrace(graceMs, metaTail, (err) => {
+        if (err !== undefined) {
+          this.log.warn(tailCtx, `Detached publish metadata tail failed for <${lifecycleUri}> (GH #1572): ${err instanceof Error ? err.message : String(err)}`);
+        } else {
+          this.log.info(tailCtx, `Detached publish metadata tail completed for <${lifecycleUri}> (GH #1572)`);
+        }
+      });
+      if (outcome === 'detached') {
+        this.log.info(tailCtx, `Publish metadata tail still running after ${graceMs}ms grace for <${lifecycleUri}> — responding now, tail continues detached (GH #1572)`);
       }
     }
 
@@ -5095,7 +5120,10 @@ export class PublishMethods extends DKGAgentBase {
       // reconcile path can mirror the gossip dual-write decision. Read back by
       // `FinalizationHandler.getKeepRootCopySignal`. Updates reuse a root
       // entity, so replace any prior value rather than accumulate.
-      try {
+      // GH #1572: this durable stamp is a reconcile backstop for subscribers
+      // that missed the (already-sent) gossip broadcast — eventual by design,
+      // so it must not gate the publish response on a congested store queue.
+      const keepRootStamp = (async () => {
         const gm = new GraphManager(this.store);
         const wsMetaGraph = options?.subGraphName
           ? gm.sharedMemoryMetaUri(contextGraphId, options.subGraphName)
@@ -5114,8 +5142,19 @@ export class PublishMethods extends DKGAgentBase {
             graph: wsMetaGraph,
           }]);
         }
+      })();
+      const keepRootOnSettled = (err?: unknown) => {
+        if (err !== undefined) {
+          this.log.warn(ctx, `Failed to persist keepRootCopyOnLabel signal for ${result.ual}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+      try {
+        const graceMs = resolvePublishTailGraceMs();
+        if (await awaitTailWithGrace(graceMs, keepRootStamp, keepRootOnSettled) === 'detached') {
+          this.log.info(ctx, `keepRootCopyOnLabel stamp still running after ${graceMs}ms grace for ${result.ual} — continuing detached (GH #1572)`);
+        }
       } catch (err) {
-        this.log.warn(ctx, `Failed to persist keepRootCopyOnLabel signal for ${result.ual}: ${err instanceof Error ? err.message : String(err)}`);
+        keepRootOnSettled(err);
       }
     }
 
