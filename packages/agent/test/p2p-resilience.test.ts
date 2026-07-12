@@ -350,6 +350,7 @@ describe('p2p resilience hooks', () => {
 
         const events: string[] = [];
         let scheduledDrains = 0;
+        let opportunisticDrains = 0;
         let enrichResolve: (() => void) | null = null;
         const enrichDone = new Promise<void>((r) => { enrichResolve = r; });
 
@@ -360,6 +361,7 @@ describe('p2p resilience hooks', () => {
           enrichResolve?.();
         };
         (agent as any).messenger.processOutboxTick = async () => { scheduledDrains += 1; };
+        (agent as any).messenger.processOutboxOnConnect = async () => { opportunisticDrains += 1; };
 
         const remotePeer = freshPeerIdString();
         const relayPeer = freshPeerIdString();
@@ -382,6 +384,7 @@ describe('p2p resilience hooks', () => {
         expect(events).toContain('enrich:start');
         expect(events).toContain('enrich:end');
         expect(scheduledDrains).toBe(0);
+        expect(opportunisticDrains).toBe(0);
       } finally {
         await agent.stop().catch(() => {});
       }
