@@ -12,6 +12,8 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
+import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
+import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 
@@ -59,7 +61,10 @@ export class BlazegraphStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.insert',
     });
-    const nquads = quads.map(quadToNQuad).join('\n') + '\n';
+    // Blazegraph's bulk-insert wire serializer (ASCII-safe N-Quads). See
+    // quadToBlazegraphNQuad / toBlazegraphAsciiSafeNQuads for why Blazegraph
+    // requires this.
+    const nquads = quads.map(quadToBlazegraphNQuad).join('\n') + '\n';
     const res = await this.runStoreWork('insert', {
       ...options,
       source: options?.source ?? 'blazegraph.insert',
@@ -181,10 +186,11 @@ export class BlazegraphStore implements TripleStore {
       // on stock Blazegraph) and rejects larger payloads with HTTP 400
       // "Unable to parse form content". The direct-POST body is not form
       // parsed, so large queries (e.g. CONSTRUCT/VALUES) are not capped.
+      // SPARQL_QUERY_CONTENT_TYPE carries charset=utf-8 (see sparql-content-types.ts).
       const res = await fetch(this.url, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/sparql-query',
+          'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
           Accept: 'application/sparql-results+json',
         },
         body: trimmed,
@@ -219,7 +225,7 @@ export class BlazegraphStore implements TripleStore {
     const res = await fetch(this.url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/sparql-query',
+        'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
         Accept: 'text/x-nquads, application/n-quads',
       },
       body: sparql,
@@ -311,9 +317,11 @@ export class BlazegraphStore implements TripleStore {
     // HTTP 400 "Unable to parse form content" — which broke large publishes
     // (a publish issues a DELETE DATA / INSERT over the full quad set). The
     // raw body is not form parsed, so large updates succeed.
+    //
+    // SPARQL_UPDATE_CONTENT_TYPE carries charset=utf-8 (see sparql-content-types.ts).
     const res = await this.runStoreWork(operation, options, async () => fetch(this.url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/sparql-update' },
+        headers: { 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
         body: update,
         signal: options?.signal,
       }),
@@ -372,6 +380,21 @@ function quadToNQuad(q: DKGQuad): string {
   const o = formatTerm(q.object);
   const g = q.graph ? ` <${q.graph}>` : '';
   return `${s} ${p} ${o}${g} .`;
+}
+
+/**
+ * N-Quads serializer for Blazegraph's bulk-insert wire format: a standard
+ * N-Quads line ({@link quadToNQuad}) made ASCII-safe
+ * ({@link toBlazegraphAsciiSafeNQuads}). This is the single serialization
+ * entry point for the adapter's write path, so the Blazegraph wire-format
+ * invariant lives at the serialization boundary rather than as a separate
+ * post-processing pass a caller must remember to apply. The ASCII-safe pass
+ * operates on the assembled line by design: it normalizes `\U` escapes and
+ * relies on backslash parity across the whole line, both of which are
+ * line-level properties of the rendered N-Quads, not of an individual term.
+ */
+function quadToBlazegraphNQuad(q: DKGQuad): string {
+  return toBlazegraphAsciiSafeNQuads(quadToNQuad(q));
 }
 
 function formatTerm(term: string): string {

@@ -33,6 +33,7 @@ import type {
   StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
@@ -229,11 +230,15 @@ export class SparqlHttpStore implements TripleStore {
     // `maxFormContentSize` (~200 KB) and rejects larger payloads with
     // HTTP 400 "Unable to parse form content". The direct-POST body is not
     // form parsed, so large queries are not capped.
+    // charset=utf-8: Jetty-backed stores (Blazegraph) decode a raw body whose
+    // Content-Type lacks a charset parameter as ISO-8859-1 (servlet default),
+    // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
+    // SPARQL protocol prescribes.
     const timeoutSignal = AbortSignal.timeout(this.timeout);
     const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
     const res = await fetch(this.queryEndpoint, {
       method: 'POST',
-      headers: { ...this.headers, 'Content-Type': 'application/sparql-query', Accept: accept },
+      headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
       body: sparql,
       signal,
     });
@@ -251,9 +256,12 @@ export class SparqlHttpStore implements TripleStore {
     return this.runStoreWork(operation, options, async () => {
       const timeoutSignal = AbortSignal.timeout(this.timeout);
       const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
+      // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
+      // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
+      // literals and DELETE DATA patterns silently stop matching.
       return fetch(this.updateEndpoint, {
         method: 'POST',
-        headers: { ...this.headers, 'Content-Type': 'application/sparql-update' },
+        headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
         body: update,
         signal,
       });

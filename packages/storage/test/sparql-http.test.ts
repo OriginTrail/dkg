@@ -131,6 +131,40 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads.some(q => q.includes('INSERT'))).toBe(true);
   });
 
+  it('sends charset=utf-8 on the query and update Content-Type (non-ASCII wire safety)', async () => {
+    // Regression guard: without an explicit charset, Jetty-backed stores
+    // (Blazegraph) decode the raw body as ISO-8859-1 and mojibake non-ASCII
+    // query/update literals. The SPARQL protocol prescribes UTF-8.
+    const originalFetch = globalThis.fetch;
+    const seen: Array<{ url: string; contentType: string }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      seen.push({ url, contentType: headers['Content-Type'] ?? '' });
+      const isQuery = url.includes('/query');
+      return new Response(
+        isQuery ? JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }) : '',
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const charsetStore = new SparqlHttpStore({
+        queryEndpoint: 'http://charset.test/query',
+        updateEndpoint: 'http://charset.test/update',
+      });
+      await charsetStore.query('SELECT * WHERE { ?s ?p "café" }');
+      await charsetStore.insert([
+        { subject: 'http://ex.org/s', predicate: 'http://schema.org/name', object: '"café"', graph: '' },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    const queryReq = seen.find((r) => r.url.includes('/query'));
+    const updateReq = seen.find((r) => r.url.includes('/update'));
+    expect(queryReq?.contentType).toBe('application/sparql-query; charset=utf-8');
+    expect(updateReq?.contentType).toBe('application/sparql-update; charset=utf-8');
+  });
+
   it('rejects RDF literals above the Java MUTF-8 hard limit before update POST', async () => {
     insertedQuads.length = 0;
     await expect(store.insert([{

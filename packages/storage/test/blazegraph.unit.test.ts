@@ -95,6 +95,65 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).toContain('<http://ex.org/g>');
   });
 
+  // ── ASCII-safe insert body (devnet pr1386-term-canon astral regression) ──
+  // Blazegraph's N-Quads parser reads the body byte-wise as ASCII (charset
+  // ignored) and truncates \UXXXXXXXX escapes to their low 16 bits, so the
+  // adapter must ship a pure-ASCII body using \uXXXX per UTF-16 code unit
+  // (astral chars as their surrogate pair). Wire-format proof lives here; the
+  // live round-trip proof is in blazegraph.integration.test.ts.
+  it('insert body is pure ASCII: raw astral/BMP chars become UTF-16 \\uXXXX escapes', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    await s.insert([
+      // 😀 U+1F600 (surrogate pair D83D DE00), é U+00E9, 𠜎 U+2070E (pair D841 DF0E)
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"café \u{1F600}\u{2070E}"', graph: 'http://ex.org/g' },
+    ]);
+    const body = String(fetchCalls[0][1]?.body);
+    // eslint-disable-next-line no-control-regex
+    expect(body).toMatch(/^[\x00-\x7F]*$/); // nothing non-ASCII on the wire
+    expect(body).toContain('"caf\\u00E9 \\uD83D\\uDE00\\uD841\\uDF0E"');
+  });
+
+  it('insert rewrites in-range \\UXXXXXXXX escapes (Blazegraph truncates them) to surrogate-pair \\uXXXX', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    await s.insert([
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"esc\\U0001F600ape"', graph: 'http://ex.org/g' },
+      // BMP big-U form also folds to the single-code-unit escape.
+      { subject: 'http://ex.org/s2', predicate: 'http://ex.org/p', object: '"bmp\\U000000E9"', graph: 'http://ex.org/g' },
+    ]);
+    const body = String(fetchCalls[0][1]?.body);
+    expect(body).toContain('"esc\\uD83D\\uDE00ape"');
+    expect(body).toContain('"bmp\\u00E9"');
+    expect(body).not.toContain('\\U0001F600');
+  });
+
+  it('insert leaves literal-backslash \\\\U sequences and out-of-range \\U escapes untouched', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    await s.insert([
+      // "\\U0001F600" in the term = ESCAPED backslash + text, NOT a \U escape.
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"lit\\\\U0001F600"', graph: 'http://ex.org/g' },
+      // \UFFFFFFFF > U+10FFFF is unrepresentable — must pass through unmangled.
+      { subject: 'http://ex.org/s2', predicate: 'http://ex.org/p', object: '"bad\\UFFFFFFFFx"', graph: 'http://ex.org/g' },
+    ]);
+    const body = String(fetchCalls[0][1]?.body);
+    expect(body).toContain('"lit\\\\U0001F600"');
+    expect(body).toContain('"bad\\UFFFFFFFFx"');
+  });
+
+  it('insert escapes non-ASCII in IRIs too (UCHAR is valid in IRIREF)', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    await s.insert([
+      { subject: 'http://ex.org/café', predicate: 'http://ex.org/p', object: '"o"', graph: 'http://ex.org/g' },
+    ]);
+    const body = String(fetchCalls[0][1]?.body);
+    // eslint-disable-next-line no-control-regex
+    expect(body).toMatch(/^[\x00-\x7F]*$/);
+    expect(body).toContain('<http://ex.org/caf\\u00E9>');
+  });
+
   it('insert throws on HTTP error with body snippet', async () => {
     setFetch(async () => new Response('bad request', { status: 400, statusText: 'Bad Request' }));
     const s = new BlazegraphStore(baseUrl);
@@ -131,9 +190,27 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const [, init] = fetchCalls[0];
     // Direct POST: raw query as the request body with application/sparql-query,
     // NOT URL-encoded form data (which would hit Jetty's maxFormContentSize cap).
-    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query');
+    // charset=utf-8 is required — without it Jetty decodes the body ISO-8859-1
+    // and non-ASCII literals in patterns never match.
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query; charset=utf-8');
     expect(String(init?.body)).toMatch(/^SELECT /);
     expect(String(init?.body)).not.toMatch(/^query=/);
+  });
+
+  it('CONSTRUCT query carries charset=utf-8 on the request Content-Type', async () => {
+    // Regression guard for the separate queryConstruct/DESCRIBE request path:
+    // same ISO-8859-1 default-decode hazard as SELECT — without charset=utf-8
+    // Jetty mojibakes any non-ASCII literal in the CONSTRUCT pattern/FILTER.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://schema.org/name> "caf\\u00E9" <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    const r = await s.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ctx/1> { ?s ?p ?o } }');
+    expect(r.type).toBe('quads');
+    const [, init] = fetchCalls[0];
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query; charset=utf-8');
+    expect(String(init?.body)).toMatch(/^CONSTRUCT /);
   });
 
   it('routes ack-priority adapter queries ahead of queued background fetch work', async () => {
@@ -253,7 +330,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       String(c[1]?.body).includes('DROP SILENT GRAPH'),
     );
     expect(call).toBeDefined();
-    expect((call?.[1]?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update');
+    expect((call?.[1]?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update; charset=utf-8');
   });
 
   it('update POSTs raw SPARQL to the endpoint with application/sparql-update and no COUNT scans', async () => {
@@ -273,7 +350,8 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(url).toBe(baseUrl);
     expect(init?.method).toBe('POST');
     // Direct POST: raw update body with application/sparql-update (not form-encoded).
-    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update');
+    // charset=utf-8 keeps Jetty from ISO-8859-1-decoding non-ASCII literals.
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update; charset=utf-8');
     expect(String(init?.body)).toBe(sparql);
     expect(init?.signal).toBe(controller.signal);
     expect(fetchCalls.some((c) => /\bCOUNT\b/i.test(String(c[1]?.body ?? '')))).toBe(false);
