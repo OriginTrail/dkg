@@ -618,11 +618,11 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): ResolvedDKGAgentConf
 }
 
 interface ACKReliableMessenger {
-  sendReliable(
+  sendRequestOwned(
     peerId: string,
     protocol: string,
     data: Uint8Array,
-    opts: { timeoutMs: number; failurePolicy: 'throw' },
+    opts: { timeoutMs: number },
   ): Promise<{ delivered: boolean; error?: unknown; response?: Uint8Array }>;
 }
 
@@ -631,9 +631,8 @@ function createACKSendP2P(input: {
   timeoutMs: number;
 }): ACKCollectorDeps['sendP2P'] {
   return async (peerId: string, protocol: string, data: Uint8Array) => {
-    const sendResult = await input.messenger.sendReliable(peerId, protocol, data, {
+    const sendResult = await input.messenger.sendRequestOwned(peerId, protocol, data, {
       timeoutMs: input.timeoutMs,
-      failurePolicy: 'throw',
     });
     if (!sendResult.delivered) {
       throw new Error(`substrate send already in flight (transport): ${sendResult.error}`);

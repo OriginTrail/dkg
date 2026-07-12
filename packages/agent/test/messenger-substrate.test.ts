@@ -143,16 +143,15 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
   });
 });
 
-describe('Messenger.sendReliable request-owned retry mode', () => {
+describe('Messenger.sendRequestOwned', () => {
   it('keeps reliable framing but does not persist recoverable failures', async () => {
     const router = makeRouter(async () => {
       throw new Error('no valid addresses for peer');
     });
     const { messenger, outboxStore } = makeSubstrate({ router });
 
-    await expect(messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+    await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
-      failurePolicy: 'throw',
     })).rejects.toThrow('no valid addresses for peer');
     expect(outboxStore.size()).toBe(0);
     expect(() => decodeReliableEnvelope(router.send.calls[0][2] as Uint8Array)).not.toThrow();
