@@ -197,6 +197,22 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).not.toMatch(/^query=/);
   });
 
+  it('CONSTRUCT query carries charset=utf-8 on the request Content-Type', async () => {
+    // Regression guard for the separate queryConstruct/DESCRIBE request path:
+    // same ISO-8859-1 default-decode hazard as SELECT — without charset=utf-8
+    // Jetty mojibakes any non-ASCII literal in the CONSTRUCT pattern/FILTER.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://schema.org/name> "caf\\u00E9" <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    const r = await s.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ctx/1> { ?s ?p ?o } }');
+    expect(r.type).toBe('quads');
+    const [, init] = fetchCalls[0];
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query; charset=utf-8');
+    expect(String(init?.body)).toMatch(/^CONSTRUCT /);
+  });
+
   it('routes ack-priority adapter queries ahead of queued background fetch work', async () => {
     const before = getExternalStorePrioritySchedulerSnapshot();
     expect(before.maxConcurrent).toBeGreaterThan(1);
