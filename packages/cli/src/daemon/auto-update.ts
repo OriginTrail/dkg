@@ -1543,11 +1543,9 @@ export async function performNpmUpdate(
  * version to `~/.dkg/previous-version` so `dkg rollback` (Edge
  * branch) has a target to reinstall.
  *
- * Tradeoffs accepted (per RFC §7.2):
- *   - Non-atomic: a mid-install crash leaves the global state
- *     half-updated. Recovery is `npm install -g` re-run.
- *   - Network-dependent rollback: requires the npm registry to
- *     have the previous version available.
+ * The npm mutation itself is not atomic, so completion is followed by an
+ * executable/version self-check. A failed check immediately reinstalls the
+ * recorded previous version before the daemon is allowed to restart.
  *
  * The function returns `'updated'` after the npm install completes;
  * the caller is responsible for stopping the running daemon so the
@@ -1638,6 +1636,41 @@ async function _performNpmUpdateInnerEdge(
       );
     }
     return "failed";
+  }
+
+  try {
+    const { stdout, stderr } = await execAsyncIo('dkg --version', {
+      encoding: 'utf-8',
+      timeout: 30_000,
+    });
+    const reported = `${stdout ?? ''} ${stderr ?? ''}`.trim();
+    if (!reported.includes(targetVersion)) {
+      throw new Error(`expected ${targetVersion}, got ${reported || 'empty version output'}`);
+    }
+    log(`Auto-update (npm-edge): self-check passed (${reported}).`);
+  } catch (verifyErr: any) {
+    log(`Auto-update (npm-edge): post-install self-check failed — ${verifyErr?.message ?? verifyErr}.`);
+    if (!currentVersion) {
+      log('Auto-update (npm-edge): previous version is unknown; automatic rollback is unavailable.');
+      return 'failed';
+    }
+    const rollbackCmd = `npm install -g ${CLI_NPM_PACKAGE}@${currentVersion}`;
+    log(`Auto-update (npm-edge): rolling back with '${rollbackCmd}'…`);
+    try {
+      await execAsyncIo(rollbackCmd, { encoding: 'utf-8', timeout: 300_000 });
+      const { stdout, stderr } = await execAsyncIo('dkg --version', {
+        encoding: 'utf-8',
+        timeout: 30_000,
+      });
+      const reported = `${stdout ?? ''} ${stderr ?? ''}`.trim();
+      if (!reported.includes(currentVersion)) {
+        throw new Error(`rollback expected ${currentVersion}, got ${reported || 'empty version output'}`);
+      }
+      log(`Auto-update (npm-edge): rollback restored ${reported}.`);
+    } catch (rollbackErr: any) {
+      log(`Auto-update (npm-edge): CRITICAL rollback failed — ${rollbackErr?.message ?? rollbackErr}.`);
+    }
+    return 'failed';
   }
 
   log(
