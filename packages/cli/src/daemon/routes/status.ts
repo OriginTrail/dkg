@@ -59,6 +59,7 @@ import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats }
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
+import { resolveEffectiveDaemonStore } from '../store-runtime.js';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -651,6 +652,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // sentinels when build-info.json is absent (monorepo / dev),
     // so consumers can branch reliably.
     const buildInfo = loadBuildInfo();
+    const effectiveStore = resolveEffectiveDaemonStore(config);
+    const effectiveStoreOptions = (effectiveStore.options ?? {}) as Record<string, unknown>;
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -666,25 +669,23 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       networkConfig: resolveNetworkConfigName(config),
       networkId,
       networkName: network?.networkName ?? null,
-      storeBackend: config.store?.backend ?? "oxigraph-server",
+      storeBackend: effectiveStore.backend,
       // External backend visibility (RFC 120 / plan PR 1 item 3). For
       // local backends both fields stay null so the response shape is
       // stable across deployments.
-      storeUrl: isExternalBackend(config.store?.backend)
+      storeUrl: isExternalBackend(effectiveStore.backend)
         ? (() => {
-            const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-            const url = typeof opts.url === 'string' ? opts.url
-              : typeof opts.queryEndpoint === 'string' ? opts.queryEndpoint
+            const url = typeof effectiveStoreOptions.url === 'string' ? effectiveStoreOptions.url
+              : typeof effectiveStoreOptions.queryEndpoint === 'string' ? effectiveStoreOptions.queryEndpoint
               : null;
             return url;
           })()
-        : config.store?.backend === 'oxigraph-server'
+        : effectiveStore.backend === 'oxigraph-server'
           // Managed local server: report its loopback endpoint so `dkg status`
           // renders the external-store health path (storeQuads/unreachable)
           // instead of printing it like a quad-less local store.
           ? (() => {
-              const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-              const port = resolveManagedOxigraphPort(opts);
+              const port = resolveManagedOxigraphPort(effectiveStoreOptions);
               return `http://127.0.0.1:${port}/query`;
             })()
           : null,
@@ -695,7 +696,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // failed query here is how operators see the managed server is down
       // (e.g. after a failed revive) instead of it always looking healthy.
       storeQuads:
-        isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server'
+        isExternalBackend(effectiveStore.backend) || effectiveStore.backend === 'oxigraph-server'
           ? await getCachedExternalStoreQuads(agent, Date.now())
           : null,
       uptimeMs: Date.now() - startedAt,

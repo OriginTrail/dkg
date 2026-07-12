@@ -34,7 +34,10 @@ import {
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { loadNetworkConfig } from '../src/config.js';
-import { handleStatusRoutes } from '../src/daemon/routes/status.js';
+import {
+  handleStatusRoutes,
+  invalidateExternalStoreQuadsCache,
+} from '../src/daemon/routes/status.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 
@@ -118,6 +121,59 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
 });
 
 describe('/api/status selected overlay details', () => {
+  it('reports the effective managed store for a blockless config', async () => {
+    const query = vi.fn(async () => ({
+      type: 'bindings' as const,
+      bindings: [{ c: '42' }],
+    }));
+    invalidateExternalStoreQuadsCache();
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      await handleStatusRoutes({
+        req,
+        res,
+        path: url.pathname,
+        url,
+        network: null,
+        config: {
+          name: 'status-blockless-store-test',
+          nodeRole: 'edge',
+          chain: { type: 'mock' },
+        },
+        startedAt: Date.now(),
+        agent: {
+          peerId: 'peer-status-test',
+          multiaddrs: [],
+          node: {
+            libp2p: { getConnections: () => [] },
+            getRelayStats: () => null,
+          },
+          publisher: { getIdentityId: () => 0n },
+          store: { query },
+        },
+        nodeVersion: '0.0.0-test',
+        nodeCommit: '',
+        admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      } as unknown as RequestContext);
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address() as AddressInfo;
+      const res = await fetch(`http://127.0.0.1:${address.port}/api/status`);
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+
+      expect(body.storeBackend).toBe('oxigraph-server');
+      expect(body.storeUrl).toBe('http://127.0.0.1:7878/query');
+      expect(body.storeQuads).toBe(42);
+      expect(query).toHaveBeenCalledOnce();
+    } finally {
+      invalidateExternalStoreQuadsCache();
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
   it('returns the network id and name for the selected overlay genesis', async () => {
     const network = await loadNetworkConfig('mainnet-gnosis');
     expect(network).not.toBeNull();

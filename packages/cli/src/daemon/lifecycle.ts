@@ -1132,19 +1132,21 @@ export async function runDaemonInner(
     ]),
   ];
   const acceptStoreReset = process.env.DKG_ACCEPT_STORE_RESET === '1';
-  const storeBoot = resolveDaemonStoreBootPlan({
+  const storeDecision = resolveDaemonStoreBootPlan({
     config,
     dataDir: dkgDir(),
     acceptStoreReset,
   });
 
-  if (storeBoot.validateOperatorConfigFirst) {
-    exitOnStoreConfigErrors(storeBoot.operatorConfig, log);
+  if (storeDecision.kind === 'invalid-config') {
+    exitOnStoreConfigErrors(storeDecision.operatorConfig, log);
+    throw new Error('Invalid store config validation unexpectedly returned');
   }
-  if (storeBoot.abortMessage) {
-    log(storeBoot.abortMessage);
+  if (storeDecision.kind === 'blocked-legacy-cutover') {
+    log(storeDecision.message);
     process.exit(1);
   }
+  const storeBoot = storeDecision;
   if (storeBoot.notice) {
     log(storeBoot.notice);
   }

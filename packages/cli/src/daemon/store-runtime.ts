@@ -6,20 +6,34 @@ import type { ManagedOxigraphResult } from './oxigraph-managed.js';
 
 type StoreConfig = NonNullable<DkgConfig['store']>;
 
-export interface DaemonStoreBootPlan {
+interface DaemonStoreOperatorContext {
   /** Operator-facing config exactly as loaded from disk / CLI. */
   operatorConfig: DkgConfig;
+}
+
+export interface InvalidDaemonStoreConfig extends DaemonStoreOperatorContext {
+  kind: 'invalid-config';
+}
+
+export interface BlockedLegacyStoreCutover extends DaemonStoreOperatorContext {
+  kind: 'blocked-legacy-cutover';
+  message: string;
+}
+
+export interface DaemonStoreBootPlan extends DaemonStoreOperatorContext {
+  kind: 'bootable';
   /** Config with the implicit daemon default materialized for boot steps. */
   effectiveConfig: DkgConfig;
   /** Store backend used for backend-switch detection and managed startup. */
   effectiveStore: StoreConfig;
-  /** True when explicit validation should run before migration gates. */
-  validateOperatorConfigFirst: boolean;
-  /** Fatal startup message; caller logs and exits before touching runtime store. */
-  abortMessage?: string;
   /** Non-fatal startup notice, e.g. acknowledged legacy default cutover. */
   notice?: string;
 }
+
+export type DaemonStoreBootDecision =
+  | InvalidDaemonStoreConfig
+  | BlockedLegacyStoreCutover
+  | DaemonStoreBootPlan;
 
 export interface DaemonStoreRuntimePlan extends DaemonStoreBootPlan {
   /** Store config consumed by validation, health probes, wipe, and the agent. */
@@ -30,15 +44,15 @@ export interface DaemonStoreRuntimePlan extends DaemonStoreBootPlan {
   runtimeSnapshotStorage: DkgConfig['sharedMemoryPublicSnapshotStorage'];
 }
 
-function defaultDaemonStore(): StoreConfig {
-  return { backend: 'oxigraph-server', options: {} };
+export function resolveEffectiveDaemonStore(config: Pick<DkgConfig, 'store'>): StoreConfig {
+  return config.store ?? { backend: 'oxigraph-server', options: {} };
 }
 
 export function resolveDaemonStoreBootPlan(opts: {
   config: DkgConfig;
   dataDir: string;
   acceptStoreReset: boolean;
-}): DaemonStoreBootPlan {
+}): DaemonStoreBootDecision {
   const { config, dataDir, acceptStoreReset } = opts;
   const legacyStorePath = join(dataDir, 'store.nq');
   const legacyStoreExists = existsSync(legacyStorePath);
@@ -53,21 +67,18 @@ export function resolveDaemonStoreBootPlan(opts: {
     && legacyCutoverRequired
     && acceptStoreReset;
   const effectiveStore = migrateAcknowledgedWorker
-    ? defaultDaemonStore()
-    : config.store ?? defaultDaemonStore();
+    ? resolveEffectiveDaemonStore({})
+    : resolveEffectiveDaemonStore(config);
   const effectiveConfig = config.store && !migrateAcknowledgedWorker
     ? config
     : { ...config, store: effectiveStore };
 
-  const plan: DaemonStoreBootPlan = {
-    operatorConfig: config,
-    effectiveConfig,
-    effectiveStore,
-    // A retired worker config with legacy data reaches the migration gate
-    // before normal validation, so the operator sees the reset acknowledgement
-    // path. Every other explicit worker config must fail normal validation.
-    validateOperatorConfigFirst: legacyWorkerConfigured && !legacyCutoverRequired,
-  };
+  // A retired worker config with no legacy data has no migration decision to
+  // make. Keep that state separate so callers cannot accidentally continue to
+  // managed startup with an invalid operator config.
+  if (legacyWorkerConfigured && !legacyCutoverRequired) {
+    return { kind: 'invalid-config', operatorConfig: config };
+  }
 
   if (legacyCutoverRequired && !acceptStoreReset) {
     const legacySource = legacyWorkerConfigured
@@ -75,22 +86,35 @@ export function resolveDaemonStoreBootPlan(opts: {
       : config.store
         ? 'worker-backed store'
         : 'implicit worker default';
-    plan.abortMessage =
-      `[STORE] oxigraph-worker support has been removed, but this node has a legacy ` +
-      `store.nq from the old ${legacySource}.\n` +
-      `Set store.backend to "oxigraph-server" (or an external SPARQL backend) and ` +
-      `restart with DKG_ACCEPT_STORE_RESET=1 to acknowledge the fresh-store cutover. ` +
-      `The legacy store.nq file is left untouched for manual backup or migration.`;
-  } else if (legacyCutoverRequired && acceptStoreReset) {
-    plan.notice = legacyWorkerConfigured
+    return {
+      kind: 'blocked-legacy-cutover',
+      operatorConfig: config,
+      message:
+        `[STORE] oxigraph-worker support has been removed, but this node has a legacy ` +
+        `store.nq from the old ${legacySource}.\n` +
+        `Set store.backend to "oxigraph-server" (or an external SPARQL backend) and ` +
+        `restart with DKG_ACCEPT_STORE_RESET=1 to acknowledge the fresh-store cutover. ` +
+        `The legacy store.nq file is left untouched for manual backup or migration.`,
+    };
+  }
+
+  let notice: string | undefined;
+  if (legacyCutoverRequired && acceptStoreReset) {
+    notice = legacyWorkerConfigured
       ? '[STORE] explicit oxigraph-worker is retired; using oxigraph-server after reset acknowledgement. Legacy store.nq is left untouched.'
       : '[STORE] using oxigraph-server after reset acknowledgement. Legacy store.nq is left untouched.';
   } else if (!config.store && acceptStoreReset) {
-    plan.notice =
+    notice =
       '[STORE] no store block found; using oxigraph-server. Legacy store.nq, if present, is left untouched.';
   }
 
-  return plan;
+  return {
+    kind: 'bootable',
+    operatorConfig: config,
+    effectiveConfig,
+    effectiveStore,
+    ...(notice ? { notice } : {}),
+  };
 }
 
 export function resolveDaemonStoreRuntime(

@@ -37,7 +37,11 @@ export const STORE_BACKENDS = {
 } as const;
 
 export type StoreBackend = keyof typeof STORE_BACKENDS;
-export type SupportedStoreBackend = Exclude<StoreBackend, 'oxigraph-worker'>;
+export type SupportedStoreBackend = {
+  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { retired: false }
+    ? Backend
+    : never;
+}[StoreBackend];
 export type MenuStoreBackend = {
   [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { menu: true }
     ? Backend
