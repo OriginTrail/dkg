@@ -217,9 +217,9 @@ export interface ProtocolOutboxStore {
   /**
    * Entries whose `nextAttemptAt <= now`, ordered by `nextAttemptAt`,
    * `firstFailureAt`, then `(peer, protocol, messageId)` ascending. `limit` is
-   * already normalized by ProtocolOutbox to a non-negative integer (or omitted
-   * for all rows); store implementations must preserve the same semantics when
-   * called directly. Used by the periodic retry scheduler.
+   * normalized by the canonical outbox due policy to a non-negative integer
+   * (or omitted for all rows). The STORE owns this normalization and ordering
+   * contract, including for direct calls. Used by the periodic retry scheduler.
    */
   due(now: number, limit?: number): ProtocolOutboxEntry[];
 
@@ -252,11 +252,6 @@ export interface ProtocolOutboxStore {
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
 }
 
-/** Shared due-page normalization used at the wrapper and store boundaries. */
-export function normalizeProtocolOutboxDueLimit(limit: number | undefined): number | undefined {
-  if (limit === undefined || !Number.isFinite(limit)) return undefined;
-  return Math.max(0, Math.floor(limit));
-}
 
 /**
  * Durable per-author KA-number allocator (OT-RFC-43 Option-1

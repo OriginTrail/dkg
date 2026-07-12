@@ -11,7 +11,7 @@ import {
   type ProtocolOutboxEntry,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
-import { mapWithConcurrency } from '../map-with-concurrency.js';
+import { OutboxDrainer } from './outbox-drainer.js';
 
 /** Bytes payload the substrate uses to signal `RESPONSE_GONE` on the wire. */
 const RESPONSE_GONE_BYTES = new TextEncoder().encode(RESPONSE_GONE_MARKER);
@@ -342,9 +342,7 @@ export class Messenger {
   private readonly outbox?: ProtocolOutbox;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
-  private readonly outboxDrainBatchSize: number;
-  private readonly outboxDrainConcurrency: number;
-  private activeOutboxDrain: Promise<void> | null = null;
+  private readonly outboxDrainer?: OutboxDrainer<ProtocolOutboxEntry>;
 
   /**
    * Application handlers registered via `register`. Stored separately
@@ -432,16 +430,24 @@ export class Messenger {
     this.clock = deps.clock ?? (() => Date.now());
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
-    this.outboxDrainBatchSize = positiveInteger(
+    const outboxDrainBatchSize = positiveInteger(
       deps.outboxDrainBatchSize,
       DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
       'outboxDrainBatchSize',
     );
-    this.outboxDrainConcurrency = positiveInteger(
+    const outboxDrainConcurrency = positiveInteger(
       deps.outboxDrainConcurrency,
       DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
       'outboxDrainConcurrency',
     );
+    if (this.outbox) {
+      this.outboxDrainer = new OutboxDrainer(
+        (now, limit) => this.outbox!.due(now, limit),
+        (entry) => this.retryOutboxEntry(entry),
+        outboxDrainBatchSize,
+        outboxDrainConcurrency,
+      );
+    }
   }
 
   /**
@@ -819,29 +825,12 @@ export class Messenger {
    * bug requires operator action (manual replay or shutdown).
    */
   processOutboxTick(now: number): Promise<void> {
-    if (!this.outbox) return Promise.resolve();
-    if (this.activeOutboxDrain) return this.activeOutboxDrain;
-
-    const drain = this.drainDueOutbox(now);
-    this.activeOutboxDrain = drain;
-    void drain.finally(() => {
-      if (this.activeOutboxDrain === drain) this.activeOutboxDrain = null;
-    }).catch(() => {});
-    return drain;
+    return this.outboxDrainer?.tick(now) ?? Promise.resolve();
   }
 
   /** Await the currently active periodic drain during graceful shutdown. */
   async waitForOutboxDrain(): Promise<void> {
-    await this.activeOutboxDrain;
-  }
-
-  private async drainDueOutbox(now: number): Promise<void> {
-    const due = this.outbox!.due(now, this.outboxDrainBatchSize);
-    await mapWithConcurrency(
-      due,
-      this.outboxDrainConcurrency,
-      (entry) => this.retryOutboxEntry(entry),
-    );
+    await this.outboxDrainer?.wait();
   }
 
   /**

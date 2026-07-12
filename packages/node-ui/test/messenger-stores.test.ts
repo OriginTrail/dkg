@@ -231,6 +231,18 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(store.due(10_000, 0)).toEqual([]);
   });
 
+  it('due deterministically breaks exact timestamp ties by peer/protocol/message id', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
+    store.enqueue(PEER_B, PROTO, MSG_2, PAYLOAD, 'e', 1_000);
+    store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 1_000);
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
+
+    expect(store.due(6_000, 2).map((entry) => [entry.peer, entry.messageId])).toEqual([
+      [PEER_A, MSG_1],
+      [PEER_A, MSG_2],
+    ]);
+  });
+
   it('dropExpired removes entries older than maxAgeMs and returns them', () => {
     const store = new SqliteProtocolOutboxStore(db, {
       maxAgeMs: 60_000,

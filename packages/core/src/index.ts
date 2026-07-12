@@ -175,12 +175,12 @@ export {
   type MessageDirection,
   type IdempotencyCheckResult,
   type ProtocolOutboxStore,
-  normalizeProtocolOutboxDueLimit,
   type ProtocolOutboxEntry,
   type KaNumberStore,
   RESPONSE_CACHE_BYTES,
   RESPONSE_GONE_MARKER,
 } from './messenger-types.js';
+export { normalizeProtocolOutboxDueLimit } from './outbox-due-policy.js';
 export {
   ProtocolOutbox,
   type ProtocolOutboxOptions,

@@ -34,7 +34,8 @@ import type {
   ProtocolOutboxEntry,
   ProtocolOutboxStore,
 } from './messenger-types.js';
-import { RESPONSE_CACHE_BYTES, normalizeProtocolOutboxDueLimit } from './messenger-types.js';
+import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
+import { normalizeProtocolOutboxDueLimit } from './outbox-due-policy.js';
 
 export interface ProtocolOutboxOptions {
   /**
@@ -201,9 +202,9 @@ export class ProtocolOutbox {
     return this.store.hasEntry(peer, protocol, messageId);
   }
 
-  /** Ordered due page; normalization is centralized before crossing the store port. */
+  /** Ordered due page; the store port owns normalization and deterministic order. */
   due(now: number, limit?: number): ProtocolOutboxEntry[] {
-    return this.store.due(now, normalizeProtocolOutboxDueLimit(limit));
+    return this.store.due(now, limit);
   }
 
   /**

@@ -27,9 +27,3 @@ export async function mapWithConcurrency<T, R>(
   await Promise.all(Array.from({ length: limit }, () => worker()));
   return results;
 }
-
-/** Maximum peer syncs in flight during catch-up; every peer is still visited. */
-export const CATCHUP_MAX_CONCURRENT_PEER_SYNCS: number = (() => {
-  const raw = Number(process.env.DKG_CATCHUP_MAX_CONCURRENT_PEERS);
-  return Number.isInteger(raw) && raw > 0 ? raw : 4;
-})();
