@@ -175,11 +175,21 @@ export function escapeDkgRdfLiteral(value: string): string {
   return value
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t')
-    .replace(/\f/g, '\\f')
-    .replace(/\x08/g, '\\b');
+    // Escape every remaining C0 control character (U+0000–U+001F) and DEL
+    // (U+007F): an N-Triples/N-Quads STRING_LITERAL_QUOTED may not contain them
+    // raw, so a NUL / VT / DEL / etc. passing through produced an invalid literal
+    // that the store rejected or stored corrupted. The five with ECHAR short
+    // forms keep them (stable output); everything else becomes a \uXXXX UCHAR.
+    .replace(/[\u0000-\u001F\u007F]/g, (ch) => {
+      switch (ch) {
+        case '\n': return '\\n';
+        case '\r': return '\\r';
+        case '\t': return '\\t';
+        case '\f': return '\\f';
+        case '\b': return '\\b';
+        default: return `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+      }
+    });
 }
 
 export {

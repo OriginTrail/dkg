@@ -135,14 +135,23 @@ export function isRdfTerm(value: string): boolean {
 }
 
 export function escapeRdfLiteralBody(value: string): string {
+  // Byte-for-byte copy of dkg-core `escapeDkgRdfLiteral` (kept dep-light).
+  // Escape every remaining C0 control character (U+0000–U+001F) and DEL
+  // (U+007F) — raw controls produce an invalid N-Triples literal. The five with
+  // ECHAR short forms keep them (stable output); everything else → \uXXXX.
   return value
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t')
-    .replace(/\f/g, '\\f')
-    .replace(/\x08/g, '\\b');
+    .replace(/[\u0000-\u001F\u007F]/g, (ch) => {
+      switch (ch) {
+        case '\n': return '\\n';
+        case '\r': return '\\r';
+        case '\t': return '\\t';
+        case '\f': return '\\f';
+        case '\b': return '\\b';
+        default: return `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+      }
+    });
 }
 
 export function normalizeRdfObject(value: string): string {
