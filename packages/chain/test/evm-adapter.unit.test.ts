@@ -224,7 +224,12 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     expect(a.readContract.calls[1][0]).toBe(identityStorage);
   });
 
-  it('identity cache misses refresh IdentityStorage so a missed Hub rotation cannot pin stale zero reads', async () => {
+  it('identity id misses reuse the cached IdentityStorage binding — no per-miss re-resolve (#1583)', async () => {
+    // Pre-#1583 `readIdentityIdFromStorage` forced `getIdentityStorage({ refresh:
+    // true })`, re-resolving the IdentityStorage ADDRESS through the Hub on EVERY
+    // identity-id miss — a major publish-burst RPC amplifier. It now reuses the
+    // cached lazy binding; rotation safety rests on the invalidation hooks (below
+    // and in the following cases), NOT a per-miss refresh.
     const a: any = new EVMChainAdapter(minimalConfig());
     const oldIdentityStorage = { target: '0x0000000000000000000000000000000000000101' };
     const newIdentityStorage = { target: '0x0000000000000000000000000000000000000102' };
@@ -235,21 +240,29 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
       resolveCount += 1;
       return resolveCount === 1 ? oldIdentityStorage : newIdentityStorage;
     });
-    a.readContract = recorder(async (contract: unknown) => (
-      contract === oldIdentityStorage ? 0n : 42n
+    // VALUE read keys off the WALLET address (not the contract), so each distinct
+    // address is a fresh/uncached read even though the binding is shared.
+    a.readContract = recorder(async (_c: unknown, _l: string, _m: string, addr: string) => (
+      addr === ethers.getAddress(ADDR) ? 7n : 9n
     ));
 
-    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+    // Two distinct-address misses resolve IdentityStorage exactly ONCE; the
+    // `getIdentityId` VALUE read stays fresh/uncached (one readContract each).
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
     expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
+    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(9n);
+    expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
+    expect(a.resolveContract.calls).toHaveLength(1);
+    expect(a.readContract.calls).toHaveLength(2);
 
-    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
+    // A dropped binding (Hub-rotation hook) forces the next miss to re-resolve
+    // fresh, so a rotated IdentityStorage cannot pin stale reads.
+    (a as any).invalidateIdentityStorageBinding();
+    expect(a.contracts.identityStorage).toBeUndefined();
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
     expect(a.contracts.identityStorage).toBe(newIdentityStorage);
     expect(a.resolveContract.calls).toHaveLength(2);
-    expect(a.readContract.calls).toHaveLength(2);
-
-    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
-    expect(a.resolveContract.calls).toHaveLength(2);
-    expect(a.readContract.calls).toHaveLength(2);
+    expect(a.readContract.calls).toHaveLength(3);
   });
 
   it('IdentityStorage Hub rotation invalidates cached identity ids and the lazy contract binding', async () => {
