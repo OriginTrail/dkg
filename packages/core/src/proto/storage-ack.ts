@@ -111,8 +111,8 @@ export const STORAGE_ACK_DECLINE_CODES = {
   /**
    * The core hit a peer-LOCAL, transient infrastructure failure while
    * servicing an otherwise well-formed request: its triple store errored
-   * mid-read/write (e.g. an oxigraph worker mid-restart throwing
-   * `store is closed`) or its live signer-registration chain lookup threw
+   * mid-read/write (e.g. a managed or external store restarting and refusing
+   * a connection) or its live signer-registration chain lookup threw
    * (a degraded shared RPC). Introduced after the testnet storage-ACK
    * dead-air incident: every such failure previously THREW out of the
    * handler, which ProtocolRouter's inbound wrapper surfaces as a bare
@@ -151,7 +151,7 @@ export const TRANSIENT_STORAGE_ACK_DECLINE_CODES: ReadonlySet<string> = new Set<
   // waiting fixes it.
   STORAGE_ACK_DECLINE_CODES.MISSING_CIPHERTEXT_CHUNKS,
   // Dead-air fix: a store/RPC blip on the core clears when the local
-  // oxigraph worker or the shared RPC recovers — the same "wait a few
+  // local store or the shared RPC recovers — the same "wait a few
   // seconds and re-ask" cadence as SWM catch-up. Marking it transient
   // keeps a briefly-degraded core in the quorum pool instead of
   // deselecting it on the first blip.
