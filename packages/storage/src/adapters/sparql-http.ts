@@ -34,6 +34,7 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
+import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
@@ -166,6 +167,10 @@ export class SparqlHttpStore implements TripleStore {
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
   private listGraphsInFlight: Promise<string[]> | null = null;
+  // #1609: per-graph write generations, bumped at the same choke points that
+  // invalidate the listGraphs cache (every local mutation). Feeds the chain-
+  // reconcile negative memo via `asGraphWriteGenSource` / `getWriteGen`.
+  private readonly writeGen = new GraphWriteGenTracker();
 
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
@@ -209,6 +214,11 @@ export class SparqlHttpStore implements TripleStore {
 
   getPressureSnapshot(): StorePressureSnapshot {
     return externalStorePriorityScheduler.snapshot;
+  }
+
+  /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
+  getWriteGen(graphPrefix: string): number {
+    return this.writeGen.getWriteGen(graphPrefix);
   }
 
   private async postQuery(sparql: string, accept: string, options?: SparqlHttpQueryOptions): Promise<Response> {
@@ -281,6 +291,7 @@ export class SparqlHttpStore implements TripleStore {
       throw new Error(`SPARQL HTTP insert failed (${res.status}): ${text.slice(0, 300)}`);
     }
     this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites(byGraph.keys());
   }
 
   async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
@@ -303,6 +314,7 @@ export class SparqlHttpStore implements TripleStore {
       throw new Error(`SPARQL HTTP delete failed (${res.status}): ${text.slice(0, 300)}`);
     }
     this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -332,6 +344,8 @@ export class SparqlHttpStore implements TripleStore {
       throw new Error(`SPARQL HTTP deleteByPattern failed (${res.status}): ${text.slice(0, 300)}`);
     }
     this.invalidateListGraphsCache();
+    if (graphUri) this.writeGen.recordGraphWrites([graphUri]);
+    else this.writeGen.recordUnscopedWrite();
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern.countAfter',
@@ -355,6 +369,7 @@ export class SparqlHttpStore implements TripleStore {
       throw new Error(`SPARQL HTTP deleteBySubjectPrefix failed (${res.status}): ${text.slice(0, 300)}`);
     }
     this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri]);
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countAfter',
@@ -377,6 +392,9 @@ export class SparqlHttpStore implements TripleStore {
       throw new Error(`SPARQL HTTP update failed (${res.status}): ${text.slice(0, 300)}`);
     }
     this.invalidateListGraphsCache();
+    // `touchedGraphs` hints only membership changes, not every graph whose
+    // CONTENT a raw UPDATE mutates — an unscoped bump is the only sound scope.
+    this.writeGen.recordUnscopedWrite();
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
@@ -462,6 +480,7 @@ export class SparqlHttpStore implements TripleStore {
       throw new Error(`SPARQL HTTP dropGraph failed (${res.status}): ${text.slice(0, 300)}`);
     }
     this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri]);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {

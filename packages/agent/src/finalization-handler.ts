@@ -12,7 +12,7 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, loadSelectedSharedMemoryQuads, loadSharedMemorySliceWithKaBoundFallback, type SwmKaGraphBound, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, loadSelectedSharedMemoryQuads, loadSharedMemorySliceWithKaBoundFallback, asGraphWriteGenSource, type GraphWriteGenSource, type SwmKaGraphBound, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -131,6 +131,32 @@ function swmKaBoundDisabled(): boolean {
   return process.env.DKG_DISABLE_SWM_KA_BOUND === '1';
 }
 
+/**
+ * TTL cap on the in-memory negative reconcile memo (#1609) — the longest a
+ * "no local SWM snapshot" verdict may be trusted without a fresh scan even
+ * when no write-generation change was observed. Bounds the exposure to any
+ * SWM writer invisible to the adapter's write-generation counter (e.g. a
+ * second process mutating a shared oxigraph-server) to "≤ TTL late", never
+ * "never". Read per call (like `swmKaBoundDisabled`) so ops and tests can
+ * retune it without a redeploy.
+ */
+const VM_RECONCILE_NEGATIVE_TTL_MS_DEFAULT = 600_000;
+function vmReconcileNegativeTtlMs(): number {
+  const raw = Number(process.env['DKG_VM_RECONCILE_NEGATIVE_TTL_MS']);
+  return Number.isFinite(raw) && raw > 0 ? raw : VM_RECONCILE_NEGATIVE_TTL_MS_DEFAULT;
+}
+
+/** LRU cap for the negative reconcile memo — bounds memory across CGs × roots. */
+const VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES = 4096;
+
+type NegativeSnapshotMemoEntry = {
+  /** Write generation for the CG's graph prefix observed BEFORE the scan. */
+  writeGen: number;
+  recordedAt: number;
+  /** Catalog-floor eligibility at scan time — a policy flip changes what can match. */
+  allowGeneratedCatalogFloor: boolean;
+};
+
 export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
@@ -145,6 +171,18 @@ export class FinalizationHandler {
   // caching a miss for a KC finalized before its on-chain KA->CG binding lands
   // would pin it to the legacy `/_meta` fallback forever, re-opening the race.
   private readonly chainCgIdByBatchId = new Map<string, string>();
+  // #1609 (2026-07-11/12 testnet incident): the write-generation source backing
+  // the negative reconcile memo below. `null` when the store's adapter doesn't
+  // track write generations — the memo is then DISABLED and every reconcile
+  // scans (fail-open), matching pre-memo behavior.
+  private readonly graphWriteGen: GraphWriteGenSource | null;
+  // Negative memo for `findSwmSnapshotForMerkleRoot`: "this (cg, namespace,
+  // root) had NO matching local SWM snapshot at write generation G". Unlike
+  // `chainCgIdByBatchId` above, caching the negative here is sound BECAUSE it
+  // is generation-gated: the verdict is only replayed while the store proves
+  // no local write has touched the CG since the scan. LRU, in-memory only —
+  // a restart clears it (fail-open).
+  private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
 
   constructor(
     store: TripleStore,
@@ -155,6 +193,7 @@ export class FinalizationHandler {
     lifecycleLogOptions?: FinalizationLifecycleLogOptions,
   ) {
     this.store = store;
+    this.graphWriteGen = asGraphWriteGenSource(store);
     this.chain = chain;
     this.eventBus = eventBus;
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
@@ -1097,6 +1136,21 @@ export class FinalizationHandler {
    * indexed property (stamped once at op completion) so the fallback disappears
    * entirely. The generated-catalog-floor variant keeps the exhaustive recompute
    * (its match is over quads+floor, not the op's intrinsic stamped root).
+   *
+   * READ memo (#1609, 2026-07-11/12 testnet incident): the #1612 digest memo skips
+   * only the merkle recompute — a never-match KA (a publish this node never shared,
+   * exactly the beacon shape) still paid O(#ops) unbounded SWM CONSTRUCTs on EVERY
+   * sweep tick, forever, stalling the event loop and dropping storage-ACK streams
+   * on big stores. This wrapper adds a write-generation-gated NEGATIVE memo over
+   * the whole scan (floor retry included): a "no match" verdict is replayed
+   * without touching the store while (a) the adapter's write generation for the
+   * CG's graph prefix is unchanged — new SWM only arrives via local writes
+   * (gossip receive, publish share, active fetch), all of which pass the adapter
+   * choke points and bump the generation, so the next call rescans — (b) the
+   * catalog-floor eligibility is unchanged, and (c) the entry is younger than
+   * `vmReconcileNegativeTtlMs()`. A MATCH is never memoized. Stores without the
+   * write-generation capability disable the memo entirely (always scan), and a
+   * restart clears it — every failure mode degrades to a rescan, never a miss.
    */
   private async findSwmSnapshotForMerkleRoot(
     contextGraphId: string,
@@ -1105,6 +1159,65 @@ export class FinalizationHandler {
     onChainCgId?: string,
   ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[]; subGraphName?: string } | null> {
     const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, onChainCgId);
+
+    // Every graph the scan reads — root/sub-graph SWM buckets, their per-KA
+    // under-graphs and `_shared_memory_meta` (op rows, `privateMerkleRoot`,
+    // stamps) — lives under the CG's URI subtree, so one prefix covers all
+    // namespaces of this call. Broader than strictly needed (any CG-local
+    // write invalidates) — that only costs an extra rescan.
+    const memoKey = `${contextGraphId}\0${subGraphName ?? ''}\0${ethers.hexlify(merkleRoot)}`;
+    const swmWritePrefix = `${contextGraphDataUri(contextGraphId)}/`;
+    const preScanGen = this.graphWriteGen?.getWriteGen(swmWritePrefix);
+    if (preScanGen !== undefined) {
+      const memo = this.negativeSnapshotMemo.get(memoKey);
+      if (memo) {
+        if (
+          memo.writeGen === preScanGen &&
+          memo.allowGeneratedCatalogFloor === allowGeneratedCatalogFloor &&
+          Date.now() - memo.recordedAt < vmReconcileNegativeTtlMs()
+        ) {
+          // Refresh LRU recency; recordedAt stays — the TTL runs from the scan.
+          this.negativeSnapshotMemo.delete(memoKey);
+          this.negativeSnapshotMemo.set(memoKey, memo);
+          return null;
+        }
+        this.negativeSnapshotMemo.delete(memoKey);
+      }
+    }
+
+    const hit = await this.scanForSwmSnapshot(
+      contextGraphId,
+      merkleRoot,
+      subGraphName,
+      allowGeneratedCatalogFloor,
+    );
+    if (hit) return hit;
+
+    if (preScanGen !== undefined) {
+      // Record at the PRE-scan generation: any write that raced the scan (or
+      // the scan's own best-effort restamps) flips the gate above, so the next
+      // call rescans rather than replaying a verdict that may predate the write.
+      this.negativeSnapshotMemo.set(memoKey, {
+        writeGen: preScanGen,
+        recordedAt: Date.now(),
+        allowGeneratedCatalogFloor,
+      });
+      while (this.negativeSnapshotMemo.size > VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES) {
+        const oldest = this.negativeSnapshotMemo.keys().next().value;
+        if (oldest === undefined) break;
+        this.negativeSnapshotMemo.delete(oldest);
+      }
+    }
+    return null;
+  }
+
+  /** The authoritative full scan behind {@link findSwmSnapshotForMerkleRoot}. */
+  private async scanForSwmSnapshot(
+    contextGraphId: string,
+    merkleRoot: Uint8Array,
+    subGraphName: string | undefined,
+    allowGeneratedCatalogFloor: boolean,
+  ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[]; subGraphName?: string } | null> {
     // Caller knows the exact namespace → search only that one.
     if (subGraphName) {
       const hit = await this.findSwmSnapshotInNamespace(

@@ -53,6 +53,11 @@ export {
   type ChangelogReader,
   type ChangelogStoreOptions,
 } from './changelog-store.js';
+export {
+  GraphWriteGenTracker,
+  asGraphWriteGenSource,
+  type GraphWriteGenSource,
+} from './graph-write-gen.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
