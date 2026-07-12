@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { KeyedSerializer } from '../src/keyed-mutex.js';
+import { KeyedSerializer, KeyedSerializerAcquireTimeoutError } from '../src/keyed-mutex.js';
 
 const tick = (ms = 0) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -91,6 +91,28 @@ describe('KeyedSerializer', () => {
     await Promise.all([p1, p2]);
     await tick(0);
     expect(s.isActive('w')).toBe(false);
+  });
+
+  it('times out queued callers with the key and depth, then skips their work', async () => {
+    const s = new KeyedSerializer(15);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const first = s.run('0xwallet', async () => gate);
+    let ran = false;
+    const second = s.run('0xwallet', async () => { ran = true; });
+    expect(s.queueDepth('0xwallet')).toBe(2);
+
+    await expect(second).rejects.toMatchObject({
+      name: 'KeyedSerializerAcquireTimeoutError',
+      code: 'KEYED_SERIALIZER_ACQUIRE_TIMEOUT',
+      key: '0xwallet',
+      queueDepth: 2,
+    } satisfies Partial<KeyedSerializerAcquireTimeoutError>);
+    release();
+    await first;
+    await tick(0);
+    expect(ran).toBe(false);
+    expect(s.queueDepth('0xwallet')).toBe(0);
   });
 
   it('prevents the publisher nonce race: same-wallet sends get distinct, monotonic nonces', async () => {
