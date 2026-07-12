@@ -46,6 +46,29 @@ describe('verifiable-memory read-both deduplicates mirrored triples (#1270)', ()
     expect(result.bindings).toEqual([{ s: ENTITY }, { s: ENTITY }]);
   });
 
+  it('preserves mappings that differ by an OPTIONAL binding in a later VM graph', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const name = q(ENTITY, NAME, '"Finalization Chain Draft"', ROOT);
+    await store.insert([
+      name,
+      { ...name, graph: VM },
+      q(ENTITY, TYPE, '"Document"', VM),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?name ?type WHERE {
+        <${ENTITY}> <${NAME}> ?name .
+        OPTIONAL { <${ENTITY}> <${TYPE}> ?type }
+      }`,
+      { contextGraphId: CG, view: 'verifiable-memory' },
+    );
+
+    expect(result.bindings).toHaveLength(2);
+    expect(result.bindings.filter((binding) => binding['type'] === undefined)).toHaveLength(1);
+    expect(result.bindings.filter((binding) => binding['type'] === '"Document"')).toHaveLength(1);
+  });
+
   it('actually reads and deduplicates the per-cgId graph in VM view routing', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);

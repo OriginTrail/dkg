@@ -377,8 +377,7 @@ export class DKGQueryEngine implements QueryEngine {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
         const vmGraphsInc = await this.discoverGraphsByPrefix(`${dataGraph}/_verifiable_memory/`);
         const dataSparql = vmGraphsInc.length > 0
-          ? (wrapWithDeduplicatedGraphValues(sparql, [dataGraph, ...vmGraphsInc])
-            ?? wrapWithGraphUnion(sparql, [dataGraph, ...vmGraphsInc])
+          ? (this.wrapVerifiableMemoryGraphSet(sparql, [dataGraph, ...vmGraphsInc])
             ?? wrapWithGraph(sparql, dataGraph))
           : wrapWithGraph(sparql, dataGraph);
         // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
@@ -401,8 +400,7 @@ export class DKGQueryEngine implements QueryEngine {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
         const vmGraphs = await this.discoverGraphsByPrefix(`${dataGraph}/_verifiable_memory/`);
         effectiveSparql = vmGraphs.length > 0
-          ? (wrapWithDeduplicatedGraphValues(sparql, [dataGraph, ...vmGraphs])
-            ?? wrapWithGraphUnion(sparql, [dataGraph, ...vmGraphs])
+          ? (this.wrapVerifiableMemoryGraphSet(sparql, [dataGraph, ...vmGraphs])
             ?? wrapWithGraph(sparql, dataGraph))
           : wrapWithGraph(sparql, dataGraph);
       }
@@ -591,29 +589,27 @@ export class DKGQueryEngine implements QueryEngine {
       return this.execAndNormalize(wrapWithGraph(effectiveSparql, allGraphs[0]));
     }
 
-    return this.queryMultipleGraphs(effectiveSparql, allGraphs, {
-      deduplicateMirroredSolutions: view === 'verifiable-memory',
-    });
+    if (view === 'verifiable-memory') {
+      const rewritten = this.wrapVerifiableMemoryGraphSet(effectiveSparql, allGraphs);
+      if (rewritten !== null) return this.execAndNormalize(rewritten);
+    }
+
+    return this.queryMultipleGraphs(effectiveSparql, allGraphs);
   }
 
-  private async queryMultipleGraphs(
-    sparql: string,
-    graphs: string[],
-    options: { deduplicateMirroredSolutions?: boolean } = {},
-  ): Promise<QueryResult> {
+  /** Canonical graph rewrite for root + per-KA/per-cgId verifiable-memory reads. */
+  private wrapVerifiableMemoryGraphSet(sparql: string, graphs: string[]): string | null {
+    if (graphs.length === 0) return sparql;
+    if (graphs.length === 1) return wrapWithGraph(sparql, graphs[0]);
+    return wrapWithDeduplicatedGraphValues(sparql, graphs)
+      ?? wrapWithGraphValues(sparql, graphs)
+      ?? wrapWithGraphUnion(sparql, graphs);
+  }
+
+  private async queryMultipleGraphs(sparql: string, graphs: string[]): Promise<QueryResult> {
     if (graphs.length === 0) return { bindings: [] };
     if (graphs.length === 1) {
       return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]));
-    }
-    // A verifiable-memory read-both can contain the same solution in the root,
-    // per-KA VM, and per-cgId graphs. Suppress only mappings already produced
-    // by an earlier graph, before caller projection preserves normal bag
-    // semantics for distinct matches that happen to project alike.
-    if (options.deduplicateMirroredSolutions) {
-      const deduplicatedSparql = wrapWithDeduplicatedGraphValues(sparql, graphs);
-      if (deduplicatedSparql !== null) {
-        return this.execAndNormalize(deduplicatedSparql);
-      }
     }
     // Prefer a single `VALUES ?g { … } GRAPH ?g { … }` query: it scopes the
     // read to the named-graph set as ONE basic graph pattern iterated over a
@@ -2475,6 +2471,43 @@ const DEDUP_RANK_SENTINEL = '?__dkgDedupRank';
 const DEDUP_PRIOR_GRAPH_SENTINEL = '?__dkgDedupPriorGraph';
 const DEDUP_PRIOR_RANK_SENTINEL = '?__dkgDedupPriorRank';
 
+function wrapWithProjectedGraphSubselect(
+  sparql: string,
+  graphUris: string[],
+  helperVariables: string[],
+  buildGraphPattern: (inner: string, graphs: string[]) => string,
+  acceptsInner: (inner: string) => boolean = () => true,
+): string | null {
+  if (hasGraphClause(sparql)) return sparql;
+  if (graphUris.length === 0) return sparql;
+
+  const braceStart = findWhereBraceStart(sparql);
+  if (braceStart === -1) return null;
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
+  if (braceEnd === -1) return null;
+
+  const before = sparql.slice(0, braceStart + 1);
+  const inner = sparql.slice(braceStart + 1, braceEnd);
+  const after = sparql.slice(braceEnd);
+  const graphs = [...new Set(graphUris)];
+
+  if (graphs.length === 1) {
+    return `${before} GRAPH <${assertSafeIri(graphs[0])}> { ${inner} } ${after}`;
+  }
+  if (/\bUNION\b/i.test(inner) || !acceptsInner(inner)) return null;
+
+  const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
+  if (collectQueryVariables(sparql).some((variable) => helperNames.has(variable.slice(1)))) {
+    return null;
+  }
+
+  const innerVars = collectQueryVariables(inner);
+  if (innerVars.length === 0) return null;
+
+  const graphPattern = buildGraphPattern(inner, graphs);
+  return `${before} { SELECT ${innerVars.join(' ')} WHERE { ${graphPattern} } } ${after}`;
+}
+
 /**
  * Run one graph pattern across an ordered graph set while suppressing only a
  * solution mapping already produced by an earlier graph. The comparison uses
@@ -2487,49 +2520,31 @@ const DEDUP_PRIOR_RANK_SENTINEL = '?__dkgDedupPriorRank';
  * return null so the existing generic multi-graph fallback remains available.
  */
 function wrapWithDeduplicatedGraphValues(sparql: string, graphUris: string[]): string | null {
-  if (hasGraphClause(sparql)) return sparql;
-  if (graphUris.length === 0) return sparql;
-
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) return null;
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return null;
-
-  const before = sparql.slice(0, braceStart + 1);
-  const inner = sparql.slice(braceStart + 1, braceEnd);
-  const after = sparql.slice(braceEnd);
-
-  if (graphUris.length === 1) {
-    return `${before} GRAPH <${assertSafeIri(graphUris[0])}> { ${inner} } ${after}`;
-  }
-  if (/\bUNION\b/i.test(inner)) return null;
-
-  const helperNames = new Set([
-    DEDUP_GRAPH_SENTINEL,
-    DEDUP_RANK_SENTINEL,
-    DEDUP_PRIOR_GRAPH_SENTINEL,
-    DEDUP_PRIOR_RANK_SENTINEL,
-  ].map((variable) => variable.slice(1)));
-  if (collectQueryVariables(sparql).some((variable) => helperNames.has(variable.slice(1)))) {
-    return null;
-  }
-
-  const innerVars = collectQueryVariables(inner);
-  if (innerVars.length === 0) return null;
-
-  const rows = [...new Set(graphUris)]
-    .map((graph, rank) => `(<${assertSafeIri(graph)}> ${rank})`)
-    .join(' ');
-  const graphPattern = [
-    `VALUES (${DEDUP_GRAPH_SENTINEL} ${DEDUP_RANK_SENTINEL}) { ${rows} }`,
-    `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`,
-    'FILTER NOT EXISTS {',
-    `  VALUES (${DEDUP_PRIOR_GRAPH_SENTINEL} ${DEDUP_PRIOR_RANK_SENTINEL}) { ${rows} }`,
-    `  FILTER (${DEDUP_PRIOR_RANK_SENTINEL} < ${DEDUP_RANK_SENTINEL})`,
-    `  GRAPH ${DEDUP_PRIOR_GRAPH_SENTINEL} { ${inner} }`,
-    '}',
-  ].join(' ');
-  return `${before} { SELECT ${innerVars.join(' ')} WHERE { ${graphPattern} } } ${after}`;
+  return wrapWithProjectedGraphSubselect(
+    sparql,
+    graphUris,
+    [
+      DEDUP_GRAPH_SENTINEL,
+      DEDUP_RANK_SENTINEL,
+      DEDUP_PRIOR_GRAPH_SENTINEL,
+      DEDUP_PRIOR_RANK_SENTINEL,
+    ],
+    (inner, graphs) => {
+      const rows = graphs
+        .map((graph, rank) => `(<${assertSafeIri(graph)}> ${rank})`)
+        .join(' ');
+      return [
+        `VALUES (${DEDUP_GRAPH_SENTINEL} ${DEDUP_RANK_SENTINEL}) { ${rows} }`,
+        `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`,
+        'FILTER NOT EXISTS {',
+        `  VALUES (${DEDUP_PRIOR_GRAPH_SENTINEL} ${DEDUP_PRIOR_RANK_SENTINEL}) { ${rows} }`,
+        `  FILTER (${DEDUP_PRIOR_RANK_SENTINEL} < ${DEDUP_RANK_SENTINEL})`,
+        `  GRAPH ${DEDUP_PRIOR_GRAPH_SENTINEL} { ${inner} }`,
+        '}',
+      ].join(' ');
+    },
+    isDedupSafeBasicGraphPattern,
+  );
 }
 
 /**
@@ -2561,52 +2576,53 @@ function wrapWithDeduplicatedGraphValues(sparql: string, graphUris: string[]): s
  * nowhere to hide the sentinel from a `SELECT *` projection).
  */
 function wrapWithGraphValues(sparql: string, graphUris: string[]): string | null {
-  if (hasGraphClause(sparql)) return sparql;
-  if (graphUris.length === 0) return sparql;
+  return wrapWithProjectedGraphSubselect(
+    sparql,
+    graphUris,
+    [VIEW_GRAPH_SENTINEL],
+    (inner, graphs) => {
+      const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
+      return `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`;
+    },
+  );
+}
 
-  const braceStart = findWhereBraceStart(sparql);
-  if (braceStart === -1) return null;
-  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
-  if (braceEnd === -1) return null;
-
-  const before = sparql.slice(0, braceStart + 1);
-  const inner = sparql.slice(braceStart + 1, braceEnd);
-  const after = sparql.slice(braceEnd);
-
-  if (graphUris.length === 1) {
-    return `${before} GRAPH <${assertSafeIri(graphUris[0])}> { ${inner} } ${after}`;
+/**
+ * The mirror anti-join is valid only for a flat basic graph pattern (plus
+ * FILTER expressions). Nested graph patterns can differ by boundness, where a
+ * correlated NOT EXISTS compatibility check is not exact mapping equality.
+ */
+function isDedupSafeBasicGraphPattern(inner: string): boolean {
+  const forbidden = ['OPTIONAL', 'MINUS', 'SERVICE', 'VALUES', 'BIND', 'SELECT', 'GRAPH', 'EXISTS'];
+  let i = 0;
+  while (i < inner.length) {
+    const ch = inner[i];
+    if (ch === '#') {
+      while (i < inner.length && inner[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      i = skipSparqlStringLiteral(inner, i);
+      continue;
+    }
+    if (ch === '<') {
+      const end = skipSparqlIriRef(inner, i);
+      i = end ?? i + 1;
+      continue;
+    }
+    if (ch === '{' || ch === '}') return false;
+    if (isKeywordStart(inner, i)) {
+      let end = i + 1;
+      while (end < inner.length && isWordContinuation(inner[end])) end++;
+      if (forbidden.some((keyword) => isSparqlKeyword(inner, i, end, keyword))) {
+        return false;
+      }
+      i = end;
+      continue;
+    }
+    i++;
   }
-
-  // An inner top-level UNION stays on the per-graph fallback (#789): merging
-  // that shape across graphs is form-aware there, and this keeps that path and
-  // its tests unchanged. Same guard `wrapWithGraphUnion` uses.
-  if (/\bUNION\b/i.test(inner)) return null;
-
-  // Never clamp a variable the user actually uses — fall back instead.
-  const sentinelName = VIEW_GRAPH_SENTINEL.slice(1);
-  if (collectQueryVariables(sparql).some((v) => v.slice(1) === sentinelName)) {
-    return null;
-  }
-
-  const innerVars = collectQueryVariables(inner);
-  if (innerVars.length === 0) {
-    // Var-less WHERE body (all-constant triples, e.g. `SELECT * WHERE { <a>
-    // <b> <c> }`). We cannot hide the sentinel here: a sub-SELECT projecting
-    // the empty user-variable set is not legal SPARQL, and the bare form would
-    // let `SELECT *` project the injected `?__dkgViewGraph` (leaking the SWM
-    // graph IRI, which embeds a wallet address). Decline so the caller falls
-    // back to the union / per-graph path, which binds no graph variable. Such
-    // a query over many graphs is not a real view workload, so the fallback's
-    // cost is irrelevant.
-    return null;
-  }
-
-  const values = graphUris.map((g) => `<${assertSafeIri(g)}>`).join(' ');
-  const graphBlock = `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`;
-  // Hide the sentinel behind a sub-SELECT that re-exposes only the user's
-  // variables, so `SELECT *` and cross-graph DISTINCT behave as they did under
-  // the UNION form.
-  return `${before} { SELECT ${innerVars.join(' ')} WHERE { ${graphBlock} } } ${after}`;
+  return true;
 }
 
 /**
