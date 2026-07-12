@@ -16,14 +16,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+// Import the production TTL const directly (it is exported from the adapter base,
+// same idiom as decodeConvictionCostCovered / CG_REGISTRY_*), so the TTL-backstop
+// test stays coupled to production without a class-surface mirror.
+import { RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS as MEMO_TTL_MS } from '../src/evm-adapter-base.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
-
-// The memo TTL is a protected static on the adapter base; read it through the
-// class so the TTL-backstop test stays coupled to the production constant.
-const MEMO_TTL_MS = ((EVMChainAdapter as unknown as { RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS?: number })
-  .RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS) ?? 30_000;
 
 const ADDR_BY_NAME: Record<string, string> = {
   IdentityStorage: '0x00000000000000000000000000000000000000A1',
@@ -133,6 +132,23 @@ describe('resolveContract address memo (#1583)', () => {
     expect(hubReads(rc)).toBe(4);
   });
 
+  it('an OBSERVED rotation of a memoized-but-unmapped name (ShardingTableStorage) flushes the memo (#1615 round-2 🔴)', async () => {
+    // ShardingTableStorage is memoized (per-ACK nodeExists) but has NO
+    // HUB_BINDING_INVALIDATORS entry, so pre-fix applyHubRotationEventName hit
+    // `if (!policy) return` and never flushed — an observed rotation left the ACK
+    // floor pinned to the retired proxy for up to the 30s TTL. The unconditional
+    // top-of-handler flush fixes it: the next resolve must re-hit the Hub.
+    const a = makeAdapter();
+    const rc = spyByName(a);
+    await a.resolveContractAddress('ShardingTableStorage');
+    await a.resolveContractAddress('ShardingTableStorage');
+    expect(hubReads(rc, 'ShardingTableStorage')).toBe(1);
+
+    (a as any).applyHubRotationEventName('ShardingTableStorage');
+    await a.resolveContractAddress('ShardingTableStorage');
+    expect(hubReads(rc, 'ShardingTableStorage')).toBe(2);
+  });
+
   it('the bulk write-side self-heal (invalidateAllBoundContracts) flushes the memo', async () => {
     const a = makeAdapter();
     const rc = spyByName(a);
@@ -227,6 +243,34 @@ describe('resolveContract address memo (#1583)', () => {
         .resolves.toBe(ADDR_BY_NAME.ShardingTableStorage);
     }
     expect(hubReads(rc, 'ShardingTableStorage')).toBe(1);
+  });
+
+  it('concurrent same-name resolves single-flight — ONE Hub read for a 100-wide burst (#1615 axis-2)', async () => {
+    // The motivating workload is a *burst*, not sequential repeats: many ACKs
+    // resolve the same name simultaneously while the first Hub read is still in
+    // flight. A plain TTL map without in-flight coalescing would fan out 100 Hub
+    // reads here; the ReadThroughTtlCache single-flights them. This asserts the
+    // adapter wiring inherits that (a regression to a non-coalescing map fails it).
+    const a = makeAdapter();
+    let releaseHubRead!: (addr: string) => void;
+    const pending = new Promise<string>((res) => { releaseHubRead = res; });
+    const rc = recorder(async () => pending); // every readContract awaits the same gate
+    a.readContract = rc;
+
+    const burst = Promise.all(
+      Array.from({ length: 100 }, () => a.resolveContractAddress('IdentityStorage')),
+    );
+    // Drain microtasks so all 100 calls have entered the cache's getOrLoad and
+    // registered against the single in-flight load before we inspect the count.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(hubReads(rc)).toBe(1); // only one read is in flight for all 100 waiters
+
+    releaseHubRead(ADDR_BY_NAME.IdentityStorage);
+    const results = await burst;
+    expect(results).toHaveLength(100);
+    expect(new Set(results).size).toBe(1); // all 100 got the same address
+    expect(results[0]).toBe(ADDR_BY_NAME.IdentityStorage);
+    expect(hubReads(rc)).toBe(1); // ...from a single Hub read, start to finish
   });
 
   // PR #1615 review axis-2: the behaviour callers actually depend on is that

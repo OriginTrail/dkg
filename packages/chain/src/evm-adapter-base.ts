@@ -123,18 +123,17 @@ const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
  *     in the 1h memo would shadow that shorter backstop (and is redundant with
  *     the pair cache).
  *
- *   - `PublishingConviction` / `ShardingTable` / `DKGStakingConvictionNFT` —
- *     memoized-then-stale would strand an outdated address for up to
- *     `RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS` because these three are resolved
- *     per-call (not lazy-bound), are ABSENT from `HUB_BINDING_INVALIDATORS`, and
- *     sit on paths with no read-side self-heal (PCA UI `version()`/`clearAgentsSupported`
- *     gate at evm-adapter-conviction.ts:610; the `listDesignatableNodes` logic
- *     read; and the one-shot conviction-NFT provisioning write at
- *     evm-adapter-identity.ts:350). Pre-#1583 each did a fresh
- *     `Hub.getContractAddress` that self-healed on the next call; excluding them
- *     restores that (a strict non-regression). They are all COLD paths — not the
- *     publish-burst hot path this memo targets — so exclusion costs ~nothing.
- *     (Review of PR #1615, axis-1 invalidation gap.)
+ *   - `PublishingConviction` / `ShardingTable` / `DKGStakingConvictionNFT` — these
+ *     three are resolved per-call (not lazy-bound) on COLD paths only: the PCA UI
+ *     `version()`/`clearAgentsSupported` gate (evm-adapter-conviction.ts:610), the
+ *     `listDesignatableNodes` logic read (itself behind a 30s cache), and the
+ *     one-shot conviction-NFT provisioning write (evm-adapter-identity.ts:350).
+ *     They are NOT excluded for a correctness reason — the round-2 unconditional
+ *     rotation flush (`applyHubRotationEventName`) would self-heal them on an
+ *     observed rotation exactly like the memoized names — but because memoizing a
+ *     cold path saves ~nothing, keeping them fresh-every-call is a zero-cost strict
+ *     non-regression (identical to pre-#1583). Excluding them also keeps this list
+ *     as documentation of "which names the memo intentionally skips."
  *
  * NOTE on the two ACK-verify-floor contracts, `IdentityStorage` and
  * `ShardingTableStorage`, which ARE memoized (not excluded): both are on the
@@ -145,16 +144,18 @@ const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
  * stay live within a single ACK regardless of this memo. The only thing memoized
  * is the proxy ADDRESS, which changes only on a Hub re-registration of the
  * contract itself (a rare, coordinated migration — NOT a key revocation or a
- * table exit). An OBSERVED such rotation of IdentityStorage flushes immediately
- * (`HUB_BINDING_INVALIDATORS`, `invalidateOnRotation:true`, plus every identity-
- * cache-invalidation site); the only residual — a poller-MISSED contract rotation
- * of either — is bounded to `RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS` (30s, the
- * staleness the codebase already accepts for the sibling `listDesignatableNodes`
- * sharding-table read), across a compound edge (rare contract rotation × rare
- * poller miss × ≤30s). Memoizing these two is a deliberate reversal of the first
- * cut's ShardingTableStorage exclusion (review of PR #1615, axis-1): excluding it
- * while memoizing its ACK-path twin IdentityStorage was inconsistent and left
- * ~half of ACK-verify address amplification uncut.
+ * table exit). Any OBSERVED such rotation of EITHER flushes the whole memo
+ * immediately: `applyHubRotationEventName` calls `resolvedContractAddressCache`
+ * `.invalidateAll()` unconditionally on every Hub rotation event (round-2 fix —
+ * this is what covers ShardingTableStorage, which has no lazy binding and so no
+ * `HUB_BINDING_INVALIDATORS` entry). The only residual — a poller-MISSED contract
+ * rotation of either — is bounded to `RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS` (30s,
+ * the staleness the codebase already accepts for the sibling `listDesignatableNodes`
+ * read), across a compound edge (rare contract rotation × rare poller miss × ≤30s).
+ * Memoizing these two is a deliberate reversal of the first cut's ShardingTableStorage
+ * exclusion (review of PR #1615): excluding it while memoizing its ACK-path twin
+ * IdentityStorage was inconsistent and left ~half of ACK-verify address
+ * amplification uncut.
  */
 const RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED = new Set<string>([
   'RandomSampling',
@@ -173,10 +174,16 @@ const RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED = new Set<string>([
  * contract-rotation the event poller MISSES → a memoized-stale address, e.g.
  * IdentityStorage behind ACK `keyHasPurpose`) to ≤30s instead of ≤1h, while a
  * publish burst (seconds–minutes) still resolves each contract from ~1 read
- * instead of ~150. Observed rotations still invalidate immediately via the hooks
- * below; contract rotation is itself a rare coordinated migration event.
+ * instead of ~150. Observed rotations still invalidate immediately via the
+ * unconditional flush in `applyHubRotationEventName`; contract rotation is itself
+ * a rare coordinated migration event.
+ *
+ * Exported (not a class member) so the memo unit test can couple its TTL-backstop
+ * assertion to the production value without widening the adapter's protected
+ * surface — the same idiom already used for `decodeConvictionCostCovered` and the
+ * `CG_REGISTRY_*` consts. (Review of PR #1615, round-2.)
  */
-const RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS = 30_000;
+export const RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS = 30_000;
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 
@@ -864,10 +871,6 @@ export class EVMChainAdapterBase {
    * with no cross-talk.
    */
   protected static readonly PREFLIGHT_TTL_MS = 60 * 60 * 1000;
-
-  /** Class-visible mirror of the module-level memo TTL (see its doc-comment);
-   *  exposed so tests can couple the TTL-backstop assertion to production. */
-  protected static readonly RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS = RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS;
 
   protected cachedChainId: { value: bigint; cachedAt: number } | undefined;
 
@@ -2354,8 +2357,13 @@ export class EVMChainAdapterBase {
    * (`readHubContractAddress`) throws on a missing/zero result so the memo only
    * ever holds a successfully-resolved non-zero address (a negative result must
    * not poison the cache — the next call re-tries).
+   *
+   * `private`: the only production caller is `resolveContract` (same class). The
+   * memo is an implementation detail of `resolveContract`, not a subclass
+   * extension point (review of PR #1615, round-2). Unit tests reach it via the
+   * usual `any`-cast on the adapter under test.
    */
-  protected async resolveContractAddress(name: string): Promise<string> {
+  private async resolveContractAddress(name: string): Promise<string> {
     if (RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED.has(name)) {
       return this.readHubContractAddress(name);
     }
@@ -3784,6 +3792,20 @@ export class EVMChainAdapterBase {
   }
 
   protected applyHubRotationEventName(name: string): void {
+    // #1583 (review round-2) — flush the resolved-address memo on EVERY observed
+    // Hub rotation, unconditionally and first. The memo caches the address of
+    // any non-excluded name, including per-call names with no lazy binding and
+    // so no `HUB_BINDING_INVALIDATORS` entry (`ShardingTableStorage`, resolved
+    // fresh per ACK in `verifyACKIdentityDetailed`). The pre-round-2 code only
+    // flushed inside `finalizeKnownHubRotation`, reached solely for names WITH a
+    // policy — so an observed ShardingTableStorage rotation left `nodeExists`
+    // pinned to the retired proxy for up to the 30s TTL. A memoized address is a
+    // pure function of Hub-registry state, so any ContractChanged / NewContract /
+    // AssetStorageChanged / NewAssetStorage event (all delivered here via the one
+    // `onContractName` callback) is exactly the signal that some memoized address
+    // may have moved; flushing all of them is correct and keeps the 30s TTL as a
+    // pure missed-rotation backstop.
+    this.resolvedContractAddressCache.invalidateAll();
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
       return;
@@ -3808,11 +3830,10 @@ export class EVMChainAdapterBase {
 
   protected finalizeKnownHubRotation(): void {
     this.invalidatePublishPreflightCache();
-    // #1583 — every known Hub rotation event (any name in
-    // HUB_BINDING_INVALIDATORS) reaches here, so flush the resolved-address memo
-    // alongside the preflight cache. This is the primary invalidation path for
-    // the memoized contract set; the excluded RS pair / ShardingTableStorage
-    // names are never in the memo.
+    // #1583 — redundant-but-harmless second flush (the unconditional flush at the
+    // top of `applyHubRotationEventName` already cleared the memo for this event).
+    // Kept so the memo stays invalidated if `finalizeKnownHubRotation` ever gains
+    // another caller. `invalidateAll()` is idempotent.
     this.resolvedContractAddressCache.invalidateAll();
     // Force the next public-method entry through `init()` so it re-resolves
     // every binding. Do not clear boot-bound handles here: the callback can
