@@ -165,7 +165,7 @@ export interface SendOpts {
   signal?: AbortSignal;
 }
 
-export interface SendReliableOpts {
+interface SendReliableCommonOpts {
   /**
    * Caller-supplied message id. Used by the receiver-side idempotency
    * cache to dedupe duplicate deliveries and by the sender-side
@@ -184,12 +184,19 @@ export interface SendReliableOpts {
    * (e.g. join-approval).
    */
   maxAgeMs?: number;
-  /**
-   * Disable durable sender retries for bounded request/response flows whose
-   * caller owns retry and response lifetime (for example StorageACK).
-   */
-  queueOnFailure?: boolean;
 }
+
+/** Default durable contract: recoverable failures are queued. */
+export interface DurableSendReliableOpts extends SendReliableCommonOpts {
+  failurePolicy?: 'queue';
+}
+
+/** Explicit request-owned contract: recoverable failures are thrown, never queued. */
+export interface ThrowingSendReliableOpts extends SendReliableCommonOpts {
+  failurePolicy: 'throw';
+}
+
+export type SendReliableOpts = DurableSendReliableOpts | ThrowingSendReliableOpts;
 
 /**
  * Result of `Messenger.sendReliable`. Three terminal shapes:
@@ -254,6 +261,12 @@ export type ReliableSendResult =
       messageId: string;
       error: string;
     };
+
+/** The explicit throw policy can never produce a durable queued result. */
+export type ThrowingReliableSendResult = Exclude<
+  ReliableSendResult,
+  { delivered: false; queued: true }
+>;
 
 /** Handler signature for `Messenger.register`. */
 export type ReliableHandler = (
@@ -578,6 +591,18 @@ export class Messenger {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
+    opts: ThrowingSendReliableOpts,
+  ): Promise<ThrowingReliableSendResult>;
+  async sendReliable(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts?: DurableSendReliableOpts,
+  ): Promise<ReliableSendResult>;
+  async sendReliable(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
     opts: SendReliableOpts = {},
   ): Promise<ReliableSendResult> {
     this.requireSubstrate('sendReliable');
@@ -674,7 +699,7 @@ export class Messenger {
       if (!isRecoverableMessengerSendError(err, errMsg)) {
         throw err;
       }
-      if (opts.queueOnFailure === false) {
+      if (opts.failurePolicy === 'throw') {
         // No durable row can later deliver or expire this request, so its SLO
         // start marker has no future owner. Clear it before returning control
         // to the request-scoped retry loop.

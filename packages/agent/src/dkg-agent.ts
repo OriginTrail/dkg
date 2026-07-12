@@ -622,7 +622,7 @@ interface ACKReliableMessenger {
     peerId: string,
     protocol: string,
     data: Uint8Array,
-    opts: { timeoutMs: number; queueOnFailure: false },
+    opts: { timeoutMs: number; failurePolicy: 'throw' },
   ): Promise<{ delivered: boolean; error?: unknown; response?: Uint8Array }>;
 }
 
@@ -633,10 +633,10 @@ function createACKSendP2P(input: {
   return async (peerId: string, protocol: string, data: Uint8Array) => {
     const sendResult = await input.messenger.sendReliable(peerId, protocol, data, {
       timeoutMs: input.timeoutMs,
-      queueOnFailure: false,
+      failurePolicy: 'throw',
     });
     if (!sendResult.delivered) {
-      throw new Error(`substrate queued (transport): ${sendResult.error}`);
+      throw new Error(`substrate send already in flight (transport): ${sendResult.error}`);
     }
     if (!sendResult.response) {
       throw new Error('substrate delivered (transport) without response');
