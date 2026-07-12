@@ -289,6 +289,31 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
     expect(log.calls.some((message) => message.includes('rollback restored'))).toBe(true);
   });
 
+  it('rolls back on an exact-version mismatch, including semver prefix collisions', async () => {
+    let versionChecks = 0;
+    _autoUpdateIo.exec = (async (cmd: string, opts?: any) => {
+      execCalls.push({ cmd, opts });
+      if (cmd === 'dkg --version') {
+        versionChecks += 1;
+        return versionChecks === 1
+          ? { stdout: 'dkg 10.0.0-rc.12', stderr: '' }
+          : { stdout: 'dkg 10.0.0-rc.0', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    }) as any;
+
+    const log = makeLog();
+    const result = await performNpmUpdateEdge('10.0.0-rc.1', '10.0.0-rc.0', log.fn);
+    expect(result).toBe('failed');
+    expect(execCalls.map((call) => call.cmd)).toEqual([
+      'npm install -g @origintrail-official/dkg@10.0.0-rc.1',
+      'dkg --version',
+      'npm install -g @origintrail-official/dkg@10.0.0-rc.0',
+      'dkg --version',
+    ]);
+    expect(log.calls.some((message) => message.includes('expected 10.0.0-rc.1'))).toBe(true);
+  });
+
   it('surfaces a prefix-configuration advisory on EACCES', async () => {
     _autoUpdateIo.exec = (() => {
       const err: any = new Error("EACCES: permission denied, mkdir '/usr/local/lib/node_modules'");
