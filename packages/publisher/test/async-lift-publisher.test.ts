@@ -10,6 +10,7 @@ import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
 import { hardhatACKProvider } from './_helpers/acks.js';
 import {
   DKGPublisher,
+  QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
   createLiftJobFailureMetadata,
   type AsyncLiftPublisherConfig,
@@ -417,6 +418,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(failed.status).toBe('failed');
     if (failed.status !== 'failed') throw new Error('expected failed job');
     expect(failed.failure.retryable).toBe(true);
+    expect(failed.timestamps.nextRetryAt).toBeUndefined();
 
     await expect(publisher.enqueueKnowledgeAssetVmPublish(intent)).resolves.toBe(jobId);
     const reaccepted = await publisher.getStatus(jobId);
@@ -428,6 +430,58 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const claimedAgain = await publisher.claimNext('wallet-2');
     expect(claimedAgain?.jobId).toBe(jobId);
     expect(claimedAgain?.status).toBe('claimed');
+  });
+
+  it('claims due quorum retries with exponential backoff and a durable max cap', async () => {
+    const publisher = createPublisher({
+      config: {
+        retryBackoffBaseMs: 100,
+        retryBackoffMaxMs: 250,
+      },
+    });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    const validation = {
+      canonicalRoots: ['urn:album:one', 'urn:album:two'],
+      canonicalRootMap: {
+        'urn:album:one': 'urn:album:one',
+        'urn:album:two': 'urn:album:two',
+      },
+      swmQuadCount: 2,
+      authorityProofRef: 'urn:dkg:publish-async:share-op-1',
+      transitionType: 'CREATE' as const,
+    };
+    await publisher.update(jobId, 'validated', { validation });
+
+    const failQuorum = () => publisher.recordPublishFailure(jobId, {
+      error: new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:test:error:quorum-unmet',
+    });
+    const failed = await failQuorum();
+    expect(failed.status).toBe('failed');
+    if (failed.status !== 'failed') throw new Error('expected failed job');
+    expect(failed.failure.code).toBe('quorum_unmet');
+    expect((failed.timestamps.nextRetryAt ?? 0) - failed.timestamps.updatedAt).toBe(100);
+
+    expect(await publisher.claimNext('wallet-2')).toBeNull();
+    now += 100;
+    const firstRetry = await publisher.claimNext('wallet-2');
+    expect(firstRetry?.jobId).toBe(jobId);
+    expect(firstRetry?.retries.retryCount).toBe(1);
+    expect(firstRetry?.retries.lastRetryReason).toBe('quorum_unmet');
+    expect(firstRetry?.timestamps.nextRetryAt).toBeUndefined();
+
+    await publisher.update(jobId, 'validated', { validation });
+    const failedAgain = await failQuorum();
+    expect((failedAgain.timestamps.nextRetryAt ?? 0) - failedAgain.timestamps.updatedAt).toBe(200);
+
+    now += 200;
+    const secondRetry = await publisher.claimNext('wallet-3');
+    expect(secondRetry?.retries.retryCount).toBe(2);
+    await publisher.update(jobId, 'validated', { validation });
+    const failedAtCap = await failQuorum();
+    expect((failedAtCap.timestamps.nextRetryAt ?? 0) - failedAtCap.timestamps.updatedAt).toBe(250);
   });
 
   it('processes knowledge asset VM publish jobs through the lifecycle executor', async () => {
