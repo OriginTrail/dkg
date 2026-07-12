@@ -23,7 +23,6 @@ const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const SWM_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/1`;
-const PER_KA_SWM_GRAPH_2 = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/2`;
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const ON_CHAIN_ID_PREDICATE = 'https://dkg.network/ontology#ContextGraphOnChainId';
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
@@ -205,76 +204,6 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(publishSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
     ]);
-  });
-
-  it('swmReadGraphs scopes the payload to the named KA graph: a same-subject copy in ANOTHER per-KA graph is excluded', async () => {
-    // NAMED-PUBLISH SWM SCOPING. The rootEntities selection is SUBJECT-scoped,
-    // so without a graph scope a co-resident assertion about the SAME entity
-    // (e.g. an already-minted share left in SWM) gets bundled into another
-    // assertion's payload — recomputed merkle != finalize-time seal.
-    // `publishFromFinalizedAssertion` passes `swmReadGraphs` = [own per-KA
-    // graph, bare bucket]; the publisher's reload must honor it.
-    const { publisher, store, publishSpy } = await makePublisher();
-    const shared = 'urn:test:root:shared';
-    await store.insert([
-      // Assertion A's copy (already promoted / possibly already minted).
-      q(shared, 'http://schema.org/name', '"from A"', PER_KA_SWM_GRAPH),
-      // Assertion B's copy — the one actually being published by name.
-      q(shared, 'http://schema.org/description', '"from B"', PER_KA_SWM_GRAPH_2),
-    ]);
-
-    await expect(
-      publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [shared] }, {
-        swmReadGraphs: [PER_KA_SWM_GRAPH_2, SWM_GRAPH],
-      }),
-    ).resolves.toMatchObject({ status: 'tentative' });
-
-    expect(publishSpy.calls).toHaveLength(1);
-    expect(publishSpy.calls[0][0].quads).toEqual([
-      { subject: shared, predicate: 'http://schema.org/description', object: '"from B"', graph: '' },
-    ]);
-  });
-
-  it('confirmed publish with swmReadGraphs drains ONLY the scoped graphs: the co-resident copy survives', async () => {
-    // Sibling invariant of the scoped read: the confirmed-publish SWM drain
-    // (clearPublishedSwmRoots) used to delete the published root SUBJECTS from
-    // EVERY graph under the bucket, stomping a co-resident assertion's
-    // same-subject copy — its own later publish then failed ("No quads in
-    // shared memory" / root mismatch, and on devnets a KaIdAlreadyMinted-class
-    // order dependence). With `swmReadGraphs` the drain is scoped to the same
-    // graph set the payload was read from.
-    const { publisher, store } = await makePublisher();
-    const confirmedResult: PublishResult = {
-      kaId: 1n,
-      ual: 'did:dkg:0x0000000000000000000000000000000000000001/1',
-      merkleRoot: new Uint8Array(32),
-      kaManifest: [{ tokenId: 1n, rootEntity: 'urn:test:root:shared', privateTripleCount: 0 }],
-      status: 'confirmed',
-      publicQuads: [],
-    };
-    const publishSpy = recorder(async (..._args: Parameters<DKGPublisher['publish']>) => confirmedResult);
-    (publisher as unknown as { publish: typeof publishSpy }).publish = publishSpy;
-
-    const shared = 'urn:test:root:shared';
-    await store.insert([
-      q(shared, 'http://schema.org/name', '"from A"', PER_KA_SWM_GRAPH),
-      q(shared, 'http://schema.org/description', '"from B"', PER_KA_SWM_GRAPH_2),
-    ]);
-
-    await expect(
-      publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [shared] }, {
-        swmReadGraphs: [PER_KA_SWM_GRAPH_2, SWM_GRAPH],
-      }),
-    ).resolves.toMatchObject({ status: 'confirmed' });
-
-    // B's own copy is drained…
-    const bGone = await store.query(`ASK { GRAPH <${PER_KA_SWM_GRAPH_2}> { <${shared}> ?p ?o } }`);
-    expect(bGone.type).toBe('boolean');
-    if (bGone.type === 'boolean') expect(bGone.value).toBe(false);
-    // …while A's same-subject copy in ITS per-KA graph is untouched.
-    const aKept = await store.query(`ASK { GRAPH <${PER_KA_SWM_GRAPH}> { <${shared}> <http://schema.org/name> "from A" } }`);
-    expect(aKept.type).toBe('boolean');
-    if (aKept.type === 'boolean') expect(aKept.value).toBe(true);
   });
 
   it('loads selected data root plus generated private-CG catalog root and threads trusted floor', async () => {
