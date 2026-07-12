@@ -1393,7 +1393,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
   it('classifies receipt wait expiry as a timeout and preserves the transaction hash', async () => {
     vi.useFakeTimers();
     try {
-      const a = new EVMChainAdapter(minimalConfig());
+      const a = new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 1_000 }));
       const signedTx = '0xdeadbeef';
       const txHash = '0x' + '66'.repeat(32);
       const provider = {
@@ -1425,7 +1425,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
           return err;
         }
       })();
-      await vi.advanceTimersByTimeAsync(180_001);
+      await vi.advanceTimersByTimeAsync(1_001);
 
       const timeoutErr = await thrown;
       expect(timeoutErr).toMatchObject({ code: 'RPC_TIMEOUT', txHash });

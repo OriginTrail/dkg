@@ -85,7 +85,7 @@ export const RPC_RECEIPT_ATTEMPT_TIMEOUT_MS = 5_000;
 
 export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 
-export const RPC_RECEIPT_TIMEOUT_MS = 180_000;
+export const RPC_RECEIPT_TIMEOUT_MS = 600_000;
 
 /**
  * Bounded "retry the whole endpoint set" for the BROADCAST phase (S2). After a

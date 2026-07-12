@@ -193,6 +193,7 @@ export interface NetworkConfig {
     hubAddress: string;
     tokenAddress?: string;
     chainId: string;
+    receiptTimeoutMs?: number;
     /**
      * ContextGraphNameRegistry discovery scan `eth_getLogs` block-window.
      * Defaults to the EVM adapter's 2,000-block common provider cap.
@@ -323,6 +324,8 @@ export interface ChainConfig {
    */
   minPublisherNativeWei?: bigint | string | number;
   minPublisherTracWei?: bigint | string | number;
+  /** Overall submitted-transaction receipt deadline (default 10 minutes). */
+  receiptTimeoutMs?: number;
 }
 
 export type ResolvedChainConfig = Partial<
@@ -1456,6 +1459,13 @@ export function resolveChainConfig(
   if (approvalPolicy !== undefined) merged.approvalPolicy = approvalPolicy;
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
+  const receiptTimeoutMs = cfg?.receiptTimeoutMs ?? net?.receiptTimeoutMs;
+  if (receiptTimeoutMs !== undefined) {
+    if (!Number.isFinite(receiptTimeoutMs) || receiptTimeoutMs < 1_000) {
+      throw new Error('chain.receiptTimeoutMs must be a finite number >= 1000');
+    }
+    merged.receiptTimeoutMs = Math.floor(receiptTimeoutMs);
+  }
   // Funding floors: local config wins, else the network overlay's per-chain
   // default (both default 0n downstream in the adapter when unset). Persisted
   // values arrive as string/number — normalize to bigint here, failing fast on

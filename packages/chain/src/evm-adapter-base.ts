@@ -629,6 +629,7 @@ export class EVMChainAdapterBase {
   protected readonly rpcFailover: RpcFailoverClient;
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
+  protected readonly receiptTimeoutMs: number;
 
   protected readonly configuredStaticChainId?: bigint;
 
@@ -1012,6 +1013,9 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
+    this.receiptTimeoutMs = Number.isFinite(config.receiptTimeoutMs) && (config.receiptTimeoutMs ?? 0) >= 1_000
+      ? Math.floor(config.receiptTimeoutMs as number)
+      : RPC_RECEIPT_TIMEOUT_MS;
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1406,7 +1410,7 @@ export class EVMChainAdapterBase {
     txHash: string,
     label: string,
   ): Promise<ethers.TransactionReceipt> {
-    const deadline = Date.now() + RPC_RECEIPT_TIMEOUT_MS;
+    const deadline = Date.now() + this.receiptTimeoutMs;
     let lastError: unknown;
     while (Date.now() < deadline) {
       try {
@@ -1422,7 +1426,7 @@ export class EVMChainAdapterBase {
       await sleep(RPC_RECEIPT_POLL_INTERVAL_MS);
     }
     throw createRpcTimeoutError(
-      `${label} tx ${txHash} timed out waiting for a receipt after ${RPC_RECEIPT_TIMEOUT_MS}ms` +
+      `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
       (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
       { cause: lastError, txHash },
     );

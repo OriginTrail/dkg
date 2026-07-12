@@ -1604,6 +1604,7 @@ export async function runDaemonInner(
         : {}),
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
       chainId: chainBase.chainId,
+      receiptTimeoutMs: chainBase.receiptTimeoutMs,
       approvalPolicy: resolveApprovalPolicy(chainBase.approvalPolicy) as ApprovalPolicy | undefined,
       cgRegistryScanPageSize: chainBase.cgRegistryScanPageSize,
       minPublisherNativeWei: chainBase.minPublisherNativeWei,
