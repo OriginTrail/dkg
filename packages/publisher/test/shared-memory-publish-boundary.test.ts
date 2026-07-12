@@ -67,7 +67,7 @@ async function makeRealPublisher(chain = new NoChainAdapter()) {
   return { publisher, store };
 }
 
-async function makePublisher(chain = new NoChainAdapter()) {
+async function makePublisher(chain = new NoChainAdapter(), status: PublishResult['status'] = 'tentative') {
   const { publisher, store } = await makeRealPublisher(chain);
   const publishResult: PublishResult = {
     kaId: 1n,
@@ -80,7 +80,7 @@ async function makePublisher(chain = new NoChainAdapter()) {
         privateTripleCount: 0,
       },
     ],
-    status: 'tentative',
+    status,
     publicQuads: [],
   };
   const publishSpy = recorder(async (..._args: Parameters<DKGPublisher['publish']>) => publishResult);
@@ -229,6 +229,52 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(publishSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"local"', graph: '' },
     ]);
+  });
+
+  it('confirmed exact cleanup removes stale ownership when the local KA was the last share', async () => {
+    const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    const root = 'urn:test:root:one';
+    await store.insert([
+      q(root, 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q(root, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
+    ]);
+
+    await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [root] }, {
+      swmKaGraphBound: {
+        agentAddress: '0x1111111111111111111111111111111111111111',
+        startNumber: 1n,
+        endNumber: 1n,
+      },
+    });
+
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(0);
+    const owners = await (publisher as any).sharedMemoryOwnersForPromotion(
+      CONTEXT_GRAPH, undefined, CONTEXT_GRAPH, [root],
+    );
+    expect(owners.size).toBe(0);
+  });
+
+  it('confirmed exact cleanup drains only local data and preserves foreign share ownership', async () => {
+    const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    const root = 'urn:test:root:one';
+    await store.insert([
+      q(root, 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q(root, 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
+      q(root, WORKSPACE_OWNER_PREDICATE, '"peer-foreign"', SWM_META_GRAPH),
+    ]);
+
+    await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [root] }, {
+      swmKaGraphBound: {
+        agentAddress: '0x1111111111111111111111111111111111111111',
+        startNumber: 1n,
+        endNumber: 1n,
+      },
+    });
+
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteByPattern({ graph: FOREIGN_PER_KA_SWM_GRAPH, subject: root })).toBe(1);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(1);
   });
 
   it('loads selected data root plus generated private-CG catalog root and threads trusted floor', async () => {

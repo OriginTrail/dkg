@@ -5539,11 +5539,19 @@ export class DKGPublisher implements Publisher {
           graph: g, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
         });
       }
-      // Root-keyed family metadata cannot distinguish two authors sharing the
-      // same subject. Exact named-KA cleanup therefore leaves it intact; the
-      // lifecycle marker cleanup owns the local record, while deleting these
-      // rows here could orphan the foreign co-resident share.
-      if (!swmKaGraphBound) {
+      // A root-keyed owner row can only remain live while some SWM family graph
+      // still contains that root. Exact cleanup preserves it for a real foreign
+      // co-resident share, but removes it when the consumed named KA was the last
+      // copy so a future peer is not blocked by a stale owner.
+      const shouldClearRootMetadata = !swmKaGraphBound || (
+        await loadSelectedSharedMemoryQuads(
+          this.store,
+          swmGraph,
+          { rootEntities: [rootEntity] },
+          { querySource: 'publisher.clearPublishedSwmRoots.reconcileOwnership' },
+        )
+      ).length === 0;
+      if (shouldClearRootMetadata) {
         const ownerDeleted = await this.store.deleteByPattern({
           graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
         });
