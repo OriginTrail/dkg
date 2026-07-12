@@ -5,6 +5,7 @@ import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
   createLiftJobFailureMetadata,
+  getLiftJobFailurePolicy,
   type LiftJob,
   type LiftJobAccepted,
   type LiftJobBroadcast,
@@ -81,10 +82,14 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
+  private static readonly DEFAULT_RETRY_BACKOFF_BASE_MS = 5_000;
+  private static readonly DEFAULT_RETRY_BACKOFF_MAX_MS = 60_000;
 
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
   private readonly maxRetries: number;
+  private readonly retryBackoffBaseMs: number;
+  private readonly retryBackoffMaxMs: number;
   private readonly recoveryLookupTimeoutMs: number;
   private readonly lockLeaseMs: number;
   private readonly now: () => number;
@@ -126,6 +131,14 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.walletLockGraphUri = DEFAULT_WALLET_LOCK_GRAPH_URI;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
+    this.retryBackoffBaseMs = config.retryBackoffBaseMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_BASE_MS;
+    this.retryBackoffMaxMs = config.retryBackoffMaxMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_MAX_MS;
+    if (!Number.isFinite(this.retryBackoffBaseMs) || this.retryBackoffBaseMs <= 0) {
+      throw new Error('Async lift publisher retryBackoffBaseMs must be greater than zero');
+    }
+    if (!Number.isFinite(this.retryBackoffMaxMs) || this.retryBackoffMaxMs < this.retryBackoffBaseMs) {
+      throw new Error('Async lift publisher retryBackoffMaxMs must be at least retryBackoffBaseMs');
+    }
     this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
@@ -243,6 +256,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if (this.paused) return null;
       if (await this.hasActiveWalletLock(walletId)) return null;
 
+      await this.reacceptDueFailedJobs(this.now());
       const next = (await this.list({ status: 'accepted' })).sort(compareAcceptedJobs)[0];
       if (!next) return null;
 
@@ -597,24 +611,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) {
       throw new Error(`Knowledge asset VM publish job ${job.jobId} is not retryable`);
     }
-    const reset = this.resetFailedJobToAccepted(job);
-    const retriedAt = this.now();
-    const reaccepted: LiftJobAccepted = {
-      ...reset,
-      retries: {
-        ...reset.retries,
-        retryCount: job.retries.retryCount + 1,
-        lastRetryReason: job.failure.code,
-      },
-      timestamps: {
-        ...reset.timestamps,
-        lastRetriedAt: retriedAt,
-        updatedAt: retriedAt,
-      },
-    };
-    await this.releaseWalletLockForJob(job);
-    await this.writeJob(reaccepted);
-    return reaccepted;
+    return this.reacceptFailedJob(job);
   }
 
   private isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
@@ -723,9 +720,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     await this.ensureGraph();
     const current = await this.getRequiredJob(jobId);
     await this.assertActiveClaimLock(current);
-    const next = this.mergeJob(current, 'failed', {
+    const next = this.scheduleRetryIfEligible(this.mergeJob(current, 'failed', {
       failure: mapPublishExceptionToLiftJobFailure(failure) as any,
-    });
+    }));
     this.assertJobMatchesStatus(next);
     await this.writeJob(next);
     await this.syncWalletLockForJob(next);
@@ -817,23 +814,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       // not retry(), to avoid double-publishing if the original tx eventually lands.
       if (job.failure.resolution === 'retry_recovery') continue;
 
-      const reset = this.resetFailedJobToAccepted(job);
-      const retriedAt = this.now();
-      const retriedJob: LiftJobAccepted = {
-        ...reset,
-        retries: {
-          ...reset.retries,
-          retryCount: job.retries.retryCount + 1,
-          lastRetryReason: job.failure.code,
-        },
-        timestamps: {
-          ...reset.timestamps,
-          lastRetriedAt: retriedAt,
-          updatedAt: retriedAt,
-        },
-      };
-      await this.releaseWalletLockForJob(job);
-      await this.writeJob(retriedJob);
+      await this.reacceptFailedJob(job);
       retried += 1;
     }
     return retried;
@@ -1020,7 +1001,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         message,
         errorPayloadRef: `urn:dkg:publisher:error:${jobId}`,
       });
-      const failed = this.mergeJob(current, 'failed', { failure: failure as any });
+      const failed = this.scheduleRetryIfEligible(
+        this.mergeJob(current, 'failed', { failure: failure as any }),
+      );
       this.assertJobMatchesStatus(failed);
       await this.writeJob(failed);
       await this.syncWalletLockForJob(failed);
@@ -1286,6 +1269,62 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         : undefined,
       controlPlane: job.controlPlane,
     };
+  }
+
+  private isAutomaticallyRetryable(job: PersistedFailedJob): boolean {
+    return getLiftJobFailurePolicy(job.failure.code).autoRetry === true
+      && job.failure.retryable
+      && job.failure.resolution === 'reset_to_accepted'
+      && job.retries.retryCount < job.retries.maxRetries;
+  }
+
+  private async reacceptDueFailedJobs(now: number): Promise<number> {
+    let retried = 0;
+    for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+      if (job.timestamps.nextRetryAt === undefined || job.timestamps.nextRetryAt > now) continue;
+      if (!this.isAutomaticallyRetryable(job)) continue;
+      await this.reacceptFailedJob(job);
+      retried += 1;
+    }
+    return retried;
+  }
+
+  private scheduleRetryIfEligible(job: LiftJob): LiftJob {
+    if (!isFailedJob(job) || !this.isAutomaticallyRetryable(job)) return job;
+    const delay = Math.min(
+      this.retryBackoffMaxMs,
+      this.retryBackoffBaseMs * 2 ** job.retries.retryCount,
+    );
+    const now = this.now();
+    return {
+      ...job,
+      timestamps: {
+        ...job.timestamps,
+        nextRetryAt: now + delay,
+        updatedAt: now,
+      },
+    };
+  }
+
+  private async reacceptFailedJob(job: PersistedFailedJob): Promise<LiftJobAccepted> {
+    const reset = this.resetFailedJobToAccepted(job);
+    const retriedAt = this.now();
+    const reaccepted: LiftJobAccepted = {
+      ...reset,
+      retries: {
+        ...reset.retries,
+        retryCount: job.retries.retryCount + 1,
+        lastRetryReason: job.failure.code,
+      },
+      timestamps: {
+        ...reset.timestamps,
+        lastRetriedAt: retriedAt,
+        updatedAt: retriedAt,
+      },
+    };
+    await this.releaseWalletLockForJob(job);
+    await this.writeJob(reaccepted);
+    return reaccepted;
   }
 
   private finalizeRecoveredJob(
