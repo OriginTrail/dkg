@@ -1448,6 +1448,49 @@ describe('Relay watchdog: review-round-1 hardening', () => {
     }
   }, 30000);
 
+  it('decays the shared backoff counter during a benign busy-deferral wait (does not freeze at an escalated interval)', async () => {
+    // otReviewAgent round 3: benign waits reduce relayWatchdogConsecutiveFailures
+    // so a persistent benign state (busy publisher, cooldown) walks the tick
+    // interval back toward base granularity instead of ratcheting at the 5-min
+    // cap. A regression removing the decay would keep the counter frozen.
+    const relay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(relay);
+    await relay.start();
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
+    const BUSY_PROTOCOL = '/dkg/test-decay/1.0.0';
+    await relay.libp2p.handle(BUSY_PROTOCOL, () => { /* hold open */ });
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    const relayPid = relay.libp2p.peerId.toString();
+    const internals = edge as unknown as {
+      watchdogTick: () => Promise<void>;
+      relayReservationRedialAt: Map<string, number>;
+      relayWatchdogConsecutiveFailures: number;
+    };
+    // In-flight app stream ⇒ every tick is a benign busy-deferral.
+    await edge.libp2p.dialProtocol(relay.libp2p.getMultiaddrs(), BUSY_PROTOCOL);
+    internals.relayReservationRedialAt.set(relayPid, Date.now() - 16_000);
+    // Pretend a prior failure sequence escalated the interval.
+    internals.relayWatchdogConsecutiveFailures = 3;
+
+    const logSpy = spyConsole('log');
+    try {
+      await internals.watchdogTick.call(edge);
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+    expect(
+      internals.relayWatchdogConsecutiveFailures,
+      'benign busy-deferral tick must decay the counter (3 → 2), not freeze it',
+    ).toBe(2);
+  }, 30000);
+
   it('busy-deferral cap: forced redial proceeds once RELAY_BUSY_DEFERRAL_MAX_TICKS is exceeded', async () => {
     const relay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
     nodes.push(relay);
