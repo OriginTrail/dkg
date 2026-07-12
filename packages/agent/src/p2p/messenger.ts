@@ -675,6 +675,10 @@ export class Messenger {
         throw err;
       }
       if (opts.queueOnFailure === false) {
+        // No durable row can later deliver or expire this request, so its SLO
+        // start marker has no future owner. Clear it before returning control
+        // to the request-scoped retry loop.
+        this.firstAttemptAt.delete(sloK);
         throw err;
       }
       const entry = outbox.enqueueFailure(

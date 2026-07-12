@@ -156,6 +156,7 @@ describe('Messenger.sendReliable request-owned retry mode', () => {
     })).rejects.toThrow('no valid addresses for peer');
     expect(outboxStore.size()).toBe(0);
     expect(() => decodeReliableEnvelope(router.send.calls[0][2] as Uint8Array)).not.toThrow();
+    expect((messenger as any).firstAttemptAt.size).toBe(0);
   });
 });
 
