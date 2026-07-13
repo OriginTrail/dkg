@@ -23,13 +23,6 @@ export interface PhaseCallbackContext {
   signal?: AbortSignal;
   /** Pre-broadcast transaction identity for durable write-ahead listeners. */
   txHash?: string;
-  /**
-   * Marks the built-in hash-bearing legacy phase as an observability-only
-   * breadcrumb. Durable listeners ignore marked breadcrumbs and persist from
-   * the following typed `chain:writeahead` event. Unmarked legacy phases from
-   * older custom executors remain a compatibility recovery fallback.
-   */
-  compatibilityBreadcrumb?: true;
 }
 
 export type PhaseCallback = (

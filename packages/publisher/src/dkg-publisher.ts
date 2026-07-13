@@ -76,6 +76,7 @@ import {
 } from './errors.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
+import { markWriteAheadCompatibilityBreadcrumb } from './write-ahead-compat.js';
 import {
   PublisherPlanner,
   coercePublisherAddress,
@@ -115,10 +116,9 @@ function createLegacyTxSignedPhaseAdapter(phases: PhaseReporter): (
     // Deliberately omit txHash from the legacy callback context: the encoded
     // phase name is its compatibility representation, while typed metadata is
     // authoritative only at chain:writeahead.
-    const legacyContext: PhaseCallbackContext = {
+    const legacyContext = markWriteAheadCompatibilityBreadcrumb({
       signal,
-      compatibilityBreadcrumb: true,
-    };
+    });
     await phases.scope(phase, async () => undefined, {
       startContext: legacyContext,
       endContext: legacyContext,

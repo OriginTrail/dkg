@@ -7,6 +7,7 @@ import {
 } from '../src/index.js';
 import { DEFAULT_WALLET_LOCK_GRAPH_URI, walletLockSubject } from '../src/async-lift-control-plane.js';
 import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
+import { markWriteAheadCompatibilityBreadcrumb } from '../src/write-ahead-compat.js';
 
 describe('KA async VM publish broadcast progress', () => {
   let now = 1_000;
@@ -351,12 +352,12 @@ describe('KA async VM publish broadcast progress', () => {
         await input.publishOptions.onPhase?.(
           `chain:txsigned:tx-${txHash}`,
           'start',
-          { signal: controller.signal, compatibilityBreadcrumb: true },
+          markWriteAheadCompatibilityBreadcrumb({ signal: controller.signal }),
         );
         await input.publishOptions.onPhase?.(
           `chain:txsigned:tx-${txHash}`,
           'end',
-          { signal: controller.signal, compatibilityBreadcrumb: true },
+          markWriteAheadCompatibilityBreadcrumb({ signal: controller.signal }),
         );
         const lateHook = input.publishOptions.onPhase?.(
           'chain:writeahead',
@@ -397,12 +398,12 @@ describe('KA async VM publish broadcast progress', () => {
         await input.publishOptions.onPhase?.(
           `chain:txsigned:tx-${txHash}`,
           'start',
-          { signal: controller.signal, compatibilityBreadcrumb: true },
+          markWriteAheadCompatibilityBreadcrumb({ signal: controller.signal }),
         );
         await input.publishOptions.onPhase?.(
           `chain:txsigned:tx-${txHash}`,
           'end',
-          { signal: controller.signal, compatibilityBreadcrumb: true },
+          markWriteAheadCompatibilityBreadcrumb({ signal: controller.signal }),
         );
         await input.publishOptions.onPhase?.(
           'chain:writeahead',

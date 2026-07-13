@@ -37,6 +37,7 @@ import { canonicalRootIri, validateLiftPublishPayload } from './async-lift-valid
 import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
+import { isWriteAheadCompatibilityBreadcrumb } from './write-ahead-compat.js';
 import {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -1105,7 +1106,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         // The built-in publisher explicitly marks its observability breadcrumb
         // because a typed durability event follows. Unmarked breadcrumbs from
         // custom legacy executors retain the original recovery fallback.
-        : context?.compatibilityBreadcrumb !== true
+        : !isWriteAheadCompatibilityBreadcrumb(context)
           ? legacyMatch?.[1]
           : undefined;
       if (
