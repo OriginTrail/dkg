@@ -3912,6 +3912,27 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     })).resolves.toBe(walletA.address);
   });
 
+  it('never rotates away from an explicitly pinned publisher during strict reservation', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 2_000n);
+
+    await expect(a.reservePublisherAddressForPublish({
+      contextGraphId: CG,
+      requiredTracWei: 1_000n,
+      publishEpochs: 2,
+      publisherAddress: walletA.address,
+    })).rejects.toMatchObject({ code: 'NO_FUNDED_PUBLISHER_WALLET' });
+
+    tracByAddr.set(lc(walletA.address), 2_000n);
+    await expect(a.reservePublisherAddressForPublish({
+      contextGraphId: CG,
+      requiredTracWei: 1_000n,
+      publishEpochs: 2,
+      publisherAddress: walletA.address,
+    })).resolves.toBe(walletA.address);
+  });
+
   it('expires the funding cache past the TTL: a newly funded wallet is re-read and selected', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     // walletA (head) unfunded (0 TRAC); walletB funded → B chosen first.

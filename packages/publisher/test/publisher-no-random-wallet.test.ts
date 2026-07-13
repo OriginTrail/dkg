@@ -391,7 +391,12 @@ class ContextAwareAdapterSigningChain extends MockChainAdapter {
 }
 
 class CostAwareRepinChain extends MockChainAdapter {
-  readonly reserveRequests: Array<{ contextGraphId: bigint; requiredTracWei: bigint; publishEpochs: number }> = [];
+  readonly reserveRequests: Array<{
+    contextGraphId: bigint;
+    requiredTracWei: bigint;
+    publishEpochs: number;
+    publisherAddress?: string;
+  }> = [];
   capturedCreateParams?: V10PublishDirectParams;
 
   constructor(
@@ -412,6 +417,7 @@ class CostAwareRepinChain extends MockChainAdapter {
     contextGraphId: bigint;
     requiredTracWei: bigint;
     publishEpochs: number;
+    publisherAddress?: string;
   }): Promise<string> {
     this.reserveRequests.push(request);
     return this.fundedPcaWallet.address;
@@ -1058,13 +1064,13 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     const result = await publisher.publish({
       contextGraphId: '1',
       quads: epochTestQuads('cost-aware-pca-repin'),
-      publishEpochs: 24,
       v10ACKProvider: captureACKInputs(ack),
     });
 
     expect(result.status).toBe('confirmed');
     expect(chain.reserveRequests).toHaveLength(1);
-    expect(chain.reserveRequests[0]).toMatchObject({ contextGraphId: 1n, publishEpochs: 24 });
+    expect(chain.reserveRequests[0].contextGraphId).toBe(1n);
+    expect(chain.reserveRequests[0].publishEpochs).not.toBe(24);
     expect(chain.reserveRequests[0].requiredTracWei).toBeGreaterThan(0n);
     expect(ack).toMatchObject({ epochs: 24, tokenAmount: 24n });
     expect(chain.capturedCreateParams).toMatchObject({
@@ -1072,6 +1078,30 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       epochs: 24,
       tokenAmount: 24n,
     });
+  });
+
+  it('rejects an adapter re-pin that disagrees with publisherPrivateKey before ACK collection', async () => {
+    const pinned = new ethers.Wallet(TEST_KEY);
+    const other = new ethers.Wallet(TEST_KEY_ALT);
+    const chain = new CostAwareRepinChain(pinned, other);
+    const keypair = await generateEd25519Keypair();
+    const publisher = await sealForWallet(new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: pinned.privateKey,
+      publisherNodeIdentityId: 7n,
+    }), pinned, chain);
+    const ackProvider = vi.fn(mockChainStubACKProvider());
+
+    await expect(publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('private-key-reservation-mismatch'),
+      v10ACKProvider: ackProvider,
+    })).rejects.toThrow(/publisherPrivateKey pins.*chain adapter reserved/i);
+    expect(chain.reserveRequests[0].publisherAddress?.toLowerCase()).toBe(pinned.address.toLowerCase());
+    expect(ackProvider).not.toHaveBeenCalled();
   });
 
   it('surfaces strict reservation failure before collecting StorageACKs', async () => {

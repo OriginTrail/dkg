@@ -1175,6 +1175,8 @@ export interface ChainAdapter {
     contextGraphId: bigint;
     requiredTracWei: bigint;
     publishEpochs: number;
+    /** Exact signer pin for publishers backed by an explicit private key. */
+    publisherAddress?: string;
   }): Promise<string>;
 
   /**

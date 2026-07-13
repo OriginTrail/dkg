@@ -1039,6 +1039,77 @@ export class DKGPublisher implements Publisher {
     return { publishEpochs, precomputedTokenAmount };
   }
 
+  /** Finalize signer, lifetime, and price before any ACK-bound identity is derived. */
+  private async resolveOnChainPublishPlan(input: {
+    contextGraphId: bigint;
+    initialSigner: PublisherSigner;
+    explicitPublishEpochs: number | undefined;
+    effectiveByteSize: bigint;
+    ctx: OperationContext;
+  }): Promise<{
+    signer: PublisherSigner;
+    publisherAddress: string;
+    publishEpochs: number;
+    tokenAmount: bigint;
+  }> {
+    const initialPricing = await this.resolvePublishPricingForSigner({
+      signer: input.initialSigner,
+      explicitPublishEpochs: input.explicitPublishEpochs,
+      effectiveByteSize: input.effectiveByteSize,
+      ctx: input.ctx,
+    });
+    if (typeof this.chain.reservePublisherAddressForPublish !== 'function') {
+      return {
+        signer: input.initialSigner,
+        publisherAddress: input.initialSigner.address,
+        publishEpochs: initialPricing.publishEpochs,
+        tokenAmount: initialPricing.precomputedTokenAmount,
+      };
+    }
+
+    const pinnedPublisherAddress = input.initialSigner.source === 'publisherPrivateKey'
+      ? input.initialSigner.address
+      : undefined;
+    const reservedAddress = coercePublisherAddress(
+      await this.chain.reservePublisherAddressForPublish({
+        contextGraphId: input.contextGraphId,
+        requiredTracWei: initialPricing.precomputedTokenAmount,
+        publishEpochs: initialPricing.publishEpochs,
+        publisherAddress: pinnedPublisherAddress,
+      }),
+    );
+    if (!reservedAddress) throw new PublisherWalletRequiredError('publish');
+    if (
+      pinnedPublisherAddress
+      && reservedAddress.toLowerCase() !== pinnedPublisherAddress.toLowerCase()
+    ) {
+      throw new Error(
+        `Publisher signer reservation mismatch: publisherPrivateKey pins ${pinnedPublisherAddress}, ` +
+        `but the chain adapter reserved ${reservedAddress}.`,
+      );
+    }
+    const reservedSigner = await this.getPublisherSigner(reservedAddress);
+    if (!reservedSigner || reservedSigner.address.toLowerCase() !== reservedAddress.toLowerCase()) {
+      throw new Error(
+        `Publisher signer reservation mismatch: no signer for reserved address ${reservedAddress}.`,
+      );
+    }
+    const finalPricing = reservedAddress.toLowerCase() === input.initialSigner.address.toLowerCase()
+      ? initialPricing
+      : await this.resolvePublishPricingForSigner({
+        signer: reservedSigner,
+        explicitPublishEpochs: input.explicitPublishEpochs,
+        effectiveByteSize: input.effectiveByteSize,
+        ctx: input.ctx,
+      });
+    return {
+      signer: reservedSigner,
+      publisherAddress: reservedAddress,
+      publishEpochs: finalPricing.publishEpochs,
+      tokenAmount: finalPricing.precomputedTokenAmount,
+    };
+  }
+
   private isChainV10Ready(): boolean {
     return this.chain.chainId !== 'none' &&
       typeof this.chain.isV10Ready === 'function' &&
@@ -1099,6 +1170,7 @@ export class DKGPublisher implements Publisher {
 
   private async getPublisherSigner(address = this.publisherAddress): Promise<PublisherSigner | undefined> {
     if (this.publisherWallet && this.publisherAddress) {
+      if (address && address.toLowerCase() !== this.publisherAddress.toLowerCase()) return undefined;
       const wallet = this.publisherWallet;
       return {
         address: this.publisherAddress,
@@ -2104,7 +2176,7 @@ export class DKGPublisher implements Publisher {
     const willAttemptOnChainPublish = publisherContextGraphId !== undefined;
     const chainV10Ready = await this.refreshChainV10Readiness();
     const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
-    let resolvedPublisherAddress = canResolveOnChainPublisher
+    const resolvedPublisherAddress = canResolveOnChainPublisher
       ? await this.resolvePublisherAddress(publisherContextGraphId)
       : await this.resolvePublisherAddress(undefined, {
         includeReservingPublisherProbe: false,
@@ -2531,46 +2603,21 @@ export class DKGPublisher implements Publisher {
     // of truth so ACK pricing == chain tx pricing. Resolved BEFORE the PCA
     // coercion below so the fundability probe can price the lock-lifetime publish.
     const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
-    let { publishEpochs, precomputedTokenAmount } = canAttemptOnChainPublish && publisherSigner
-      ? await this.resolvePublishPricingForSigner({
-        signer: publisherSigner,
+    const publishPlan = canAttemptOnChainPublish && publisherSigner && publisherContextGraphId !== undefined
+      ? await this.resolveOnChainPublishPlan({
+        contextGraphId: publisherContextGraphId,
+        initialSigner: publisherSigner,
         explicitPublishEpochs,
         effectiveByteSize,
         ctx,
       })
-      : { publishEpochs: explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS, precomputedTokenAmount: 0n };
-
-    // Re-pin once the exact publish cost is known, before ACK collection and
-    // remote staging. The initial address probe above is necessarily cost-blind
-    // because pricing depends on the finalized payload and lifetime.
-    if (
-      canAttemptOnChainPublish &&
-      publisherContextGraphId !== undefined &&
-      typeof this.chain.reservePublisherAddressForPublish === 'function'
-    ) {
-      const fundedAddress = coercePublisherAddress(
-        await this.chain.reservePublisherAddressForPublish({
-          contextGraphId: publisherContextGraphId,
-          requiredTracWei: precomputedTokenAmount,
-          publishEpochs,
-        }),
-      );
-      const fundedSigner = await this.getPublisherSigner(fundedAddress);
-      if (!fundedAddress || !fundedSigner) {
-        throw new PublisherWalletRequiredError('publish');
-      }
-      resolvedPublisherAddress = fundedAddress;
-      publisherSigner = fundedSigner;
-      publisherAddress = fundedAddress;
-      // PCA lifetime and price are signer-dependent. If strict fundability chose
-      // a different wallet, rebuild them before ACK digest/tx construction.
-      ({ publishEpochs, precomputedTokenAmount } = await this.resolvePublishPricingForSigner({
-        signer: fundedSigner,
-        explicitPublishEpochs,
-        effectiveByteSize,
-        ctx,
-      }));
+      : undefined;
+    if (publishPlan) {
+      publisherSigner = publishPlan.signer;
+      publisherAddress = publishPlan.publisherAddress;
     }
+    const publishEpochs = publishPlan?.publishEpochs ?? explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
+    const precomputedTokenAmount = publishPlan?.tokenAmount ?? 0n;
 
     // Identifier split for V10 publishes.
     //

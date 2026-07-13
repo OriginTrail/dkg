@@ -189,8 +189,44 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     contextGraphId: bigint;
     requiredTracWei: bigint;
     publishEpochs: number;
+    publisherAddress?: string;
   }): Promise<string> {
     await this.init();
+    if (request.publisherAddress) {
+      const selected = this.findSignerByAddress(request.publisherAddress);
+      if (!selected) {
+        throw new Error(
+          `Configured publisherAddress ${request.publisherAddress} is not present in the EVM signer pool.`,
+        );
+      }
+      if (this.contracts.contextGraphs) {
+        const authorized = await this.readContract(
+          this.contracts.contextGraphs,
+          'contextGraphs.isAuthorizedPublisher',
+          'isAuthorizedPublisher',
+          request.contextGraphId,
+          selected.address,
+        );
+        if (!authorized) {
+          throw new Error(
+            `Configured publisherAddress ${selected.address} is not authorized to publish ` +
+            `to context graph ${request.contextGraphId.toString()}.`,
+          );
+        }
+      }
+      return (await this.selectFundedSigner(
+        [selected],
+        {
+          kind: 'native+trac',
+          nativeFloorWei: this.minPublisherNativeWei,
+          tracFloorWei: this.minPublisherTracWei,
+          requiredTracWei: request.requiredTracWei,
+          consultPca: true,
+          pcaPublishEpochs: request.publishEpochs,
+        },
+        { preferIdle: false, unfundedPolicy: 'throw-diagnostic' },
+      )).address;
+    }
     return (await this.nextAuthorizedSigner(
       request.contextGraphId,
       request.requiredTracWei,
