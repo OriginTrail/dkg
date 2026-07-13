@@ -672,11 +672,13 @@ interface W3CAskResponse {
 function w3cTermToString(t: W3CTerm): string {
   if (t.type === 'bnode') return `_:${t.value}`;
   if (t.type === 'literal' || t.type === 'typed-literal') {
-    return formatRdfLiteralTerm({
-      value: t.value,
-      language: t['xml:lang'],
-      datatype: t.datatype,
-    });
+    if (t['xml:lang']) {
+      return formatRdfLiteralTerm({ kind: 'language', value: t.value, language: t['xml:lang'] });
+    }
+    if (t.datatype) {
+      return formatRdfLiteralTerm({ kind: 'typed', value: t.value, datatype: t.datatype });
+    }
+    return formatRdfLiteralTerm({ kind: 'plain', value: t.value });
   }
   return t.value;
 }

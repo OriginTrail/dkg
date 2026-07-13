@@ -4,6 +4,9 @@ import {
   formatRdfLiteralTerm,
   isRdfTerm,
   normalizeRdfObject,
+  parseRdfLiteralTerm,
+  type RdfLiteralTerm,
+  unescapeRdfLiteral,
 } from '../src/index.js';
 
 describe('escapeRdfLiteral', () => {
@@ -23,18 +26,63 @@ describe('escapeRdfLiteral', () => {
   });
 });
 
-describe('formatRdfLiteralTerm', () => {
-  const value = 'café "quote" \\ tab:\t control:\u0001 del:\u007F';
-  const body = 'café \\"quote\\" \\\\ tab:\\t control:\\u0001 del:\\u007F';
+describe('RDF literal term codec', () => {
+  const value = 'café 😀 "quote" \\ tab:\t control:\u0001 del:\u007F slash-n:\\n';
+  const body = 'café 😀 \\"quote\\" \\\\ tab:\\t control:\\u0001 del:\\u007F slash-n:\\\\n';
 
   it('owns plain, language-tagged, and typed binding formatting', () => {
-    expect(formatRdfLiteralTerm({ value })).toBe(`"${body}"`);
-    expect(formatRdfLiteralTerm({ value, language: 'en' })).toBe(`"${body}"@en`);
-    expect(formatRdfLiteralTerm({ value, datatype: 'urn:test:datatype' }))
+    expect(formatRdfLiteralTerm({ kind: 'plain', value })).toBe(`"${body}"`);
+    expect(formatRdfLiteralTerm({ kind: 'language', value, language: 'en' })).toBe(`"${body}"@en`);
+    expect(formatRdfLiteralTerm({ kind: 'typed', value, datatype: 'urn:test:datatype' }))
       .toBe(`"${body}"^^<urn:test:datatype>`);
     expect(formatRdfLiteralTerm({
+      kind: 'typed',
       value,
       datatype: 'http://www.w3.org/2001/XMLSchema#string',
     })).toBe(`"${body}"`);
+  });
+
+  it.each<RdfLiteralTerm>([
+    { kind: 'plain', value },
+    { kind: 'language', value, language: 'sr-Latn' },
+    { kind: 'typed', value, datatype: 'urn:test:datatype' },
+  ])('round-trips $kind literals through the canonical formatter and parser', (literal) => {
+    const formatted = formatRdfLiteralTerm(literal);
+    expect(parseRdfLiteralTerm(formatted)).toEqual(literal);
+    expect(formatRdfLiteralTerm(parseRdfLiteralTerm(formatted)!)).toBe(formatted);
+  });
+
+  it('round-trips the complete escaped C0 and DEL control range', () => {
+    const controls = Array.from({ length: 0x20 }, (_, code) => String.fromCharCode(code)).join('')
+      + '\u007F';
+    const literal: RdfLiteralTerm = { kind: 'plain', value: controls };
+    expect(parseRdfLiteralTerm(formatRdfLiteralTerm(literal))).toEqual(literal);
+  });
+
+  it('keeps XSD string elision in the typed formatting path', () => {
+    const typed: RdfLiteralTerm = {
+      kind: 'typed',
+      value,
+      datatype: 'http://www.w3.org/2001/XMLSchema#string',
+    };
+    const formatted = formatRdfLiteralTerm(typed);
+    expect(formatted).toBe(`"${body}"`);
+    expect(parseRdfLiteralTerm(formatted)).toEqual({ kind: 'plain', value });
+  });
+
+  it('unescapes standard short and Unicode escapes in a single parity-safe pass', () => {
+    expect(unescapeRdfLiteral('quote:\\" slash:\\\\ controls:\\b\\t\\n\\f\\r BMP:\\u00E9 astral:\\U0001F600'))
+      .toBe('quote:" slash:\\ controls:\b\t\n\f\r BMP:é astral:😀');
+    expect(unescapeRdfLiteral('literal-backslash-n:\\\\n')).toBe('literal-backslash-n:\\n');
+  });
+
+  it('rejects non-literal and malformed literal terms', () => {
+    expect(parseRdfLiteralTerm('urn:test:not-a-literal')).toBeNull();
+    expect(parseRdfLiteralTerm('"unterminated')).toBeNull();
+    expect(parseRdfLiteralTerm('"x"@en^^<urn:test>')).toBeNull();
+    expect(parseRdfLiteralTerm('"unknown:\\q"')).toBeNull();
+    expect(parseRdfLiteralTerm('"bad-unicode:\\u00ZZ"')).toBeNull();
+    expect(parseRdfLiteralTerm('"out-of-range:\\U00110000"')).toBeNull();
+    expect(parseRdfLiteralTerm('"raw\nnewline"')).toBeNull();
   });
 });

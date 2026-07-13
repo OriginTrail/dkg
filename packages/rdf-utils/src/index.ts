@@ -23,24 +23,79 @@ export function escapeRdfLiteral(value: string): string {
   });
 }
 
-export interface RdfLiteralTermInput {
-  value: string;
-  language?: string;
-  datatype?: string;
-}
+export type RdfLiteralTerm =
+  | { kind: 'plain'; value: string }
+  | { kind: 'language'; value: string; language: string }
+  | { kind: 'typed'; value: string; datatype: string };
 
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+const RDF_LITERAL_TERM_PATTERN =
+  /^"((?:[^"\\\u0000-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*)"(?:@([A-Za-z]+(?:-[A-Za-z0-9]+)*)|\^\^<([^>]+)>)?$/;
 
 /** Serialize an RDF literal binding as the N-Triples-style term used by DKG APIs. */
-export function formatRdfLiteralTerm({
-  value,
-  language,
-  datatype,
-}: RdfLiteralTermInput): string {
-  const escaped = escapeRdfLiteral(value);
-  if (language) return `"${escaped}"@${language}`;
-  if (datatype && datatype !== XSD_STRING) return `"${escaped}"^^<${datatype}>`;
+export function formatRdfLiteralTerm(term: RdfLiteralTerm): string {
+  const escaped = escapeRdfLiteral(term.value);
+  if (term.kind === 'language') return `"${escaped}"@${term.language}`;
+  if (term.kind === 'typed' && term.datatype !== XSD_STRING) {
+    return `"${escaped}"^^<${term.datatype}>`;
+  }
   return `"${escaped}"`;
+}
+
+/**
+ * Reverse {@link escapeRdfLiteral} and the standard N-Triples string escapes.
+ * The single left-to-right pass preserves escape parity: `\\\\n` becomes a
+ * literal backslash followed by `n`, rather than a newline.
+ */
+export function unescapeRdfLiteral(value: string): string {
+  if (!value.includes('\\')) return value;
+
+  let result = '';
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index];
+    if (character !== '\\' || index + 1 >= value.length) {
+      result += character;
+      continue;
+    }
+
+    const escaped = value[++index];
+    switch (escaped) {
+      case 'n': result += '\n'; break;
+      case 'r': result += '\r'; break;
+      case 't': result += '\t'; break;
+      case 'b': result += '\b'; break;
+      case 'f': result += '\f'; break;
+      case '"': result += '"'; break;
+      case "'": result += "'"; break;
+      case '\\': result += '\\'; break;
+      case 'u':
+        result += String.fromCodePoint(Number.parseInt(value.slice(index + 1, index + 5), 16));
+        index += 4;
+        break;
+      case 'U':
+        result += String.fromCodePoint(Number.parseInt(value.slice(index + 1, index + 9), 16));
+        index += 8;
+        break;
+      default: result += escaped; break;
+    }
+  }
+  return result;
+}
+
+/** Parse the N-Triples-style literal term emitted by {@link formatRdfLiteralTerm}. */
+export function parseRdfLiteralTerm(term: string): RdfLiteralTerm | null {
+  const match = term.match(RDF_LITERAL_TERM_PATTERN);
+  if (!match) return null;
+
+  let value: string;
+  try {
+    value = unescapeRdfLiteral(match[1]);
+  } catch {
+    return null;
+  }
+  if (match[2]) return { kind: 'language', value, language: match[2] };
+  if (match[3]) return { kind: 'typed', value, datatype: match[3] };
+  return { kind: 'plain', value };
 }
 
 /** Return whether a string already represents an RDF term accepted by DKG publishers. */
