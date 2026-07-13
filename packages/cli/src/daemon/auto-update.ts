@@ -46,7 +46,6 @@ import {
 } from '../config.js';
 import {
   daemonRestartCommandArgs,
-  resolveDaemonRestartCommand,
   type DaemonRestartCommand,
 } from '../daemon-entrypoint.js';
 import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan, type AutoUpdateGitRefPlan } from '../auto-update-ref.js';
@@ -1567,7 +1566,6 @@ export async function performNpmUpdateEdge(
   targetVersion: string,
   currentVersion: string | null,
   log: (msg: string) => void,
-  restartCommand: DaemonRestartCommand = resolveDaemonRestartCommand(),
 ): Promise<UpdateStatus> {
   if (_updateInProgress) {
     log("Auto-update (npm-edge): another update is already in progress, skipping");
@@ -1580,6 +1578,7 @@ export async function performNpmUpdateEdge(
     return "failed";
   }
   try {
+    const restartCommand = _autoUpdateIo.resolveDaemonRestartCommand();
     return await _performNpmUpdateInnerEdge(
       targetVersion,
       currentVersion,

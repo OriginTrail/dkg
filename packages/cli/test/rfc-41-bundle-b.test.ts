@@ -243,6 +243,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       operations.push(`${file} ${args.join(' ')}`);
       return Promise.resolve({ stdout: 'dkg 10.0.0-rc.12', stderr: '' });
     }) as any;
+    _autoUpdateIo.resolveDaemonRestartCommand = () => restartCommand;
   });
 
   afterEach(() => {
@@ -255,7 +256,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       '10.0.0-rc.11',
       log.fn,
-      restartCommand,
     );
 
     expect(result).toBe('updated');
@@ -282,7 +282,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       null,
       log.fn,
-      restartCommand,
     );
 
     expect(result).toBe('updated');
@@ -303,7 +302,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '99.99.99',
       '10.0.0-rc.11',
       log.fn,
-      restartCommand,
     );
 
     expect(result).toBe('failed');
@@ -329,7 +327,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       '10.0.0-rc.11',
       log.fn,
-      restartCommand,
     );
     expect(result).toBe('failed');
     const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
@@ -354,7 +351,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       null,
       log.fn,
-      restartCommand,
     );
     const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
 
@@ -384,7 +380,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       '10.0.0-rc.11',
       log.fn,
-      restartCommand,
     );
     const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
 
@@ -415,7 +410,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.1',
       '10.0.0-rc.0',
       log.fn,
-      restartCommand,
     );
     expect(result).toBe('failed');
     const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
@@ -440,7 +434,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       '10.0.0-rc.11',
       log.fn,
-      restartCommand,
     );
 
     expect(result).toBe('failed');
@@ -450,6 +443,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
 
   it('derives the default self-check from the canonical supervisor command', async () => {
     process.env.DKG_NO_BLUE_GREEN = '1';
+    _autoUpdateIo.resolveDaemonRestartCommand = origIo.resolveDaemonRestartCommand;
     const canonicalCommand = resolveDaemonRestartCommand();
     const log = makeLog();
 
