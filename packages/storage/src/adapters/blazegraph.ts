@@ -12,8 +12,8 @@ import type {
   AskResult,
 } from '../triple-store.js';
 import {
-  formatSparqlJsonTerm,
-  type SparqlJsonTerm,
+  formatSparqlJsonBindings,
+  type SparqlJsonSelectResponse,
 } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
@@ -360,23 +360,14 @@ export class BlazegraphStore implements TripleStore {
       }
 
       const json = await deadline.waitFor(
-        res.json() as Promise<BlazeSelectResponse | BlazeAskResponse>,
+        res.json() as Promise<SparqlJsonSelectResponse | BlazeAskResponse>,
       );
 
       if (isAsk || 'boolean' in json) {
         return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
       }
 
-      const sr = json as BlazeSelectResponse;
-      const vars = sr.head?.vars ?? [];
-      const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
-        const obj: Record<string, string> = {};
-        for (const v of vars) {
-          const cell = row[v];
-          if (cell) obj[v] = formatSparqlJsonTerm(cell);
-        }
-        return obj;
-      });
+      const bindings = formatSparqlJsonBindings(json as SparqlJsonSelectResponse);
       return { type: 'bindings', bindings } satisfies SelectResult;
     });
   }
@@ -501,11 +492,6 @@ export class BlazegraphStore implements TripleStore {
 // =====================================================================
 // Blazegraph JSON result types
 // =====================================================================
-
-interface BlazeSelectResponse {
-  head: { vars: string[] };
-  results: { bindings: Array<Record<string, SparqlJsonTerm>> };
-}
 
 interface BlazeAskResponse {
   boolean: boolean;

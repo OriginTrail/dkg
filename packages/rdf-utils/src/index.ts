@@ -41,6 +41,11 @@ export interface SparqlJsonTerm {
   'xml:lang'?: string;
 }
 
+export interface SparqlJsonSelectResponse {
+  head?: { vars?: string[] };
+  results?: { bindings?: Array<Record<string, SparqlJsonTerm>> };
+}
+
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const RDF_LITERAL_TERM_PATTERN =
   /^"((?:[^"\\\u0000-\u0008\u000A-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*)"(?:@([A-Za-z]+(?:-[A-Za-z0-9]+)*)|\^\^<([^>]+)>)?$/;
@@ -85,6 +90,21 @@ export function formatSparqlJsonTerm(term: SparqlJsonTerm): string {
     });
   }
   return term.value;
+}
+
+/** Convert a W3C SPARQL Results JSON SELECT payload into DKG API bindings. */
+export function formatSparqlJsonBindings(
+  response: SparqlJsonSelectResponse,
+): Array<Record<string, string>> {
+  const variables = response.head?.vars ?? [];
+  return (response.results?.bindings ?? []).map((row) => {
+    const binding: Record<string, string> = {};
+    for (const variable of variables) {
+      const term = row[variable];
+      if (term) binding[variable] = formatSparqlJsonTerm(term);
+    }
+    return binding;
+  });
 }
 
 /**

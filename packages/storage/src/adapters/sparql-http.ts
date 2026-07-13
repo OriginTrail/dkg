@@ -33,8 +33,8 @@ import type {
   StorePressureSnapshot,
 } from '../triple-store.js';
 import {
-  formatSparqlJsonTerm,
-  type SparqlJsonTerm,
+  formatSparqlJsonBindings,
+  type SparqlJsonSelectResponse,
 } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
@@ -430,22 +430,13 @@ export class SparqlHttpStore implements TripleStore {
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = (await res.json()) as W3CSelectResponse | W3CAskResponse;
+        const json = (await res.json()) as SparqlJsonSelectResponse | W3CAskResponse;
 
         if (isAsk || 'boolean' in json) {
           return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
         }
 
-        const sr = json as W3CSelectResponse;
-        const vars = sr.head?.vars ?? [];
-        const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
-          const obj: Record<string, string> = {};
-          for (const v of vars) {
-            const cell = row[v];
-            if (cell) obj[v] = formatSparqlJsonTerm(cell);
-          }
-          return obj;
-        });
+        const bindings = formatSparqlJsonBindings(json as SparqlJsonSelectResponse);
         return { type: 'bindings', bindings } satisfies SelectResult;
       } finally {
         this.maybeEmitSlowQuery({
@@ -655,11 +646,6 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
 // ---------------------------------------------------------------------------
 // W3C SPARQL 1.1 JSON result types
 // ---------------------------------------------------------------------------
-
-interface W3CSelectResponse {
-  head: { vars: string[] };
-  results: { bindings: Array<Record<string, SparqlJsonTerm>> };
-}
 
 interface W3CAskResponse {
   boolean: boolean;
