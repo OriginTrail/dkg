@@ -920,7 +920,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       signal: options.signal,
     });
     if (result === 'unsupported') return 'unsupported';
-    return result === 'replaced' ? 'written' : 'conflict';
+    return result === 'replacement-present' ? 'written' : 'conflict';
   }
 
   private async deleteJob(jobId: string): Promise<void> {

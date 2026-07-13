@@ -180,7 +180,7 @@ export async function tryUpdateWithTouchedGraphs(
 }
 
 export type ConditionalSubjectReplaceResult =
-  | 'replaced'
+  | 'replacement-present'
   | 'condition-not-met'
   | 'unsupported';
 
@@ -195,9 +195,9 @@ export interface ConditionalSubjectReplaceOptions {
 
 /**
  * Atomically replace one RDF subject when all expected predicate/object pairs
- * still match. The follow-up ASK distinguishes a committed replacement from a
- * failed compare without exposing SPARQL construction or result probing to
- * feature packages.
+ * still match. The follow-up ASK reports whether the requested verification
+ * value is present; SPARQL UPDATE does not expose whether this invocation or
+ * an equivalent concurrent writer installed that value.
  */
 export async function tryConditionalReplaceSubject(
   store: TripleStore,
@@ -235,15 +235,17 @@ export async function tryConditionalReplaceSubject(
   );
   if (!supported) return 'unsupported';
 
+  // Once UPDATE has been submitted, cancellation cannot prove that it did not
+  // commit. Resolve the observed state without reusing the mutation signal so
+  // callers never mistake a committed replacement for an aborted no-op.
   const result = await store.query(
     `ASK { GRAPH <${options.graph}> { ` +
       `<${options.subject}> <${options.verify.predicate}> ${options.verify.object} } }`,
-    { signal: options.signal },
   );
   if (result.type !== 'boolean') {
     throw new Error('Conditional subject replacement verification expected an ASK result');
   }
-  return result.value ? 'replaced' : 'condition-not-met';
+  return result.value ? 'replacement-present' : 'condition-not-met';
 }
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
