@@ -79,6 +79,7 @@ describe('Random Sampling lifecycle gating', () => {
         identityId: '52',
         disabledReason: null,
       });
+      expect(randomSamplingRetryTimer(agent)).toBeNull();
     } finally {
       intervalSpy.mockRestore();
       await agent.stop().catch(() => {});
