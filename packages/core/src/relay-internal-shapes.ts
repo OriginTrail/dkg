@@ -80,6 +80,8 @@ export interface LibP2PStreamShape {
   protocol?: string;
   /** Stream direction relative to this node — `inbound` if the peer initiated, `outbound` if we did. */
   direction?: 'inbound' | 'outbound';
+  /** Best-effort stream reset used by the relay watchdog's bounded reaper. */
+  abort?: (reason: Error) => void;
 }
 
 /**
