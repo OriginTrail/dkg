@@ -119,7 +119,7 @@ export class HubRotationPoller {
     const head = await this.readTip(
       'Hub rotation poll getBlockNumber',
       (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
+      { policy: 'cappedPointRead' },
     );
     if (!this.started || generation !== this.generation) return;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
@@ -131,7 +131,7 @@ export class HubRotationPoller {
         toBlock: head,
         topics: [binding.topics],
       }),
-      { policy: 'watchdogWideLogScan' },
+      { policy: 'cappedWideLogScan' },
     );
     if (!this.started || generation !== this.generation) return;
 
@@ -147,7 +147,7 @@ export class HubRotationPoller {
     const head = await this.readTip(
       'Hub rotation poll initial getBlockNumber',
       (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
+      { policy: 'cappedPointRead' },
     );
     if (!this.started || generation !== this.generation) return;
     this.lastScannedBlock = this.lastScannedBlock == null

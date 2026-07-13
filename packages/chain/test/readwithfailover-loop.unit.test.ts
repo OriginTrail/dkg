@@ -263,14 +263,14 @@ describe('RpcFailoverClient.read — per-attempt cap (named policies, log-scan s
     expect(only.read.calls).toHaveLength(1);
   });
 
-  it('failOpenFundingRead caps EVEN single-RPC — an over-budget read aborts → exhausted', async () => {
+  it('cappedPointRead caps EVEN single-RPC for a funding read → exhausted', async () => {
     vi.useFakeTimers();
     const only = { read: delayedRead(5_000, 'ONLY') };
     const client = makeClient([only], ['https://only.example']);
 
-    const settled = client.read('funding', (pr: any) => pr.read(), { policy: 'failOpenFundingRead' })
+    const settled = client.read('funding', (pr: any) => pr.read(), { policy: 'cappedPointRead' })
       .then((r: unknown) => r, (e: unknown) => e);
-    // failOpenFundingRead caps every attempt incl. single-RPC at
+    // cappedPointRead caps every attempt incl. single-RPC at
     // RPC_READ_STALL_TIMEOUT_MS; advance past it so the 5s read aborts → single →
     // exhausted.
     await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1_500);

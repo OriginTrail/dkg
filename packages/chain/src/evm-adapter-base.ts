@@ -22,7 +22,7 @@ import type {
   ConvictionReader,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { BoundedKeyedSerializer } from './keyed-mutex.js';
+import { SignerWriteLane, SignerWritePlan } from './signer-write-lane.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -31,7 +31,7 @@ import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import {
   RpcFailoverClient,
-  rpcAlwaysCappedPointReadExecutionBudgetMs,
+  rpcCappedPointReadExecutionBudgetMs,
   rpcBroadcastPassExecutionBudgetMs,
   rpcPopulateAndSignExecutionBudgetMs,
   rpcReceiptLookupPassExecutionBudgetMs,
@@ -60,19 +60,6 @@ type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
 };
 
-type SignerWriteProfileName = 'single-transaction' | 'v10-allowance-recovery';
-
-interface SignerWriteProfile {
-  /** Maximum on-chain transactions sent while this serializer entry is held. */
-  maxTransactions: number;
-  /** Failed prepare passes allowed in addition to each transaction's prepare. */
-  maxAdditionalPopulateAndSignAttempts: number;
-  /** Bounded allowance reads outside populate/sign. */
-  maxAllowanceReadPasses: number;
-  /** Complete post-approve visibility-poll sequences. */
-  maxAllowanceVisibilityPollSequences: number;
-}
-
 /** Domain behavior: a stale V10 allowance can trigger exactly one recovery. */
 const V10_ALLOWANCE_RECOVERY_ATTEMPTS = 1;
 const V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS = 6;
@@ -82,7 +69,7 @@ function allowanceVisibilityPollBackoffMs(attemptIndex: number): number {
 }
 
 function allowanceVisibilityPollExecutionBudgetMs(endpointCount: number): number {
-  const readBudgetMs = rpcAlwaysCappedPointReadExecutionBudgetMs(endpointCount);
+  const readBudgetMs = rpcCappedPointReadExecutionBudgetMs(endpointCount);
   let backoffBudgetMs = 0;
   for (let i = 0; i < V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS - 1; i += 1) {
     backoffBudgetMs += allowanceVisibilityPollBackoffMs(i);
@@ -91,39 +78,14 @@ function allowanceVisibilityPollExecutionBudgetMs(endpointCount: number): number
 }
 
 /**
- * The write orchestration owns the profiles that reserve signer-lane time.
- * V10 can send initial approve + forced re-approve + publish/update, and its
- * one-shot stale-allowance recovery adds one failed populate/sign pass.
- */
-const SIGNER_WRITE_PROFILES: Readonly<Record<SignerWriteProfileName, SignerWriteProfile>> = {
-  'single-transaction': {
-    maxTransactions: 1,
-    maxAdditionalPopulateAndSignAttempts: 0,
-    maxAllowanceReadPasses: 0,
-    maxAllowanceVisibilityPollSequences: 0,
-  },
-  'v10-allowance-recovery': {
-    // Main write + possible initial approve + one forced re-approve.
-    maxTransactions: 2 + V10_ALLOWANCE_RECOVERY_ATTEMPTS,
-    maxAdditionalPopulateAndSignAttempts: V10_ALLOWANCE_RECOVERY_ATTEMPTS,
-    // Initial gate plus the gate repeated by each forced recovery.
-    maxAllowanceReadPasses: 1 + V10_ALLOWANCE_RECOVERY_ATTEMPTS,
-    maxAllowanceVisibilityPollSequences: V10_ALLOWANCE_RECOVERY_ATTEMPTS,
-  },
-};
-
-/**
  * Conservative occupancy of one serialized transaction. Phase-specific
  * transport bounds stay beside the failover loops that own those phases; this
  * orchestration layer adds broadcast retries/backoff and receipt confirmation.
  */
-function signerTxExecutionBudgetMs(
-  endpointCount: number,
-  profile: SignerWriteProfile,
-): number {
+function signerTransactionExecutionBudgetMs(endpointCount: number): number {
   const broadcastPasses = RPC_ENDPOINT_SET_RETRIES + 1;
   const populateAndSignBudgetMs = rpcPopulateAndSignExecutionBudgetMs(endpointCount);
-  const transactionBudgetMs = populateAndSignBudgetMs
+  return populateAndSignBudgetMs
     + broadcastPasses * rpcBroadcastPassExecutionBudgetMs(endpointCount)
     + RPC_ENDPOINT_SET_RETRIES * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS
     // A receipt lookup may begin just before the poll deadline and still
@@ -133,11 +95,6 @@ function signerTxExecutionBudgetMs(
     + RPC_RECEIPT_TIMEOUT_MS
     + rpcReceiptLookupPassExecutionBudgetMs(endpointCount)
     + RPC_RECEIPT_POLL_INTERVAL_MS;
-  return profile.maxTransactions * transactionBudgetMs
-    + profile.maxAdditionalPopulateAndSignAttempts * populateAndSignBudgetMs
-    + profile.maxAllowanceReadPasses * rpcAlwaysCappedPointReadExecutionBudgetMs(endpointCount)
-    + profile.maxAllowanceVisibilityPollSequences
-      * allowanceVisibilityPollExecutionBudgetMs(endpointCount);
 }
 
 /**
@@ -742,7 +699,7 @@ export class EVMChainAdapterBase {
    * `Nonce too low` (OriginTrail/dkg#953). Cross-wallet concurrency is
    * preserved.
    */
-  protected readonly signerTxSerializer: BoundedKeyedSerializer;
+  protected readonly signerWriteLane: SignerWriteLane;
 
   /**
    * Lowercased addresses of operational wallets CONFIRMED registered on-chain
@@ -1099,9 +1056,7 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
-    this.signerTxSerializer = new BoundedKeyedSerializer({
-      laneLabel: 'transaction lane',
-    });
+    this.signerWriteLane = new SignerWriteLane();
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1408,8 +1363,8 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * CONTRACT view read needing a non-default policy or classifier — the funding
-   * reads (`failOpenFundingRead`), the events scan (`wideLogScan`), or a bespoke
+   * CONTRACT view read needing a non-default policy or classifier — capped
+   * funding/allowance reads, the events scan (`wideLogScan`), or a bespoke
    * `isRetryable`. Keeps the `fn` lambda (vs the string-method `readContract`) for
    * reads whose call shape isn't a plain `c.method(...args)`.
    */
@@ -1555,7 +1510,7 @@ export class EVMChainAdapterBase {
     // it propagates up here. The allowance is never reset per endpoint, so at most
     // ONE forced approve fires per publish regardless of endpoints tried. Only the
     // one returned signed tx is broadcast; the whole thing runs inside the
-    // per-wallet `KeyedSerializer` (#953), strictly pre-broadcast / pre-WAL.
+    // per-wallet `SignerWriteLane` (#953), strictly pre-broadcast / pre-WAL.
     let allowanceRecoveriesRemaining = V10_ALLOWANCE_RECOVERY_ATTEMPTS;
     for (;;) {
       try {
@@ -1645,7 +1600,28 @@ export class EVMChainAdapterBase {
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<{ signedTx: string; txHash: string }>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
   ): Promise<ethers.TransactionReceipt> {
-    return this.withSerializedSignerWrite(signer, async (ctx) => {
+    // Declare the exact worst-case phases immediately beside the operation
+    // that executes them. There is no free-form profile/default to keep in
+    // sync: changing the V10 recovery flow means changing this ordered plan at
+    // the same boundary. Optional branches reserve their maximum occupancy.
+    const endpointCount = this.providers.length;
+    const transactionBudgetMs = signerTransactionExecutionBudgetMs(endpointCount);
+    const allowanceReadBudgetMs = rpcCappedPointReadExecutionBudgetMs(endpointCount);
+    const plan = new SignerWritePlan()
+      .reserve('initial V10 allowance gate', allowanceReadBudgetMs)
+      .reserve('optional initial V10 approval transaction', transactionBudgetMs);
+    for (let recovery = 0; recovery < V10_ALLOWANCE_RECOVERY_ATTEMPTS; recovery += 1) {
+      plan
+        .reserve('failed V10 populate/sign before allowance recovery',
+          rpcPopulateAndSignExecutionBudgetMs(endpointCount))
+        .reserve('forced V10 allowance gate', allowanceReadBudgetMs)
+        .reserve('forced V10 approval transaction', transactionBudgetMs)
+        .reserve('forced V10 allowance visibility poll',
+          allowanceVisibilityPollExecutionBudgetMs(endpointCount));
+    }
+    plan.reserve(`V10 ${label} transaction`, transactionBudgetMs);
+
+    return this.withSerializedSignerWrite(signer, plan, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash } = await buildSignedTx(ctx);
       try {
         await onBroadcast?.({ txHash: preBroadcastTxHash });
@@ -1662,7 +1638,7 @@ export class EVMChainAdapterBase {
       );
       if (!receipt) onNullReceipt(preBroadcastTxHash);
       return receipt;
-    }, 'v10-allowance-recovery');
+    });
   }
 
   protected async sendPopulatedTransaction(
@@ -1707,21 +1683,21 @@ export class EVMChainAdapterBase {
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
-    return this.withSerializedSignerWrite(signer, (ctx) =>
+    return this.withSerializedSignerWrite(signer, this.singleTransactionSignerWritePlan(), (ctx) =>
       ctx.sendContractTransaction(contract, method, args, signer, label, opts),
     );
   }
 
   /**
-   * Owns the per-wallet serializer and exposes the unlocked write primitive
-   * only to code already running inside that serializer window.
+   * Owns the per-wallet signer-write lane and exposes the unlocked primitive
+   * only to code already running inside that nonce-critical window.
    */
   protected async withSerializedSignerWrite<T>(
     signer: Wallet,
+    plan: SignerWritePlan,
     fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
-    profile: SignerWriteProfileName = 'single-transaction',
   ): Promise<T> {
-    return this.signerTxSerializer.run(signer.address, () =>
+    return this.signerWriteLane.run(signer.address, plan, () =>
       fn({
         sendContractTransaction: (contract, method, args, innerSigner, label, opts) => {
           if (ethers.getAddress(innerSigner.address) !== ethers.getAddress(signer.address)) {
@@ -1732,17 +1708,17 @@ export class EVMChainAdapterBase {
           return this.sendContractTransactionUnlocked(contract, method, args, innerSigner, label, opts);
         },
       }),
-      {
-        // Read the live endpoint width when the entry is queued. The failover
-        // client deliberately observes providers/rpcUrls reassignments through
-        // a thunk, so its lane budget must not snapshot constructor-time width.
-        executionBudgetMs: this.signerWriteExecutionBudgetMs(profile),
-      },
     );
   }
 
-  protected signerWriteExecutionBudgetMs(profile: SignerWriteProfileName): number {
-    return signerTxExecutionBudgetMs(this.providers.length, SIGNER_WRITE_PROFILES[profile]);
+  protected singleTransactionSignerWritePlan(): SignerWritePlan {
+    // Read the live endpoint width when the entry is queued. RpcFailoverClient
+    // deliberately observes providers/rpcUrls reassignments through a thunk,
+    // so the lane plan must not snapshot constructor-time width.
+    return new SignerWritePlan().reserve(
+      'single contract transaction',
+      signerTransactionExecutionBudgetMs(this.providers.length),
+    );
   }
 
   private async sendContractTransactionUnlocked(
@@ -1820,7 +1796,7 @@ export class EVMChainAdapterBase {
       tokenWithSigner,
       'token.allowance',
       (token) => token.allowance(signer.address, kav10Address),
-      { policy: 'alwaysCappedPointRead' },
+      { policy: 'cappedPointRead' },
     );
     const { needsApprove, targetAllowance } = computeApprovalAction(
       this.approvalPolicy,
@@ -1908,7 +1884,7 @@ export class EVMChainAdapterBase {
           token,
           'allowance visibility poll',
           (c) => c.allowance(owner, spender),
-          { policy: 'alwaysCappedPointRead' },
+          { policy: 'cappedPointRead' },
         )) as bigint;
       } catch {
         // Transient read failure / stall timeout — treat as not-yet-visible
@@ -2111,7 +2087,7 @@ export class EVMChainAdapterBase {
       // straight through to the first funded candidate when none is idle or the
       // preference is off — so it can never EXCLUDE a wallet, only reorder.
       if (preferIdle && !this.idleAwareSelectionDisabled) {
-        const idle = fundableIdx.find((i) => !this.signerTxSerializer.isActive(candidates[i].address));
+        const idle = fundableIdx.find((i) => !this.signerWriteLane.isActive(candidates[i].address));
         if (idle !== undefined) return candidates[idle];
       }
       return candidates[fundableIdx[0]];
@@ -2256,7 +2232,7 @@ export class EVMChainAdapterBase {
         (p) => p.getBalance(address),
         // Fail-open funding read: keep a HARD per-attempt cap even on the
         // last / single provider so a hung RPC can't stall wallet selection.
-        { policy: 'failOpenFundingRead' },
+        { policy: 'cappedPointRead' },
       );
     } catch {
       return null;
@@ -2269,7 +2245,7 @@ export class EVMChainAdapterBase {
     try {
       return (await this.readContractWith(
         token, 'token.balanceOf', (c) => c.balanceOf(address),
-        { policy: 'failOpenFundingRead' },
+        { policy: 'cappedPointRead' },
       )) as bigint;
     } catch {
       return null;

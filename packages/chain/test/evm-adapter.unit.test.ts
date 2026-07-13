@@ -3365,7 +3365,7 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
       throw new Error(`unexpected RPC method ${method}`);
     });
 
-    // R1/#1336: readTracBalance now reads via readContractWith (failOpenFundingRead
+    // R1/#1336: readTracBalance now reads via readContractWith (cappedPointRead
     // policy) → rebindContract does `token.connect(p).balanceOf(addr)`, so the
     // CONNECTED contract (what token.connect returns) must expose balanceOf — not
     // just the top-level token. (Native getBalance still works: the helper mutates
@@ -4091,9 +4091,11 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gate, {
-        executionBudgetMs: (a as any).signerWriteExecutionBudgetMs('single-transaction'),
-      });
+      void (a as any).signerWriteLane.run(
+        walletA.address,
+        (a as any).singleTransactionSignerWritePlan(),
+        () => gate,
+      );
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // registered pool[0], despite gas-poor + busy
@@ -4107,9 +4109,11 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       // Both funded (helper default). Hold walletA (the round-robin head) busy.
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gate, {
-        executionBudgetMs: (a as any).signerWriteExecutionBudgetMs('single-transaction'),
-      });
+      void (a as any).signerWriteLane.run(
+        walletA.address,
+        (a as any).singleTransactionSignerWritePlan(),
+        () => gate,
+      );
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletB.address); // idle wallet preferred over the busy head
@@ -4122,12 +4126,16 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       let releaseA!: () => void; let releaseB!: () => void;
       const gA = new Promise<void>((r) => { releaseA = r; });
       const gB = new Promise<void>((r) => { releaseB = r; });
-      void (a as any).signerTxSerializer.run(walletA.address, () => gA, {
-        executionBudgetMs: (a as any).signerWriteExecutionBudgetMs('single-transaction'),
-      });
-      void (a as any).signerTxSerializer.run(walletB.address, () => gB, {
-        executionBudgetMs: (a as any).signerWriteExecutionBudgetMs('single-transaction'),
-      });
+      void (a as any).signerWriteLane.run(
+        walletA.address,
+        (a as any).singleTransactionSignerWritePlan(),
+        () => gA,
+      );
+      void (a as any).signerWriteLane.run(
+        walletB.address,
+        (a as any).singleTransactionSignerWritePlan(),
+        () => gB,
+      );
       try {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // both busy → first funded (head), not excluded
@@ -4226,9 +4234,11 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
         registerPool(a);
         let release!: () => void;
         const gate = new Promise<void>((r) => { release = r; });
-        void (a as any).signerTxSerializer.run(walletA.address, () => gate, {
-          executionBudgetMs: (a as any).signerWriteExecutionBudgetMs('single-transaction'),
-        });
+        void (a as any).signerWriteLane.run(
+          walletA.address,
+          (a as any).singleTransactionSignerWritePlan(),
+          () => gate,
+        );
         try {
           const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
           expect(chosen.address).toBe(walletA.address); // idle bias disabled → busy head still chosen

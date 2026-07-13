@@ -35,7 +35,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   resolveCapMs,
-  rpcAlwaysCappedPointReadExecutionBudgetMs,
+  rpcCappedPointReadExecutionBudgetMs,
   type SignPopulatedFn,
 } from '../src/rpc-failover-client.js';
 import {
@@ -75,23 +75,13 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
     expect(resolveCapMs('wideLogScan', 1)).toBeUndefined();
   });
 
-  it('watchdog policies cap single-RPC attempts with the matching point/log deadline', () => {
-    expect(resolveCapMs('watchdogPointRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(resolveCapMs('watchdogPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(resolveCapMs('watchdogWideLogScan', 1)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
-    expect(resolveCapMs('watchdogWideLogScan', 2)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
-  });
-
-  it('failOpenFundingRead: caps EVERY attempt incl. single-RPC at RPC_READ_STALL_TIMEOUT_MS', () => {
-    expect(resolveCapMs('failOpenFundingRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(resolveCapMs('failOpenFundingRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-  });
-
-  it('alwaysCappedPointRead: caps foreground reads and budgets every live endpoint', () => {
-    expect(resolveCapMs('alwaysCappedPointRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(resolveCapMs('alwaysCappedPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(rpcAlwaysCappedPointReadExecutionBudgetMs(1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(rpcAlwaysCappedPointReadExecutionBudgetMs(2)).toBe(2 * RPC_READ_STALL_TIMEOUT_MS);
+  it('canonical capped shapes cap every attempt, independent of caller domain', () => {
+    expect(resolveCapMs('cappedPointRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(resolveCapMs('cappedPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(resolveCapMs('cappedWideLogScan', 1)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
+    expect(resolveCapMs('cappedWideLogScan', 2)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
+    expect(rpcCappedPointReadExecutionBudgetMs(1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(rpcCappedPointReadExecutionBudgetMs(2)).toBe(2 * RPC_READ_STALL_TIMEOUT_MS);
   });
 });
 
@@ -149,12 +139,12 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     expect(slowView.calls).toHaveLength(1);
   });
 
-  it('read SINGLE-RPC watchdogPointRead caps background watcher reads', async () => {
+  it('read SINGLE-RPC cappedPointRead caps background watcher reads', async () => {
     vi.useFakeTimers();
     const slow = recorder(() => new Promise<string>((r) => { setTimeout(() => r('ONLY'), 5_000); }));
     const client = makeClient([{ read: slow }], ['https://only.example']);
 
-    const settled = client.read('watcher point read', (pr: any) => pr.read(), { policy: 'watchdogPointRead' })
+    const settled = client.read('watcher point read', (pr: any) => pr.read(), { policy: 'cappedPointRead' })
       .then((r: unknown) => r, (e: unknown) => e);
     await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1_500);
 
@@ -163,7 +153,7 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     expect(slow.calls).toHaveLength(1);
   });
 
-  it('readContract SINGLE-RPC watchdogPointRead caps background watcher views', async () => {
+  it('readContract SINGLE-RPC cappedPointRead caps background watcher views', async () => {
     vi.useFakeTimers();
     const slowView = recorder(() => new Promise<string>((r) => { setTimeout(() => r('ONLY'), 5_000); }));
     const contract = { connect: () => ({ view: slowView }) } as any;
@@ -173,7 +163,7 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
       'watcher view',
       contract,
       (c: any) => c.view(),
-      { policy: 'watchdogPointRead' },
+      { policy: 'cappedPointRead' },
     ).then((r: unknown) => r, (e: unknown) => e);
     await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1_500);
 
@@ -182,7 +172,7 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     expect(slowView.calls).toHaveLength(1);
   });
 
-  it('readContract SINGLE-RPC alwaysCappedPointRead caps a foreground allowance gate', async () => {
+  it('readContract SINGLE-RPC cappedPointRead caps a foreground allowance gate', async () => {
     vi.useFakeTimers();
     const hungAllowance = recorder(() => new Promise<bigint>(() => {}));
     const contract = { connect: () => ({ allowance: hungAllowance }) } as any;
@@ -192,7 +182,7 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
       'token.allowance',
       contract,
       (c: any) => c.allowance('owner', 'spender'),
-      { policy: 'alwaysCappedPointRead' },
+      { policy: 'cappedPointRead' },
     ).then((r: unknown) => r, (e: unknown) => e);
     await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1);
 

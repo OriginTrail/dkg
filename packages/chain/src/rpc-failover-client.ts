@@ -102,12 +102,12 @@ export function rpcReceiptLookupPassExecutionBudgetMs(endpointCount: number): nu
     * phaseTimeoutTotalMs(RECEIPT_LOOKUP_PHASE_TIMEOUT_MS);
 }
 
-/** Worst-case bound for one always-capped point-read pass across live endpoints. */
-export function rpcAlwaysCappedPointReadExecutionBudgetMs(endpointCount: number): number {
+/** Worst-case bound for one canonical capped point-read pass across live endpoints. */
+export function rpcCappedPointReadExecutionBudgetMs(endpointCount: number): number {
   const count = normalizedEndpointCount(endpointCount);
-  const perEndpointCapMs = resolveCapMs('alwaysCappedPointRead', count);
+  const perEndpointCapMs = resolveCapMs('cappedPointRead', count);
   if (perEndpointCapMs == null) {
-    throw new Error('alwaysCappedPointRead must always define a per-endpoint timeout');
+    throw new Error('cappedPointRead must always define a per-endpoint timeout');
   }
   return count * perEndpointCapMs;
 }
@@ -130,22 +130,19 @@ export interface RpcEndpoint {
  * {@link resolveCapMs}.
  *   - `pointRead`           — a single `eth_call` / point provider read.
  *   - `wideLogScan`         — a multi-thousand-block `eth_getLogs` scan.
- *   - `watchdogPointRead`   — a background point read that must not wedge a
- *     one-RPC node.
- *   - `watchdogWideLogScan` — a background log scan that must not wedge a
- *     one-RPC node.
- *   - `alwaysCappedPointRead` — a foreground point read capped on every
- *     endpoint, including a single-RPC client.
- *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
- *     stall selection (capped on EVERY attempt, including single-RPC).
+ *   - `cappedPointRead`   — the canonical point-read shape with a cap on EVERY
+ *     attempt, including single-RPC clients (allowance, funding, watchdog).
+ *   - `cappedWideLogScan` — the canonical wide-scan shape with a cap on EVERY
+ *     attempt, including single-RPC clients (background watchdog scans).
+ *
+ * Caller/domain attribution belongs in the read label / `rpcUsageConsumer`,
+ * not in this transport-behavior enum.
  */
 export type ReadPolicy =
   | 'pointRead'
   | 'wideLogScan'
-  | 'watchdogPointRead'
-  | 'watchdogWideLogScan'
-  | 'alwaysCappedPointRead'
-  | 'failOpenFundingRead';
+  | 'cappedPointRead'
+  | 'cappedWideLogScan';
 
 /** Per-read options: timeout/failover behavior plus an explicit low-cardinality
  *  telemetry consumer key for `eth_call` attribution. `label` remains a human
@@ -258,25 +255,16 @@ export function isContractViewRetryable(err: unknown): boolean {
  *   |---------------------|--------------------------|-------------------------|
  *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         |
  *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
- *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
- *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
- *   | alwaysCappedPointRead | RPC_READ_STALL (4s)    | RPC_READ_STALL (4s)    |
- *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
+ *   | cappedPointRead     | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
+ *   | cappedWideLogScan   | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
  *
  * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
- * to; #894). The watchdog policies are for background reads that must clear
- * their scheduler gate even on one-RPC nodes, without imposing a poll-level
- * deadline over a multi-RPC failover sequence.
+ * to; #894). The capped variants preserve the same read shape while ensuring a
+ * foreground gate or background watcher also clears on a one-RPC node.
  */
 export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
-  if (
-    policy === 'alwaysCappedPointRead'
-    || policy === 'failOpenFundingRead'
-    || policy === 'watchdogPointRead'
-  ) {
-    return RPC_READ_STALL_TIMEOUT_MS;
-  }
-  if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
+  if (policy === 'cappedPointRead') return RPC_READ_STALL_TIMEOUT_MS;
+  if (policy === 'cappedWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
   if (providerCount <= 1) return undefined;
   return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
 }
@@ -731,7 +719,7 @@ export class RpcFailoverClient {
    * and fails over a hung backend; the cap comes from the named `policy` via
    * {@link resolveCapMs} (multi-RPC caps each attempt; single-RPC is uncapped for
    * `pointRead`/`wideLogScan` — #894, nothing to fail over to — while watchdog
-   * policies and `failOpenFundingRead` cap even single-RPC attempts). The
+   * `cappedPointRead` / `cappedWideLogScan` cap even single-RPC attempts). The
    * `endpoints` are read LIVE from the injected thunk so a mid-flight reassignment
    * of the pool is observed.
    */

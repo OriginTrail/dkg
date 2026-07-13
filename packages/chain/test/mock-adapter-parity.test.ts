@@ -150,10 +150,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'sendPopulatedTransaction',
   'sendContractTransaction',
   // TS-private / protected write-serialization plumbing. The EVM adapter uses
-  // this scope to expose an unlocked sender only while the per-wallet serializer
+  // this scope to expose an unlocked sender only while the per-wallet signer lane
   // is held; the mock has no nonce-sign-broadcast window to mirror.
   'withSerializedSignerWrite',
-  'signerWriteExecutionBudgetMs',
+  'singleTransactionSignerWritePlan',
   'sendContractTransactionUnlocked',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
@@ -171,7 +171,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'populateAndSignV10WithAllowanceRecovery',
   // TS-private shared dispatch for the two V10 write paths (#953). Serializes
   // the populate→sign→broadcast→confirm nonce window per operational wallet
-  // via KeyedSerializer. The mock has no nonce/broadcast surface to mirror —
+  // via SignerWriteLane. The mock has no nonce/broadcast surface to mirror —
   // its writes return typed results directly without populating a tx.
   'dispatchSerializedV10Write',
   // Lazy-cache helpers for frequently-resolved contracts — TS-private,

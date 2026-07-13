@@ -9,13 +9,13 @@
  * so the second reverts "Nonce too low" and the publish degrades to a
  * tentative kaId:0. These tests drive the actual seam (private methods reached
  * via `as any`, the same convention the rest of evm-adapter.unit.test.ts uses)
- * so deleting the `signerTxSerializer.run(...)` wrap turns the suite red.
+ * so deleting the `signerWriteLane.run(...)` wrap turns the suite red.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import {
-  rpcAlwaysCappedPointReadExecutionBudgetMs,
+  rpcCappedPointReadExecutionBudgetMs,
   rpcBroadcastPassExecutionBudgetMs,
   rpcPopulateAndSignExecutionBudgetMs,
   rpcReceiptLookupPassExecutionBudgetMs,
@@ -100,7 +100,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       }));
       const signer = new ethers.Wallet(DEPLOYER_PK);
       const operationBudgetMs = (a as any)
-        .signerWriteExecutionBudgetMs('single-transaction') as number;
+        .singleTransactionSignerWritePlan().executionBudgetMs as number;
       const endpointCount = 2;
       const expectedOperationBudgetMs =
         rpcPopulateAndSignExecutionBudgetMs(endpointCount)
@@ -113,13 +113,21 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
 
       let release!: () => void;
       const blocked = new Promise<void>((resolve) => { release = resolve; });
-      const first = (a as any).withSerializedSignerWrite(signer, async () => blocked);
+      const first = (a as any).withSerializedSignerWrite(
+        signer,
+        (a as any).singleTransactionSignerWritePlan(),
+        async () => blocked,
+      );
       let secondStarted = false;
       let secondSettled = false;
-      const second = (a as any).withSerializedSignerWrite(signer, async () => {
-        secondStarted = true;
-        return 'second';
-      }).then(
+      const second = (a as any).withSerializedSignerWrite(
+        signer,
+        (a as any).singleTransactionSignerWritePlan(),
+        async () => {
+          secondStarted = true;
+          return 'second';
+        },
+      ).then(
         (value: string) => { secondSettled = true; return value; },
         (error: unknown) => { secondSettled = true; throw error; },
       );
@@ -147,7 +155,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       const a = new EVMChainAdapter(minimalConfig());
       const signer = new ethers.Wallet(DEPLOYER_PK);
       const oneEndpointBudgetMs = (a as any)
-        .signerWriteExecutionBudgetMs('single-transaction') as number;
+        .singleTransactionSignerWritePlan().executionBudgetMs as number;
 
       // RpcFailoverClient intentionally reads this pair through a live thunk.
       // Rebind to two endpoints after construction and prove admission uses the
@@ -158,18 +166,26 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         'http://127.0.0.1:59997',
       ];
       const twoEndpointBudgetMs = (a as any)
-        .signerWriteExecutionBudgetMs('single-transaction') as number;
+        .singleTransactionSignerWritePlan().executionBudgetMs as number;
       expect(twoEndpointBudgetMs).toBeGreaterThan(oneEndpointBudgetMs);
 
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      const first = (a as any).withSerializedSignerWrite(signer, async () => gate);
+      const first = (a as any).withSerializedSignerWrite(
+        signer,
+        (a as any).singleTransactionSignerWritePlan(),
+        async () => gate,
+      );
       let secondStarted = false;
       let secondSettled = false;
-      const second = (a as any).withSerializedSignerWrite(signer, async () => {
-        secondStarted = true;
-        return 'second';
-      }).then(
+      const second = (a as any).withSerializedSignerWrite(
+        signer,
+        (a as any).singleTransactionSignerWritePlan(),
+        async () => {
+          secondStarted = true;
+          return 'second';
+        },
+      ).then(
         (value: string) => { secondSettled = true; return value; },
         (error: unknown) => { secondSettled = true; throw error; },
       );
@@ -193,19 +209,11 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       const signer = new ethers.Wallet(DEPLOYER_PK);
       const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
       const transactionBudgetMs = (a as any)
-        .signerWriteExecutionBudgetMs('single-transaction') as number;
-      const v10BudgetMs = (a as any)
-        .signerWriteExecutionBudgetMs('v10-allowance-recovery') as number;
+        .singleTransactionSignerWritePlan().executionBudgetMs as number;
       const failedPopulateBudgetMs = rpcPopulateAndSignExecutionBudgetMs(1);
-      const allowanceReadBudgetMs = rpcAlwaysCappedPointReadExecutionBudgetMs(1);
+      const allowanceReadBudgetMs = rpcCappedPointReadExecutionBudgetMs(1);
       const allowanceVisibilityBudgetMs = 6 * allowanceReadBudgetMs
         + [250, 500, 750, 1000, 1250].reduce((total, value) => total + value, 0);
-      const oldBudgetWithoutAllowancePhases = 3 * transactionBudgetMs + failedPopulateBudgetMs;
-      expect(v10BudgetMs).toBe(
-        oldBudgetWithoutAllowancePhases
-        + 2 * allowanceReadBudgetMs
-        + allowanceVisibilityBudgetMs,
-      );
 
       const tokenWithSigner = connectable({});
       (a as any).contracts.token = { connect: recorder(() => tokenWithSigner) };
@@ -291,14 +299,11 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         },
       );
 
-      // One millisecond before the complete bound, the predecessor is still
-      // validly finishing its final publish after two allowance reads and the
-      // forced visibility poll. The queued write must remain admitted.
-      await vi.advanceTimersByTimeAsync(v10BudgetMs - 2);
-      expect(secondBuilt).toBe(false);
-      expect(secondSettled).toBe(false);
-
-      await vi.advanceTimersByTimeAsync(1);
+      // Drive the actual maximum recovery path to completion. If its co-located
+      // signer-write plan omits any phase, the successor's admission timer fires
+      // before this sequence drains and `secondError` becomes non-undefined.
+      // The test deliberately does not duplicate the plan's complete formula.
+      await vi.runAllTimersAsync();
       await expect(first).resolves.toMatchObject({ hash: 'first' });
       await second;
       expect(secondError).toBeUndefined();
@@ -460,10 +465,10 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         }),
       },
     };
-    const serializer = (a as any).signerTxSerializer;
-    const origRun = serializer.run.bind(serializer);
+    const signerWriteLane = (a as any).signerWriteLane;
+    const origRun = signerWriteLane.run.bind(signerWriteLane);
     const runSpy = recorder((...args: unknown[]) => origRun(...args));
-    serializer.run = runSpy;
+    signerWriteLane.run = runSpy;
     const SENTINEL = 'APPROVE_REACHED_INSIDE_LOCK';
     const ensureV10ApproveTrac = recorder(async () => {
       throw new Error(SENTINEL);
@@ -572,7 +577,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
   it('serializes concurrent SAME-wallet standalone sends (RS/staking/PCA now hold the lock too)', async () => {
     // Before Phase 1 these calls hit `sendContractTransaction` raw — no lock —
     // so two same-wallet sends could read the same pending nonce. Now the
-    // public wrapper acquires `signerTxSerializer.run(signer.address, ...)`.
+    // public wrapper acquires `signerWriteLane.run(signer.address, plan, ...)`.
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
     const events: string[] = [];
@@ -717,7 +722,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     // The actual Phase-1 win: RS create/submit used to bypass the per-wallet
     // lock, so a publish rotated onto wallet #0 and a concurrent RS tx could
     // read the same pending nonce. Now BOTH funnel through the one
-    // `signerTxSerializer` keyed by address → their send windows never interleave.
+    // `signerWriteLane` keyed by address → their send windows never interleave.
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
     const events: string[] = [];
