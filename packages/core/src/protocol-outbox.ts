@@ -35,7 +35,6 @@ import type {
   ProtocolOutboxStore,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
-import { normalizeProtocolOutboxDueLimit } from './outbox-due-policy.js';
 
 export interface ProtocolOutboxOptions {
   /**
@@ -103,17 +102,9 @@ export class ProtocolOutbox {
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
-   * same `(peer, protocol, messageId)`. Two trigger surfaces — the
-   * periodic tick (`Messenger.processOutboxTick`) and the
-   * opportunistic flush on `connection:open`
-   * (`Messenger.processOutboxOnConnect`) — can interleave: the tick
-   * starts the send for entry E, JS yields, `connection:open` fires,
-   * the on-connect handler reads `pendingFor(peer)` (entry E is still
-   * there — `markDelivered` hasn't fired yet because the in-flight
-   * send hasn't resolved), and would start a CONCURRENT second send
-   * for the same entry. Worst case both succeed and the receiver sees
-   * the same payload twice (receiver dedup absorbs it, but we waste
-   * a round-trip and amplify load).
+   * same `(peer, protocol, messageId)`. Overlapping scheduler callers or
+   * another explicit sender can otherwise interleave around a stale due
+   * snapshot and duplicate the same wire attempt.
    *
    * `tryBeginAttempt` is an atomic check-and-set: the second
    * concurrent attempter sees `false` and exits without dialing.
@@ -202,18 +193,31 @@ export class ProtocolOutbox {
     return this.store.hasEntry(peer, protocol, messageId);
   }
 
-  /** Ordered due page; the store port owns normalization and deterministic order. */
-  due(now: number, limit?: number): ProtocolOutboxEntry[] {
-    return this.store.due(now, limit);
+  /** All due entries in deterministic retry order. */
+  due(now: number): ProtocolOutboxEntry[] {
+    return this.duePage(now);
   }
 
   /**
-   * All entries for `peer`, regardless of `nextAttemptAt`. Used by
-   * `Messenger.processOutboxOnConnect` for opportunistic flush on
-   * reconnection.
+   * Canonical bounded due-page boundary. The wrapper owns input normalization,
+   * deterministic ordering, and the defensive cap; stores only optimize the
+   * already-normalized query when they support it.
    */
-  pendingFor(peer: string): ProtocolOutboxEntry[] {
-    return this.store.pendingFor(peer);
+  duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
+    const normalizedLimit = limit === undefined || !Number.isFinite(limit)
+      ? undefined
+      : Math.max(0, Math.floor(limit));
+    const entries = this.store.due(now, normalizedLimit)
+      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt
+        || a.firstFailureAt - b.firstFailureAt
+        || a.peer.localeCompare(b.peer)
+        || a.protocol.localeCompare(b.protocol)
+        || a.messageId.localeCompare(b.messageId));
+    return normalizedLimit === undefined ? entries : entries.slice(0, normalizedLimit);
+  }
+
+  hasPendingFor(peer: string): boolean {
+    return this.store.hasPendingFor(peer);
   }
 
   /** Drop entries older than the store's configured max-age. */
@@ -328,15 +332,11 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     return this.entries.has(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
   }
 
-  pendingFor(peer: string): ProtocolOutboxEntry[] {
-    return Array.from(this.entries.values())
-      .filter((e) => e.peer === peer)
-      .sort((a, b) => a.firstFailureAt - b.firstFailureAt)
-      .map(cloneOutboxEntry);
+  hasPendingFor(peer: string): boolean {
+    return Array.from(this.entries.values()).some((entry) => entry.peer === peer);
   }
 
   due(now: number, limit?: number): ProtocolOutboxEntry[] {
-    const boundedLimit = normalizeProtocolOutboxDueLimit(limit);
     const entries = Array.from(this.entries.values())
       .filter((e) => e.nextAttemptAt <= now)
       .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt
@@ -344,7 +344,7 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
         || a.peer.localeCompare(b.peer)
         || a.protocol.localeCompare(b.protocol)
         || a.messageId.localeCompare(b.messageId));
-    return (boundedLimit === undefined ? entries : entries.slice(0, boundedLimit))
+    return (limit === undefined ? entries : entries.slice(0, limit))
       .map(cloneOutboxEntry);
   }
 
@@ -364,12 +364,12 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   list(): ProtocolOutboxEntry[] {
-    return Array.from(this.entries.values()).map((e) => ({ ...e }));
+    return Array.from(this.entries.values()).map(cloneOutboxEntry);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
     const entry = this.entries.get(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
-    return entry ? { ...entry } : undefined;
+    return entry ? cloneOutboxEntry(entry) : undefined;
   }
 }
 

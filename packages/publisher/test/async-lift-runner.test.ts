@@ -61,6 +61,7 @@ describe('AsyncLiftRunner', () => {
     });
 
     await runner.start();
+    await waitFor(() => expect(order).toContain('process'));
     await runner.stop();
 
     expect(order[0]).toBe('recover');

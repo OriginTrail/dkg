@@ -891,9 +891,8 @@ export class DKGAgentBase {
   protected hostModeReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   protected hostModePruneTimer: ReturnType<typeof setInterval> | null = null;
   // rc.9 PR-10: joinApprovalRetryQueue + joinApprovalRetryTimer
-  // deleted. The substrate's SQLite-backed ProtocolOutbox + its tick
-  // (`Messenger.processOutboxTick`) + opportunistic on-connect flush
-  // (`Messenger.processOutboxOnConnect`) replace the entire in-memory
+  // deleted. The substrate's SQLite-backed ProtocolOutbox + its
+  // scheduled tick (`Messenger.processOutboxTick`) replace the in-memory
   // queue: persistence across restart, generic per-protocol coverage,
   // identical backoff-ladder semantics. Operator-facing diagnostics
   // (`listPendingJoinApprovalRetries`) are stubbed to [] until PR-12

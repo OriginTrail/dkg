@@ -180,7 +180,6 @@ export {
   RESPONSE_CACHE_BYTES,
   RESPONSE_GONE_MARKER,
 } from './messenger-types.js';
-export { normalizeProtocolOutboxDueLimit } from './outbox-due-policy.js';
 export {
   ProtocolOutbox,
   type ProtocolOutboxOptions,

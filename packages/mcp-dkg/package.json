@@ -42,6 +42,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@modelcontextprotocol/sdk": "^1",
     "zod": "^3.25",
     "yaml": "^2.6.0"

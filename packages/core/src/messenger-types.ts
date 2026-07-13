@@ -197,29 +197,25 @@ export interface ProtocolOutboxStore {
 
   /**
    * Whether an entry exists for `(peer, protocol, messageId)`. Used
-   * by the stale-snapshot guard in `Messenger.processOutboxOnConnect`
-   * — between `tryBeginAttempt` (inflight lock) and the wire send,
+   * by the scheduled drain's stale-snapshot guard — between
+   * `tryBeginAttempt` (inflight lock) and the wire send,
    * a sibling flush may have already delivered + removed the entry,
    * and we must not double-send. The rc9 #538 fix lifted into the
    * generic substrate.
    */
   hasEntry(peer: string, protocol: string, messageId: string): boolean;
 
-  /**
-   * All entries for a specific peer, regardless of `nextAttemptAt`.
-   * Used by `processOutboxOnConnect`: a reconnection is the signal
-   * we were waiting for, so attempt now even if backoff isn't due
-   * yet. Sorted by `firstFailureAt` ascending for FIFO per-peer
-   * drain.
-   */
-  pendingFor(peer: string): ProtocolOutboxEntry[];
+  /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
+  hasPendingFor(peer: string): boolean;
 
   /**
-   * Entries whose `nextAttemptAt <= now`, ordered by `nextAttemptAt`,
-   * `firstFailureAt`, then `(peer, protocol, messageId)` ascending. `limit` is
-   * normalized by the canonical outbox due policy to a non-negative integer
-   * (or omitted for all rows). The STORE owns this normalization and ordering
-   * contract, including for direct calls. Used by the periodic retry scheduler.
+   * Efficient storage primitive for entries whose `nextAttemptAt <= now`.
+   * When supplied, `limit` has already been normalized to a non-negative
+   * integer by `ProtocolOutbox.duePage`. Implementations should apply it after
+   * ordering by `nextAttemptAt`, `firstFailureAt`, then
+   * `(peer, protocol, messageId)` ascending. The wrapper defensively reorders
+   * and caps the result so older stores that ignore this optional parameter
+   * remain safe.
    */
   due(now: number, limit?: number): ProtocolOutboxEntry[];
 

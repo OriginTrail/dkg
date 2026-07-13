@@ -11,8 +11,7 @@ describe('OutboxDrainer', () => {
         if (entry === 'failed') throw new Error('store write failed');
         await blocked;
       },
-      2,
-      2,
+      { batchSize: 2, concurrency: 2 },
     );
 
     const tick = drainer.tick(100);
@@ -24,5 +23,58 @@ describe('OutboxDrainer', () => {
     await expect(tick).rejects.toThrow('outbox retry worker');
     await waiting;
     expect(waitSettled).toBe(true);
+  });
+
+  it('defensively caps a due loader that ignores the requested limit', async () => {
+    const processed: number[] = [];
+    const drainer = new OutboxDrainer(
+      () => [1, 2, 3, 4],
+      async (entry) => { processed.push(entry); },
+      { batchSize: 2, concurrency: 1 },
+    );
+
+    await drainer.tick(100);
+    expect(processed).toEqual([1, 2]);
+  });
+
+  it('starts a fresh drain after a failed tick', async () => {
+    let fail = true;
+    let loads = 0;
+    const drainer = new OutboxDrainer(
+      () => { loads += 1; return ['entry']; },
+      async () => { if (fail) throw new Error('store write failed'); },
+      { batchSize: 1, concurrency: 1 },
+    );
+
+    await expect(drainer.tick(100)).rejects.toThrow('outbox retry worker');
+    fail = false;
+    await drainer.tick(200);
+    expect(loads).toBe(2);
+  });
+
+  it('stops pulling new entries while joining retries already in flight', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const started: number[] = [];
+    const drainer = new OutboxDrainer(
+      () => [1, 2, 3],
+      async (entry) => { started.push(entry); await blocked; },
+      { batchSize: 3, concurrency: 1 },
+    );
+
+    const tick = drainer.tick(100);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const stopping = drainer.stop();
+    expect(started).toEqual([1]);
+    release();
+    await Promise.all([tick, stopping]);
+    expect(started).toEqual([1]);
+  });
+
+  it('rejects invalid scheduler bounds at its own boundary', () => {
+    expect(() => new OutboxDrainer(() => [], async () => {}, { batchSize: 0, concurrency: 1 }))
+      .toThrow('batchSize must be a positive integer');
+    expect(() => new OutboxDrainer(() => [], async () => {}, { batchSize: 1, concurrency: 0 }))
+      .toThrow('concurrency must be a positive integer');
   });
 });

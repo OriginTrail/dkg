@@ -268,12 +268,12 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     agent = boot.agent;
     const internals = boot.internals;
     const response = new Uint8Array([9]);
-    const sendReliable = vi.fn(async () => ({
+    const sendRequestOwned = vi.fn(async () => ({
       delivered: true,
       response,
     }));
     const payload = new Uint8Array([1, 2, 3]);
-    internals.messenger = { sendReliable };
+    internals.messenger = { sendRequestOwned };
 
     internals.createV10ACKProvider('test-cg');
     const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
@@ -283,10 +283,10 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const updateDeps = capturedAckCollectorDeps[1] as ACKCollectorDepsCapture;
     await expect(updateDeps.sendP2P!('peer-b', '/dkg/test/storage-update-ack', payload)).resolves.toEqual(response);
 
-    expect(sendReliable).toHaveBeenNthCalledWith(1, 'peer-a', '/dkg/test/storage-ack', payload, {
+    expect(sendRequestOwned).toHaveBeenNthCalledWith(1, 'peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
-    expect(sendReliable).toHaveBeenNthCalledWith(2, 'peer-b', '/dkg/test/storage-update-ack', payload, {
+    expect(sendRequestOwned).toHaveBeenNthCalledWith(2, 'peer-b', '/dkg/test/storage-update-ack', payload, {
       timeoutMs: 60_000,
     });
   });
@@ -296,18 +296,18 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     agent = boot.agent;
     const internals = boot.internals;
     const response = new Uint8Array([9]);
-    const sendReliable = vi.fn(async () => ({
+    const sendRequestOwned = vi.fn(async () => ({
       delivered: true,
       response,
     }));
-    internals.messenger = { sendReliable };
+    internals.messenger = { sendRequestOwned };
     const payload = new Uint8Array([1]);
 
     internals.createV10ACKProvider('test-cg');
     const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
     await expect(publishDeps.sendP2P!('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);
 
-    expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
+    expect(sendRequestOwned).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
   });
@@ -340,11 +340,11 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     agent = boot.agent;
     const internals = boot.internals;
     const response = new Uint8Array([9]);
-    const sendReliable = vi.fn(async () => ({
+    const sendRequestOwned = vi.fn(async () => ({
       delivered: true,
       response,
     }));
-    internals.messenger = { sendReliable };
+    internals.messenger = { sendRequestOwned };
     const payload = new Uint8Array([1]);
 
     internals.createV10ACKProvider('test-cg');
@@ -355,7 +355,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       handlerDeadlineMs: 0,
       sendTimeoutMs: 20_000,
     });
-    expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
+    expect(sendRequestOwned).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 20_000,
     });
   });
@@ -370,10 +370,10 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       delivered: false,
       error: 'queued',
     }));
-    internals.messenger = { sendReliable: queuedSend };
+    internals.messenger = { sendRequestOwned: queuedSend };
     await expect(
       internals.createACKTransportFactory()().sendP2P('peer-a', '/dkg/test/storage-ack', payload),
-    ).rejects.toThrow(/substrate queued \(transport\): queued/);
+    ).rejects.toThrow(/substrate send already in flight \(transport\): queued/);
     expect(queuedSend).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
@@ -381,7 +381,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const missingResponseSend = vi.fn(async () => ({
       delivered: true,
     }));
-    internals.messenger = { sendReliable: missingResponseSend };
+    internals.messenger = { sendRequestOwned: missingResponseSend };
     await expect(
       internals.createACKTransportFactory()().sendP2P('peer-a', '/dkg/test/storage-ack', payload),
     ).rejects.toThrow(/substrate delivered \(transport\) without response/);

@@ -65,6 +65,11 @@ const GOLDEN: Array<{ input: string; expected: string; note: string }> = [
   { input: 'form\ffeed', expected: '"form\\ffeed"', note: 'form-feed escaped' },
   { input: 'bs\bhere', expected: '"bs\\bhere"', note: 'backspace escaped' },
   { input: 'a"b\nc', expected: '"a\\"b\\nc"', note: 'quote + newline together' },
+  // ── non-ECHAR control chars (#416): must become \uXXXX, not pass through raw ──
+  { input: 'nul\u0000x', expected: '"nul\\u0000x"', note: 'NUL → \\u0000 UCHAR' },
+  { input: 'vt\u000Bx', expected: '"vt\\u000Bx"', note: 'vertical tab (0x0B) → \\u000B' },
+  { input: 'us\u001Fx', expected: '"us\\u001Fx"', note: 'unit separator (0x1F) → \\u001F' },
+  { input: 'del\u007Fx', expected: '"del\\u007Fx"', note: 'DEL (0x7F) → \\u007F' },
 ];
 
 describe('rdf-object-normalization conformance (dkg_knowledge_asset_create quads — cross-adapter parity)', () => {
@@ -90,5 +95,7 @@ describe('rdf-object-normalization conformance (dkg_knowledge_asset_create quads
   it('escapeRdfLiteralBody escapes the N-Triples ECHAR set (body only, no surrounding quotes)', () => {
     expect(escapeRdfLiteralBody('a\\b"c\nd\re\tf\fg\bh')).toBe('a\\\\b\\"c\\nd\\re\\tf\\fg\\bh');
     expect(escapeRdfLiteralBody('plain')).toBe('plain');
+    // #416: non-ECHAR C0 controls + DEL become \uXXXX (uppercase, 4-digit).
+    expect(escapeRdfLiteralBody('a\u0000b\u000Bc\u007Fd')).toBe('a\\u0000b\\u000Bc\\u007Fd');
   });
 });
