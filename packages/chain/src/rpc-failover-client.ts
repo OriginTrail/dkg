@@ -44,12 +44,13 @@ import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactio
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
+  RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   STICKY_PREFERRED_TTL_MS,
 } from './evm-adapter-constants.js';
@@ -608,11 +609,28 @@ export class RpcFailoverClient {
                 ),
                 lookup: async (hash, attemptNumber) => {
                   span.addEvent('receipt.attempt', { attempt: attemptNumber });
+                  // The outer endpoint pass races this complete callback against
+                  // its attempt/operation deadline, but a Promise race cannot
+                  // cancel the losing validation promise. Cap validation itself
+                  // to the same boundary so it cannot later resume and issue a
+                  // detached receipt RPC after the wait has already failed over
+                  // or timed out.
+                  const validationTimeoutMs = options.deadlineMs === undefined
+                    ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
+                    : Math.max(0, Math.min(
+                      RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+                      options.deadlineMs - Date.now(),
+                    ));
                   await this.validateEndpointForAttempt(
                     endpoint,
-                    undefined,
+                    validationTimeoutMs,
                     `receipt lookup chainId validation via RPC #${attemptNumber}`,
                   );
+                  if (options.deadlineMs !== undefined && Date.now() >= options.deadlineMs) {
+                    throw createRpcTimeoutError(
+                      `receipt lookup via RPC #${attemptNumber} exceeded its operation deadline`,
+                    );
+                  }
                   return endpoint.provider.getTransactionReceipt(hash);
                 },
               };

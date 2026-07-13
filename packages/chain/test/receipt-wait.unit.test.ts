@@ -41,10 +41,12 @@ describe('receipt deadline orchestration', () => {
     });
   });
 
-  it('caps endpoint validation with the same operation deadline before receipt lookup', async () => {
+  it('does not continue into receipt lookup when validation resolves after the deadline', async () => {
     vi.useFakeTimers({ now: 0 });
     const getTransactionReceipt = vi.fn(async () => null);
-    const validateEndpoint = vi.fn(async () => new Promise<void>(() => {}));
+    const validateEndpoint = vi.fn(async () => {
+      await new Promise<void>(resolve => setTimeout(resolve, 1_100));
+    });
     const client = new RpcFailoverClient(
       () => [{
         provider: { getTransactionReceipt } as any,
@@ -74,6 +76,29 @@ describe('receipt deadline orchestration', () => {
     });
     expect(validateEndpoint).toHaveBeenCalledTimes(1);
     expect(getTransactionReceipt).not.toHaveBeenCalled();
+
+    // The uncancelled validation promise itself may still resolve, but the
+    // lookup callback must already have terminated at its own deadline cap.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(getTransactionReceipt).not.toHaveBeenCalled();
+  });
+
+  it('uses the canonical reverted-receipt error for direct transaction waits', async () => {
+    const receipt = { status: 0, hash: '0xreverted' } as any;
+    const endpoint = {
+      provider: { getTransactionReceipt: vi.fn(async () => receipt) } as any,
+      rpcUrl: 'https://rpc.example',
+    };
+
+    await expect(waitForTransactionReceiptWithFailover(
+      [endpoint],
+      receipt.hash,
+      { receiptTimeoutMs: 1_000, logLabel: 'direct test' },
+    )).rejects.toMatchObject({
+      code: 'CALL_EXCEPTION',
+      receipt,
+      message: 'direct test tx 0xreverted was mined but reverted (status=0)',
+    });
   });
 
   it('treats omitted endpoint URLs as telemetry-only metadata', async () => {

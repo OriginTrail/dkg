@@ -163,9 +163,13 @@ export function isThrottleRpcError(err: unknown): boolean {
 
 export function assertSuccessfulReceipt(receipt: ethers.TransactionReceipt, label: string): void {
   if (receipt.status !== 0) return;
-  const err = new Error(`${label} tx ${receipt.hash} was mined but reverted (status=0)`);
-  (err as any).code = 'CALL_EXCEPTION';
-  (err as any).receipt = receipt;
+  const err = Object.assign(
+    new Error(`${label} tx ${receipt.hash} was mined but reverted (status=0)`),
+    {
+      code: 'CALL_EXCEPTION' as const,
+      receipt,
+    },
+  );
   throw err;
 }
 

@@ -4,6 +4,7 @@ import { type JsonRpcProvider, type TransactionReceipt } from 'ethers';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import {
+  assertSuccessfulReceipt,
   isRetryableRpcError,
   sleep,
   withTimeout,
@@ -226,13 +227,7 @@ export async function waitForTransactionReceiptWithFailover(
         logLabel: `${logLabel} receipt lookup`,
       })
     ).receipt,
-    assertSuccessfulReceipt: (receipt) => {
-      if (receipt.status !== 0) return;
-      const err = new Error(`Transaction ${txHash} was mined but reverted (status=0)`);
-      (err as any).code = 'CALL_EXCEPTION';
-      (err as any).receipt = receipt;
-      throw err;
-    },
+    assertSuccessfulReceipt: receipt => assertSuccessfulReceipt(receipt, logLabel),
     formatTimeoutMessage: () =>
       `Transaction ${txHash} was broadcast but no receipt was found within ${receiptTimeoutMs}ms`,
   });
