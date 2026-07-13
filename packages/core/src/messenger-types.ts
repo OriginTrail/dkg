@@ -208,8 +208,10 @@ export interface ProtocolOutboxStore {
   /**
    * Snapshot every durable row for one peer. This is the pre-#1579 public
    * contract retained for custom store compatibility and diagnostics/DHT
-   * bookkeeping only. Automatic retries MUST continue to select from `due` or
-   * `duePage`; a connection event must never drain this snapshot.
+   * bookkeeping only. Results are ordered by `firstFailureAt` ascending (with
+   * implementation-defined tie order), matching the legacy contract.
+   * Automatic retries MUST continue to select from `due` or `duePage`; a
+   * connection event must never drain this snapshot.
    */
   pendingFor(peer: string): ProtocolOutboxEntry[];
 
