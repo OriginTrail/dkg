@@ -2599,6 +2599,47 @@ export async function runDaemonInner(
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
+  // A time window cannot bound a same-day log storm. Trim an oversized
+  // dashboard DB incrementally after startup so upgrading a multi-GB node does
+  // not block its boot on one huge DELETE/VACUUM. Small batches smooth event-
+  // loop impact; after the cap is reached DashboardDB performs one compaction
+  // that returns the free pages to the OS. Steady-state probes share the normal
+  // six-hour prune cadence.
+  const LOG_VOLUME_PRUNE_INITIAL_DELAY_MS = 60_000;
+  const LOG_VOLUME_PRUNE_CATCHUP_INTERVAL_MS = 15_000;
+  const LOG_VOLUME_RECLAIM_RETRY_MS = 10 * 60_000;
+  let logVolumePruneTimer: ReturnType<typeof setTimeout> | null = null;
+  let logVolumeRowsDeleted = 0;
+  const scheduleLogVolumePrune = (delayMs: number): void => {
+    logVolumePruneTimer = setTimeout(() => {
+      try {
+        const result = dashDb.pruneLogVolumeBatch();
+        logVolumeRowsDeleted += result.deleted;
+        if (!result.hasMore && !result.reclaimPending && (logVolumeRowsDeleted > 0 || result.compacted)) {
+          log(
+            `Dashboard log-volume cleanup removed ${logVolumeRowsDeleted} old routine row(s)` +
+              (result.compacted ? ' and compacted node-ui.db' : ''),
+          );
+          logVolumeRowsDeleted = 0;
+        }
+        scheduleLogVolumePrune(
+          result.hasMore
+            ? LOG_VOLUME_PRUNE_CATCHUP_INTERVAL_MS
+            : result.reclaimPending
+              ? LOG_VOLUME_RECLAIM_RETRY_MS
+              : PRUNE_INTERVAL_MS,
+        );
+      } catch (err) {
+        log(
+          `Dashboard log-volume cleanup deferred: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        scheduleLogVolumePrune(LOG_VOLUME_RECLAIM_RETRY_MS);
+      }
+    }, delayMs);
+    logVolumePruneTimer.unref();
+  };
+  scheduleLogVolumePrune(LOG_VOLUME_PRUNE_INITIAL_DELAY_MS);
+
   // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent
   // ~$200 of RPC credits in a day with nothing measuring it). The whole
   // Wiring only (scheduling/format live in rpc-usage-log.ts, unit-tested).
@@ -3454,6 +3495,7 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        if (logVolumePruneTimer) clearTimeout(logVolumePruneTimer);
         // Clears the timer AND performs the final best-effort drain (BEFORE
         // telemetry stops), so a partial window still reaches Loki — keeps
         // log-derived request totals exact across process lifecycles.

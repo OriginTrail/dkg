@@ -139,6 +139,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     // size-rotated, independent of the retention window).
     expect(c.textContent ?? '').not.toMatch(/daemon\.log/i);
     expect(c.textContent ?? '').toMatch(/pruned automatically/i);
+    expect(c.textContent ?? '').toMatch(/routine logs also have a size safety cap/i);
   });
 
   it('reducing retention shows the reduce-confirm group, focuses Prune & Save, and Escape-free Cancel dismisses it', async () => {
