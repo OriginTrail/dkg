@@ -654,6 +654,9 @@ importers:
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       js-yaml:
         specifier: ^4.1.1
         version: 4.1.1
@@ -846,6 +849,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1
         version: 1.27.1(zod@3.25.76)
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       yaml:
         specifier: ^2.6.0
         version: 2.8.3
@@ -1105,6 +1111,15 @@ importers:
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/rdf-utils:
+    devDependencies:
+      '@vitest/coverage-v8':
+        specifier: ^4.0.18
+        version: 4.0.18(vitest@4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)

@@ -21,9 +21,16 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
+import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
+import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
+import {
+  childOwnsListenPort,
+  findListenOwnerPid,
+} from '../src/daemon/oxigraph-listen-port.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -116,7 +123,132 @@ function startOpts(port: number, extra: Record<string, unknown> = {}) {
   };
 }
 
+describe('buildOxigraphSpawnSpec', () => {
+  it('launches the binary directly when memory isolation is not configured', () => {
+    const strategy = createOxigraphLaunchStrategy({
+      platform: 'linux',
+      parentPid: 42,
+      uid: 1000,
+    });
+    expect(strategy.nextSpawnSpec('/opt/oxigraph', ['serve']))
+      .toEqual({ command: '/opt/oxigraph', args: ['serve'] });
+  });
+
+  it('wraps Oxigraph in a finite systemd user scope', () => {
+    const strategy = createOxigraphLaunchStrategy({
+      memoryLimits: { highMiB: 2048, maxMiB: 3072 },
+      platform: 'linux',
+      parentPid: 42,
+      uid: 1000,
+      nodeExecutable: '/opt/node',
+      watchdogPath: '/opt/oxigraph-watchdog.js',
+    });
+    strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
+    strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
+    const spec = strategy.nextSpawnSpec(
+      '/opt/oxigraph',
+      ['serve', '--bind', '127.0.0.1:7878'],
+    );
+
+    expect(spec.command).toBe('systemd-run');
+    expect(spec.environment).toEqual({
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+    });
+    expect(spec.args.slice(0, 8)).toEqual([
+      '--user', '--scope', '--collect', '--quiet',
+      '--unit=dkg-oxigraph-42-3',
+      '--property=MemoryHigh=2048M',
+      '--property=MemoryMax=3072M',
+      '--property=MemorySwapMax=0',
+    ]);
+    expect(spec.args.slice(-7)).toEqual([
+      '/opt/node', '/opt/oxigraph-watchdog.js', '42',
+      '/opt/oxigraph', 'serve', '--bind', '127.0.0.1:7878',
+    ]);
+  });
+
+  it('fails closed when finite scope limits cannot be enforced', () => {
+    expect(() => createOxigraphLaunchStrategy({
+      memoryLimits: { maxMiB: 3072 },
+      platform: 'darwin',
+      parentPid: 42,
+      uid: 1000,
+    })).toThrow(/require Linux/);
+  });
+});
+
 describe('startOxigraphServer (real child processes)', () => {
+  it('threads memory limits through systemd launch, descendant readiness, and listener cgroup sampling', async () => {
+    const port = await freePort();
+    let launchedCommand = '';
+    let launchedArgs: readonly string[] = [];
+    let launchedEnv: NodeJS.ProcessEnv | undefined;
+    let ownershipPolicy: 'child-only' | 'process-tree' | undefined;
+    const snapshotPids: number[] = [];
+    const resolvedListenerPid = 424_242;
+
+    const injectedSpawn = ((command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      launchedCommand = command;
+      launchedArgs = args;
+      launchedEnv = options?.env;
+      const binaryIndex = args.indexOf(standin);
+      expect(binaryIndex).toBeGreaterThan(0);
+      return spawn(standin, args.slice(binaryIndex + 1), options);
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { highMiB: 128, maxMiB: 256 },
+      platform: 'linux',
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async (child: import('node:child_process').ChildProcess, _port: number, _host: string, ownership?: 'child-only' | 'process-tree') => {
+          ownershipPolicy = ownership;
+          expect(child.pid).toBeDefined();
+          return resolvedListenerPid;
+        },
+        readCgroupOomSnapshot: (pid: number) => {
+          snapshotPids.push(pid);
+          return { dir: '/sys/fs/cgroup/dkg-test-oxi', oomKill: 0 };
+        },
+      },
+    }));
+    try {
+      expect(launchedCommand).toBe('systemd-run');
+      expect(launchedArgs).toContain('--property=MemoryHigh=128M');
+      expect(launchedArgs).toContain('--property=MemoryMax=256M');
+      expect(launchedArgs).toContain('--property=MemorySwapMax=0');
+      expect(launchedEnv?.XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
+      expect(ownershipPolicy).toBe('process-tree');
+      expect(snapshotPids).toEqual([resolvedListenerPid]);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it.runIf(process.platform === 'linux')('accepts a descendant process as the verified listener owner', async () => {
+    const port = await freePort();
+    const wrapper = spawn('/bin/sh', [
+      '-c',
+      '"$@" & child=$!; trap \'kill -TERM "$child" 2>/dev/null; wait "$child" 2>/dev/null\' TERM; wait "$child"',
+      'wrapper',
+      standin,
+      'serve',
+      '--location', dir,
+      '--bind', `127.0.0.1:${port}`,
+    ], { stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 50 && !(await portAnswers(port)); i++) await sleep(20);
+      const listenerPid = await fetchPid(port);
+      expect(await childOwnsListenPort(wrapper, port, '127.0.0.1')).toBe(false);
+      expect(await childOwnsListenPort(wrapper, port, '127.0.0.1', 'process-tree')).toBe(true);
+      expect(await findListenOwnerPid(wrapper, port, '127.0.0.1', 'process-tree')).toBe(listenerPid);
+    } finally {
+      wrapper.kill('SIGTERM');
+      await new Promise<void>((resolve) => wrapper.once('exit', () => resolve()));
+    }
+  });
+
   it('spawns the binary and resolves once the real readiness probe answers', async () => {
     const port = await freePort();
     const handle = await startOxigraphServer(startOpts(port));
@@ -236,6 +368,124 @@ describe('startOxigraphServer OOM classification in the restart log', () => {
     }
     return false;
   }
+
+  it('attributes a scoped wrapper SIGKILL using the resolved Oxigraph listener cgroup', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const listenerPid = 777_777;
+    const snapshotPids: number[] = [];
+    let launched: import('node:child_process').ChildProcess | undefined;
+    let oomKillAtExit = 5;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      launched = spawn(standin, args.slice(binaryIndex + 1), options);
+      return launched;
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      log: (message: string) => logs.push(message),
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async () => listenerPid,
+        readCgroupOomSnapshot: (pid: number) => {
+          snapshotPids.push(pid);
+          return { dir: '/sys/fs/cgroup/dkg-scoped-oxi', oomKill: 5 };
+        },
+        readCgroupOomKill: () => oomKillAtExit,
+      },
+    }));
+    try {
+      expect(snapshotPids).toEqual([listenerPid]);
+      oomKillAtExit = 6;
+      launched!.kill('SIGKILL');
+      expect(await waitForLog(logs, /OOM-killed by cgroup memory cap/)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('attributes a scoped command OOM when its wrapper translates SIGKILL to exit 137', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let oomKillAtExit = 9;
+    const wrapperProgram = `
+      const { spawn } = require('node:child_process');
+      const [command, ...args] = process.argv.slice(1);
+      const child = spawn(command, args, { stdio: 'inherit' });
+      process.on('SIGTERM', () => child.kill('SIGTERM'));
+      child.once('exit', () => process.exit(137));
+    `;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      return spawn(
+        process.execPath,
+        ['-e', wrapperProgram, standin, ...args.slice(binaryIndex + 1)],
+        options,
+      );
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      log: (message: string) => logs.push(message),
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async () => await fetchPid(port),
+        readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/dkg-scoped-oxi', oomKill: 9 }),
+        readCgroupOomKill: () => oomKillAtExit,
+      },
+    }));
+    try {
+      oomKillAtExit = 10;
+      process.kill(await fetchPid(port), 'SIGKILL');
+      expect(await waitForLog(logs, /code=137.*OOM-killed by cgroup memory cap/)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('uses the scoped watchdog marker when systemd removes memory.events before wrapper exit', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const wrapperProgram = `
+      const { spawn } = require('node:child_process');
+      const [command, ...args] = process.argv.slice(1);
+      const child = spawn(command, args, { stdio: 'inherit' });
+      process.on('SIGTERM', () => child.kill('SIGTERM'));
+      child.once('exit', () => {
+        process.stderr.write(${JSON.stringify(OXIGRAPH_WATCHDOG_OOM_MARKER)} + '\\n');
+        process.exit(0);
+      });
+    `;
+    const injectedSpawn = ((_command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const binaryIndex = args.indexOf(standin);
+      return spawn(
+        process.execPath,
+        ['-e', wrapperProgram, standin, ...args.slice(binaryIndex + 1)],
+        options,
+      );
+    }) as typeof spawn;
+
+    const handle = await startOxigraphServer(startOpts(port, {
+      memoryLimits: { maxMiB: 256 },
+      platform: 'linux',
+      log: (message: string) => logs.push(message),
+      io: {
+        spawn: injectedSpawn,
+        findListenOwnerPid: async () => await fetchPid(port),
+        readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/vanished', oomKill: 12 }),
+        readCgroupOomKill: () => null,
+      },
+    }));
+    try {
+      process.kill(await fetchPid(port), 'SIGKILL');
+      expect(await waitForLog(logs, /code=0.*OOM-killed by cgroup memory cap/)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
 
   it('labels an OOM-kill when the cgroup oom_kill count increments across the exit', async () => {
     const port = await freePort();

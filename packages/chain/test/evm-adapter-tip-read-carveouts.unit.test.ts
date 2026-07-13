@@ -181,6 +181,22 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
     await expect(a.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
   });
 
+  it('retries an all-429 receipt-block pass and returns the recovered timestamp', async () => {
+    const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
+    const primary = recorder(async () => { throw retryable429(); });
+    let backupAttempt = 0;
+    const backup = recorder(async () => {
+      backupAttempt += 1;
+      if (backupAttempt === 1) throw retryable429();
+      return { timestamp: 42 };
+    });
+    const a = makeTwoEndpointAdapter({ getBlock: primary }, { getBlock: backup });
+
+    await expect(a.getBlockTimestamp(123n)).resolves.toBe(42);
+    expect(primary.calls).toHaveLength(2);
+    expect(backup.calls).toHaveLength(2);
+  });
+
   it('MIXED null + transport error PROPAGATES regardless of endpoint order (order-independent, round-6 🔴)', async () => {
     const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
     // Order A: primary transport error, backup null. A transport failure occurred,

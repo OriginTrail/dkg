@@ -716,8 +716,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       ctx,
       `join-approval for "${contextGraphId}" → ${agentAddress} not delivered now ` +
         `(error=${result.error ?? 'unknown'}). Curator-local state is correct; ` +
-        `substrate outbox holds the queued send and will retry on its backoff ` +
-        `ladder + on the invitee's next reconnect.`,
+        `substrate outbox holds the queued send and will retry on its backoff ladder.`,
     );
   }
 
@@ -727,8 +726,8 @@ export class JoinRequestMethods extends DKGAgentBase {
    * delivery state matters.
    *
    * Used by:
-   *   * The substrate's periodic outbox tick + on-connect flush —
-   *     both transparent to this call (rc.9 PR-10).
+   *   * The substrate's periodic outbox tick, transparent to this call
+   *     (rc.9 PR-10).
    *   * The operator-facing route `POST /api/context-graph/{id}/redeliver-approval`,
    *     which lets an operator (or peer agent via the chat MCP) re-poke
    *     the curator when the automated retry isn't fast enough.
@@ -856,17 +855,16 @@ export class JoinRequestMethods extends DKGAgentBase {
    */
   // rc.9 PR-10: processJoinApprovalRetryQueueTick +
   // processJoinApprovalRetryQueueOnConnect deleted. The substrate's
-  // Messenger.processOutboxTick + Messenger.processOutboxOnConnect
-  // cover /dkg/10.0.1/join-request automatically (same as chat in
+  // Messenger.processOutboxTick covers /dkg/10.0.1/join-request
+  // automatically (same as chat in
   // PR-3), so the two dedicated processors are obsolete. Operator
   // re-fire route POST /api/context-graph/{id}/redeliver-approval is
   // unchanged — it still calls redeliverJoinApproval which now
   // simply re-issues the substrate send.
 
   /**
-   * Re-attempt delivery of a single chat outbox entry. Centralised so
-   * the periodic tick + the connection:open opportunistic flush share
-   * one code path. Returns the entry's current state so the caller can
+   * Re-attempt delivery of a single chat outbox entry from the periodic
+   * scheduler. Returns the entry's current state so the caller can
    * decide what to log.
    *
    * Goes through `messageHandler.sendChat` directly (bypassing
@@ -884,17 +882,14 @@ export class JoinRequestMethods extends DKGAgentBase {
    * class: an inbound circuit connection from P was open and live, but
    * every `libp2p.dialProtocol(P, ...)` retry on our side failed with
    * "The dial request has no valid addresses for peer" for several
-   * minutes. Daemon logs showed 31 `connection:open` events from P
-   * (all inbound, all via R) + 20 opportunistic-flush attempts, all
-   * failing dialProtocol — and then the moment ONE outbound connection
-   * succeeded (which populated peerStore from outbound identify), the
-   * very next opportunistic-flush delivered the queued message.
+   * minutes. Reverse-path enrichment ensures the next scheduled retry sees a
+   * usable address without letting connection churn bypass persisted backoff.
    *
    * The clean fix would be inside libp2p (`dialProtocol` should reuse
    * an existing open connection of any direction — see PR 5 in the
    * postmortem follow-up plan), but until that lands, populating
    * peerStore from the inbound circuit's address gives the dialer
-   * something to find on the very next attempt.
+   * something to find on the next scheduled attempt.
    *
    * Public so a unit test can exercise it directly without standing up
    * a full libp2p network (the listener that calls it is registered
@@ -1140,7 +1135,7 @@ export class JoinRequestMethods extends DKGAgentBase {
           ctx,
           `${label} for "${contextGraphId}" to ${agentAddress} (${targetPeerId}) ` +
           `queued in substrate outbox: ${sendResult.error}. ` +
-          `Substrate will retry on its own backoff ladder + on the invitee's next reconnect.`,
+          `Substrate will retry on its persisted backoff schedule.`,
         );
         return { delivered: false, peerId: targetPeerId, error: sendResult.error };
       }

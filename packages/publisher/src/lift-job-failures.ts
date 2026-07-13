@@ -41,6 +41,7 @@ export const LIFT_JOB_FAILURE_CODES = [
   'validation_timeout',
   'wallet_claim_timeout',
   'wallet_unavailable',
+  'quorum_unmet',
   'rpc_unavailable',
   'tx_submit_timeout',
   'tx_reverted',
@@ -69,6 +70,8 @@ export interface LiftJobFailurePolicy {
   readonly mode: LiftJobFailureMode;
   readonly retryable: boolean;
   readonly resolution: LiftJobFailureResolution;
+  /** Safe to re-submit automatically because failure occurs before any transaction can be accepted. */
+  readonly autoRetry?: boolean;
   readonly timeoutHandling?: LiftJobTimeoutHandling;
 }
 
@@ -97,6 +100,7 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailur
   validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted' },
   wallet_claim_timeout: { code: 'wallet_claim_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted' },
   wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
+  quorum_unmet: { code: 'quorum_unmet', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: true },
   rpc_unavailable: { code: 'rpc_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
   tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
@@ -121,6 +125,7 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   validation_timeout: ['claimed', 'validated'],
   wallet_claim_timeout: ['accepted', 'claimed'],
   wallet_unavailable: ['claimed', 'broadcast'],
+  quorum_unmet: ['broadcast'],
   rpc_unavailable: ['broadcast'],
   tx_submit_timeout: ['broadcast'],
   tx_reverted: ['broadcast'],
