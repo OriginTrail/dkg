@@ -3,9 +3,9 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
+  contextGraphLayerUriCandidates, contextGraphLayerPrefixCandidates,
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
-  canonicalKnowledgeAssetAgentAddress,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   ASSERTION_NAMED_GRAPH_PREFIX,
   isAssertionScopedChildGraph,
@@ -95,20 +95,14 @@ export function resolveViewGraphs(
       // misses sub-graph assertions (Codex review on PR #1132).
       if (opts.assertionName) {
         if (opts.kaNumber !== undefined) {
-          const canonicalGraph = contextGraphLayerUri(
-            contextGraphId,
-            MemoryLayer.WorkingMemory,
-            opts.agentAddress,
-            opts.kaNumber,
-            opts.subGraphName,
-          );
-          const legacyGraph =
-            `did:dkg:context-graph:${contextGraphId}${sg}` +
-            `/_working_memory/${opts.agentAddress}/${opts.kaNumber}`;
           return {
-            graphs: canonicalGraph === legacyGraph
-              ? [canonicalGraph]
-              : [canonicalGraph, legacyGraph],
+            graphs: contextGraphLayerUriCandidates(
+              contextGraphId,
+              MemoryLayer.WorkingMemory,
+              opts.agentAddress,
+              opts.kaNumber,
+              opts.subGraphName,
+            ),
             graphPrefixes: [],
           };
         }
@@ -128,14 +122,19 @@ export function resolveViewGraphs(
       // unscoped WM read. New full EVM-address writes use the lowercase core
       // identity, while the caller's original casing is retained as a legacy
       // read prefix for graphs written before canonicalization.
-      const addresses: string[] = [];
+      const graphPrefixes: string[] = [];
       const seen = new Set<string>();
       for (const address of [opts.agentAddress, ...(opts.agentAddressAliases ?? [])]) {
         if (!address) continue;
-        for (const candidate of [canonicalKnowledgeAssetAgentAddress(address), address]) {
+        for (const candidate of contextGraphLayerPrefixCandidates(
+          contextGraphId,
+          MemoryLayer.WorkingMemory,
+          address,
+          opts.subGraphName,
+        )) {
           if (seen.has(candidate)) continue;
           seen.add(candidate);
-          addresses.push(candidate);
+          graphPrefixes.push(candidate);
         }
       }
       return {
@@ -143,9 +142,7 @@ export function resolveViewGraphs(
         // Combine main's same-identity alias span (#1107 review 🟡) with
         // #1132's sub-graph scoping (#184/#675): one prefix per alias address,
         // each carrying the optional sub-graph suffix.
-        graphPrefixes: addresses.map(
-          (addr) => `did:dkg:context-graph:${contextGraphId}${sg}/_working_memory/${addr}/`,
-        ),
+        graphPrefixes,
       };
     }
     case 'shared-working-memory':

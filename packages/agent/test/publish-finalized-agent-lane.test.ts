@@ -11,6 +11,7 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { KA_ID_PRED, VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { sharedMemoryScopeForFinalizedLifecycle } from '../src/finalized-lifecycle-swm.js';
 
 const CG = 'publish-agent-lane';
 const NAME = 'asset';
@@ -30,6 +31,22 @@ function makeLog() {
 }
 
 describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
+  it('derives finalized SWM scope in the neutral lifecycle boundary', () => {
+    expect(sharedMemoryScopeForFinalizedLifecycle(AGENT_B, undefined)).toEqual({
+      kind: 'complete-family',
+    });
+    expect(sharedMemoryScopeForFinalizedLifecycle(AGENT_B, 1n)).toEqual({
+      kind: 'named-lifecycle',
+      identity: { agentAddress: AGENT_B, kaNumber: 1n },
+    });
+    expect(sharedMemoryScopeForFinalizedLifecycle(AGENT_B, RESERVED_KA_ID)).toEqual({
+      kind: 'named-lifecycle',
+      identity: { agentAddress: AGENT_B, kaNumber: 1n },
+    });
+    expect(() => sharedMemoryScopeForFinalizedLifecycle(DEFAULT_AGENT, RESERVED_KA_ID))
+      .toThrow(/not in author .* namespace/);
+  });
+
   it('injects the curated catalog floor into the exact named lifecycle graph', async () => {
     const store = new OxigraphStore();
     const agent = Object.create(DKGAgent.prototype) as any;

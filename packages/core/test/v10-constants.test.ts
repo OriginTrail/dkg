@@ -34,6 +34,9 @@ import {
   contextGraphVerifiableMemoryMetaUri,
   contextGraphAssertionUri,
   contextGraphLayerUri,
+  contextGraphLayerUriCandidates,
+  contextGraphLayerPrefixCandidates,
+  knowledgeAssetAgentAddressesEqual,
   contextGraphRulesUri,
   contextGraphSubGraphUri,
   // Deprecated aliases
@@ -207,6 +210,32 @@ describe('V10 named graph URIs', () => {
     ]) {
       expect(contextGraphLayerUri(id, layer, mixed, 7).endsWith(expectedSuffix)).toBe(true);
     }
+  });
+
+  it('centralizes canonical and caller-known legacy graph and prefix candidates', () => {
+    const mixed = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const lower = mixed.toLowerCase();
+    expect(contextGraphLayerUriCandidates(
+      id,
+      MemoryLayer.WorkingMemory,
+      mixed,
+      7,
+      'game-state',
+    )).toEqual([
+      `did:dkg:context-graph:${id}/game-state/_working_memory/${lower}/7`,
+      `did:dkg:context-graph:${id}/game-state/_working_memory/${mixed}/7`,
+    ]);
+    expect(contextGraphLayerPrefixCandidates(
+      id,
+      MemoryLayer.SharedWorkingMemory,
+      mixed,
+      'game-state',
+    )).toEqual([
+      `did:dkg:context-graph:${id}/game-state/_shared_memory/${lower}/`,
+      `did:dkg:context-graph:${id}/game-state/_shared_memory/${mixed}/`,
+    ]);
+    expect(knowledgeAssetAgentAddressesEqual(mixed, lower)).toBe(true);
+    expect(knowledgeAssetAgentAddressesEqual('PeerA', 'peera')).toBe(false);
   });
 
   it('uniform per-KA layer URI: sub-graph scoping is uniform across layers', () => {

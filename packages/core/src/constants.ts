@@ -323,6 +323,11 @@ export function canonicalKnowledgeAssetAgentAddress(agentAddress: string): strin
     : agentAddress;
 }
 
+/** Compare graph identity addresses using EVM case-folding and legacy exactness. */
+export function knowledgeAssetAgentAddressesEqual(left: string, right: string): boolean {
+  return canonicalKnowledgeAssetAgentAddress(left) === canonicalKnowledgeAssetAgentAddress(right);
+}
+
 /** Build the layer-independent canonical `{address}/{number}` suffix. */
 export function canonicalKnowledgeAssetGraphIdentitySuffix(
   agentAddress: string,
@@ -330,6 +335,17 @@ export function canonicalKnowledgeAssetGraphIdentitySuffix(
 ): string {
   const canonicalAgentAddress = canonicalKnowledgeAssetAgentAddress(agentAddress);
   return `${canonicalAgentAddress}/${kaNumber}`;
+}
+
+function contextGraphLayerBaseUri(
+  contextGraphId: string,
+  layer: MemoryLayer,
+  subGraphName?: string,
+): string {
+  const base = subGraphName
+    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
+    : `did:dkg:context-graph:${contextGraphId}`;
+  return `${base}/${memoryLayerSlug(layer)}`;
 }
 
 /**
@@ -351,10 +367,39 @@ export function contextGraphLayerUri(
   kaNumber: string | number | bigint,
   subGraphName?: string,
 ): string {
-  const base = subGraphName
-    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
-    : `did:dkg:context-graph:${contextGraphId}`;
-  return `${base}/${memoryLayerSlug(layer)}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
+  const layerBase = contextGraphLayerBaseUri(contextGraphId, layer, subGraphName);
+  return `${layerBase}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
+}
+
+/**
+ * Canonical per-KA graph first, followed by the caller-known historical casing
+ * when it differs. Store-backed readers can discover additional aliases and
+ * compare them with `knowledgeAssetAgentAddressesEqual`.
+ */
+export function contextGraphLayerUriCandidates(
+  contextGraphId: string,
+  layer: MemoryLayer,
+  agentAddress: string,
+  kaNumber: string | number | bigint,
+  subGraphName?: string,
+): string[] {
+  const layerBase = contextGraphLayerBaseUri(contextGraphId, layer, subGraphName);
+  const canonical = `${layerBase}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
+  const legacy = `${layerBase}/${agentAddress}/${kaNumber}`;
+  return canonical === legacy ? [canonical] : [canonical, legacy];
+}
+
+/** Canonical and caller-known legacy prefixes for an unscoped layer read. */
+export function contextGraphLayerPrefixCandidates(
+  contextGraphId: string,
+  layer: MemoryLayer,
+  agentAddress: string,
+  subGraphName?: string,
+): string[] {
+  const layerBase = contextGraphLayerBaseUri(contextGraphId, layer, subGraphName);
+  const canonical = `${layerBase}/${canonicalKnowledgeAssetAgentAddress(agentAddress)}/`;
+  const legacy = `${layerBase}/${agentAddress}/`;
+  return canonical === legacy ? [canonical] : [canonical, legacy];
 }
 
 export interface ContextGraphLayerIdentity {

@@ -398,8 +398,8 @@ import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
 import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,
-  sharedMemoryScopeForFinalizedLifecycle,
 } from './dkg-agent-publish.js';
+import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-swm.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';

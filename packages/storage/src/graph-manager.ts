@@ -13,6 +13,7 @@ import {
   contextGraphSubGraphPrivateUri,
   contextGraphCatalogUri,
   canonicalKnowledgeAssetGraphIdentitySuffix,
+  knowledgeAssetAgentAddressesEqual,
   isSafeIri,
   assertSafeIri,
   sparqlString,
@@ -224,7 +225,6 @@ async function resolveSwmReadGraphs(
   const stagingPrefix = `${bucketGraph}/staging/`;
   const under = await listGraphsByPrefix(store, `${bucketGraph}/`, options);
   const out = new Set<string>([bucketGraph]);
-  const boundAddress = bound?.agentAddress.toLowerCase();
   for (const graph of under) {
     if (graph.startsWith(stagingPrefix)) continue;
     if (!isSafeIri(graph)) continue;
@@ -232,7 +232,7 @@ async function resolveSwmReadGraphs(
       const child = parseBoundableSwmChildGraph(bucketGraph, graph);
       if (
         child &&
-        (child.agentAddress.toLowerCase() !== boundAddress ||
+        (!knowledgeAssetAgentAddressesEqual(child.agentAddress, bound.agentAddress) ||
           child.kaNumber < bound.startNumber ||
           child.kaNumber > bound.endNumber)
       ) {
@@ -337,7 +337,8 @@ async function resolveNamedLifecycleReadPolicy(
   const legacyCompatibleReadGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
     .filter((graph) => {
       const child = parseBoundableSwmChildGraph(bucketGraph, graph);
-      return child?.agentAddress.toLowerCase() === identity.agentAddress.toLowerCase()
+      return child !== undefined
+        && knowledgeAssetAgentAddressesEqual(child.agentAddress, identity.agentAddress)
         && child.kaNumber === identity.kaNumber;
     });
   return { canonicalGraph, legacyCompatibleReadGraphs };
