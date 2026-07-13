@@ -153,6 +153,36 @@ describe('reconcileContextGraph — sweep', () => {
 });
 
 describe('VmReconcileScheduler', () => {
+  it('collapses a successful live burst into one run plus one trailing run', async () => {
+    let runs = 0;
+    let resolveCurrent!: () => void;
+    const scheduler = new VmReconcileScheduler(
+      async () => {
+        runs += 1;
+        await new Promise<void>((resolve) => {
+          resolveCurrent = resolve;
+        });
+      },
+      () => undefined,
+    );
+
+    const first = scheduler.triggerLive('cg');
+    void scheduler.triggerLive('cg');
+    void scheduler.triggerLive('cg');
+    void scheduler.triggerLive('cg');
+    expect(runs).toBe(1);
+
+    resolveCurrent();
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(2);
+
+    resolveCurrent();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(2);
+    expect(scheduler.isInFlight('cg')).toBe(false);
+  });
+
   it('suppresses queued/live retries after failure but retries on the periodic path', async () => {
     let runs = 0;
     const failures: Array<{ key: string; error: unknown }> = [];
