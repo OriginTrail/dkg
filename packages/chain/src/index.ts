@@ -62,8 +62,6 @@ export {
   resolveReceiptTimeoutMs,
 } from './evm-adapter-constants.js';
 export {
-  waitForReceiptWithDeadline,
-  type ReceiptLookupOptions,
-  type ReceiptWaitTimeoutContext,
-  type WaitForReceiptWithDeadlineOptions,
+  waitForTransactionReceiptWithFailover,
+  type TransactionReceiptWaitOptions,
 } from './receipt-wait.js';

@@ -9,8 +9,7 @@ import {
   createRpcTimeoutError,
   RPC_RECEIPT_TIMEOUT_MS,
   resolveReceiptTimeoutMs,
-  waitForReceiptWithDeadline,
-  type ReceiptLookupOptions,
+  waitForTransactionReceiptWithFailover,
 } from '@origintrail-official/dkg-chain';
 import { cliErrorMessage } from './cli-helpers.js';
 
@@ -73,11 +72,15 @@ function createCliEvmProviders(rpcUrl: string, rpcUrls?: string[]): {
   return { urls, providers, readProvider };
 }
 
+/**
+ * @deprecated Compatibility-only single-pass helper. Live CLI writes use the
+ * chain package's high-level `waitForTransactionReceiptWithFailover` boundary.
+ */
 async function getCliReceiptWithFailover(
   providers: ethers.JsonRpcProvider[],
   txHash: string,
   urls?: string[],
-  options: ReceiptLookupOptions & { attemptTimeoutMs?: number } = {},
+  options: { attemptTimeoutMs?: number; deadlineMs?: number } = {},
 ): Promise<ethers.TransactionReceipt | null> {
   let lastRetryable: unknown;
   let sawNonErrorResponse = false;
@@ -168,19 +171,10 @@ async function sendCliRawTransactionWithFailover(
     );
   }
 
-  return waitForReceiptWithDeadline({
-    txHash,
+  return waitForTransactionReceiptWithFailover(providers, txHash, {
+    rpcUrls: urls,
     receiptTimeoutMs,
-    pollIntervalMs: CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-    getReceipt: (hash, { deadlineMs }) => getCliReceiptWithFailover(
-      providers,
-      hash,
-      urls,
-      { deadlineMs },
-    ),
-    assertSuccessfulReceipt: (receipt) => assertCliSuccessfulReceipt(receipt, txHash),
-    formatTimeoutMessage: () =>
-      `Transaction ${txHash} was broadcast but no receipt was found within ${receiptTimeoutMs}ms`,
+    logLabel: 'cli',
   });
 }
 

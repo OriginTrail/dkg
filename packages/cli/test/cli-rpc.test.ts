@@ -199,4 +199,38 @@ describe('cli-rpc classifier consolidation (W4)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('preserves a deterministic reverted receipt that arrives at the deadline', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const provider = {
+        broadcastTransaction: async () => ({ hash: '0xreverted' }),
+        getTransactionReceipt: async () => {
+          vi.setSystemTime(1_001);
+          return { status: 0 };
+        },
+      } as any;
+
+      const outcome = sendCliRawTransactionWithFailover(
+        [provider],
+        '0xsigned',
+        '0xreverted',
+        undefined,
+        { receiptTimeoutMs: 1_000 },
+      ).then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      );
+
+      await expect(outcome).resolves.toMatchObject({
+        status: 'rejected',
+        reason: { code: 'CALL_EXCEPTION' },
+      });
+      const result = await outcome;
+      expect(result.status === 'rejected' ? result.reason.code : '')
+        .not.toBe('RPC_TIMEOUT');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
