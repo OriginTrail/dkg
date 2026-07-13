@@ -6,7 +6,9 @@
 // These files live at the repo root but must be present INSIDE packages/cli at
 // pack time because `packages/cli/package.json#files` lists "network" and
 // "project.json" — and npm silently omits `files` entries that don't exist on
-// disk when the tarball is built.
+// disk when the tarball is built. The image-metadata parser itself lives in
+// packages/cli because both the source-tree callers and the published CLI use
+// that exact module as the validation boundary.
 //
 // Historically this copy was a side effect of the `build` script. That made it
 // cache-unsafe: `turbo.json` declares the build task's outputs as `dist/**`
@@ -23,9 +25,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import blazegraphImageMetadata from '../packages/cli/blazegraph-image-metadata.cjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_ROOT_DIR = path.resolve(path.dirname(SCRIPT_PATH), '..');
+const { readBlazegraphImageMetadata } = blazegraphImageMetadata;
 
 function enumerateNetworkOverlays(sourceNetworkDir) {
   if (!fs.existsSync(sourceNetworkDir) || !fs.statSync(sourceNetworkDir).isDirectory()) {
@@ -62,11 +66,7 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
     throw new Error(`copy-cli-runtime-assets: repo-root project.json not found at ${sourceProjectJson}`);
   }
   try {
-    const metadata = JSON.parse(fs.readFileSync(sourceBlazegraphImageJson, 'utf8'));
-    if (typeof metadata.image !== 'string' || !metadata.image.trim()) throw new Error('missing image');
-    if (!Number.isInteger(metadata.containerPort) || metadata.containerPort < 1 || metadata.containerPort > 65535) {
-      throw new Error('invalid containerPort');
-    }
+    readBlazegraphImageMetadata(sourceBlazegraphImageJson);
   } catch {
     throw new Error(
       `copy-cli-runtime-assets: valid repo-root blazegraph-image.json not found at ${sourceBlazegraphImageJson}`,
@@ -78,8 +78,15 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
     sourceProjectJson,
     sourceBlazegraphImageJson,
     networkJsonFiles: overlays,
-    // package-relative paths that MUST appear inside the published tarball
-    relPaths: ['project.json', 'blazegraph-image.json', ...overlays.map((file) => `network/${file}`)],
+    // Package-relative runtime paths that MUST appear inside the published
+    // tarball. The parser is already package-local; the remaining entries are
+    // materialized below from their repo-root sources.
+    relPaths: [
+      'project.json',
+      'blazegraph-image.json',
+      'blazegraph-image-metadata.cjs',
+      ...overlays.map((file) => `network/${file}`),
+    ],
   };
 }
 

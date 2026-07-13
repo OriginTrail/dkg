@@ -362,13 +362,8 @@ deploy_contracts() {
 BLAZEGRAPH_AVAILABLE=false
 
 read_blazegraph_metadata() {
-  node -e '
-    const fs = require("node:fs");
-    const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
-    if (!Number.isInteger(metadata.containerPort) || metadata.containerPort < 1 || metadata.containerPort > 65535) process.exit(1);
-    process.stdout.write(`${metadata.image.trim()}\t${metadata.containerPort}\n`);
-  ' "$REPO_ROOT/blazegraph-image.json"
+  node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" \
+    "$REPO_ROOT/blazegraph-image.json"
 }
 
 start_blazegraph() {

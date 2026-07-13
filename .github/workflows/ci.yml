@@ -480,13 +480,7 @@ jobs:
       - name: "Verify provisioned Blazegraph image contract"
         run: |
           set -euo pipefail
-          runtime="$(node -e '
-            const fs = require("node:fs");
-            const metadata = JSON.parse(fs.readFileSync("blazegraph-image.json", "utf8"));
-            if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
-            if (!Number.isInteger(metadata.containerPort) || metadata.containerPort < 1 || metadata.containerPort > 65535) process.exit(1);
-            process.stdout.write(metadata.image.trim() + "\t" + metadata.containerPort + "\n");
-          ')"
+          runtime="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json)"
           IFS=$'\t' read -r image container_port <<< "$runtime"
           if [[ -z "$image" || -z "$container_port" ]]; then
             echo "::error::Could not read image contract from blazegraph-image.json"

@@ -23,7 +23,15 @@
  * injectable; tests run in <50 ms.
  */
 import { describe, it, expect } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -49,6 +57,12 @@ function runDevnetBlazegraphSmoke(metadata: string): {
 } {
   const root = mkdtempSync(join(tmpdir(), 'dkg-devnet-blazegraph-'));
   const capture = join(root, 'docker-run.args');
+  const parserDir = join(root, 'packages', 'cli');
+  mkdirSync(parserDir, { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, 'packages/cli/blazegraph-image-metadata.cjs'),
+    join(parserDir, 'blazegraph-image-metadata.cjs'),
+  );
   writeFileSync(join(root, 'blazegraph-image.json'), metadata);
   try {
     const result = spawnSync('bash', [

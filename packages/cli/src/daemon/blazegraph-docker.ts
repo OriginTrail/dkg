@@ -28,7 +28,7 @@
  * machine-readable repo-root `blazegraph-image.json` runtime asset.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import * as net from 'node:net';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
@@ -64,25 +64,19 @@ interface BlazegraphImageMetadata {
   containerPort: number;
 }
 
+interface BlazegraphImageMetadataParser {
+  readBlazegraphImageMetadata(path: string): BlazegraphImageMetadata;
+}
+
+const require = createRequire(import.meta.url);
+const { readBlazegraphImageMetadata } = require(
+  '../../blazegraph-image-metadata.cjs',
+) as BlazegraphImageMetadataParser;
+
 function loadBlazegraphImageMetadata(): BlazegraphImageMetadata {
   for (const path of runtimeAssetPaths('blazegraph-image.json')) {
     try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
-        image?: unknown;
-        containerPort?: unknown;
-      };
-      if (
-        typeof parsed.image === 'string' &&
-        parsed.image.trim() &&
-        Number.isInteger(parsed.containerPort) &&
-        Number(parsed.containerPort) > 0 &&
-        Number(parsed.containerPort) <= 65_535
-      ) {
-        return {
-          image: parsed.image.trim(),
-          containerPort: Number(parsed.containerPort),
-        };
-      }
+      return readBlazegraphImageMetadata(path);
     } catch { /* try the packaged runtime asset */ }
   }
   throw new Error('Could not load the pinned Blazegraph image metadata from blazegraph-image.json');
