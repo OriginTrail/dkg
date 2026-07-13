@@ -408,11 +408,13 @@ function createRouteEvmProvider(rpcUrl: string, rpcUrls?: string[]): ethers.Json
 // expensive on a large namespace, and the route is polled by the
 // dashboard, telemetry, and `dkg status` operators. 30 s TTL is short
 // enough that a fresh wipe / bulk publish shows up quickly without
-// flooding Blazegraph. Local backends bypass this entirely (file-bytes
-// metric stays on the metrics collector tick).
+// flooding Blazegraph. Cold/stale callers get the current snapshot while
+// one refresh runs in the background, so status never waits on the count.
+// Local backends bypass this entirely (file-bytes metric stays on the
+// metrics collector tick).
 const STORE_QUADS_CACHE_TTL_MS = 30_000;
 let storeQuadsCache: { value: number | null; fetchedAt: number } | null = null;
-let storeQuadsInflight: Promise<number | null> | null = null;
+let storeQuadsInflight: Promise<void> | null = null;
 
 /** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
 export function invalidateExternalStoreQuadsCache(): void {
@@ -420,40 +422,42 @@ export function invalidateExternalStoreQuadsCache(): void {
   storeQuadsInflight = null;
 }
 
-async function getCachedExternalStoreQuads(
+function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
-): Promise<number | null> {
+): number | null {
   if (storeQuadsCache && now - storeQuadsCache.fetchedAt < STORE_QUADS_CACHE_TTL_MS) {
     return storeQuadsCache.value;
   }
-  if (storeQuadsInflight) return storeQuadsInflight;
 
-  storeQuadsInflight = (async () => {
-    try {
-      const r = await agent.store.query(
-        'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
-      );
-      let value: number | null = null;
-      if (r.type === 'bindings' && r.bindings.length > 0) {
-        const cell = r.bindings[0].c ?? '';
-        const digits = cell.match(/\d+/)?.[0];
-        value = digits ? parseInt(digits, 10) : 0;
+  const currentValue = storeQuadsCache?.value ?? null;
+  if (!storeQuadsInflight) {
+    const refresh = (async () => {
+      try {
+        const r = await agent.store.query(
+          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
+        );
+        let value: number | null = null;
+        if (r.type === 'bindings' && r.bindings.length > 0) {
+          const cell = r.bindings[0].c ?? '';
+          const digits = cell.match(/\d+/)?.[0];
+          value = digits ? parseInt(digits, 10) : 0;
+        }
+        storeQuadsCache = { value, fetchedAt: Date.now() };
+      } catch {
+        // Surface "unknown" rather than a stale value; operators can
+        // distinguish unreachable from genuinely-empty via storeBackend +
+        // their network logs. Cache the null briefly to avoid hammering
+        // a flapping endpoint.
+        storeQuadsCache = { value: null, fetchedAt: Date.now() };
       }
-      storeQuadsCache = { value, fetchedAt: Date.now() };
-      return value;
-    } catch {
-      // Surface "unknown" rather than a stale value; operators can
-      // distinguish unreachable from genuinely-empty via storeBackend +
-      // their network logs. Cache the null briefly to avoid hammering
-      // a flapping endpoint.
-      storeQuadsCache = { value: null, fetchedAt: Date.now() };
-      return null;
-    } finally {
-      storeQuadsInflight = null;
-    }
-  })();
-  return storeQuadsInflight;
+    })();
+    storeQuadsInflight = refresh;
+    void refresh.finally(() => {
+      if (storeQuadsInflight === refresh) storeQuadsInflight = null;
+    });
+  }
+  return currentValue;
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
@@ -696,7 +700,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // (e.g. after a failed revive) instead of it always looking healthy.
       storeQuads:
         isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server'
-          ? await getCachedExternalStoreQuads(agent, Date.now())
+          ? getCachedExternalStoreQuads(agent, Date.now())
           : null,
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
