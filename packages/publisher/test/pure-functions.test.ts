@@ -14,12 +14,14 @@ import {
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
   appendMissingGeneratedPrivateCatalogFloor,
+  prepareGeneratedPrivateCatalogFloor,
   replaceGeneratedPrivateCatalogFloor,
   catalogTripleKey,
   validatePublishRequest,
   assertTrustedCatalogTriplesAreGeneratedFloor,
 } from '../src/index.js';
 import type { ValidationOptions } from '../src/validation.js';
+import type { PrepareGeneratedPrivateCatalogFloorOptions } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'agent-registry';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
@@ -142,6 +144,36 @@ describe('merkle', () => {
 });
 
 describe('generated private catalog preparation', () => {
+  it('preserves the public preparation API for default append and explicit replacement', () => {
+    const contextGraphId = 'private-catalog-api-cg';
+    const cgDid = `did:dkg:context-graph:${contextGraphId}`;
+    const content = q(cgDid, 'urn:test:private-note', '"keep encrypted"');
+    const staleFloor = generatedPrivateCatalogFloorQuads(contextGraphId, 'urn:stale');
+    const defaultOptions: PrepareGeneratedPrivateCatalogFloorOptions = {};
+    const replaceOptions: PrepareGeneratedPrivateCatalogFloorOptions = {
+      graph: cgDid,
+      mode: 'replace-generated',
+    };
+
+    const appended = prepareGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, staleFloor[0]],
+      defaultOptions,
+    );
+    const replaced = prepareGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, ...staleFloor],
+      replaceOptions,
+    );
+
+    expect(appended.quads[0]).toBe(content);
+    expect(appended.quads[1]).toBe(staleFloor[0]);
+    expect(replaced.quads).toEqual([
+      content,
+      ...generatedPrivateCatalogFloorQuads(contextGraphId, cgDid),
+    ]);
+  });
+
   it('fills a partial legacy floor without duplicating existing triples', () => {
     const contextGraphId = 'private-catalog-cg';
     const floor = generatedPrivateCatalogFloorQuads(contextGraphId);

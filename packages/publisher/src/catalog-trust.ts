@@ -65,6 +65,17 @@ export interface PreparedGeneratedPrivateCatalogFloor {
   trustedNonManifestCatalogTriples: ReadonlySet<string>;
 }
 
+export interface PrepareGeneratedPrivateCatalogFloorOptions {
+  /** Graph term applied to newly generated floor quads. */
+  graph?: string;
+  /**
+   * append-missing preserves immutable/legacy snapshots and fills only absent
+   * deterministic triples. replace-generated rebuilds the recognized catalog
+   * partition while retaining ordinary private data on the CG-DID subject.
+   */
+  mode?: 'append-missing' | 'replace-generated';
+}
+
 export function appendMissingGeneratedPrivateCatalogFloor(
   contextGraphId: string,
   quads: readonly Quad[],
@@ -102,6 +113,32 @@ export function replaceGeneratedPrivateCatalogFloor(
       contextGraphId,
     ),
   };
+}
+
+/**
+ * Backward-compatible public preparation boundary for the deterministic
+ * private-CG catalog floor.
+ *
+ * Keep publish quads and their exact trust allow-list coupled while allowing
+ * callers to select the immutable append path or the update replacement path.
+ */
+export function prepareGeneratedPrivateCatalogFloor(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  options: PrepareGeneratedPrivateCatalogFloorOptions = {},
+): PreparedGeneratedPrivateCatalogFloor {
+  if (options.mode === 'replace-generated') {
+    return replaceGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      quads,
+      options.graph,
+    );
+  }
+  return appendMissingGeneratedPrivateCatalogFloor(
+    contextGraphId,
+    quads,
+    options.graph,
+  );
 }
 
 export function assertTrustedCatalogTriplesAreGeneratedFloor(

@@ -702,6 +702,86 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
   });
 });
 
+const QUEUED_TEST_AUTHOR = '0x1111111111111111111111111111111111111111';
+const QUEUED_TEST_LIFECYCLE = '0x2222222222222222222222222222222222222222';
+
+function makeQueuedAgentHarness(options: {
+  peerId: string;
+  ual: string;
+  chain?: Record<string, unknown>;
+  onChainContextGraphId?: string | null;
+  encryptInlinePayload?: unknown;
+  encryptInlineChunked?: unknown;
+}) {
+  const publisherPublish = recorder(async (_opts: any) => ({
+    status: 'tentative' as const,
+    ual: options.ual,
+  }));
+  const agentLike: any = {
+    peerId: options.peerId,
+    defaultAgentAddress: QUEUED_TEST_AUTHOR,
+    chain: options.chain ?? {},
+    store: {
+      query: recorder(async () => ({ type: 'bindings', bindings: [] })),
+      insert: recorder(async () => undefined),
+      deleteByPattern: recorder(async () => undefined),
+    },
+    log: {
+      info: recorder(() => undefined),
+      warn: recorder(() => undefined),
+      error: recorder(() => undefined),
+      debug: recorder(() => undefined),
+    },
+    publisher: {
+      publish: publisherPublish,
+      clearSwmShareComplete: recorder(async () => undefined),
+    },
+    createV10ACKProvider: recorder(() => undefined),
+    _resolveEncryptInlinePayload: recorder(async () => options.encryptInlinePayload),
+    _resolveEncryptInlineChunked: recorder(async () => options.encryptInlineChunked),
+    _stampPointer: recorder(async () => undefined),
+  };
+  if (options.onChainContextGraphId !== undefined) {
+    agentLike.getContextGraphOnChainId = recorder(
+      async () => options.onChainContextGraphId,
+    );
+  }
+  return { agentLike, publisherPublish };
+}
+
+function makeQueuedPublishRequest(options: {
+  contextGraphId: string;
+  name: string;
+  shareOperationId: string;
+  root: string;
+  intentByte: string;
+  reservedKaId?: `${bigint}`;
+}): KnowledgeAssetVmPublishRequest {
+  return {
+    contextGraphId: options.contextGraphId,
+    name: options.name,
+    shareOperationId: options.shareOperationId,
+    roots: [options.root],
+    seal: {
+      merkleRoot: `0x${'12'.repeat(32)}`,
+      authorAddress: QUEUED_TEST_AUTHOR,
+      signature: {
+        r: `0x${'34'.repeat(32)}`,
+        vs: `0x${'56'.repeat(32)}`,
+      },
+      schemeVersion: 1,
+      ...(options.reservedKaId === undefined
+        ? {}
+        : { reservedKaId: options.reservedKaId }),
+    },
+    sealChainId: '31337',
+    sealKav10Address: QUEUED_TEST_LIFECYCLE,
+    sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+    sealMerkleRoot: `0x${'12'.repeat(32)}`,
+    intentKey: `sha256:${options.intentByte.repeat(32)}`,
+  };
+}
+
 describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routing', () => {
   it('reconstructs the curated catalog floor and lets real encryption override placeholders', async () => {
     const realInline = recorder(async (plaintext: Uint8Array) => new Uint8Array([...plaintext, 0xaa]));
@@ -716,62 +796,29 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     const failClosedChunked = recorder(async () => {
       throw new Error('fail-closed chunk placeholder should not be used');
     });
-    const publisherPublish = recorder(async (_opts: any) => ({
-      status: 'tentative',
-      ual: 'did:dkg:local/queued-encryption',
-    }));
-    const store = {
-      query: recorder(async () => ({ type: 'bindings', bindings: [] })),
-      insert: recorder(async () => undefined),
-      deleteByPattern: recorder(async () => undefined),
-    };
-    const agentLike = {
+    const { agentLike, publisherPublish } = makeQueuedAgentHarness({
       peerId: 'did:dkg:agent:queued-encryption',
-      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      ual: 'did:dkg:local/queued-encryption',
       chain: {
         getEvmChainId: recorder(async () => 31337n),
         getKnowledgeAssetsLifecycleAddress: recorder(
-          async () => '0x2222222222222222222222222222222222222222',
+          async () => QUEUED_TEST_LIFECYCLE,
         ),
       },
-      store,
-      log: {
-        info: recorder(() => undefined),
-        warn: recorder(() => undefined),
-        error: recorder(() => undefined),
-        debug: recorder(() => undefined),
-      },
-      publisher: {
-        publish: publisherPublish,
-        clearSwmShareComplete: recorder(async () => undefined),
-      },
-      createV10ACKProvider: recorder(() => undefined),
-      getContextGraphOnChainId: recorder(async () => '7'),
-      _resolveEncryptInlinePayload: recorder(async () => realInline),
-      _resolveEncryptInlineChunked: recorder(async () => realChunked),
-      _stampPointer: recorder(async () => undefined),
-    } as any;
-    const request: KnowledgeAssetVmPublishRequest = {
+      onChainContextGraphId: '7',
+      encryptInlinePayload: realInline,
+      encryptInlineChunked: realChunked,
+    });
+    const request = makeQueuedPublishRequest({
       contextGraphId: 'private-cg',
       name: 'queued-private-ka',
       shareOperationId: 'share-op-1',
-      roots: ['urn:test:queued-private'],
-      seal: {
-        merkleRoot: `0x${'12'.repeat(32)}`,
-        authorAddress: '0x1111111111111111111111111111111111111111',
-        signature: {
-          r: `0x${'34'.repeat(32)}`,
-          vs: `0x${'56'.repeat(32)}`,
-        },
-        schemeVersion: 1,
-        reservedKaId: ((BigInt('0x1111111111111111111111111111111111111111') << 96n) | 1n).toString(),
-      },
-      sealChainId: '31337',
-      sealKav10Address: '0x2222222222222222222222222222222222222222',
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: `0x${'12'.repeat(32)}`,
-      intentKey: `sha256:${'ab'.repeat(32)}`,
-    };
+      root: 'urn:test:queued-private',
+      intentByte: 'ab',
+      reservedKaId: (
+        (BigInt(QUEUED_TEST_AUTHOR) << 96n) | 1n
+      ).toString() as `${bigint}`,
+    });
     const generatedFloor = generatedPrivateCatalogFloorQuads('private-cg');
     const legacyFloorQuad = { ...generatedFloor[0], graph: 'urn:legacy:catalog' };
 
@@ -821,54 +868,18 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
 
   it('does not trust or append a catalog floor for a private local-only queued publish', async () => {
     const realInline = recorder(async (plaintext: Uint8Array) => plaintext);
-    const publisherPublish = recorder(async (_opts: any) => ({
-      status: 'tentative',
-      ual: 'did:dkg:local/queued-private-local',
-    }));
-    const agentLike = {
+    const { agentLike, publisherPublish } = makeQueuedAgentHarness({
       peerId: 'did:dkg:agent:queued-private-local',
-      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
-      chain: {},
-      store: {
-        query: recorder(async () => ({ type: 'bindings', bindings: [] })),
-        insert: recorder(async () => undefined),
-        deleteByPattern: recorder(async () => undefined),
-      },
-      log: {
-        info: recorder(() => undefined),
-        warn: recorder(() => undefined),
-        error: recorder(() => undefined),
-        debug: recorder(() => undefined),
-      },
-      publisher: {
-        publish: publisherPublish,
-        clearSwmShareComplete: recorder(async () => undefined),
-      },
-      createV10ACKProvider: recorder(() => undefined),
-      _resolveEncryptInlinePayload: recorder(async () => realInline),
-      _resolveEncryptInlineChunked: recorder(async () => undefined),
-      _stampPointer: recorder(async () => undefined),
-    } as any;
-    const request: KnowledgeAssetVmPublishRequest = {
+      ual: 'did:dkg:local/queued-private-local',
+      encryptInlinePayload: realInline,
+    });
+    const request = makeQueuedPublishRequest({
       contextGraphId: 'private-local-cg',
       name: 'queued-private-local-ka',
       shareOperationId: 'share-op-private-local',
-      roots: ['urn:test:queued-private-local'],
-      seal: {
-        merkleRoot: `0x${'12'.repeat(32)}`,
-        authorAddress: '0x1111111111111111111111111111111111111111',
-        signature: {
-          r: `0x${'34'.repeat(32)}`,
-          vs: `0x${'56'.repeat(32)}`,
-        },
-        schemeVersion: 1,
-      },
-      sealChainId: '31337',
-      sealKav10Address: '0x2222222222222222222222222222222222222222',
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: `0x${'12'.repeat(32)}`,
-      intentKey: `sha256:${'cd'.repeat(32)}`,
-    };
+      root: 'urn:test:queued-private-local',
+      intentByte: 'cd',
+    });
     const originalQuads = [{
       subject: 'urn:test:queued-private-local',
       predicate: 'http://schema.org/name',
@@ -899,54 +910,17 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     const placeholderChunked = recorder(async () => {
       throw new Error('queued fail-closed chunk placeholder');
     });
-    const publisherPublish = recorder(async (_opts: any) => ({
-      status: 'tentative',
-      ual: 'did:dkg:local/queued-placeholder',
-    }));
-    const agentLike = {
+    const { agentLike, publisherPublish } = makeQueuedAgentHarness({
       peerId: 'did:dkg:agent:queued-placeholder',
-      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
-      chain: {},
-      store: {
-        query: recorder(async () => ({ type: 'bindings', bindings: [] })),
-        insert: recorder(async () => undefined),
-        deleteByPattern: recorder(async () => undefined),
-      },
-      log: {
-        info: recorder(() => undefined),
-        warn: recorder(() => undefined),
-        error: recorder(() => undefined),
-        debug: recorder(() => undefined),
-      },
-      publisher: {
-        publish: publisherPublish,
-        clearSwmShareComplete: recorder(async () => undefined),
-      },
-      createV10ACKProvider: recorder(() => undefined),
-      _resolveEncryptInlinePayload: recorder(async () => undefined),
-      _resolveEncryptInlineChunked: recorder(async () => undefined),
-      _stampPointer: recorder(async () => undefined),
-    } as any;
-    const request: KnowledgeAssetVmPublishRequest = {
+      ual: 'did:dkg:local/queued-placeholder',
+    });
+    const request = makeQueuedPublishRequest({
       contextGraphId: 'public-cg',
       name: 'queued-public-ka',
       shareOperationId: 'share-op-placeholder',
-      roots: ['urn:test:queued-public'],
-      seal: {
-        merkleRoot: `0x${'12'.repeat(32)}`,
-        authorAddress: '0x1111111111111111111111111111111111111111',
-        signature: {
-          r: `0x${'34'.repeat(32)}`,
-          vs: `0x${'56'.repeat(32)}`,
-        },
-        schemeVersion: 1,
-      },
-      sealChainId: '31337',
-      sealKav10Address: '0x2222222222222222222222222222222222222222',
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: `0x${'12'.repeat(32)}`,
-      intentKey: `sha256:${'ef'.repeat(32)}`,
-    };
+      root: 'urn:test:queued-public',
+      intentByte: 'ef',
+    });
     const originalQuads = [{
       subject: 'urn:test:queued-public',
       predicate: 'http://schema.org/name',
@@ -973,60 +947,23 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
   });
 
   it('uses queued resolved on-chain CG id as binding-only metadata for same-CG publishes', async () => {
-    const publisherPublish = recorder(async (_opts: any) => ({
-      status: 'tentative',
-      ual: 'did:dkg:local/queued-binding',
-    }));
-    const store = {
-      query: recorder(async () => ({ type: 'bindings', bindings: [] })),
-      insert: recorder(async () => undefined),
-      deleteByPattern: recorder(async () => undefined),
-    };
-    const agentLike = {
+    const { agentLike, publisherPublish } = makeQueuedAgentHarness({
       peerId: 'did:dkg:agent:queued-binding',
-      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      ual: 'did:dkg:local/queued-binding',
       chain: {
         getEvmChainId: recorder(async () => 31337n),
-        getKnowledgeAssetsLifecycleAddress: recorder(async () => '0x2222222222222222222222222222222222222222'),
+        getKnowledgeAssetsLifecycleAddress: recorder(async () => QUEUED_TEST_LIFECYCLE),
       },
-      getContextGraphOnChainId: recorder(async () => null),
-      store,
-      log: {
-        info: recorder(() => undefined),
-        warn: recorder(() => undefined),
-        error: recorder(() => undefined),
-        debug: recorder(() => undefined),
-      },
-      publisher: {
-        publish: publisherPublish,
-        clearSwmShareComplete: recorder(async () => undefined),
-      },
-      createV10ACKProvider: recorder(() => undefined),
-      _resolveEncryptInlinePayload: recorder(async () => undefined),
-      _resolveEncryptInlineChunked: recorder(async () => undefined),
-      _stampPointer: recorder(async () => undefined),
-    } as any;
-    const request: KnowledgeAssetVmPublishRequest = {
+      onChainContextGraphId: null,
+    });
+    const request = makeQueuedPublishRequest({
       contextGraphId: 'memory-layers-e2e',
       name: 'queued-binding-ka',
       shareOperationId: 'share-op-1',
-      roots: ['urn:test:queued-binding'],
-      seal: {
-        merkleRoot: `0x${'12'.repeat(32)}`,
-        authorAddress: '0x1111111111111111111111111111111111111111',
-        signature: {
-          r: `0x${'34'.repeat(32)}`,
-          vs: `0x${'56'.repeat(32)}`,
-        },
-        schemeVersion: 1,
-        reservedKaId: '1' as `${bigint}`,
-      },
-      sealChainId: '31337',
-      sealKav10Address: '0x2222222222222222222222222222222222222222',
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: `0x${'12'.repeat(32)}`,
-      intentKey: `sha256:${'cd'.repeat(32)}`,
-    };
+      root: 'urn:test:queued-binding',
+      intentByte: 'cd',
+      reservedKaId: '1',
+    });
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
       contextGraphId: request.contextGraphId,
@@ -1066,59 +1003,23 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
   });
 
   it('fails queued same-CG publishes before publisher execution when the CG is not on chain', async () => {
-    const publisherPublish = recorder(async (_opts: any) => ({
-      status: 'tentative',
-      ual: 'did:dkg:local/should-not-publish',
-    }));
-    const agentLike = {
+    const { agentLike, publisherPublish } = makeQueuedAgentHarness({
       peerId: 'did:dkg:agent:queued-unregistered',
-      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      ual: 'did:dkg:local/should-not-publish',
       chain: {
         getEvmChainId: recorder(async () => 31337n),
-        getKnowledgeAssetsLifecycleAddress: recorder(async () => '0x2222222222222222222222222222222222222222'),
+        getKnowledgeAssetsLifecycleAddress: recorder(async () => QUEUED_TEST_LIFECYCLE),
       },
-      getContextGraphOnChainId: recorder(async () => null),
-      store: {
-        query: recorder(async () => ({ type: 'bindings', bindings: [] })),
-        insert: recorder(async () => undefined),
-        deleteByPattern: recorder(async () => undefined),
-      },
-      log: {
-        info: recorder(() => undefined),
-        warn: recorder(() => undefined),
-        error: recorder(() => undefined),
-        debug: recorder(() => undefined),
-      },
-      publisher: {
-        publish: publisherPublish,
-        clearSwmShareComplete: recorder(async () => undefined),
-      },
-      createV10ACKProvider: recorder(() => undefined),
-      _resolveEncryptInlinePayload: recorder(async () => undefined),
-      _resolveEncryptInlineChunked: recorder(async () => undefined),
-      _stampPointer: recorder(async () => undefined),
-    } as any;
-    const request: KnowledgeAssetVmPublishRequest = {
+      onChainContextGraphId: null,
+    });
+    const request = makeQueuedPublishRequest({
       contextGraphId: 'unregistered-product-cg',
       name: 'queued-unregistered-ka',
       shareOperationId: 'share-op-1',
-      roots: ['urn:test:queued-unregistered'],
-      seal: {
-        merkleRoot: `0x${'12'.repeat(32)}`,
-        authorAddress: '0x1111111111111111111111111111111111111111',
-        signature: {
-          r: `0x${'34'.repeat(32)}`,
-          vs: `0x${'56'.repeat(32)}`,
-        },
-        schemeVersion: 1,
-        reservedKaId: '1' as `${bigint}`,
-      },
-      sealChainId: '31337',
-      sealKav10Address: '0x2222222222222222222222222222222222222222',
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: `0x${'12'.repeat(32)}`,
-      intentKey: `sha256:${'de'.repeat(32)}`,
-    };
+      root: 'urn:test:queued-unregistered',
+      intentByte: 'de',
+      reservedKaId: '1',
+    });
 
     let thrown: any;
     try {
