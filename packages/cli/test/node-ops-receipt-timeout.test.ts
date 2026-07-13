@@ -105,8 +105,10 @@ describe('node-ops set-ask receipt deadline wiring', () => {
       receiptTimeoutMs: 725_000,
     });
     mocks.createCliEvmProviders.mockReturnValue({
-      urls: ['https://rpc.example'],
-      providers: [{ id: 'write-provider' }],
+      endpoints: [{
+        rpcUrl: 'https://rpc.example',
+        provider: { id: 'write-provider' },
+      }],
       readProvider: { id: 'read-provider' },
       receiptTimeoutMs: 725_000,
     });
@@ -133,8 +135,10 @@ describe('node-ops set-ask receipt deadline wiring', () => {
     );
     expect(mocks.sendCliRawTransactionWithFailover).toHaveBeenCalledWith(
       {
-        urls: ['https://rpc.example'],
-        providers: [{ id: 'write-provider' }],
+        endpoints: [{
+          rpcUrl: 'https://rpc.example',
+          provider: { id: 'write-provider' },
+        }],
         readProvider: { id: 'read-provider' },
         receiptTimeoutMs: 725_000,
       },

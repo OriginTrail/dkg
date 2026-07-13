@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect, vi } from 'vitest';
+import { ethers } from 'ethers';
 import {
   createCliEvmProviders,
   isCliRetryableRpcError,
@@ -10,10 +11,15 @@ import { isRetryableRpcError, isKnownTransactionError, isChainRpcTransportError 
 
 function writeContext(
   providers: any[],
-  urls: string[] = providers.map((_, index) => `https://rpc-${index + 1}.example`),
   receiptTimeoutMs = 600_000,
 ) {
-  return { providers, urls, receiptTimeoutMs };
+  return {
+    endpoints: providers.map((provider, index) => ({
+      provider,
+      rpcUrl: `https://rpc-${index + 1}.example`,
+    })),
+    receiptTimeoutMs,
+  };
 }
 
 describe('cli-rpc classifier consolidation (W4)', () => {
@@ -67,7 +73,7 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     } as any;
     await expect(
       sendCliRawTransactionWithFailover(
-        writeContext([failing, failing], ['https://a.example', 'https://b.example']),
+        writeContext([failing, failing]),
         '0xsigned',
         '0xhash',
       ),
@@ -87,7 +93,7 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     } as any;
     await expect(
       sendCliRawTransactionWithFailover(
-        writeContext([reverting, reverting], ['https://a.example', 'https://b.example']),
+        writeContext([reverting, reverting]),
         '0xsigned',
         '0xhash',
       ),
@@ -104,7 +110,7 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     } as any;
 
     await expect(sendCliRawTransactionWithFailover(
-      writeContext([provider], ['https://rpc.example'], 999),
+      writeContext([provider], 999),
       '0xsigned',
       '0xhash',
     )).rejects.toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
@@ -127,7 +133,7 @@ describe('cli-rpc classifier consolidation (W4)', () => {
       },
     }) as any;
     const err = await sendCliRawTransactionWithFailover(
-      writeContext([provider(), provider()], ['https://a.example', 'https://b.example']),
+      writeContext([provider(), provider()]),
       '0xsigned',
       '0xdeadbeef',
     ).catch((e) => e);
@@ -158,7 +164,6 @@ describe('cli-rpc classifier consolidation (W4)', () => {
       const result = sendCliRawTransactionWithFailover(
         writeContext(
           [first, second],
-          ['https://first.example', 'https://second.example'],
           1_000,
         ),
         '0xsigned',
@@ -229,7 +234,7 @@ describe('cli-rpc classifier consolidation (W4)', () => {
       } as any;
 
       const outcome = sendCliRawTransactionWithFailover(
-        writeContext([provider], ['https://rpc.example'], 1_000),
+        writeContext([provider], 1_000),
         '0xsigned',
         '0xreverted',
       ).then(
@@ -247,5 +252,23 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('constructs one provider/url endpoint list at the factory boundary', () => {
+    const context = createCliEvmProviders(
+      'https://primary.example',
+      ['https://backup.example'],
+      725_000,
+    );
+
+    expect(context.endpoints.map(endpoint => endpoint.rpcUrl)).toEqual([
+      'https://primary.example',
+      'https://backup.example',
+    ]);
+    expect(context.endpoints.every(endpoint => endpoint.provider instanceof ethers.JsonRpcProvider))
+      .toBe(true);
+    expect(context).not.toHaveProperty('providers');
+    expect(context).not.toHaveProperty('urls');
+    expect(context.receiptTimeoutMs).toBe(725_000);
   });
 });
