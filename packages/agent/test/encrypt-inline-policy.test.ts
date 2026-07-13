@@ -18,7 +18,12 @@ import {
   encodePublishIntent,
   isStorageACKDecline,
 } from '@origintrail-official/dkg-core';
-import { StorageACKHandler, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
+import {
+  StorageACKHandler,
+  generatedPrivateCatalogFloorQuads,
+  generatedPrivateCatalogTripleKeys,
+  type KnowledgeAssetVmPublishRequest,
+} from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
@@ -697,7 +702,7 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
 });
 
 describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routing', () => {
-  it('lets resolved real encryption callbacks override queued fail-closed placeholders', async () => {
+  it('reconstructs the curated catalog floor and lets real encryption override placeholders', async () => {
     const realInline = recorder(async (plaintext: Uint8Array) => new Uint8Array([...plaintext, 0xaa]));
     const realChunked = recorder(async () => ({
       ciphertextChunksRoot: ethers.getBytes(ethers.id('queued-real-chunk-root')),
@@ -789,6 +794,8 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     expect(publisherPublish.calls.at(-1)?.[0]).toMatchObject({
       encryptInlinePayload: realInline,
       encryptInlineChunked: realChunked,
+      quads: expect.arrayContaining(generatedPrivateCatalogFloorQuads('private-cg')),
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys('private-cg'),
     });
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload).not.toBe(failClosedInline);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlineChunked).not.toBe(failClosedChunked);

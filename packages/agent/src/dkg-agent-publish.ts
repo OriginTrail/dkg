@@ -111,6 +111,8 @@ import {
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject,
   canonicalPublishPayload,
+  catalogTripleKey,
+  generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
@@ -3957,10 +3959,36 @@ export class PublishMethods extends DKGAgentBase {
       );
       const encryptInlinePayload = resolvedEncryptInlinePayload ?? publishOptions.encryptInlinePayload;
       const encryptInlineChunked = resolvedEncryptInlineChunked ?? publishOptions.encryptInlineChunked;
+      // #1670 — finalized private assertions seal the deterministic public
+      // catalog floor, but assertionPromote deliberately keeps that synthetic
+      // root out of the per-user-root immutable share snapshot. The synchronous
+      // named-KA path reconstructs the floor in SWM before publishing; queued
+      // execution must do the same from deterministic inputs. Without it the
+      // publisher has no catalog commitment/staging bytes, so cores fall back to
+      // their (intentionally absent) curated SWM copy and decline NO_DATA_IN_SWM.
+      //
+      // Gate this on the live, chain-policy-resolved encryption callback rather
+      // than the queued mapper placeholder. That keeps public CGs untouched and
+      // prevents caller-supplied policy hints from manufacturing trusted catalog
+      // triples. Exact-key de-duplication also supports legacy snapshots that
+      // already contain some or all of the generated floor.
+      const trustedQueuedCatalogTriples = resolvedEncryptInlinePayload
+        ? generatedPrivateCatalogTripleKeys(request.contextGraphId)
+        : undefined;
+      const queuedPublishQuads = trustedQueuedCatalogTriples
+        ? (() => {
+            const present = new Set(snapshotQuads.map(catalogTripleKey));
+            return [
+              ...snapshotQuads,
+              ...generatedPrivateCatalogFloorQuads(request.contextGraphId)
+                .filter((quad) => !present.has(catalogTripleKey(quad))),
+            ];
+          })()
+        : snapshotQuads;
       result = await publisher.publish({
         ...publisherPublishOptions,
         contextGraphId: request.contextGraphId,
-        quads: snapshotQuads,
+        quads: queuedPublishQuads,
         privateQuads: snapshotPrivateQuads.length > 0 ? snapshotPrivateQuads : undefined,
         publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
         subGraphName: request.subGraphName,
@@ -3982,6 +4010,9 @@ export class PublishMethods extends DKGAgentBase {
         onChainContextGraphId: queuedOnChainContextGraphId,
         encryptInlinePayload,
         encryptInlineChunked,
+        ...(trustedQueuedCatalogTriples
+          ? { trustedNonManifestCatalogTriples: trustedQueuedCatalogTriples }
+          : {}),
       });
 
       if (result.status === 'confirmed' && result.onChainResult) {
