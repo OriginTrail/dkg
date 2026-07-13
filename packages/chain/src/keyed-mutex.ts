@@ -16,7 +16,6 @@ interface KeyedSerializerEntry {
   readonly queueDepth: number;
   readonly reject: (reason?: unknown) => void;
   readonly resolve: (value: unknown) => void;
-  deadlineAt?: number;
   state: KeyedSerializerEntryState;
   startedAt?: number;
   timeout?: ReturnType<typeof setTimeout>;
@@ -94,7 +93,7 @@ export class KeyedSerializer {
     );
     const initialWaitMs = admission
       ? livePredecessors.reduce(
-        (total, predecessor) => total + (predecessor.admission?.operationBudgetMs ?? Number.POSITIVE_INFINITY),
+        (total, predecessor) => total + this.remainingOccupancyMs(predecessor, now),
         0,
       )
       : 0;
@@ -112,9 +111,6 @@ export class KeyedSerializer {
       queueDepth,
       resolve: resolveResult as (value: unknown) => void,
       reject: rejectResult,
-      deadlineAt: admission && initialWaitMs > 0 && Number.isFinite(initialWaitMs)
-        ? now + initialWaitMs
-        : undefined,
       state: 'queued',
     };
     lane.entries.push(entry);
@@ -125,64 +121,51 @@ export class KeyedSerializer {
         // Queue diagnostics must never alter signer-write admission.
       }
     }
-    this.refreshAdmissionTimeouts(key, lane);
+    this.refreshAdmissionTimeouts(lane);
     this.drain(key, lane);
     return result;
   }
 
   /**
-   * Refresh caller deadlines after an entry expires or a predecessor finishes
-   * early. Every entry receives the full advertised budget of predecessors
-   * that were live when it joined. If one of those predecessors later times
-   * out, its abandoned budget is removed from every successor immediately;
-   * this can expire an entire queued burst at the same real blocker deadline.
+   * Recompute queued deadlines from occupancy that can still happen. The
+   * running predecessor contributes only its unused budget; every queued
+   * predecessor contributes its full budget. Timed-out entries contribute
+   * nothing, so a burst behind one wedged operation collapses at that
+   * operation's deadline instead of waiting on callbacks that will be skipped.
    */
-  private refreshAdmissionTimeouts(key: string, lane: KeyedSerializerLane): void {
+  private refreshAdmissionTimeouts(lane: KeyedSerializerLane): void {
     const now = Date.now();
+    let hasLivePredecessor = false;
+    let remainingPredecessorOccupancyMs = 0;
     for (const entry of lane.entries) {
       if (entry.timeout) {
         clearTimeout(entry.timeout);
         entry.timeout = undefined;
       }
-    }
-
-    // Expiring one queued entry removes its advertised occupancy from all
-    // successors. Repeat the scan so collapsed deadlines expire in the same
-    // pass rather than receiving serial, already-abandoned grace periods.
-    let expiredOne = true;
-    while (expiredOne) {
-      expiredOne = false;
-      for (let index = 0; index < lane.entries.length; index += 1) {
-        const entry = lane.entries[index]!;
-        if (
-          entry.state !== 'queued'
-          || !entry.admission
-          || entry.deadlineAt === undefined
-          || entry.deadlineAt > now
-        ) continue;
-
-        entry.state = 'timed-out';
-        entry.reject(entry.admission.timeoutError(
-          Math.max(0, entry.deadlineAt - entry.enqueuedAt),
-          entry.queueDepth,
-        ));
-        for (const successor of lane.entries.slice(index + 1)) {
-          if (successor.state === 'queued' && successor.deadlineAt !== undefined) {
-            successor.deadlineAt -= entry.admission.operationBudgetMs;
-          }
+      if (entry.state === 'queued' && entry.admission && hasLivePredecessor) {
+        if (remainingPredecessorOccupancyMs <= 0) {
+          entry.state = 'timed-out';
+          entry.reject(entry.admission.timeoutError(now - entry.enqueuedAt, entry.queueDepth));
+        } else if (Number.isFinite(remainingPredecessorOccupancyMs)) {
+          entry.timeout = setTimeout(
+            () => this.refreshAdmissionTimeouts(lane),
+            remainingPredecessorOccupancyMs,
+          );
+          entry.timeout.unref?.();
         }
-        expiredOne = true;
+      }
+
+      if (entry.state === 'queued' || entry.state === 'running') {
+        hasLivePredecessor = true;
+        remainingPredecessorOccupancyMs += this.remainingOccupancyMs(entry, now);
       }
     }
+  }
 
-    for (const entry of lane.entries) {
-      if (entry.state !== 'queued' || entry.deadlineAt === undefined) continue;
-      entry.timeout = setTimeout(() => {
-        this.refreshAdmissionTimeouts(key, lane);
-        this.drain(key, lane);
-      }, Math.max(0, entry.deadlineAt - now));
-      entry.timeout.unref?.();
-    }
+  private remainingOccupancyMs(entry: KeyedSerializerEntry, now: number): number {
+    const budgetMs = entry.admission?.operationBudgetMs ?? Number.POSITIVE_INFINITY;
+    if (entry.state !== 'running' || entry.startedAt === undefined) return budgetMs;
+    return Math.max(0, budgetMs - (now - entry.startedAt));
   }
 
   private drain(key: string, lane: KeyedSerializerLane): void {
@@ -207,10 +190,11 @@ export class KeyedSerializer {
       .then(entry.fn)
       .then(entry.resolve, entry.reject)
       .finally(() => {
-        const finishedAt = Date.now();
-        const unusedBudgetMs = entry.admission && entry.startedAt !== undefined
-          ? Math.max(0, entry.admission.operationBudgetMs - (finishedAt - entry.startedAt))
-          : 0;
+        // The event loop may have been blocked past a queued deadline, letting
+        // this promise settle before its overdue timer callback runs. Rebase
+        // while the completed runner still occupies the lane so successors
+        // observe its exhausted budget and are rejected before it is removed.
+        this.refreshAdmissionTimeouts(lane);
         lane.running = false;
         if (lane.entries[0] === entry) {
           lane.entries.shift();
@@ -218,15 +202,10 @@ export class KeyedSerializer {
           const index = lane.entries.indexOf(entry);
           if (index >= 0) lane.entries.splice(index, 1);
         }
-        if (unusedBudgetMs > 0) {
-          for (const successor of lane.entries) {
-            if (successor.state === 'queued' && successor.deadlineAt !== undefined) {
-              successor.deadlineAt -= unusedBudgetMs;
-            }
-          }
-        }
+        // Remove the finished occupancy, then give the new head an immediate
+        // start and rebase later entries behind that head's full plan.
+        this.refreshAdmissionTimeouts(lane);
         this.drain(key, lane);
-        this.refreshAdmissionTimeouts(key, lane);
       });
   }
 }

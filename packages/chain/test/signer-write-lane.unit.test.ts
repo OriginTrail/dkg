@@ -118,6 +118,36 @@ describe('SignerWriteLane', () => {
     }
   });
 
+  it('expires a successor before drain when the admission timer callback is delayed', async () => {
+    vi.useFakeTimers();
+    try {
+      const lane = new SignerWriteLane(15);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const first = lane.run('blocked-loop-wallet', 'first', async () => gate);
+      const callback = vi.fn(async () => 'must not run');
+      const second = lane.run('blocked-loop-wallet', 'second', callback);
+      const secondExpectation = expect(second).rejects.toMatchObject({
+        name: 'SignerWriteLaneAdmissionTimeoutError',
+        waitMs: 20,
+        queueDepth: 2,
+      });
+
+      // Move wall time past the deadline without servicing timers, modelling a
+      // blocked event loop whose runner settles before the overdue callback.
+      vi.setSystemTime(Date.now() + 20);
+      release();
+      await first;
+      await vi.advanceTimersByTimeAsync(0);
+
+      await secondExpectation;
+      expect(callback).not.toHaveBeenCalled();
+      expect(lane.isActive('blocked-loop-wallet')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('immediately excludes a timed-out entry budget from later admission deadlines', async () => {
     vi.useFakeTimers();
     try {
