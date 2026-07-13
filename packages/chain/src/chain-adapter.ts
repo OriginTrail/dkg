@@ -18,6 +18,25 @@ export interface ConvictionReader {
   requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 }
 
+/** Inputs for one adapter-owned, cost-aware publisher planning decision. */
+export interface PublisherPublishPlanRequest {
+  contextGraphId: bigint;
+  effectiveByteSize: bigint;
+  /** Caller override. When omitted, a covering PCA may select its own lock. */
+  explicitPublishEpochs?: number;
+  /** Direct-spend lifetime used when no covering PCA-specific plan applies. */
+  defaultPublishEpochs: number;
+  /** Exact signer pin for an explicit publisher address/private key. */
+  publisherAddress?: string;
+}
+
+/** Final signer-dependent values that must be fixed before publish side effects. */
+export interface PublisherPublishPlan {
+  publisherAddress: string;
+  publishEpochs: number;
+  tokenAmount: bigint;
+}
+
 /** A PCA the node relates to (GAP-1): `owned` (a node wallet holds the NFT),
  *  `agent` (a node op wallet is its registered publishing agent), or `both`. */
 export type PcaRelation = 'owned' | 'agent' | 'both';
@@ -1160,37 +1179,20 @@ export interface ChainAdapter {
   /**
    * Return an authorized signer for early, cost-independent publisher work.
    * This does not prove that the signer can fund a later publish. Once the
-   * exact quote exists, publishers should use
-   * {@link reservePublisherAddressForPublish} before binding signatures.
+   * payload size exists, publishers should use
+   * {@link resolvePublisherPublishPlan} before binding signatures.
    */
   getAuthorizedPublisherAddress?(contextGraphId: bigint): Promise<string>;
 
   /**
-   * Strict, cost-aware signer reservation used once an exact publish quote
-   * exists. Signer-pool adapters advance their cursor atomically here so
-   * concurrent publishers do not bind multiple off-chain signatures to the
-   * same transaction signer by accident.
+   * Resolve authorization, candidate-specific PCA lifetime/pricing, strict
+   * fundability, and signer-pool rotation as one adapter-owned operation.
+   * Publishers call this before ACK collection or encrypted staging so no
+   * publish-bound identity is derived from a provisional signer.
    */
-  reservePublisherAddressForPublish?(request: {
-    contextGraphId: bigint;
-    requiredTracWei: bigint;
-    /**
-     * Exact lifetime when the caller has fixed one. Omit while selecting for
-     * an implicit lifetime so a candidate PCA signer's lock can determine the
-     * final quote; callers must then re-reserve that signer with the resolved
-     * lifetime and cost before producing publish-bound signatures.
-     */
-    publishEpochs?: number;
-    /** Exact signer pin for publishers backed by an explicit private key. */
-    publisherAddress?: string;
-    /**
-     * Candidates whose signer-specific exact plan already failed validation.
-     * Unpinned reservation implementations must not return them again. This
-     * makes multi-candidate progress explicit instead of relying on hidden
-     * round-robin cursor side effects.
-     */
-    excludedPublisherAddresses?: string[];
-  }): Promise<string>;
+  resolvePublisherPublishPlan?(
+    request: PublisherPublishPlanRequest,
+  ): Promise<PublisherPublishPlan>;
 
   /**
    * Sign with a specific adapter-held address. Adapters with signer pools

@@ -254,13 +254,6 @@ function coercePublisherAddress(value: unknown): string | undefined {
   return normalized === ethers.ZeroAddress ? undefined : normalized;
 }
 
-function isNoFundedPublisherReservationError(error: unknown): boolean {
-  return typeof error === 'object'
-    && error !== null
-    && 'code' in error
-    && (error as { code?: unknown }).code === 'NO_FUNDED_PUBLISHER_WALLET';
-}
-
 function publisherAddressFromUal(ual: string | undefined): string | undefined {
   const prefix = 'did:dkg:';
   if (!ual?.startsWith(prefix)) return undefined;
@@ -965,60 +958,13 @@ export class DKGPublisher implements Publisher {
     return address === ethers.ZeroAddress ? '0x0000000000000000000000000000000000000001' : address;
   }
 
-  /** Resolve every signer-dependent publish input as one coherent snapshot. */
-  private async resolvePublishPricingForSigner(input: {
-    signer: PublisherSigner;
+  /** Compatibility pricing for adapters without adapter-owned publish planning. */
+  private async resolveLegacyPublishPricing(input: {
     explicitPublishEpochs: number | undefined;
     effectiveByteSize: bigint;
     ctx: OperationContext;
   }): Promise<{ publishEpochs: number; precomputedTokenAmount: bigint }> {
-    let publishEpochs = input.explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
-    if (
-      input.explicitPublishEpochs === undefined
-      && typeof this.chain.getConvictionAgentAccountId === 'function'
-      && typeof this.chain.getConvictionAccountLockDurationEpochs === 'function'
-    ) {
-      try {
-        const accountId = await this.chain.getConvictionAgentAccountId(input.signer.address);
-        if (accountId > 0n) {
-          const lockEpochs = await this.chain.getConvictionAccountLockDurationEpochs(accountId);
-          if (lockEpochs > 0) {
-            let canFundDiscount = true;
-            if (typeof this.chain.convictionAccountCanCover === 'function') {
-              if (typeof this.chain.getRequiredPublishTokenAmount !== 'function') {
-                canFundDiscount = false;
-              } else {
-                try {
-                  const quoted = await this.chain.getRequiredPublishTokenAmount(input.effectiveByteSize, lockEpochs);
-                  const prospectiveBaseCost = quoted > BigInt(lockEpochs) ? quoted : BigInt(lockEpochs);
-                  canFundDiscount = await this.chain.convictionAccountCanCover(accountId, prospectiveBaseCost);
-                } catch {
-                  canFundDiscount = false;
-                }
-              }
-            }
-            if (canFundDiscount) {
-              publishEpochs = lockEpochs;
-              this.log.info(
-                input.ctx,
-                `PCA-funded publish detected (signer=${input.signer.address}, accountId=${accountId}) — coercing publishEpochs to lockDurationEpochs=${lockEpochs}`,
-              );
-            } else {
-              this.log.info(
-                input.ctx,
-                `Signer ${input.signer.address} is a registered PCA agent (accountId=${accountId}) but funding for this publish's discounted cost could not be confirmed — NOT coercing publishEpochs; publishing at requested lifetime=${publishEpochs} via direct spend`,
-              );
-            }
-          }
-        }
-      } catch (err) {
-        this.log.warn(
-          input.ctx,
-          `PCA epochs probe failed — falling back to publishEpochs=${publishEpochs}: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    const publishEpochs = input.explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
 
     let precomputedTokenAmount = BigInt(publishEpochs);
     if (typeof this.chain.getRequiredPublishTokenAmount === 'function') {
@@ -1059,13 +1005,12 @@ export class DKGPublisher implements Publisher {
     publishEpochs: number;
     tokenAmount: bigint;
   }> {
-    const initialPricing = await this.resolvePublishPricingForSigner({
-      signer: input.initialSigner,
-      explicitPublishEpochs: input.explicitPublishEpochs,
-      effectiveByteSize: input.effectiveByteSize,
-      ctx: input.ctx,
-    });
-    if (typeof this.chain.reservePublisherAddressForPublish !== 'function') {
+    if (typeof this.chain.resolvePublisherPublishPlan !== 'function') {
+      const initialPricing = await this.resolveLegacyPublishPricing({
+        explicitPublishEpochs: input.explicitPublishEpochs,
+        effectiveByteSize: input.effectiveByteSize,
+        ctx: input.ctx,
+      });
       return {
         signer: input.initialSigner,
         publisherAddress: input.initialSigner.address,
@@ -1074,115 +1019,47 @@ export class DKGPublisher implements Publisher {
       };
     }
 
-    // A configured publisherAddress is an explicit namespace/signing contract
-    // even when the adapter holds the key. Only adapter-inferred addresses may
-    // rotate across the operational pool during cost-aware reservation.
+    // The adapter owns candidate iteration, PCA probing, exact pricing, strict
+    // funding validation, and cursor advancement as one operation. The
+    // publisher only binds the returned final signer to ACK/transaction data.
     const pinnedPublisherAddress = this.publisherAddress !== undefined
       ? input.initialSigner.address
       : undefined;
     const pinnedPublisherLabel = this.publisherWallet
       ? 'publisherPrivateKey'
       : 'configured publisherAddress';
-    const rejectedExactPlans = new Map<string, unknown>();
-    for (;;) {
-      // A configured pin and an explicit lifetime already have a complete
-      // signer-independent quote. An unpinned implicit lifetime does not: use
-      // only the 1-wei PCA liveness probe (`requiredTracWei: 0n`) to discover a
-      // candidate, then validate that candidate's own lock-priced tuple below.
-      // Using the initial signer's default quote here would wrongly reject a
-      // valid shorter-lock PCA before its exact price can be computed.
-      const discoveryIsExact = pinnedPublisherAddress !== undefined
-        || input.explicitPublishEpochs !== undefined;
-      const discoveryRequiredTracWei = discoveryIsExact
-        ? initialPricing.precomputedTokenAmount
-        : 0n;
-      const discoveryPublishEpochs = discoveryIsExact
-        ? initialPricing.publishEpochs
-        : undefined;
-      const reservedAddress = coercePublisherAddress(
-        await this.chain.reservePublisherAddressForPublish({
-          contextGraphId: input.contextGraphId,
-          requiredTracWei: discoveryRequiredTracWei,
-          publishEpochs: discoveryPublishEpochs,
-          publisherAddress: pinnedPublisherAddress,
-          // Candidate progress is part of the adapter contract. The publisher
-          // does not assume that repeated calls advance a hidden EVM cursor.
-          excludedPublisherAddresses: pinnedPublisherAddress
-            ? undefined
-            : [...rejectedExactPlans.keys()],
-        }),
-      );
-      if (!reservedAddress) throw new PublisherWalletRequiredError('publish');
-      const reservationKey = reservedAddress.toLowerCase();
-      const previousRejection = rejectedExactPlans.get(reservationKey);
-      // A non-conforming/non-advancing adapter cannot make this loop spin.
-      if (previousRejection !== undefined) throw previousRejection;
-      if (
-        pinnedPublisherAddress
-        && reservationKey !== pinnedPublisherAddress.toLowerCase()
-      ) {
-        throw new Error(
-          `Publisher signer reservation mismatch: ${pinnedPublisherLabel} pins ${pinnedPublisherAddress}, ` +
-          `but the chain adapter reserved ${reservedAddress}.`,
-        );
-      }
-      const reservedSigner = await this.getPublisherSigner(reservedAddress);
-      if (!reservedSigner || reservedSigner.address.toLowerCase() !== reservationKey) {
-        throw new Error(
-          `Publisher signer reservation mismatch: no signer for reserved address ${reservedAddress}.`,
-        );
-      }
-      const finalPricing = reservationKey === input.initialSigner.address.toLowerCase()
-        ? initialPricing
-        : await this.resolvePublishPricingForSigner({
-          signer: reservedSigner,
-          explicitPublishEpochs: input.explicitPublishEpochs,
-          effectiveByteSize: input.effectiveByteSize,
-          ctx: input.ctx,
-        });
-      const discoveryMatchesFinalPlan = discoveryPublishEpochs === finalPricing.publishEpochs
-        && discoveryRequiredTracWei === finalPricing.precomputedTokenAmount;
-      if (!discoveryMatchesFinalPlan) {
-        // An implicit lifetime makes the first reservation provisional even if
-        // its numeric quote happens to stay unchanged: a PCA candidate may
-        // cover the default quote but have a mismatched lock. Pin and validate
-        // every resolved tuple before any ACK-bound or remote side effect.
-        try {
-          const finalReservedAddress = coercePublisherAddress(
-            await this.chain.reservePublisherAddressForPublish({
-              contextGraphId: input.contextGraphId,
-              requiredTracWei: finalPricing.precomputedTokenAmount,
-              publishEpochs: finalPricing.publishEpochs,
-              publisherAddress: reservedAddress,
-            }),
-          );
-          if (
-            !finalReservedAddress
-            || finalReservedAddress.toLowerCase() !== reservationKey
-          ) {
-            throw new Error(
-              `Publisher signer reservation mismatch: final publish plan pins ${reservedAddress}, ` +
-              `but the chain adapter reserved ${finalReservedAddress ?? 'no address'}.`,
-            );
-          }
-        } catch (error) {
-          // If this candidate cannot fund its own exact PCA plan, explicitly
-          // exclude it from the next discovery request. This works for any
-          // adapter implementation; it does not depend on cursor side effects.
-          if (!pinnedPublisherAddress && isNoFundedPublisherReservationError(error)) {
-            rejectedExactPlans.set(reservationKey, error);
-            continue;
-          }
-          throw error;
-        }
-      }
-      return {
-        signer: reservedSigner,
-        publisherAddress: reservedAddress,
-        publishEpochs: finalPricing.publishEpochs,
-        tokenAmount: finalPricing.precomputedTokenAmount,
-      };
+    const resolvedPlan = await this.chain.resolvePublisherPublishPlan({
+      contextGraphId: input.contextGraphId,
+      effectiveByteSize: input.effectiveByteSize,
+      explicitPublishEpochs: input.explicitPublishEpochs,
+      defaultPublishEpochs: DEFAULT_PUBLISH_EPOCHS,
+      publisherAddress: pinnedPublisherAddress,
+    });
+    const plannedAddress = coercePublisherAddress(resolvedPlan.publisherAddress);
+    if (!plannedAddress) {
+      throw new Error('Publisher publish plan returned no valid publisher address.');
     }
+    if (
+      pinnedPublisherAddress
+      && plannedAddress.toLowerCase() !== pinnedPublisherAddress.toLowerCase()
+    ) {
+      throw new Error(
+        `Publisher signer reservation mismatch: ${pinnedPublisherLabel} pins ${pinnedPublisherAddress}, ` +
+        `but the chain adapter reserved/planned ${plannedAddress}.`,
+      );
+    }
+    const plannedSigner = await this.getPublisherSigner(plannedAddress);
+    if (!plannedSigner || plannedSigner.address.toLowerCase() !== plannedAddress.toLowerCase()) {
+      throw new Error(
+        `Publisher signer reservation mismatch: no signer for planned address ${plannedAddress}.`,
+      );
+    }
+    return {
+      signer: plannedSigner,
+      publisherAddress: plannedAddress,
+      publishEpochs: resolvedPlan.publishEpochs,
+      tokenAmount: resolvedPlan.tokenAmount,
+    };
   }
 
   private isChainV10Ready(): boolean {
@@ -2274,16 +2151,16 @@ export class DKGPublisher implements Publisher {
     const willAttemptOnChainPublish = publisherContextGraphId !== undefined;
     const chainV10Ready = await this.refreshChainV10Readiness();
     const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
-    const strictPublishReservationAvailable = canResolveOnChainPublisher
-      && typeof this.chain.reservePublisherAddressForPublish === 'function';
+    const adapterOwnedPublishPlanningAvailable = canResolveOnChainPublisher
+      && typeof this.chain.resolvePublisherPublishPlan === 'function';
     const resolvedPublisherAddress = canResolveOnChainPublisher
       ? await this.resolvePublisherAddress(publisherContextGraphId, {
-        // The strict reservation below is the one cursor-moving selection for
+        // The adapter-owned plan below is the one cursor-moving selection for
         // this publish. A prior getAuthorizedPublisherAddress probe would move
         // the cursor once more and make two-wallet pools always submit from the
-        // second wallet. Non-reserving adapter surfaces still establish that a
-        // usable signer exists before payload preparation.
-        includeReservingPublisherProbe: !strictPublishReservationAvailable,
+        // second wallet. Legacy adapter surfaces still establish that a usable
+        // signer exists before payload preparation.
+        includeReservingPublisherProbe: !adapterOwnedPublishPlanningAvailable,
       })
       : await this.resolvePublisherAddress(undefined, {
         includeReservingPublisherProbe: false,

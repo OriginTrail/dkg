@@ -213,13 +213,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async getRequiredPublishTokenAmount(publicByteSize: bigint, epochs: number): Promise<bigint> {
     await this.init();
-    if (!this.contracts.askStorage) {
-      throw new Error('AskStorage not available');
-    }
-    const ask = await this.readContract(
-      this.contracts.askStorage, 'askStorage.getStakeWeightedAverageAsk', 'getStakeWeightedAverageAsk',
-    );
-    return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
+    return this.quoteRequiredPublishTokenAmount(publicByteSize, epochs);
   }
 
   // =====================================================================

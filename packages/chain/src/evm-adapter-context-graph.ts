@@ -18,7 +18,7 @@ import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult, type PublisherPublishPlan, type PublisherPublishPlanRequest } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
 type ContextGraphRegistryScanPlan =
@@ -172,59 +172,20 @@ function buildCursorContextGraphRegistryScanPlan(
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
-   * Reserve the next authorized signer and return its address. The publisher
-   * uses this to bind off-chain signatures to the tx signer before
-   * `publishDirect` is submitted. This pre-pin runs BEFORE the publish cost is
-   * known (and the ChainAdapter interface advertises no cost arg), so it selects
-   * on the funding floor only — cost-aware selection lives inside
-   * `createKnowledgeAssets` (the no-`publisherAddress` path), and pin-time
-   * pricing is tracked as a follow-up (#1328).
+   * Legacy cost-independent authorized signer selection. New publish flows use
+   * resolvePublisherPublishPlan once byte size is known so signer, lifetime,
+   * price, and strict funding are fixed by one adapter operation.
    */
   async getAuthorizedPublisherAddress(contextGraphId: bigint): Promise<string> {
     await this.init();
     return (await this.nextAuthorizedSigner(contextGraphId)).address;
   }
 
-  async reservePublisherAddressForPublish(request: {
-    contextGraphId: bigint;
-    requiredTracWei: bigint;
-    publishEpochs?: number;
-    publisherAddress?: string;
-    excludedPublisherAddresses?: string[];
-  }): Promise<string> {
+  async resolvePublisherPublishPlan(
+    request: PublisherPublishPlanRequest,
+  ): Promise<PublisherPublishPlan> {
     await this.init();
-    if (request.publisherAddress) {
-      const selected = await this.resolvePinnedPublisherSigner(
-        request.contextGraphId,
-        request.publisherAddress,
-      );
-      return (await this.selectFundedSignerOrThrow(
-        [selected],
-        {
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: request.requiredTracWei,
-          pca: request.publishEpochs === undefined
-            ? { kind: 'provisional-publish' }
-            : { kind: 'publish', epochs: request.publishEpochs },
-        },
-        { preferIdle: false },
-      )).address;
-    }
-    return (await this.requireFundedPublisherSigner(
-      request.contextGraphId,
-      {
-        kind: 'native+trac',
-        nativeFloorWei: this.minPublisherNativeWei,
-        tracFloorWei: this.minPublisherTracWei,
-        requiredTracWei: request.requiredTracWei,
-        pca: request.publishEpochs === undefined
-          ? { kind: 'provisional-publish' }
-          : { kind: 'publish', epochs: request.publishEpochs },
-      },
-      { excludedPublisherAddresses: request.excludedPublisherAddresses },
-    )).address;
+    return this.resolveFundedPublisherPublishPlan(request);
   }
 
   // =====================================================================

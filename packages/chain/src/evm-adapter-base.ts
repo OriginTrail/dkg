@@ -20,6 +20,8 @@ import type {
   V10PublishParams,
   OnChainPublishResult,
   ConvictionReader,
+  PublisherPublishPlan,
+  PublisherPublishPlanRequest,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
@@ -563,6 +565,8 @@ export type FundingMode =
 
 export type NativeOnlyFundingMode = Extract<FundingMode, { kind: 'native-only' }>;
 export type NativeAndTracFundingMode = Extract<FundingMode, { kind: 'native+trac' }>;
+
+type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
 
 /**
  * Generalized operational-wallet selection request. The discriminant fixes the
@@ -1880,9 +1884,9 @@ export class EVMChainAdapterBase {
    * `nextAuthorizedSigner` is the thin publish wrapper over this; RS / update /
    * relay route through it with their own `txClass` + `FundingMode` in later phases.
    */
-  private async _withSignerSelection(
-    select: (ordered: Wallet[]) => Promise<Wallet>,
-  ): Promise<Wallet> {
+  private async _withSignerSelection<T extends { address: string }>(
+    select: (ordered: Wallet[]) => Promise<T>,
+  ): Promise<T> {
     const previousSelection = this.signerSelectionQueue;
     let releaseSelection!: () => void;
     this.signerSelectionQueue = new Promise<void>((resolve) => { releaseSelection = resolve; });
@@ -1955,48 +1959,6 @@ export class EVMChainAdapterBase {
           { preferIdle: spec.preferIdle ?? false },
         );
       return chosen;
-    });
-  }
-
-  /**
-   * Strict publisher reservation. Unlike {@link selectSigner}, this never
-   * returns a known-short best-effort wallet: it refreshes the whole authorized
-   * candidate set before emitting the terminal funding diagnostic. Keeping this
-   * as a named path prevents normal RS/update/publish routing from silently
-   * acquiring fail-closed behavior.
-   */
-  protected async requireFundedPublisherSigner(
-    contextGraphId: bigint,
-    funding: NativeAndTracFundingMode,
-    options: { excludedPublisherAddresses?: readonly string[] } = {},
-  ): Promise<Wallet> {
-    return this._withSignerSelection(async (ordered) => {
-      const authorized = await this._authorizedPublisherSigners(ordered, contextGraphId);
-      const excluded = new Set(
-        (options.excludedPublisherAddresses ?? []).map((address) => address.toLowerCase()),
-      );
-      const eligible = authorized.filter((signer) => !excluded.has(signer.address.toLowerCase()));
-      if (eligible.length === 0) {
-        const diagnostics = await Promise.all(authorized.map(async (signer) => {
-          const fundingSnapshot = await this.getWalletFunding(signer.address, {
-            forceRefresh: true,
-            metrics: 'native+trac',
-          });
-          return {
-            address: signer.address,
-            nativeWei: fundingSnapshot.native,
-            tracWei: fundingSnapshot.trac,
-          };
-        }));
-        throw new InsufficientPublisherFundsError(
-          `Every authorized publisher wallet was rejected for its exact signer-specific publish plan. ` +
-          formatNoFundedPublisherWalletMessage(diagnostics),
-          diagnostics,
-        );
-      }
-      return this.fundedWalletSelectionDisabled
-        ? eligible[0]
-        : this.selectFundedSignerOrThrow(eligible, funding, { preferIdle: false });
     });
   }
 
@@ -2192,6 +2154,201 @@ export class EVMChainAdapterBase {
       formatNoFundedPublisherWalletMessage(diagnostics),
       diagnostics,
     );
+  }
+
+  /** Shared AskStorage quote used by both the public read and publish planning. */
+  protected async quoteRequiredPublishTokenAmount(
+    publicByteSize: bigint,
+    epochs: number,
+  ): Promise<bigint> {
+    if (!this.contracts.askStorage) {
+      throw new Error('AskStorage not available');
+    }
+    const ask = await this.readContract(
+      this.contracts.askStorage,
+      'askStorage.getStakeWeightedAverageAsk',
+      'getStakeWeightedAverageAsk',
+    );
+    return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
+  }
+
+  private async _publisherCandidatePlan(
+    signer: Wallet,
+    request: PublisherPublishPlanRequest,
+    quote: (epochs: number) => Promise<bigint>,
+  ): Promise<PublisherCandidatePlan> {
+    let publishEpochs = request.explicitPublishEpochs ?? request.defaultPublishEpochs;
+    let tokenAmount: bigint | undefined;
+
+    // An implicit lifetime is signer-dependent: only a PCA that can cover this
+    // candidate's exact lock-priced publish is allowed to select its lock.
+    if (
+      request.explicitPublishEpochs === undefined
+      && this.contracts.dkgPublishingConvictionNFT
+    ) {
+      const conviction = this as unknown as ConvictionReader;
+      try {
+        const accountId = await withTimeout(
+          conviction.getConvictionAgentAccountId(signer.address),
+          RPC_READ_STALL_TIMEOUT_MS,
+          'pca publish-plan account lookup',
+        );
+        if (accountId > 0n) {
+          const lockEpochs = await withTimeout(
+            conviction.getConvictionAccountLockDurationEpochs(accountId),
+            RPC_READ_STALL_TIMEOUT_MS,
+            'pca publish-plan lock lookup',
+          );
+          if (lockEpochs > 0) {
+            const quoted = await quote(lockEpochs);
+            const lockTokenAmount = quoted > BigInt(lockEpochs)
+              ? quoted
+              : BigInt(lockEpochs);
+            const covers = await withTimeout(
+              conviction.convictionAccountCanCover(accountId, lockTokenAmount),
+              RPC_READ_STALL_TIMEOUT_MS,
+              'pca publish-plan coverage probe',
+            );
+            if (covers) {
+              publishEpochs = lockEpochs;
+              tokenAmount = lockTokenAmount;
+            }
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[chain] PCA publish-plan probe failed for signer=${signer.address}; ` +
+          `using direct-spend lifetime=${publishEpochs}: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    if (tokenAmount === undefined) {
+      try {
+        const quoted = await quote(publishEpochs);
+        tokenAmount = quoted > BigInt(publishEpochs)
+          ? quoted
+          : BigInt(publishEpochs);
+      } catch (error) {
+        tokenAmount = BigInt(publishEpochs);
+        console.warn(
+          `[chain] Publish-plan quote failed for byteSize=${request.effectiveByteSize}, ` +
+          `epochs=${publishEpochs}; using protocol minimum ${tokenAmount}: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    return {
+      signer,
+      address: signer.address,
+      publisherAddress: signer.address,
+      publishEpochs,
+      tokenAmount,
+    };
+  }
+
+  private async _scanPublisherCandidatePlans(
+    plans: PublisherCandidatePlan[],
+    forceRefresh = false,
+  ): Promise<{
+    fundings: Array<{ native: bigint | null; trac: bigint | null }>;
+    fundableIdx: number[];
+  }> {
+    const fundings = await Promise.all(plans.map((plan) => this.getWalletFunding(
+      plan.publisherAddress,
+      { forceRefresh, metrics: 'native+trac' },
+    )));
+    const fundable = await Promise.all(plans.map((plan, index) => this.isWalletFundable(
+      plan.publisherAddress,
+      fundings[index],
+      {
+        kind: 'native+trac',
+        nativeFloorWei: this.minPublisherNativeWei,
+        tracFloorWei: this.minPublisherTracWei,
+        requiredTracWei: plan.tokenAmount,
+        pca: { kind: 'publish', epochs: plan.publishEpochs },
+      },
+    )));
+    return {
+      fundings,
+      fundableIdx: fundable.flatMap((isFundable, index) => isFundable ? [index] : []),
+    };
+  }
+
+  /**
+   * Adapter-owned publish planning state machine. Candidate discovery, PCA
+   * lifetime selection, exact quote validation, strict funding, and cursor
+   * advancement happen atomically behind this boundary.
+   */
+  protected async resolveFundedPublisherPublishPlan(
+    request: PublisherPublishPlanRequest,
+  ): Promise<PublisherPublishPlan> {
+    const quoteCache = new Map<number, Promise<bigint>>();
+    const quote = (epochs: number): Promise<bigint> => {
+      const cached = quoteCache.get(epochs);
+      if (cached) return cached;
+      const pending = this.quoteRequiredPublishTokenAmount(request.effectiveByteSize, epochs)
+        .catch((error) => {
+          // A transient PCA-lock quote failure must not poison the fallback
+          // direct-spend quote for the same numeric lifetime.
+          quoteCache.delete(epochs);
+          throw error;
+        });
+      quoteCache.set(epochs, pending);
+      return pending;
+    };
+
+    if (request.publisherAddress) {
+      const signer = await this.resolvePinnedPublisherSigner(
+        request.contextGraphId,
+        request.publisherAddress,
+      );
+      const plan = await this._publisherCandidatePlan(signer, request, quote);
+      await this.selectFundedSignerOrThrow(
+        [signer],
+        {
+          kind: 'native+trac',
+          nativeFloorWei: this.minPublisherNativeWei,
+          tracFloorWei: this.minPublisherTracWei,
+          requiredTracWei: plan.tokenAmount,
+          pca: { kind: 'publish', epochs: plan.publishEpochs },
+        },
+        { preferIdle: false },
+      );
+      return {
+        publisherAddress: plan.publisherAddress,
+        publishEpochs: plan.publishEpochs,
+        tokenAmount: plan.tokenAmount,
+      };
+    }
+
+    return this._withSignerSelection(async (ordered) => {
+      const authorized = await this._authorizedPublisherSigners(ordered, request.contextGraphId);
+      const plans = await Promise.all(
+        authorized.map((signer) => this._publisherCandidatePlan(signer, request, quote)),
+      );
+      const initial = await this._scanPublisherCandidatePlans(plans);
+      if (initial.fundableIdx.length > 0) {
+        const plan = plans[initial.fundableIdx[0]];
+        return plan;
+      }
+
+      // A terminal pool-wide decision must not use stale advisory balances.
+      const refreshed = await this._scanPublisherCandidatePlans(plans, true);
+      if (refreshed.fundableIdx.length > 0) {
+        return plans[refreshed.fundableIdx[0]];
+      }
+
+      const diagnostics = plans.map((plan, index) => ({
+        address: plan.publisherAddress,
+        nativeWei: refreshed.fundings[index].native,
+        tracWei: refreshed.fundings[index].trac,
+      }));
+      throw new InsufficientPublisherFundsError(
+        formatNoFundedPublisherWalletMessage(diagnostics),
+        diagnostics,
+      );
+    });
   }
 
   /**
