@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_NETWORK_IDENTITY,
   QuietRetryableHandlerError,
+  createOperationContext,
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -144,6 +145,33 @@ export function translateNetworkAdmissionErrorAtProtocolBoundary(
     return new QuietRetryableHandlerError(error.message);
   }
   return error;
+}
+
+/**
+ * Build the exact admission callback installed into ProtocolRouter by the
+ * agent lifecycle. Keeping the translation in this adapter makes the
+ * agent-owned probe error invisible to the generic core router while giving
+ * the lifecycle wiring a focused regression-test surface.
+ */
+export function createNetworkAdmissionProtocolCheck(
+  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted'>,
+): (
+  peerId: string,
+  protocolId: string,
+  direction: 'inbound' | 'outbound',
+  options?: NetworkAdmissionAttemptOptions,
+) => Promise<boolean> {
+  return async (peerId, _protocolId, direction, options) => {
+    try {
+      return await coordinator.ensureAdmitted(
+        peerId,
+        createOperationContext('connect'),
+        options,
+      );
+    } catch (error) {
+      throw translateNetworkAdmissionErrorAtProtocolBoundary(error, direction);
+    }
+  };
 }
 
 export class NetworkAdmissionRejectedError extends Error {

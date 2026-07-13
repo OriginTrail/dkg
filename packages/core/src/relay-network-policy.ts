@@ -26,6 +26,39 @@ export interface RelayNetworkPolicy {
 const RELAY_DENIAL_LOG_INTERVAL_MS = 60_000;
 const RELAY_DENIAL_LOG_CACHE_MAX = 128;
 
+type RelayDenialLogger = (input: RelayPathGateInput) => void;
+
+function createRelayDenialLogger(
+  log: (message: string) => void,
+  now: () => number,
+): RelayDenialLogger {
+  const short = (id: string): string => id.slice(-8);
+  const denialLogs = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+
+  return ({ direction, relayPeerId, remotePeerId, addr }) => {
+    const key = `${direction}:${relayPeerId}`;
+    const timestamp = now();
+    const previous = denialLogs.get(key);
+    if (previous && timestamp - previous.lastLoggedAt < RELAY_DENIAL_LOG_INTERVAL_MS) {
+      previous.suppressed += 1;
+      return;
+    }
+    if (!previous && denialLogs.size >= RELAY_DENIAL_LOG_CACHE_MAX) {
+      const oldestKey = denialLogs.keys().next().value as string | undefined;
+      if (oldestKey !== undefined) denialLogs.delete(oldestKey);
+    }
+    const suppressed = previous?.suppressed ?? 0;
+    denialLogs.delete(key);
+    denialLogs.set(key, { lastLoggedAt: timestamp, suppressed: 0 });
+    log(
+      `Network isolation: denying ${direction} relayed connection ` +
+      `relay=${short(relayPeerId)}${remotePeerId ? ` remote=${short(remotePeerId)}` : ''}` +
+      `${addr ? ` addr=${addr}` : ''}` +
+      `${suppressed > 0 ? ` suppressedSinceLast=${suppressed}` : ''}`,
+    );
+  };
+}
+
 export function buildActiveRelayNetworkPolicy(
   activeRelayPeerIds: ReadonlySet<string> | undefined,
   log: (message: string) => void = () => {},
@@ -67,9 +100,9 @@ export function buildActiveRelayPathGate(
   log: (message: string) => void = () => {},
   now: () => number = Date.now,
 ): RelayPathGate {
-  const short = (id: string): string => id.slice(-8);
-  const denialLogs = new Map<string, { lastLoggedAt: number; suppressed: number }>();
-  return ({ direction, relayPeerId, remotePeerId, addr }) => {
+  const logDenial = createRelayDenialLogger(log, now);
+  return (input) => {
+    const { relayPeerId } = input;
     if (activeRelayPeerIds.has(relayPeerId)) return false;
 
     // Connection gating is a hot path: one foreign relay can surface a large
@@ -77,26 +110,7 @@ export function buildActiveRelayPathGate(
     // denial itself synchronous and unchanged, but emit at most one diagnostic
     // per direction/relay/minute. The bounded cache prevents attacker-selected
     // relay ids from becoming an unbounded in-memory log-suppression table.
-    const key = `${direction}:${relayPeerId}`;
-    const timestamp = now();
-    const previous = denialLogs.get(key);
-    if (previous && timestamp - previous.lastLoggedAt < RELAY_DENIAL_LOG_INTERVAL_MS) {
-      previous.suppressed += 1;
-      return true;
-    }
-    if (!previous && denialLogs.size >= RELAY_DENIAL_LOG_CACHE_MAX) {
-      const oldestKey = denialLogs.keys().next().value as string | undefined;
-      if (oldestKey !== undefined) denialLogs.delete(oldestKey);
-    }
-    const suppressed = previous?.suppressed ?? 0;
-    denialLogs.delete(key);
-    denialLogs.set(key, { lastLoggedAt: timestamp, suppressed: 0 });
-    log(
-      `Network isolation: denying ${direction} relayed connection ` +
-      `relay=${short(relayPeerId)}${remotePeerId ? ` remote=${short(remotePeerId)}` : ''}` +
-      `${addr ? ` addr=${addr}` : ''}` +
-      `${suppressed > 0 ? ` suppressedSinceLast=${suppressed}` : ''}`,
-    );
+    logDenial(input);
     return true;
   };
 }

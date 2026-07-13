@@ -73,7 +73,6 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type AdmissionCheckOptions,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
@@ -156,7 +155,7 @@ import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
-  translateNetworkAdmissionErrorAtProtocolBoundary,
+  createNetworkAdmissionProtocolCheck,
 } from './p2p/network-admission-coordinator.js';
 import {
   createCGMemberEnumerator,
@@ -894,22 +893,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     this.router = new ProtocolRouter(this.node, {
       peerResolver,
-      isPeerAccepted: async (
-        peerId: string,
-        _protocolId: string,
-        direction: 'inbound' | 'outbound',
-        options?: AdmissionCheckOptions,
-      ) => {
-        try {
-          return await this.networkAdmissionCoordinator.ensureAdmitted(
-            peerId,
-            createOperationContext('connect'),
-            options,
-          );
-        } catch (error) {
-          throw translateNetworkAdmissionErrorAtProtocolBoundary(error, direction);
-        }
-      },
+      isPeerAccepted: createNetworkAdmissionProtocolCheck(this.networkAdmissionCoordinator),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
     // Default to in-memory substrate stores when no durable stores

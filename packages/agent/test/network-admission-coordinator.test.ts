@@ -9,6 +9,7 @@ import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionProbeError,
   NetworkAdmissionRejectedError,
+  createNetworkAdmissionProtocolCheck,
   translateNetworkAdmissionErrorAtProtocolBoundary,
 } from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService, type NetworkAdmissionOptions } from '../src/p2p/network-admission.js';
@@ -36,6 +37,25 @@ describe('protocol admission error boundary', () => {
 
     const rejected = new NetworkAdmissionRejectedError(REMOTE_PEER_ID);
     expect(translateNetworkAdmissionErrorAtProtocolBoundary(rejected, 'inbound')).toBe(rejected);
+  });
+
+  it('wires inbound quiet translation and outbound error preservation into the router callback', async () => {
+    const probeError = new NetworkAdmissionProbeError(REMOTE_PEER_ID, 'retryable probe backed off');
+    const ensureAdmitted = vi.fn().mockRejectedValue(probeError);
+    const check = createNetworkAdmissionProtocolCheck({ ensureAdmitted });
+    const options = { timeoutMs: 123 };
+
+    await expect(
+      check(REMOTE_PEER_ID, '/dkg/test/1.0.0', 'inbound', options),
+    ).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+    await expect(
+      check(REMOTE_PEER_ID, '/dkg/test/1.0.0', 'outbound', options),
+    ).rejects.toBe(probeError);
+
+    expect(ensureAdmitted).toHaveBeenCalledTimes(2);
+    expect(ensureAdmitted.mock.calls[0][0]).toBe(REMOTE_PEER_ID);
+    expect(ensureAdmitted.mock.calls[0][1]).toMatchObject({ operationName: 'connect' });
+    expect(ensureAdmitted.mock.calls[0][2]).toBe(options);
   });
 });
 
