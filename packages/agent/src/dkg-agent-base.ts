@@ -421,6 +421,9 @@ export function createListContextGraphsCacheInvalidatingStore(
     get queryCancellation() {
       return innerStore.queryCancellation;
     },
+    getPressureSnapshot() {
+      return innerStore.getPressureSnapshot?.();
+    },
     insert(quads, options) {
       return invalidateAfterMutation(
         () => innerStore.insert(quads, options),
@@ -449,8 +452,8 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => markProjectionDirty?.(),
       );
     },
-    hasGraph(graphUri) {
-      return innerStore.hasGraph(graphUri);
+    hasGraph(graphUri, options) {
+      return innerStore.hasGraph(graphUri, options);
     },
     createGraph(graphUri) {
       return innerStore.createGraph(graphUri);

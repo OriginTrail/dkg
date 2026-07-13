@@ -1388,13 +1388,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // Previously this probed BOTH and returned true if either
                 // looked private, letting curated-shape envelopes ride a
                 // public-CG publish.
-                try {
-                  if (await this.isPrivateContextGraph(cgId)) return true;
-                } catch { /* fall through to chain probe */ }
+                //
+                // `accessPolicy` is immutable on-chain, so a cache hit is an
+                // authoritative verdict. Check it before consulting the local
+                // projection: under store pressure that projection can require
+                // several sequential SPARQL reads, needlessly consuming most
+                // of the ACK deadline even though the chain event already gave
+                // us the answer. Cache misses retain the local-store shortcut
+                // and lazy chain fallback below for missed/old events.
                 const cached = this.onChainAccessPolicyCache.get(cgId);
                 if (cached !== undefined) {
                   return cached === 1;
                 }
+                try {
+                  if (await this.isPrivateContextGraph(cgId)) return true;
+                } catch { /* fall through to chain probe */ }
                 const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
                 if (typeof getAccessPolicy !== 'function') {
                   return null;

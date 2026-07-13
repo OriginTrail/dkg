@@ -100,6 +100,10 @@ interface ACKCollectorDepsCapture {
   ) => Promise<VerifyACKIdentityResult>;
 }
 
+interface StorageACKHandlerConfigCapture {
+  isCgCurated?: (cgId: string, swmGraphId?: string) => Promise<boolean | null>;
+}
+
 /**
  * Reach into the agent's `private createV10ACKProvider(cgId)` so the
  * ACK collector is actually constructed and its deps are captured.
@@ -134,6 +138,8 @@ interface ProviderInternals {
       identityId: bigint,
     ) => Promise<VerifyACKIdentityResult>;
   };
+  onChainAccessPolicyCache: Map<string, number>;
+  isPrivateContextGraph(contextGraphId: string): Promise<boolean>;
   node: { libp2p: { getPeers(): unknown[] } };
 }
 
@@ -415,5 +421,44 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(capturedStorageACKHandlerConfigs).toContainEqual(
       expect.objectContaining({ ackHandlerDeadlineMs: 55_000 }),
     );
+  });
+
+  it('uses immutable cached access policy before touching the local store on publish/update ACKs', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+
+    agent = await DKGAgent.create({
+      name: 'ACKCurationFastPathTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    await agent.start();
+
+    const internals = agent as unknown as ProviderInternals;
+    const localProbe = vi.fn(async () => {
+      throw new Error('local projection must not run for an authoritative cache hit');
+    });
+    internals.isPrivateContextGraph = localProbe;
+    const chainProbe = vi.spyOn(chain, 'getContextGraphAccessPolicy');
+    internals.onChainAccessPolicyCache.set('101', 1);
+    internals.onChainAccessPolicyCache.set('102', 0);
+
+    const handlerConfig = capturedStorageACKHandlerConfigs.find(
+      (config): config is StorageACKHandlerConfigCapture =>
+        typeof (config as StorageACKHandlerConfigCapture).isCgCurated === 'function',
+    );
+    expect(handlerConfig?.isCgCurated).toBeTypeOf('function');
+
+    // StorageACKHandler uses this one callback from both handler() and
+    // updateHandler(), so the fast path covers publish and update ACKs.
+    await expect(handlerConfig!.isCgCurated!('101', 'private-looking-source')).resolves.toBe(true);
+    await expect(handlerConfig!.isCgCurated!('102', 'private-looking-source')).resolves.toBe(false);
+    expect(localProbe).not.toHaveBeenCalled();
+    expect(chainProbe).not.toHaveBeenCalled();
   });
 });
