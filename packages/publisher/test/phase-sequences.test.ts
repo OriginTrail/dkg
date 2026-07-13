@@ -716,10 +716,22 @@ describe('Phase-sequence contracts', () => {
       const calls: [string, 'start' | 'end'][] = [];
       let writeAheadTxHash: string | undefined;
       let legacyContextTxHash: string | undefined;
+      let legacyStartContext: unknown;
+      let legacyEndContext: unknown;
+      let legacyContextHasPublicBreadcrumb = false;
       const fn: PhaseCallback = (phase, status, context) => {
         calls.push([phase, status]);
-        if (phase.startsWith('chain:txsigned:tx-') && status === 'start') {
-          legacyContextTxHash = context?.txHash;
+        if (phase.startsWith('chain:txsigned:tx-')) {
+          if (status === 'start') {
+            legacyStartContext = context;
+            legacyContextTxHash = context?.txHash;
+            legacyContextHasPublicBreadcrumb = Object.prototype.hasOwnProperty.call(
+              context ?? {},
+              'compatibilityBreadcrumb',
+            );
+          } else {
+            legacyEndContext = context;
+          }
         }
         if (phase === 'chain:writeahead' && status === 'start') {
           writeAheadTxHash = context?.txHash;
@@ -735,6 +747,9 @@ describe('Phase-sequence contracts', () => {
       const [txPhase] = txsignedStarts[0];
       expect(txPhase).toMatch(/^chain:txsigned:tx-0x[0-9a-fA-F]{64}$/);
       expect(legacyContextTxHash).toBeUndefined();
+      expect(legacyContextHasPublicBreadcrumb).toBe(false);
+      expect(Object.keys(legacyStartContext ?? {})).not.toContain('compatibilityBreadcrumb');
+      expect(legacyEndContext).toBe(legacyStartContext);
       expect(writeAheadTxHash).toBe(txPhase.slice('chain:txsigned:tx-'.length));
 
       // Keep the legacy breadcrumb before the typed durable boundary for

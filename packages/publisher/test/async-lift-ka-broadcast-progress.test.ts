@@ -136,6 +136,33 @@ describe('KA async VM publish broadcast progress', () => {
     expect(processed?.broadcast?.txHash).toBe(txHash);
   });
 
+  it('ignores the built-in marked legacy breadcrumb until structured write-ahead', async () => {
+    const txHash = `0x${'ce'.repeat(32)}` as `0x${string}`;
+    const controller = new AbortController();
+    let jobId = '';
+    let statusDuringExecutor: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        await input.publishOptions.onPhase?.(
+          `chain:txsigned:tx-${txHash}`,
+          'start',
+          markWriteAheadCompatibilityBreadcrumb({ signal: controller.signal }),
+        );
+        statusDuringExecutor = await publisher.getStatus(jobId);
+        throw new Error('built-in breadcrumb preceded structured write-ahead');
+      },
+    });
+    await stageShareSnapshot();
+
+    jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(statusDuringExecutor?.status).toBe('validated');
+    expect(statusDuringExecutor?.broadcast).toBeUndefined();
+    expect(processed?.status).toBe('failed');
+    expect(processed?.broadcast).toBeUndefined();
+  });
+
   it('ignores an unmarked legacy txsigned event when its supplied signal is aborted', async () => {
     const txHash = `0x${'ca'.repeat(32)}` as `0x${string}`;
     const controller = new AbortController();
