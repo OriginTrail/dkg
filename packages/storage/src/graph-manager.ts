@@ -12,6 +12,8 @@ import {
   contextGraphSubGraphMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphCatalogUri,
+  canonicalKnowledgeAssetGraphIdentitySuffix,
+  knowledgeAssetAgentAddressesEqual,
   isSafeIri,
   assertSafeIri,
   sparqlString,
@@ -105,6 +107,24 @@ export interface LoadSelectedVerifiableMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
 }
+
+export interface MigrateNamedLifecycleSharedMemoryOptions {
+  graphResolution?: QueryOptions;
+  namedSource?: QueryOptions;
+  legacyBucketSource?: QueryOptions;
+}
+
+export type NamedLifecycleSharedMemoryMigrationResult =
+  | {
+      sourceEmpty: true;
+      migratedLegacyQuadCount: 0;
+      targetGraph: string;
+    }
+  | {
+      sourceEmpty: false;
+      migratedLegacyQuadCount: number;
+      targetGraph: string;
+    };
 
 function mergeQueryOptions(
   options?: QueryOptions,
@@ -205,7 +225,6 @@ async function resolveSwmReadGraphs(
   const stagingPrefix = `${bucketGraph}/staging/`;
   const under = await listGraphsByPrefix(store, `${bucketGraph}/`, options);
   const out = new Set<string>([bucketGraph]);
-  const boundAddress = bound?.agentAddress.toLowerCase();
   for (const graph of under) {
     if (graph.startsWith(stagingPrefix)) continue;
     if (!isSafeIri(graph)) continue;
@@ -213,7 +232,7 @@ async function resolveSwmReadGraphs(
       const child = parseBoundableSwmChildGraph(bucketGraph, graph);
       if (
         child &&
-        (child.agentAddress.toLowerCase() !== boundAddress ||
+        (!knowledgeAssetAgentAddressesEqual(child.agentAddress, bound.agentAddress) ||
           child.kaNumber < bound.startNumber ||
           child.kaNumber > bound.endNumber)
       ) {
@@ -297,29 +316,32 @@ export async function loadSharedMemoryQuadsForScope(
 
 interface NamedLifecycleGraphResolution {
   canonicalGraph: string;
-  matchingGraphs: string[];
+  legacyCompatibleReadGraphs: string[];
 }
 
-async function resolveNamedLifecycleGraphPolicy(
+/**
+ * Legacy read compatibility only: find every historical checksum-casing alias
+ * for the same logical lifecycle. This scan must never influence where new
+ * data is written.
+ */
+async function resolveNamedLifecycleReadPolicy(
   store: TripleStore,
   bucketGraph: string,
   identity: NamedKnowledgeAssetGraphIdentity,
   options?: QueryOptions,
 ): Promise<NamedLifecycleGraphResolution> {
-  assertSafeIri(bucketGraph);
-  const { agentAddress, kaNumber } = identity;
-  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
-    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
-  }
-  const canonicalGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
-  assertSafeIri(canonicalGraph);
-  const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
+  const canonicalGraph = canonicalSharedMemoryScopeWriteGraph(bucketGraph, {
+    kind: 'named-lifecycle',
+    identity,
+  });
+  const legacyCompatibleReadGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
     .filter((graph) => {
       const child = parseBoundableSwmChildGraph(bucketGraph, graph);
-      return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
-        && child.kaNumber === kaNumber;
+      return child !== undefined
+        && knowledgeAssetAgentAddressesEqual(child.agentAddress, identity.agentAddress)
+        && child.kaNumber === identity.kaNumber;
     });
-  return { canonicalGraph, matchingGraphs };
+  return { canonicalGraph, legacyCompatibleReadGraphs };
 }
 
 /** Resolve the concrete graph set for an explicit semantic SWM scope. */
@@ -332,37 +354,60 @@ export async function resolveSharedMemoryScopeGraphs(
   if (scope.kind === 'complete-family') {
     return resolveSharedMemoryReadGraphs(store, bucketGraph, options);
   }
-  const { canonicalGraph, matchingGraphs } = await resolveNamedLifecycleGraphPolicy(
+  const { canonicalGraph, legacyCompatibleReadGraphs } = await resolveNamedLifecycleReadPolicy(
     store,
     bucketGraph,
     scope.identity,
     options,
   );
-  // Preserve the writer's checksum casing while matching EVM identity
-  // case-insensitively. An absent lifecycle still resolves to its canonical
-  // candidate so the caller gets a safe empty result.
-  return matchingGraphs.length > 0
-    ? matchingGraphs as NonEmptyGraphList
+  // Read every historical checksum-casing alias for compatibility. An absent
+  // lifecycle still resolves to the canonical candidate so callers receive a
+  // safe empty result without widening to the bucket or sibling lifecycles.
+  return legacyCompatibleReadGraphs.length > 0
+    ? legacyCompatibleReadGraphs as NonEmptyGraphList
     : [canonicalGraph];
 }
 
-/** Resolve the single graph to WRITE for a semantic scope. */
+/** Resolve the single canonical graph to WRITE for a semantic scope. */
+export function canonicalSharedMemoryScopeWriteGraph(
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+): string {
+  assertSafeIri(bucketGraph);
+  if (scope.kind === 'complete-family') return bucketGraph;
+  const { agentAddress, kaNumber } = scope.identity;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
+    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
+  }
+  const graph = `${bucketGraph}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
+  assertSafeIri(graph);
+  return graph;
+}
+
+/**
+ * @deprecated New canonical-only writers should use the synchronous
+ * `canonicalSharedMemoryScopeWriteGraph` after explicitly converging aliases.
+ * This compatibility resolver deliberately retains its original store-aware
+ * behavior: prefer the canonical graph when it exists, otherwise keep writing
+ * to the stable existing alias chosen by the old API.
+ */
 export async function resolveSharedMemoryScopeWriteGraph(
   store: TripleStore,
   bucketGraph: string,
   scope: SharedMemoryGraphScope,
   options?: QueryOptions,
 ): Promise<string> {
-  assertSafeIri(bucketGraph);
-  if (scope.kind === 'complete-family') return bucketGraph;
-  const { canonicalGraph, matchingGraphs } = await resolveNamedLifecycleGraphPolicy(
+  if (scope.kind === 'complete-family') {
+    return canonicalSharedMemoryScopeWriteGraph(bucketGraph, scope);
+  }
+  const { canonicalGraph, legacyCompatibleReadGraphs } = await resolveNamedLifecycleReadPolicy(
     store,
     bucketGraph,
     scope.identity,
     options,
   );
-  return matchingGraphs.find((graph) => graph === canonicalGraph)
-    ?? matchingGraphs.slice().sort()[0]
+  return legacyCompatibleReadGraphs.find((graph) => graph === canonicalGraph)
+    ?? legacyCompatibleReadGraphs.slice().sort()[0]
     ?? canonicalGraph;
 }
 
@@ -426,6 +471,138 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
   return { quads, accepted };
 }
 
+function sharedMemorySelectionGraphPattern(
+  selection: SharedMemoryReadSelection,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+): string {
+  if (selection === 'all') {
+    return '?s ?p ?o';
+  }
+  const roots = [...new Set(
+    selection.rootEntities
+      .map((r) => String(r).trim())
+      .filter((r) => isSafeIri(r)),
+  )];
+  if (roots.length === 0) {
+    const hadInput = selection.rootEntities.length > 0;
+    const message = options.rootEntitiesErrorMessage?.({
+      inputCount: selection.rootEntities.length,
+      hadInput,
+    }) ?? (
+      hadInput
+        ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
+        : 'No rootEntities provided'
+    );
+    throw new Error(message);
+  }
+  const values = roots.map((r) => `<${r}>`).join(' ');
+  return `VALUES ?root { ${values} }
+          ?s ?p ?o .
+          FILTER(
+            ?s = ?root
+            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
+          )`;
+}
+
+/**
+ * Load one selected SWM root closure from explicit source graphs while
+ * preserving the source graph on every returned quad. The selection pattern is
+ * shared with the normal scoped loader, so migration cannot drift from publish
+ * semantics. One CONSTRUCT is issued per graph because CONSTRUCT results are a
+ * default-graph dataset and otherwise lose their source graph identity.
+ */
+async function loadGraphQualifiedSharedMemoryQuads(
+  store: TripleStore,
+  graphs: readonly string[],
+  selection: SharedMemoryReadSelection,
+  options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
+  const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
+  const quads: Quad[] = [];
+  for (const graph of new Set(graphs)) {
+    assertSafeIri(graph);
+    const result = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE {
+        GRAPH <${graph}> { ${innerGraphPattern} }
+      }`,
+      queryOptions,
+    );
+    if (result.type === 'quads') {
+      quads.push(...result.quads.map((quad) => ({ ...quad, graph })));
+    }
+  }
+  return options.quadFilter ? quads.filter(options.quadFilter) : quads;
+}
+
+/**
+ * Converge a selected legacy-bucket / checksum-alias root closure into the
+ * canonical named lifecycle graph. Storage owns graph discovery and
+ * graph-qualified loading; lifecycle metadata repair remains the publisher's
+ * responsibility.
+ *
+ * Checksum aliases are safe to delete after canonical insertion because they
+ * identify this exact lifecycle. The bare legacy bucket is different: it
+ * predates KA-number scoping and one root closure may be the only SWM copy for
+ * multiple not-yet-finalized lifecycles. Keep that compatibility copy until a
+ * higher-level owner can prove no sibling lifecycle references it. Exact named
+ * reads exclude the bucket, so retaining it cannot contaminate the migrated KA.
+ */
+export async function migrateSharedMemoryRootClosureToNamedLifecycle(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  identity: NamedKnowledgeAssetGraphIdentity,
+  options: MigrateNamedLifecycleSharedMemoryOptions = {},
+): Promise<NamedLifecycleSharedMemoryMigrationResult> {
+  const scope = { kind: 'named-lifecycle', identity } as const;
+  const targetGraph = canonicalSharedMemoryScopeWriteGraph(bucketGraph, scope);
+  const namedGraphs = await resolveSharedMemoryScopeGraphs(
+    store,
+    bucketGraph,
+    scope,
+    options.graphResolution,
+  );
+  const namedQuads = await loadGraphQualifiedSharedMemoryQuads(
+    store,
+    namedGraphs,
+    selection,
+    { queryOptions: options.namedSource },
+  );
+  const legacyBucketQuads = await loadGraphQualifiedSharedMemoryQuads(
+    store,
+    [bucketGraph],
+    selection,
+    { queryOptions: options.legacyBucketSource },
+  );
+  if (namedQuads.length === 0 && legacyBucketQuads.length === 0) {
+    return {
+      sourceEmpty: true,
+      migratedLegacyQuadCount: 0,
+      targetGraph,
+    };
+  }
+
+  const canonicalQuadsByTriple = new Map<string, Quad>();
+  for (const quad of [...namedQuads, ...legacyBucketQuads]) {
+    const canonicalQuad = { ...quad, graph: targetGraph };
+    canonicalQuadsByTriple.set(
+      JSON.stringify([quad.subject, quad.predicate, quad.object]),
+      canonicalQuad,
+    );
+  }
+  await store.insert([...canonicalQuadsByTriple.values()]);
+
+  const legacyAliasQuads = namedQuads.filter((quad) => quad.graph !== targetGraph);
+  if (legacyAliasQuads.length > 0) await store.delete(legacyAliasQuads);
+
+  return {
+    sourceEmpty: false,
+    migratedLegacyQuadCount: legacyBucketQuads.length,
+    targetGraph,
+  };
+}
+
 async function loadSharedMemoryQuadsInternal(
   store: TripleStore,
   bucketGraph: string,
@@ -435,35 +612,7 @@ async function loadSharedMemoryQuadsInternal(
     | { kind: 'bounded'; bound: SwmKaGraphBound }
     | SharedMemoryGraphScope,
 ): Promise<Quad[]> {
-  let innerGraphPattern: string;
-  if (selection === 'all') {
-    innerGraphPattern = '?s ?p ?o';
-  } else {
-    const roots = [...new Set(
-      selection.rootEntities
-        .map((r) => String(r).trim())
-        .filter((r) => isSafeIri(r)),
-    )];
-    if (roots.length === 0) {
-      const hadInput = selection.rootEntities.length > 0;
-      const message = options.rootEntitiesErrorMessage?.({
-        inputCount: selection.rootEntities.length,
-        hadInput,
-      }) ?? (
-        hadInput
-          ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
-          : 'No rootEntities provided'
-      );
-      throw new Error(message);
-    }
-    const values = roots.map((r) => `<${r}>`).join(' ');
-    innerGraphPattern = `VALUES ?root { ${values} }
-          ?s ?p ?o .
-          FILTER(
-            ?s = ?root
-            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-          )`;
-  }
+  const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
   let swmGraphs: NonEmptyGraphList;

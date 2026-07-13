@@ -201,18 +201,26 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
     const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
     // Order A: primary transport error, backup null. A transport failure occurred,
     // so we canNOT conclude "block not imported anywhere" → propagate (not 0).
+    const orderAThrottle = recorder(async () => { throw retryable429(); });
+    const orderANull = recorder(async () => null);
     const orderA = makeTwoEndpointAdapter(
-      { getBlock: recorder(async () => { throw retryable429(); }) },
-      { getBlock: recorder(async () => null) },
+      { getBlock: orderAThrottle },
+      { getBlock: orderANull },
     );
     await expect(orderA.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(orderAThrottle.calls).toHaveLength(1);
+    expect(orderANull.calls).toHaveLength(1);
     // Order B: primary null, backup transport error — SAME endpoint states, so the
     // result must be identical (before the fix this returned 0 vs threw by order).
+    const orderBNull = recorder(async () => null);
+    const orderBThrottle = recorder(async () => { throw retryable429(); });
     const orderB = makeTwoEndpointAdapter(
-      { getBlock: recorder(async () => null) },
-      { getBlock: recorder(async () => { throw retryable429(); }) },
+      { getBlock: orderBNull },
+      { getBlock: orderBThrottle },
     );
     await expect(orderB.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(orderBNull.calls).toHaveLength(1);
+    expect(orderBThrottle.calls).toHaveLength(1);
   });
 });
 
