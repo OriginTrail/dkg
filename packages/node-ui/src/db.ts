@@ -2666,6 +2666,22 @@ export interface SqliteProtocolOutboxStoreOptions {
   backoffFor?: (attempts: number) => number;
 }
 
+interface ProtocolOutboxMetadataRow {
+  peer_id: string;
+  protocol: string;
+  message_id: string;
+  attempts: number;
+  first_failure_at: number;
+  last_attempt_at: number;
+  next_attempt_at: number;
+  last_error: string | null;
+}
+
+// Keep payload out of metadata queries so SQLite never materializes retry BLOBs in JavaScript.
+const PROTOCOL_OUTBOX_METADATA_COLUMNS =
+  'peer_id, protocol, message_id, attempts, ' +
+  'first_failure_at, last_attempt_at, next_attempt_at, last_error';
+
 export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   private readonly db: Database.Database;
   private maxAgeMs = 24 * 60 * 60 * 1000;
@@ -2847,21 +2863,11 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     const cutoff = now - this.maxAgeMs;
     const rows = this.db
       .prepare(
-        `SELECT peer_id, protocol, message_id, attempts,
-                first_failure_at, last_attempt_at, next_attempt_at, last_error
+        `SELECT ${PROTOCOL_OUTBOX_METADATA_COLUMNS}
          FROM protocol_outbox
          WHERE first_failure_at < ?`,
       )
-      .all(cutoff) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
+      .all(cutoff) as ProtocolOutboxMetadataRow[];
     this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
     return rows.map(SqliteProtocolOutboxStore.rowToMetadata);
   }
@@ -2893,21 +2899,11 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   listMetadata(): ProtocolOutboxMetadata[] {
     const rows = this.db
       .prepare(
-        `SELECT peer_id, protocol, message_id, attempts,
-                first_failure_at, last_attempt_at, next_attempt_at, last_error
+        `SELECT ${PROTOCOL_OUTBOX_METADATA_COLUMNS}
          FROM protocol_outbox
          ORDER BY first_failure_at ASC`,
       )
-      .all() as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
+      .all() as ProtocolOutboxMetadataRow[];
     return rows.map(SqliteProtocolOutboxStore.rowToMetadata);
   }
 
@@ -2950,16 +2946,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     };
   }
 
-  private static rowToMetadata(row: {
-    peer_id: string;
-    protocol: string;
-    message_id: string;
-    attempts: number;
-    first_failure_at: number;
-    last_attempt_at: number;
-    next_attempt_at: number;
-    last_error: string | null;
-  }): ProtocolOutboxMetadata {
+  private static rowToMetadata(row: ProtocolOutboxMetadataRow): ProtocolOutboxMetadata {
     return {
       peer: row.peer_id,
       protocol: row.protocol,

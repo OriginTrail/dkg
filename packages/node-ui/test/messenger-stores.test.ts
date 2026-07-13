@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -196,6 +196,30 @@ describe('SqliteProtocolOutboxStore', () => {
 
     expect(pending.map((entry) => entry.messageId)).toEqual([MSG_1, MSG_2]);
     expect(pending.every((entry) => !Object.hasOwn(entry, 'payload'))).toBe(true);
+  });
+
+  it('keeps payload columns out of metadata listing and expiration queries', () => {
+    const store = new SqliteProtocolOutboxStore(db, { maxAgeMs: 60_000 });
+    store.enqueue(PEER_A, PROTO, MSG_1, new Uint8Array(1024), 'old', 0);
+    const prepareSpy = vi.spyOn(db.db, 'prepare');
+    let metadataSelects: string[] = [];
+
+    try {
+      store.listMetadata();
+      store.dropExpiredMetadata(60_001);
+      metadataSelects = prepareSpy.mock.calls
+        .map(([sql]) => String(sql).replace(/\s+/g, ' ').trim())
+        .filter((sql) => /^SELECT\b/i.test(sql) && /\bFROM protocol_outbox\b/i.test(sql));
+    } finally {
+      prepareSpy.mockRestore();
+    }
+
+    expect(metadataSelects).toHaveLength(2);
+    for (const sql of metadataSelects) {
+      const selectProjection = sql.slice(0, sql.search(/\bFROM\b/i));
+      expect(selectProjection).not.toContain('*');
+      expect(selectProjection).not.toMatch(/\bpayload\b/i);
+    }
   });
 
   it('enqueue bumps attempts and reschedules on repeat failure for the same key', () => {
