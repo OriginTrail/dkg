@@ -148,7 +148,7 @@ import {
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
-import { createPublicSnapshotStore, createPublisherControlFromStore, resolveAsyncPublisherAvailability, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../publisher-runner.js';
+import { createPublicSnapshotStore, createPublisherControlFromStore, resolveAsyncPublisherAvailability, startPublisherRuntimeWithOutcome, type AsyncPublisherAvailability, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -1976,34 +1976,25 @@ export async function runDaemonInner(
 
     const publisherTimer = setTimeout(() => {
       void (async () => {
-        try {
-          const runtime = await startPublisherRuntimeIfEnabled({
-            dataDir: dkgDir(),
-            config,
-            store: agent.store,
-            keypair: agent.wallet.keypair,
-            chainBase: publisherChainBase,
-            ackTransportFactory: agent.createACKTransportFactory({
-              sendTimeoutMs: storageAckTiming.sendTimeoutMs,
-              log,
-            }),
-            publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
-            knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
-            knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+        const outcome = await startPublisherRuntimeWithOutcome({
+          dataDir: dkgDir(),
+          config,
+          store: agent.store,
+          keypair: agent.wallet.keypair,
+          chainBase: publisherChainBase,
+          ackTransportFactory: agent.createACKTransportFactory({
+            sendTimeoutMs: storageAckTiming.sendTimeoutMs,
             log,
-          });
-          publisherRuntime = runtime;
-          publisherAvailability = resolveAsyncPublisherAvailability({
-            config,
-            runtime,
-            ...(runtime ? {} : { lifecycleReason: 'no_publisher_wallets' as const }),
-          });
-        } catch (err: any) {
-          publisherAvailability = resolveAsyncPublisherAvailability({
-            config,
-            runtime: null,
-            lifecycleReason: 'publisher_startup_failed',
-          });
+          }),
+          publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
+          knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
+          knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+          log,
+        });
+        publisherRuntime = outcome.runtime;
+        publisherAvailability = outcome.availability;
+        if (outcome.status === 'failed') {
+          const err = outcome.error as any;
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
         }
       })();

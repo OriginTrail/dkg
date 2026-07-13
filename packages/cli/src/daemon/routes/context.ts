@@ -60,8 +60,8 @@ export interface RequestContext {
   agent: DKGAgent;
   publisherControl: ReturnType<typeof createPublisherControlFromStore>;
   publisherRuntime: PublisherRuntime | null;
-  /** Lifecycle-owned publisher state; optional for direct route embeddings/tests. */
-  publisherAvailability?: AsyncPublisherAvailability;
+  /** Lifecycle-owned publisher state, resolved once before route dispatch. */
+  publisherAvailability: AsyncPublisherAvailability;
   config: DkgConfig;
   startedAt: number;
   dashDb: DashboardDB;

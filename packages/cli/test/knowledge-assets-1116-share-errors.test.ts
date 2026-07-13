@@ -37,7 +37,7 @@ import { GraphManager, createTripleStore } from '@origintrail-official/dkg-stora
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
-import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
+import { createPublisherRuntimeFromAgent, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
 
 const CG_ID = 'issue-1116-cg';
@@ -67,7 +67,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       wallets: [{ address: '0x1111111111111111111111111111111111111111' }],
     },
     config: Record<string, unknown> = {},
-    publisherAvailability?: unknown,
+    publisherAvailability: AsyncPublisherAvailability = { available: true },
   ) {
     const agent = {
       async listContextGraphs() {
@@ -396,7 +396,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       resolveFinalizedAssertionVmPublishIntent: async () => { resolved += 1; },
     }, {}, {
       enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
-    }, null);
+    }, null, {}, {
+      available: false,
+      reason: 'publisher_disabled',
+      retryable: false,
+      operatorActionRequired: true,
+    });
 
     const res = await post('vm/publish-async', { contextGraphId: CG_ID });
     expect(res.status).toBe(503);
@@ -414,7 +419,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     let enqueued = 0;
     await startWith({}, {}, {}, {
       enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
-    }, { walletIds: [], wallets: [] });
+    }, { walletIds: [], wallets: [] }, { publisher: { enabled: true } }, {
+      available: false,
+      reason: 'no_publisher_wallets',
+      retryable: false,
+      operatorActionRequired: true,
+    });
 
     const res = await post('vm/publish-async', { contextGraphId: CG_ID });
     expect(res.status).toBe(503);
@@ -446,8 +456,46 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueued).toBe(0);
   });
 
-  it('vm/publish-async classifies an unknown startup failure as operator-actionable', async () => {
-    await startWith({}, {}, {}, {}, null, { publisher: { enabled: true } });
+  it.each([
+    {
+      reason: 'publisher_starting' as const,
+      retryable: true,
+      operatorActionRequired: false,
+    },
+    {
+      reason: 'publisher_startup_failed' as const,
+      retryable: false,
+      operatorActionRequired: true,
+    },
+  ])('vm/publish-async honors lifecycle $reason before intent resolution', async (availability) => {
+    let resolved = 0;
+    let enqueued = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => { resolved += 1; },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
+    }, null, { publisher: { enabled: true } }, {
+      available: false,
+      ...availability,
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'async_publisher_unavailable',
+      ...availability,
+    });
+    expect(resolved).toBe(0);
+    expect(enqueued).toBe(0);
+  });
+
+  it('vm/publish-async reports lifecycle startup failure as operator-actionable', async () => {
+    await startWith({}, {}, {}, {}, null, { publisher: { enabled: true } }, {
+      available: false,
+      reason: 'publisher_startup_failed',
+      retryable: false,
+      operatorActionRequired: true,
+    });
 
     const res = await post('vm/publish-async', { contextGraphId: CG_ID });
     expect(res.status).toBe(503);

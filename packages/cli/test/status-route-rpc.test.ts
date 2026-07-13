@@ -76,6 +76,12 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
     expect(body.chain).not.toHaveProperty('rpcUrl');
     expect(body.chain).not.toHaveProperty('rpcUrls');
     expect(body.chain).not.toHaveProperty('hubAddress');
+    expect(body.asyncPublisher).toEqual({
+      available: false,
+      reason: 'publisher_disabled',
+      retryable: false,
+      operatorActionRequired: true,
+    });
     // Multi-RPC failover observability (W3): scalar counts + bounded by-class
     // map only — host-only, never a full RPC URL.
     expect(typeof body.chain.rpcFailovers).toBe('number');

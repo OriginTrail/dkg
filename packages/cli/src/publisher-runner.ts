@@ -136,6 +136,69 @@ export async function startPublisherRuntimeIfEnabled(args: {
   }
 }
 
+export type PublisherStartupOutcome =
+  | {
+      status: 'started';
+      runtime: PublisherRuntime;
+      availability: Extract<AsyncPublisherAvailability, { available: true }>;
+    }
+  | {
+      status: 'disabled' | 'no_publisher_wallets';
+      runtime: null;
+      availability: Extract<AsyncPublisherAvailability, { available: false }>;
+    }
+  | {
+      status: 'failed';
+      runtime: null;
+      availability: Extract<AsyncPublisherAvailability, { available: false }>;
+      error: unknown;
+    };
+
+/**
+ * Explicit daemon-startup boundary. The compatibility helper above retains its
+ * historical nullable return, while lifecycle code consumes this discriminant
+ * and never has to guess which unavailable state a null runtime represents.
+ */
+export async function startPublisherRuntimeWithOutcome(
+  args: Parameters<typeof startPublisherRuntimeIfEnabled>[0],
+): Promise<PublisherStartupOutcome> {
+  const unavailable = (
+    reason: Exclude<AsyncPublisherUnavailableReason, 'publisher_starting'>,
+  ): Extract<AsyncPublisherAvailability, { available: false }> => ({
+    available: false,
+    reason,
+    retryable: false,
+    operatorActionRequired: true,
+  });
+
+  if (!args.config.publisher?.enabled) {
+    return {
+      status: 'disabled',
+      runtime: null,
+      availability: unavailable('publisher_disabled'),
+    };
+  }
+
+  try {
+    const runtime = await startPublisherRuntimeIfEnabled(args);
+    if (!runtime) {
+      return {
+        status: 'no_publisher_wallets',
+        runtime: null,
+        availability: unavailable('no_publisher_wallets'),
+      };
+    }
+    return { status: 'started', runtime, availability: { available: true } };
+  } catch (error) {
+    return {
+      status: 'failed',
+      runtime: null,
+      availability: unavailable('publisher_startup_failed'),
+      error,
+    };
+  }
+}
+
 interface PublisherRuntimeBaseArgs {
   dataDir: string;
   keypair: Ed25519Keypair;

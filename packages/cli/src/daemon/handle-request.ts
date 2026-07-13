@@ -363,9 +363,9 @@ export async function handleRequest(
   apiPortRef: { value: number },
   routePlugins: RoutePlugin[],
   admission: AdmissionStatsView,
-  emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void,
-  emitNotification?: (event: NotificationSseEvent) => void,
-  publisherAvailability?: AsyncPublisherAvailability,
+  emitMemoryGraphChanged: ((event: MemoryGraphChangedEvent) => void) | undefined,
+  emitNotification: ((event: NotificationSseEvent) => void) | undefined,
+  publisherAvailability: AsyncPublisherAvailability,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;

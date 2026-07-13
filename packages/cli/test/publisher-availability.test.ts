@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAsyncPublisherAvailability, type PublisherRuntime } from '../src/publisher-runner.js';
+import {
+  resolveAsyncPublisherAvailability,
+  startPublisherRuntimeWithOutcome,
+  type PublisherRuntime,
+} from '../src/publisher-runner.js';
 
 const runtime = (wallets: unknown[]): PublisherRuntime => ({
   wallets,
@@ -35,5 +39,22 @@ describe('resolveAsyncPublisherAvailability', () => {
       available: false, reason: 'publisher_starting', retryable: true, operatorActionRequired: false,
     });
     expect(resolveAsyncPublisherAvailability({ config: {}, runtime: runtime([{}]) })).toEqual({ available: true });
+  });
+
+  it('keeps disabled startup explicit instead of overloading a null runtime', async () => {
+    const outcome = await startPublisherRuntimeWithOutcome({
+      config: { publisher: { enabled: false } },
+    } as Parameters<typeof startPublisherRuntimeWithOutcome>[0]);
+
+    expect(outcome).toEqual({
+      status: 'disabled',
+      runtime: null,
+      availability: {
+        available: false,
+        reason: 'publisher_disabled',
+        retryable: false,
+        operatorActionRequired: true,
+      },
+    });
   });
 });

@@ -78,7 +78,7 @@ function createGetRequest(url: string): RequestContext['req'] {
 
 function createContext(overrides: Partial<RequestContext> = {}): RequestContext {
   const url = new URL('http://127.0.0.1/api/epcis/capture');
-  return {
+  const context: RequestContext = {
     req: createRequest(),
     res: createResponse() as unknown as ServerResponse,
     agent: {
@@ -88,6 +88,12 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
     } as unknown as RequestContext['agent'],
     publisherControl: {} as RequestContext['publisherControl'],
     publisherRuntime: null,
+    publisherAvailability: {
+      available: false,
+      reason: 'publisher_startup_failed',
+      retryable: false,
+      operatorActionRequired: true,
+    },
     config: {
       epcis: { contextGraphId: 'epcis-test' },
       publisher: { enabled: true },
@@ -117,6 +123,24 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
     requestAgentAddress: '0x0',
     ...overrides,
   };
+  if (overrides.publisherAvailability === undefined) {
+    context.publisherAvailability = context.publisherRuntime?.walletIds.length
+      ? { available: true }
+      : context.config.publisher?.enabled
+        ? {
+            available: false,
+            reason: 'publisher_startup_failed',
+            retryable: false,
+            operatorActionRequired: true,
+          }
+        : {
+            available: false,
+            reason: 'publisher_disabled',
+            retryable: false,
+            operatorActionRequired: true,
+          };
+  }
+  return context;
 }
 
 function responseBody(ctx: RequestContext): Record<string, unknown> {
@@ -133,6 +157,37 @@ describe('EPCIS async capture publisher readiness', () => {
     expect(responseBody(ctx)).toMatchObject({
       error: 'PublisherUnavailable',
     });
+  });
+
+  it.each([
+    {
+      reason: 'publisher_starting' as const,
+      retryable: true,
+      operatorActionRequired: false,
+    },
+    {
+      reason: 'no_publisher_wallets' as const,
+      retryable: false,
+      operatorActionRequired: true,
+    },
+  ])('preserves lifecycle $reason details without invoking capture', async (availability) => {
+    let publishCalls = 0;
+    const ctx = createContext({
+      agent: {
+        publishAsync: async () => { publishCalls += 1; },
+      } as unknown as RequestContext['agent'],
+      publisherRuntime: null,
+      publisherAvailability: { available: false, ...availability },
+    });
+
+    await handleEpcisRoutes(ctx);
+
+    expect(ctx.res.statusCode).toBe(503);
+    expect(responseBody(ctx)).toMatchObject({
+      error: 'PublisherUnavailable',
+      ...availability,
+    });
+    expect(publishCalls).toBe(0);
   });
 
   it('keeps disabled publisher config mapped to PublisherDisabled', async () => {

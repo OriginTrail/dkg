@@ -40,6 +40,9 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 [[ "$(code_of "$(api "$NODE" GET /api/status)")" == 200 ]] || fail "temporary node did not become ready"
+status_body="$(body_of "$(api "$NODE" GET /api/status)")"
+[[ "$(field "$status_body" asyncPublisher.reason)" == no_publisher_wallets ]] \
+  || fail "status did not expose no-wallet publisher readiness: $status_body"
 api "$NODE" POST /api/identity/ensure '{}' >/dev/null || true
 
 jobs_before_body="$(body_of "$(api "$NODE" GET /api/publisher/jobs)")"
@@ -63,4 +66,44 @@ body="$(body_of "$response")"
 jobs_after_body="$(body_of "$(api "$NODE" GET /api/publisher/jobs)")"
 jobs_after="$(JOBS="$jobs_after_body" node -e 'const j=JSON.parse(process.env.JOBS);process.stdout.write(String((j.jobs||[]).length))')"
 [[ "$jobs_after" == "$jobs_before" ]] || fail "job count grew from $jobs_before to $jobs_after"
-echo "[#1576] PASS: unavailable publisher rejected before durable enqueue"
+
+# Reproduce the review regression: the post-API startup task used to turn a
+# disabled publisher into no_publisher_wallets because both states returned a
+# null runtime. The explicit startup outcome must keep it disabled after restart.
+"$ROOT/scripts/devnet.sh" stop-node "$NODE" >/dev/null
+NODE_DIR="$NODE_DIR" node --input-type=module <<'NODE'
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const path = join(process.env.NODE_DIR, 'config.json');
+const config = JSON.parse(readFileSync(path, 'utf8'));
+config.publisher = { ...(config.publisher ?? {}), enabled: false };
+writeFileSync(path, JSON.stringify(config, null, 2));
+NODE
+"$ROOT/scripts/devnet.sh" restart-node "$NODE" >/dev/null
+
+disabled_status=""
+for _ in $(seq 1 90); do
+  disabled_status="$(body_of "$(api "$NODE" GET /api/status)")"
+  [[ "$(field "$disabled_status" asyncPublisher.reason)" == publisher_disabled ]] && break
+  sleep 1
+done
+[[ "$(field "$disabled_status" asyncPublisher.reason)" == publisher_disabled ]] \
+  || fail "disabled publisher was reclassified after startup: $disabled_status"
+
+disabled_response="$(api "$NODE" POST "/api/knowledge-assets/$name/vm/publish-async" "{\"contextGraphId\":\"$CG\"}")"
+[[ "$(code_of "$disabled_response")" == 503 ]] || fail "disabled publish expected 503: $disabled_response"
+disabled_body="$(body_of "$disabled_response")"
+[[ "$(field "$disabled_body" reason)" == publisher_disabled ]] \
+  || fail "disabled publish exposed wrong reason: $disabled_body"
+[[ "$(field "$disabled_body" retryable)" == false ]] \
+  || fail "disabled publisher was advertised retryable: $disabled_body"
+
+epcis_response="$(api "$NODE" POST /api/epcis/capture '{}')"
+[[ "$(code_of "$epcis_response")" == 503 ]] || fail "disabled EPCIS expected 503: $epcis_response"
+[[ "$(field "$(body_of "$epcis_response")" error)" == PublisherDisabled ]] \
+  || fail "EPCIS lost disabled-specific response: $(body_of "$epcis_response")"
+
+jobs_disabled_body="$(body_of "$(api "$NODE" GET /api/publisher/jobs)")"
+jobs_disabled="$(JOBS="$jobs_disabled_body" node -e 'const j=JSON.parse(process.env.JOBS);process.stdout.write(String((j.jobs||[]).length))')"
+[[ "$jobs_disabled" == "$jobs_before" ]] || fail "disabled startup changed job count from $jobs_before to $jobs_disabled"
+echo "[#1576] PASS: no-wallet and disabled states stay distinct and reject before durable enqueue"

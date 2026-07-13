@@ -103,7 +103,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../../config.js';
-import { createPublisherControlFromStore, resolveAsyncPublisherAvailability, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -490,11 +490,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
 
   // POST /api/epcis/capture  { contextGraphId?, subGraphName?, epcisDocument, publishOptions? }
   if (req.method === "POST" && path === "/api/epcis/capture") {
-    const publisherAvailability = resolveAsyncPublisherAvailability({
-      config,
-      runtime: publisherRuntime,
-      lifecycleAvailability: ctx.publisherAvailability,
-    });
+    const publisherAvailability = ctx.publisherAvailability;
     if (!publisherAvailability.available && publisherAvailability.reason === 'publisher_disabled') {
       return jsonResponse(res, 503, {
         error: "PublisherDisabled",
