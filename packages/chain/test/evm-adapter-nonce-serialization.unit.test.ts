@@ -17,7 +17,6 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { V10_WRITE_AHEAD_HOOK_TIMEOUT_MS } from '../src/chain-adapter.js';
 import {
   SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
-  SignerWriteOperation,
 } from '../src/signer-write-lane.js';
 import { connectable } from './connectable.js';
 
@@ -53,26 +52,12 @@ const fakeReceipt = (hash: string) =>
   ({ hash, blockNumber: 1, index: 0, status: 1, logs: [] }) as unknown as ethers.TransactionReceipt;
 const V10_KA_ADDRESS = '0x' + 'aa'.repeat(20);
 
-type TestV10State = {
-  signedTx?: string;
-  txHash?: string;
-  receipt?: ethers.TransactionReceipt;
-};
-
 function preparedOperation(
   build: (ctx: any) => Promise<{ signedTx: string; txHash: string }>,
 ) {
-  return new SignerWriteOperation<any, TestV10State, ethers.TransactionReceipt>(
-    SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
-    () => ({}),
-    (state) => {
-      if (!state.receipt) throw new Error('test V10 operation completed without a receipt');
-      return state.receipt;
-    },
-  ).phase('test prepare signed transaction', async (ctx, state) => {
-    const prepared = await build(ctx);
-    state.signedTx = prepared.signedTx;
-    state.txHash = prepared.txHash;
+  return Object.freeze({
+    runAllowanceGate: async () => undefined,
+    populateAndSign: build,
   });
 }
 
@@ -108,6 +93,40 @@ function minimalPublishParams(): any {
 }
 
 describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)', () => {
+  it('assembles the complete immutable V10 operation before entering the signer lane', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const preparation = preparedOperation(async () => ({
+      signedTx: 'complete-operation',
+      txHash: '0xcomplete',
+    }));
+    expect(Object.isFrozen(preparation)).toBe(true);
+
+    const lane = (a as any).signerWriteLane;
+    const originalRun = lane.run.bind(lane);
+    let admittedPhaseLabels: readonly string[] = [];
+    lane.run = recorder((address: string, plan: { phaseLabels: readonly string[] }, fn: () => Promise<unknown>) => {
+      admittedPhaseLabels = plan.phaseLabels;
+      return originalRun(address, plan, fn);
+    });
+    (a as any).sendSignedTransactionAndWait = async () => fakeReceipt('complete-operation');
+
+    await expect((a as any).dispatchSerializedV10Write(
+      signer,
+      'publish',
+      async () => undefined,
+      preparation,
+      neverNull,
+    )).resolves.toMatchObject({ hash: 'complete-operation' });
+
+    expect(admittedPhaseLabels).toEqual([
+      'initial V10 allowance gate and optional approval transaction',
+      'V10 publish populate/sign with bounded allowance recovery',
+      'V10 publish durable write-ahead hook',
+      'V10 publish broadcast and receipt',
+    ]);
+  });
+
   it('keeps a queued adapter write alive beyond the legacy fixed 60-second wait', async () => {
     vi.useFakeTimers();
     try {
@@ -225,7 +244,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         signer,
         'publish',
         slowWriteAhead,
-        (a as any).createV10SignerWriteOperation(
+        (a as any).createV10SignerWritePreparation(
           signer,
           {} as any,
           'publish',

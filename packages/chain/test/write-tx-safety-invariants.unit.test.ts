@@ -27,7 +27,6 @@ import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import type { V10WriteAheadHookInfo } from '../src/chain-adapter.js';
 import { RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS } from '../src/evm-adapter-constants.js';
-import { SignerWriteOperation } from '../src/signer-write-lane.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
@@ -71,22 +70,9 @@ const neverNull = (pre: string): never => { throw new Error(`unexpected null rec
 function preparedOperation(
   buildSignedTx: () => Promise<{ signedTx: string; txHash: string }>,
 ) {
-  type State = {
-    signedTx?: string;
-    txHash?: string;
-    receipt?: ethers.TransactionReceipt;
-  };
-  return new SignerWriteOperation<any, State, ethers.TransactionReceipt>(
-    60_000,
-    () => ({}),
-    (state) => {
-      if (!state.receipt) throw new Error('test write completed without a receipt');
-      return state.receipt;
-    },
-  ).phase('test prepare signed transaction', async (_ctx, state) => {
-    const prepared = await buildSignedTx();
-    state.signedTx = prepared.signedTx;
-    state.txHash = prepared.txHash;
+  return Object.freeze({
+    runAllowanceGate: async () => undefined,
+    populateAndSign: buildSignedTx,
   });
 }
 

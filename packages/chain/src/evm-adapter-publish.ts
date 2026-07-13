@@ -810,7 +810,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     // still satisfy the contract's `transferFrom(..., 1n)` minimum.
     // #953: the approve runs INSIDE the per-wallet serialized window below
     // (it sends its own tx on `signer`), not here — it is an executable
-    // phase of `createV10SignerWriteOperation`.
+    // step of `createV10SignerWritePreparation`.
 
     // P-1 review (Codex iter-5): same pattern as the publish path —
     // break the single contract call into populate / sign / hook /
@@ -834,7 +834,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       signer,
       'update',
       params.onBroadcast,
-      this.createV10SignerWriteOperation(
+      this.createV10SignerWritePreparation(
         signer,
         ka as Contract,
         'update',

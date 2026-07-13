@@ -67,6 +67,14 @@ type V10SignerWriteState = {
   receipt?: ethers.TransactionReceipt;
 };
 
+/** Immutable inputs used by the one owner that assembles the full V10 write. */
+type V10SignerWritePreparation = Readonly<{
+  runAllowanceGate: (context: SerializedSignerWriteContext) => Promise<void>;
+  populateAndSign: (
+    context: SerializedSignerWriteContext,
+  ) => Promise<{ signedTx: string; txHash: string }>;
+}>;
+
 /** Domain behavior: a stale V10 allowance can trigger exactly one recovery. */
 const V10_ALLOWANCE_RECOVERY_ATTEMPTS = 1;
 const V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS = 6;
@@ -1605,8 +1613,9 @@ export class EVMChainAdapterBase {
    * the nonce monotonic; cross-wallet writes are unaffected (different keys
    * run concurrently).
    *
-   * The supplied operation owns both each callback and its admission budget;
-   * dispatch appends the bounded WAL and broadcast phases before queueing it.
+   * This method is the single owner of the complete signer-write operation:
+   * preparation, bounded WAL, and broadcast/receipt phases are all assembled
+   * before the operation crosses into the signer lane.
    * `onBroadcast` is the durable WAL checkpoint: it `await`s before broadcast
    * and a throw/timeout fails closed (the signed tx is still local, never sent,
    * so the caller can retry with no on-chain effect).
@@ -1615,13 +1624,33 @@ export class EVMChainAdapterBase {
     signer: Wallet,
     label: 'publish' | 'update',
     onBroadcast: ((info: V10WriteAheadHookInfo) => Promise<void> | void) | undefined,
-    operation: SignerWriteOperation<
+    preparation: V10SignerWritePreparation,
+    onNullReceipt: (preBroadcastTxHash: string) => never,
+  ): Promise<ethers.TransactionReceipt> {
+    const operation = new SignerWriteOperation<
       SerializedSignerWriteContext,
       V10SignerWriteState,
       ethers.TransactionReceipt
-    >,
-    onNullReceipt: (preBroadcastTxHash: string) => never,
-  ): Promise<ethers.TransactionReceipt> {
+    >(
+      SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
+      () => ({}),
+      (state) => {
+        if (!state.receipt) throw new Error(`V10 ${label} operation completed without a receipt`);
+        return state.receipt;
+      },
+    )
+      .phase(
+        'initial V10 allowance gate and optional approval transaction',
+        async (ctx) => preparation.runAllowanceGate(ctx),
+      )
+      .phase(
+        `V10 ${label} populate/sign with bounded allowance recovery`,
+        async (ctx, state) => {
+          const prepared = await preparation.populateAndSign(ctx);
+          state.signedTx = prepared.signedTx;
+          state.txHash = prepared.txHash;
+        },
+      );
     if (onBroadcast) {
       operation.phase(
         `V10 ${label} durable write-ahead hook`,
@@ -1662,11 +1691,11 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Build the complete pre-broadcast V10 operation. The operation's single
-   * conservative admission envelope intentionally does not reproduce the
-   * nested allowance/retry call graph; the concrete helpers own those limits.
+   * Bind the two concrete preparation steps without exposing a partially built
+   * signer-write operation. `dispatchSerializedV10Write` consumes this frozen
+   * descriptor and assembles the complete operation in one place.
    */
-  protected createV10SignerWriteOperation(
+  protected createV10SignerWritePreparation(
     signer: Wallet,
     kaContract: Contract,
     method: 'publish' | 'update',
@@ -1675,53 +1704,30 @@ export class EVMChainAdapterBase {
     tokenAmount: bigint,
     approvalLabel: string,
     reapproveLabel: string,
-  ): SignerWriteOperation<
-    SerializedSignerWriteContext,
-    V10SignerWriteState,
-    ethers.TransactionReceipt
-  > {
-    return new SignerWriteOperation<
-      SerializedSignerWriteContext,
-      V10SignerWriteState,
-      ethers.TransactionReceipt
-    >(
-      SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
-      () => ({}),
-      (state) => {
-        if (!state.receipt) throw new Error(`V10 ${method} operation completed without a receipt`);
-        return state.receipt;
+  ): V10SignerWritePreparation {
+    return Object.freeze({
+      runAllowanceGate: async (ctx: SerializedSignerWriteContext) => {
+        await this.ensureV10ApproveTrac(
+          signer,
+          kav10Address,
+          tokenAmount,
+          approvalLabel,
+          false,
+          ctx.sendContractTransaction,
+        );
       },
-    )
-      .phase(
-        'initial V10 allowance gate and optional approval transaction',
-        async (ctx) => {
-          await this.ensureV10ApproveTrac(
-            signer,
-            kav10Address,
-            tokenAmount,
-            approvalLabel,
-            false,
-            ctx.sendContractTransaction,
-          );
-        },
-      )
-      .phase(
-        `V10 ${method} populate/sign with bounded allowance recovery`,
-        async (ctx, state) => {
-          const prepared = await this.populateAndSignV10WithAllowanceRecovery(
-            signer,
-            kaContract,
-            method,
-            methodParams,
-            kav10Address,
-            tokenAmount,
-            reapproveLabel,
-            ctx.sendContractTransaction,
-          );
-          state.signedTx = prepared.signedTx;
-          state.txHash = prepared.txHash;
-        },
-      );
+      populateAndSign: async (ctx: SerializedSignerWriteContext) =>
+        this.populateAndSignV10WithAllowanceRecovery(
+          signer,
+          kaContract,
+          method,
+          methodParams,
+          kav10Address,
+          tokenAmount,
+          reapproveLabel,
+          ctx.sendContractTransaction,
+        ),
+    });
   }
 
   protected async sendPopulatedTransaction(
@@ -3464,7 +3470,7 @@ export class EVMChainAdapterBase {
     // `this.contracts.token === undefined` no-op for read-only adapters.
     // #953: the approve runs INSIDE the per-wallet serialized window below
     // (it sends its own tx on `txSigner`), not here — it is an executable
-    // phase of `createV10SignerWriteOperation`.
+    // step of `createV10SignerWritePreparation`.
 
     // Build the on-chain PublishParams struct matching the field order +
     // types in `KnowledgeAssetsLifecycle.sol` (RFC-001 author-attestation
@@ -3587,7 +3593,7 @@ export class EVMChainAdapterBase {
       txSigner,
       'publish',
       params.onBroadcast,
-      this.createV10SignerWriteOperation(
+      this.createV10SignerWritePreparation(
         txSigner,
         ka as Contract,
         'publish',
