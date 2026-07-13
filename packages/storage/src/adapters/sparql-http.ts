@@ -32,12 +32,12 @@ import type {
   AskResult,
   StorePressureSnapshot,
 } from '../triple-store.js';
-import {
-  formatSparqlJsonBindings,
-  type SparqlJsonSelectResponse,
-} from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
+import {
+  formatSparqlJsonBindings,
+  type AdapterSparqlJsonSelectResponse,
+} from './sparql-json-results.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
@@ -430,13 +430,13 @@ export class SparqlHttpStore implements TripleStore {
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = (await res.json()) as SparqlJsonSelectResponse | W3CAskResponse;
+        const json = (await res.json()) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
         if (isAsk || 'boolean' in json) {
           return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
         }
 
-        const bindings = formatSparqlJsonBindings(json as SparqlJsonSelectResponse);
+        const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
         return { type: 'bindings', bindings } satisfies SelectResult;
       } finally {
         this.maybeEmitSlowQuery({

@@ -3,8 +3,6 @@ import {
   escapeRdfLiteral,
   formatRdfLiteralBinding,
   formatRdfLiteralTerm,
-  formatSparqlJsonBindings,
-  formatSparqlJsonTerm,
   isRdfTerm,
   normalizeRdfObject,
   parseRdfLiteralTerm,
@@ -54,43 +52,6 @@ describe('RDF literal term codec', () => {
       language: 'en',
       datatype: 'urn:test:ignored-when-language-is-present',
     })).toBe(`"${body}"@en`);
-  });
-
-  it('owns complete SPARQL JSON term conversion', () => {
-    expect(formatSparqlJsonTerm({ type: 'uri', value: 'urn:test:entity' }))
-      .toBe('urn:test:entity');
-    expect(formatSparqlJsonTerm({ type: 'bnode', value: 'blank' })).toBe('_:blank');
-    expect(formatSparqlJsonTerm({ type: 'literal', value })).toBe(`"${body}"`);
-    expect(formatSparqlJsonTerm({ type: 'literal', value, 'xml:lang': 'en' }))
-      .toBe(`"${body}"@en`);
-    expect(formatSparqlJsonTerm({
-      type: 'typed-literal',
-      value,
-      datatype: 'urn:test:datatype',
-    })).toBe(`"${body}"^^<urn:test:datatype>`);
-    expect(formatSparqlJsonTerm({
-      type: 'typed-literal',
-      value,
-      datatype: 'http://www.w3.org/2001/XMLSchema#string',
-    })).toBe(`"${body}"`);
-  });
-
-  it('owns complete SPARQL JSON SELECT binding conversion', () => {
-    expect(formatSparqlJsonBindings({
-      head: { vars: ['uri', 'missing', 'language', 'typed'] },
-      results: {
-        bindings: [{
-          uri: { type: 'uri', value: 'urn:test:entity' },
-          language: { type: 'literal', value, 'xml:lang': 'en' },
-          typed: { type: 'typed-literal', value, datatype: 'urn:test:datatype' },
-        }],
-      },
-    })).toEqual([{
-      uri: 'urn:test:entity',
-      language: `"${body}"@en`,
-      typed: `"${body}"^^<urn:test:datatype>`,
-    }]);
-    expect(formatSparqlJsonBindings({})).toEqual([]);
   });
 
   it.each<RdfLiteralTerm>([
@@ -143,6 +104,8 @@ describe('RDF literal term codec', () => {
     expect(parseRdfLiteralTerm('"unknown:\\q"')).toBeNull();
     expect(parseRdfLiteralTerm('"bad-unicode:\\u00ZZ"')).toBeNull();
     expect(parseRdfLiteralTerm('"out-of-range:\\U00110000"')).toBeNull();
+    expect(parseRdfLiteralTerm('"surrogate-short:\\uD800"')).toBeNull();
+    expect(parseRdfLiteralTerm('"surrogate-long:\\U0000DFFF"')).toBeNull();
     expect(parseRdfLiteralTerm('"raw\nnewline"')).toBeNull();
   });
 });

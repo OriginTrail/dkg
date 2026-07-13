@@ -34,18 +34,6 @@ export interface RdfLiteralBinding {
   datatype?: string;
 }
 
-export interface SparqlJsonTerm {
-  type: 'uri' | 'literal' | 'bnode' | 'typed-literal';
-  value: string;
-  datatype?: string;
-  'xml:lang'?: string;
-}
-
-export interface SparqlJsonSelectResponse {
-  head?: { vars?: string[] };
-  results?: { bindings?: Array<Record<string, SparqlJsonTerm>> };
-}
-
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const RDF_LITERAL_TERM_PATTERN =
   /^"((?:[^"\\\u0000-\u0008\u000A-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*)"(?:@([A-Za-z]+(?:-[A-Za-z0-9]+)*)|\^\^<([^>]+)>)?$/;
@@ -79,34 +67,6 @@ export function formatRdfLiteralBinding(binding: RdfLiteralBinding): string {
   return formatRdfLiteralTerm({ kind: 'plain', value: binding.value });
 }
 
-/** Serialize one W3C SPARQL Results JSON term into the DKG API term format. */
-export function formatSparqlJsonTerm(term: SparqlJsonTerm): string {
-  if (term.type === 'bnode') return `_:${term.value}`;
-  if (term.type === 'literal' || term.type === 'typed-literal') {
-    return formatRdfLiteralBinding({
-      value: term.value,
-      language: term['xml:lang'],
-      datatype: term.datatype,
-    });
-  }
-  return term.value;
-}
-
-/** Convert a W3C SPARQL Results JSON SELECT payload into DKG API bindings. */
-export function formatSparqlJsonBindings(
-  response: SparqlJsonSelectResponse,
-): Array<Record<string, string>> {
-  const variables = response.head?.vars ?? [];
-  return (response.results?.bindings ?? []).map((row) => {
-    const binding: Record<string, string> = {};
-    for (const variable of variables) {
-      const term = row[variable];
-      if (term) binding[variable] = formatSparqlJsonTerm(term);
-    }
-    return binding;
-  });
-}
-
 /**
  * Reverse {@link escapeRdfLiteral} and the standard N-Triples string escapes.
  * The single left-to-right pass preserves escape parity: `\\\\n` becomes a
@@ -134,17 +94,25 @@ function decodeValidatedRdfLiteralBody(value: string): string {
       case "'": result += "'"; break;
       case '\\': result += '\\'; break;
       case 'u':
-        result += String.fromCodePoint(Number.parseInt(value.slice(index + 1, index + 5), 16));
+        result += decodeUnicodeScalar(value.slice(index + 1, index + 5));
         index += 4;
         break;
       case 'U':
-        result += String.fromCodePoint(Number.parseInt(value.slice(index + 1, index + 9), 16));
+        result += decodeUnicodeScalar(value.slice(index + 1, index + 9));
         index += 8;
         break;
       default: result += escaped; break;
     }
   }
   return result;
+}
+
+function decodeUnicodeScalar(hex: string): string {
+  const codePoint = Number.parseInt(hex, 16);
+  if (codePoint > 0x10FFFF || (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+    throw new RangeError(`Invalid Unicode scalar value: ${hex}`);
+  }
+  return String.fromCodePoint(codePoint);
 }
 
 /** Parse the N-Triples-style literal term emitted by {@link formatRdfLiteralTerm}. */

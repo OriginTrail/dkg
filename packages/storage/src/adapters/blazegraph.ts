@@ -11,12 +11,12 @@ import type {
   ConstructResult,
   AskResult,
 } from '../triple-store.js';
-import {
-  formatSparqlJsonBindings,
-  type SparqlJsonSelectResponse,
-} from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
+import {
+  formatSparqlJsonBindings,
+  type AdapterSparqlJsonSelectResponse,
+} from './sparql-json-results.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
@@ -360,14 +360,14 @@ export class BlazegraphStore implements TripleStore {
       }
 
       const json = await deadline.waitFor(
-        res.json() as Promise<SparqlJsonSelectResponse | BlazeAskResponse>,
+        res.json() as Promise<AdapterSparqlJsonSelectResponse | BlazeAskResponse>,
       );
 
       if (isAsk || 'boolean' in json) {
         return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
       }
 
-      const bindings = formatSparqlJsonBindings(json as SparqlJsonSelectResponse);
+      const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
       return { type: 'bindings', bindings } satisfies SelectResult;
     });
   }
