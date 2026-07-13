@@ -146,6 +146,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { unpackKnowledgeAssetId } from './ka-identity.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -424,6 +425,20 @@ export type ResolveCuratedChainKeyContextOptions = {
 function normalizeOptionalContextGraphId(value: string | null | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function sharedMemoryScopeForFinalizedLifecycle(
+  authorAddress: string,
+  packedKaId: bigint | undefined,
+): SharedMemoryGraphScope {
+  if (packedKaId === undefined) return { kind: 'complete-family' };
+  const identity = unpackKnowledgeAssetId(packedKaId);
+  if (ethers.getAddress(identity.agentAddress) !== ethers.getAddress(authorAddress)) {
+    throw new Error(
+      `Finalized lifecycle KA id ${packedKaId} is not in author ${ethers.getAddress(authorAddress)}'s namespace`,
+    );
+  }
+  return { kind: 'named-lifecycle', identity };
 }
 
 function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): void {
@@ -3807,6 +3822,10 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
+    const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
+      seal.authorAddress,
+      seal.reservedKaId ?? packedKaId,
+    );
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
@@ -3817,6 +3836,7 @@ export class PublishMethods extends DKGAgentBase {
           [...request.roots],
           request.subGraphName,
           ctx,
+          sharedMemoryScope,
         );
       } catch (err) {
         this.log.warn(
@@ -4266,17 +4286,10 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
-    const namedKaId = seal.reservedKaId ?? packedKaId;
-    const namedKaNumber = namedKaId === undefined ? undefined : namedKaId & ((1n << 96n) - 1n);
-    const sharedMemoryScope: SharedMemoryGraphScope = namedKaNumber === undefined
-      ? { kind: 'complete-family' }
-      : {
-          kind: 'named-lifecycle',
-          identity: {
-            agentAddress: seal.authorAddress,
-            kaNumber: namedKaNumber,
-          },
-        };
+    const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
+      seal.authorAddress,
+      seal.reservedKaId ?? packedKaId,
+    );
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
 
@@ -4428,7 +4441,6 @@ export class PublishMethods extends DKGAgentBase {
           subGraphName: opts?.subGraphName,
           publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
           publishEpochs: opts?.publishEpochs,
-          clearSharedMemoryAfter: opts?.clearSharedMemoryAfter,
           reservedKaId: recoveredReservedKaId,
           sharedMemoryScope,
           // Wired through to the inner publisher.publish() via
@@ -4468,6 +4480,17 @@ export class PublishMethods extends DKGAgentBase {
           );
         }
       }
+    }
+
+    // Exact scope owns published-root cleanup. A caller's explicit request to
+    // clear every remaining share is a separate family-wide destructive action
+    // that runs only after a confirmed publish/update.
+    if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true) {
+      await publisher.clearRemainingSharedMemory(
+        contextGraphId,
+        opts?.subGraphName,
+        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      );
     }
 
     // OT-RFC-43 A2 (decision 2) — stamp the VM pointer on the lifecycle URN

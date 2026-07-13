@@ -89,6 +89,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       subGraphName?: string;
     }> = [];
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
+    const remainingClearCalls: any[][] = [];
     const loadCalls: Array<{
       contextGraphId: string;
       selection: any;
@@ -119,6 +120,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         return agentAddress === AGENT_B;
       },
       clearSwmShareComplete: async () => {},
+      clearRemainingSharedMemory: async (...args: any[]) => { remainingClearCalls.push(args); },
     };
     agent._loadSelectedSWMQuads = async (
       contextGraphId: string,
@@ -144,7 +146,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         ual: 'did:dkg:test/31337/1',
         merkleRoot: MERKLE,
         kaManifest: [],
-        status: 'tentative',
+        status: 'confirmed',
         publicQuads: [],
       };
     };
@@ -153,6 +155,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, {
       agentAddress: AGENT_B,
+      clearSharedMemoryAfter: true,
     });
 
     expect(result.assertionUri).toBe(assertionUri);
@@ -189,7 +192,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         reservedKaId: RESERVED_KA_ID,
       },
     });
-    expect(result.status).toBe('tentative');
+    expect(publishCalls[0]?.opts).not.toHaveProperty('clearSharedMemoryAfter');
+    expect(remainingClearCalls).toHaveLength(1);
+    expect(remainingClearCalls[0].slice(0, 2)).toEqual([CG, undefined]);
+    expect(result.status).toBe('confirmed');
   });
 
   it('cleans only the finalized named lifecycle after a confirmed update', async () => {

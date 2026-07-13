@@ -4,6 +4,7 @@ import {
   TRUST_LEVEL_PREDICATE,
   TrustLevel,
   TypedEventBus,
+  createOperationContext,
   encodeWorkspacePublishRequest,
   generateEd25519Keypair,
   DKG_ENTITY,
@@ -286,6 +287,45 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(await store.deleteByPattern({ graph: SAME_AUTHOR_SIBLING_SWM_GRAPH, subject: root })).toBe(1);
     expect(await store.deleteByPattern({ graph: FOREIGN_PER_KA_SWM_GRAPH, subject: root })).toBe(1);
     expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(1);
+  });
+
+  it('batches multi-root exact-cleanup metadata reconciliation into one family read', async () => {
+    const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    const consumedOnly = 'urn:test:root:consumed-only';
+    const stillShared = 'urn:test:root:still-shared';
+    await store.insert([
+      q(consumedOnly, 'http://schema.org/name', '"local-one"', PER_KA_SWM_GRAPH),
+      q(stillShared, 'http://schema.org/name', '"local-two"', PER_KA_SWM_GRAPH),
+      q(`${stillShared}/.well-known/genid/1`, 'http://schema.org/name', '"sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
+      q(consumedOnly, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
+      q(stillShared, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
+    ]);
+    const originalQuery = store.query.bind(store);
+    let familyReads = 0;
+    store.query = async (...args) => {
+      if (args[1]?.source === 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership') {
+        familyReads += 1;
+      }
+      return originalQuery(...args);
+    };
+
+    await publisher.clearPublishedSwmRoots(
+      CONTEXT_GRAPH,
+      [consumedOnly, stillShared],
+      undefined,
+      createOperationContext('test'),
+      {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+        },
+      },
+    );
+
+    expect(familyReads).toBe(1);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: consumedOnly })).toBe(0);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: stillShared })).toBe(1);
   });
 
   it('rejects a family-wide remaining clear for an exact named lifecycle', async () => {

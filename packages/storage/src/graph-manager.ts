@@ -295,6 +295,33 @@ export async function loadSharedMemoryQuadsForScope(
   return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, scope);
 }
 
+interface NamedLifecycleGraphResolution {
+  canonicalGraph: string;
+  matchingGraphs: string[];
+}
+
+async function resolveNamedLifecycleGraphPolicy(
+  store: TripleStore,
+  bucketGraph: string,
+  identity: NamedKnowledgeAssetGraphIdentity,
+  options?: QueryOptions,
+): Promise<NamedLifecycleGraphResolution> {
+  assertSafeIri(bucketGraph);
+  const { agentAddress, kaNumber } = identity;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
+    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
+  }
+  const canonicalGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
+  assertSafeIri(canonicalGraph);
+  const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
+    .filter((graph) => {
+      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
+      return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
+        && child.kaNumber === kaNumber;
+    });
+  return { canonicalGraph, matchingGraphs };
+}
+
 /** Resolve the concrete graph set for an explicit semantic SWM scope. */
 export async function resolveSharedMemoryScopeGraphs(
   store: TripleStore,
@@ -305,24 +332,18 @@ export async function resolveSharedMemoryScopeGraphs(
   if (scope.kind === 'complete-family') {
     return resolveSharedMemoryReadGraphs(store, bucketGraph, options);
   }
-  const { agentAddress, kaNumber } = scope.identity;
-  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
-    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
-  }
-  const exactGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
-  assertSafeIri(exactGraph);
-  const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
-    .filter((graph) => {
-      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
-      return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
-        && child.kaNumber === kaNumber;
-    });
+  const { canonicalGraph, matchingGraphs } = await resolveNamedLifecycleGraphPolicy(
+    store,
+    bucketGraph,
+    scope.identity,
+    options,
+  );
   // Preserve the writer's checksum casing while matching EVM identity
   // case-insensitively. An absent lifecycle still resolves to its canonical
   // candidate so the caller gets a safe empty result.
   return matchingGraphs.length > 0
     ? matchingGraphs as NonEmptyGraphList
-    : [exactGraph];
+    : [canonicalGraph];
 }
 
 /** Resolve the single graph to WRITE for a semantic scope. */
@@ -334,21 +355,15 @@ export async function resolveSharedMemoryScopeWriteGraph(
 ): Promise<string> {
   assertSafeIri(bucketGraph);
   if (scope.kind === 'complete-family') return bucketGraph;
-  const { agentAddress, kaNumber } = scope.identity;
-  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
-    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
-  }
-  const exactGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
-  assertSafeIri(exactGraph);
-  const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
-    .filter((graph) => {
-      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
-      return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
-        && child.kaNumber === kaNumber;
-    });
-  return matchingGraphs.find((graph) => graph === exactGraph)
+  const { canonicalGraph, matchingGraphs } = await resolveNamedLifecycleGraphPolicy(
+    store,
+    bucketGraph,
+    scope.identity,
+    options,
+  );
+  return matchingGraphs.find((graph) => graph === canonicalGraph)
     ?? matchingGraphs.slice().sort()[0]
-    ?? exactGraph;
+    ?? canonicalGraph;
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */

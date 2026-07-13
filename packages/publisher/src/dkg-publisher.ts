@@ -5505,18 +5505,32 @@ export class DKGPublisher implements Publisher {
           graph: g, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
         });
       }
-      // A root-keyed owner row can only remain live while some SWM family graph
-      // still contains that root. Exact cleanup preserves it for a real foreign
-      // co-resident share, but removes it when the consumed named KA was the last
-      // copy so a future peer is not blocked by a stale owner.
-      const shouldClearRootMetadata = metadataPolicy === 'always' || (
-        await loadSelectedSharedMemoryQuads(
-          this.store,
-          swmGraph,
-          { rootEntities: [rootEntity] },
-          { querySource: 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership' },
-        )
-      ).length === 0;
+    }
+    // A root-keyed owner row can only remain live while some SWM family graph
+    // still contains that root. Reconcile the complete selected root set with
+    // one family-wide read rather than one independent scan per root.
+    const rootsWithRemainingShares = new Set<string>();
+    if (metadataPolicy === 'when-no-share-remains') {
+      const remaining = await loadSelectedSharedMemoryQuads(
+        this.store,
+        swmGraph,
+        { rootEntities },
+        { querySource: 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership' },
+      );
+      for (const quad of remaining) {
+        for (const rootEntity of rootEntities) {
+          if (
+            quad.subject === rootEntity
+            || quad.subject.startsWith(`${rootEntity}/.well-known/genid/`)
+          ) {
+            rootsWithRemainingShares.add(rootEntity);
+          }
+        }
+      }
+    }
+    for (const rootEntity of rootEntities) {
+      const shouldClearRootMetadata = metadataPolicy === 'always'
+        || !rootsWithRemainingShares.has(rootEntity);
       if (shouldClearRootMetadata) {
         const ownerDeleted = await this.store.deleteByPattern({
           graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
