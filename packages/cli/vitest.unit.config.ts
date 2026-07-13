@@ -45,6 +45,7 @@ export default defineConfig({
           'test/init.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
+          'test/random-sampling-status.test.ts',
           'test/catchup-runner.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',

@@ -30,6 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { describeRandomSamplingDisabledStatus } from '../random-sampling-status.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -129,13 +130,7 @@ randomSamplingCmd
       if (!status.loop) {
         console.log(`  Loop:      not running`);
         if (!status.enabled) {
-          if (status.role !== 'core') {
-            console.log(`  Reason:    edge node — random sampling is core-only`);
-          } else if (status.identityId === '0') {
-            console.log(`  Reason:    no on-chain identity yet (run "dkg start" after staking)`);
-          } else {
-            console.log(`  Reason:    chain adapter missing RandomSampling methods (V10 not deployed?)`);
-          }
+          console.log(`  Reason:    ${describeRandomSamplingDisabledStatus(status)}`);
         }
         return;
       }
