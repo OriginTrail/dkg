@@ -1008,7 +1008,7 @@ export class DKGNode {
       : undefined;
     const activeRelayNetworkPolicy = buildActiveRelayNetworkPolicy(
       activeNetworkRelayPeerIds,
-      (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+      { log: (message) => console.warn(`[${new Date().toISOString()}] ${message}`) },
     );
     const activeRelayDiscoveryFilter = activeRelayNetworkPolicy?.discoveryFilter;
 
