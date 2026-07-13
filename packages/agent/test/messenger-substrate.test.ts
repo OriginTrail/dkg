@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
@@ -180,6 +180,64 @@ describe('Messenger.sendRequestOwned', () => {
     expect(outboxStore.size()).toBe(0);
     expect((messenger as any).firstAttemptAt.size).toBe(0);
     expect(resolvePeer.calls).toHaveLength(1);
+  });
+
+  it('does not return an address failure until slow DHT recovery can affect the next retry', async () => {
+    vi.useFakeTimers();
+    try {
+      let peerResolved = false;
+      const router = makeRouter(async () => {
+        if (!peerResolved) throw new Error('no valid addresses for peer');
+        return new Uint8Array([0x42]);
+      });
+      const resolvePeer = recorder(
+        async (_peerId: string, _opts: { signal: AbortSignal }): Promise<void> => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+          peerResolved = true;
+        },
+      );
+      const { messenger, outboxStore } = makeSubstrate({ router, resolvePeer });
+
+      let firstSettled = false;
+      const firstOutcome = messenger.sendRequestOwned(
+        PEER_A,
+        PROTO,
+        new Uint8Array([1]),
+        { messageId: FIXED_MSG_ID },
+      ).then(
+        (value) => ({ value, error: undefined }),
+        (error: unknown) => ({ value: undefined, error }),
+      ).finally(() => {
+        firstSettled = true;
+      });
+
+      // Longer than ACKCollector's historical ~3s retry window: the send still
+      // owns its failure until peerStore refresh completes, so no retry can run
+      // against the same stale routing state.
+      await vi.advanceTimersByTimeAsync(3_001);
+      expect(firstSettled).toBe(false);
+      expect(router.send.calls).toHaveLength(1);
+      expect(outboxStore.size()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1_999);
+      const first = await firstOutcome;
+      expect(first.value).toBeUndefined();
+      expect(first.error).toBeInstanceOf(Error);
+      expect((first.error as Error).message).toBe('no valid addresses for peer');
+      expect(resolvePeer.calls).toHaveLength(1);
+
+      const retried = await messenger.sendRequestOwned(
+        PEER_A,
+        PROTO,
+        new Uint8Array([1]),
+        { messageId: '00000000-0000-4000-8000-000000000002' },
+      );
+      expect(retried.delivered).toBe(true);
+      expect(router.send.calls).toHaveLength(2);
+      expect(outboxStore.size()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

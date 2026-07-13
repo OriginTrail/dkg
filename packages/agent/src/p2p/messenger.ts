@@ -372,9 +372,8 @@ export class Messenger {
    * Per-`(protocol, peer, messageId)` "first sendReliable invocation"
    * timestamp. Used to compute the SLO latency clock per the rc.9
    * plan: "sendReliable invoke → resolved {delivered:true} (includes
-   * queue + retries)". Cleared on delivery + on outbox expiry; on
-   * non-recoverable throw the entry leaks (acceptable — these are
-   * exceptional cases that the plan's overnight soak surfaces).
+   * queue + retries)". Cleared on delivery, outbox expiry, and any
+   * terminal/request-owned failure that has no durable retry owner.
    */
   private readonly firstAttemptAt = new Map<string, number>();
 
@@ -404,6 +403,13 @@ export class Messenger {
    * on still-fresh peerStore data).
    */
   private readonly lastDhtWalkAt = new Map<string, number>();
+
+  /**
+   * Active peer-resolution work by peer. Request-owned sends await this exact
+   * promise before returning failure to their external retry owner; durable
+   * outbox retries keep the historical fire-and-forget behavior.
+   */
+  private readonly dhtWalksInFlight = new Map<string, Promise<void>>();
 
   /**
    * Per-protocol classifier that decides whether a successful wire
@@ -746,10 +752,10 @@ export class Messenger {
         // to the request-scoped retry loop.
         this.firstAttemptAt.delete(sloK);
         // ACKCollector owns the retry schedule, but address refresh still
-        // belongs to Messenger. Trigger it immediately: request-owned retries
-        // commonly use fresh message ids, so no durable attempt counter exists
-        // that could ever reach the outbox stall threshold.
-        this.maybeScheduleDhtWalk(peerId, { kind: 'request-owned' }, errMsg);
+        // belongs to Messenger. Wait for the refresh (or its bounded failure)
+        // before returning control so the collector cannot exhaust its short
+        // retry window against the same stale peerStore state.
+        await this.scheduleDhtWalk(peerId, { kind: 'request-owned' }, errMsg);
         throw err;
       }
       const entry = outbox.enqueueFailure(
@@ -761,7 +767,7 @@ export class Messenger {
         this.clock(),
       );
       this.noteQueuedForSlo(protocolId);
-      this.maybeScheduleDhtWalk(peerId, { kind: 'outbox', attempts: entry.attempts }, errMsg);
+      void this.scheduleDhtWalk(peerId, { kind: 'outbox', attempts: entry.attempts }, errMsg);
       return {
         delivered: false,
         queued: true,
@@ -932,7 +938,7 @@ export class Messenger {
         this.clock(),
       );
       if (isRecoverableMessengerSendError(err, errMsg)) {
-        this.maybeScheduleDhtWalk(
+        void this.scheduleDhtWalk(
           entry.peer,
           { kind: 'outbox', attempts: updated.attempts },
           errMsg,
@@ -947,16 +953,13 @@ export class Messenger {
   }
 
   /**
-   * DHT-walk-on-stall recovery primitive (rc.9 PR-5). Fire a
-   * `resolvePeer` call in the background when an outbox entry hits
-   * `OUTBOX_STALL_THRESHOLD` attempts on an address-resolution
-   * error, subject to per-peer rate-limiting.
+   * DHT-walk-on-stall recovery primitive (rc.9 PR-5). Durable outbox callers
+   * fire it in the background after `OUTBOX_STALL_THRESHOLD`; request-owned
+   * callers await it so their external retry loop observes refreshed routing.
    *
-   * Fire-and-forget: never blocks the caller. The DHT walk's
-   * side-effect (populating `peerStore` for the peer) heals the
-   * next periodic-tick retry, not the
-   * current one. This is intentional — the current retry has
-   * already failed; the walk is for the next attempt.
+   * The current wire attempt has already failed. Resolution only prepares the
+   * next attempt, whether that is a periodic outbox tick or an ACKCollector
+   * retry. Concurrent request-owned callers share and await one per-peer walk.
    *
    * Guards:
    *   1. No-op when `resolvePeer` not wired.
@@ -970,24 +973,34 @@ export class Messenger {
    *   5. Time-bounded (`DHT_WALK_TIMEOUT_MS`) — failures logged,
    *      never bubble.
    */
-  private maybeScheduleDhtWalk(peerId: string, trigger: DhtWalkTrigger, errMsg: string): void {
-    if (!this.resolvePeer) return;
-    if (trigger.kind === 'outbox' && trigger.attempts < OUTBOX_STALL_THRESHOLD) return;
-    if (!shouldTriggerDhtWalk(errMsg)) return;
+  private scheduleDhtWalk(
+    peerId: string,
+    trigger: DhtWalkTrigger,
+    errMsg: string,
+  ): Promise<void> {
+    if (!this.resolvePeer) return Promise.resolve();
+    if (trigger.kind === 'outbox' && trigger.attempts < OUTBOX_STALL_THRESHOLD) {
+      return Promise.resolve();
+    }
+    if (!shouldTriggerDhtWalk(errMsg)) return Promise.resolve();
+
+    const activeWalk = this.dhtWalksInFlight.get(peerId);
+    if (activeWalk) return activeWalk;
+
     const last = this.lastDhtWalkAt.get(peerId);
     const now = this.clock();
-    if (last !== undefined && now - last < DHT_WALK_RATE_LIMIT_MS) return;
+    if (last !== undefined && now - last < DHT_WALK_RATE_LIMIT_MS) {
+      return Promise.resolve();
+    }
 
     this.lastDhtWalkAt.set(peerId, now);
     const signal = AbortSignal.timeout(DHT_WALK_TIMEOUT_MS);
     const reason = trigger.kind === 'outbox'
       ? `after ${trigger.attempts} stalled outbox attempts`
       : 'after a request-owned address failure';
-    // Fire-and-forget; never await. Any error swallowed + logged.
-    // The walk's value is its side-effect (peerStore population),
-    // not its return value, so we don't even need the resolved
-    // multiaddrs here.
-    void this.resolvePeer(peerId, { signal })
+    // Errors are swallowed after logging so a request-owned caller still
+    // receives the original transport failure, not a secondary DHT error.
+    const walk = this.resolvePeer(peerId, { signal })
       .then(() => {
         console.warn(
           `[Messenger] DHT walk completed for ${peerId.slice(-8)} ${reason} — peerStore should now be primed`,
@@ -998,7 +1011,14 @@ export class Messenger {
         console.warn(
           `[Messenger] DHT walk for ${peerId.slice(-8)} failed (${reason}): ${msg}`,
         );
+      })
+      .finally(() => {
+        if (this.dhtWalksInFlight.get(peerId) === walk) {
+          this.dhtWalksInFlight.delete(peerId);
+        }
       });
+    this.dhtWalksInFlight.set(peerId, walk);
+    return walk;
   }
 
   private clearDhtWalkRateLimitIfDrained(peerId: string): void {
