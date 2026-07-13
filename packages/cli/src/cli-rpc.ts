@@ -7,7 +7,6 @@ import {
   noteRpcExhaustion,
   ChainRpcTransportError,
   createRpcTimeoutError,
-  RPC_RECEIPT_TIMEOUT_MS,
   resolveReceiptTimeoutMs,
   waitForTransactionReceiptWithFailover,
 } from '@origintrail-official/dkg-chain';
@@ -15,12 +14,6 @@ import { cliErrorMessage } from './cli-helpers.js';
 
 const CLI_RPC_READ_STALL_TIMEOUT_MS = 4_000;
 const CLI_RPC_BROADCAST_TIMEOUT_MS = 10_000;
-const CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS = 5_000;
-const CLI_RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
-// Backwards-compatible export for command modules that already import the CLI
-// name. The chain package owns the default so direct CLI writes cannot drift
-// from adapter-backed writes when chain.receiptTimeoutMs is omitted.
-const CLI_RPC_RECEIPT_TIMEOUT_MS = RPC_RECEIPT_TIMEOUT_MS;
 
 function cliWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -70,60 +63,6 @@ function createCliEvmProviders(rpcUrl: string, rpcUrls?: string[]): {
       { quorum: 1 },
     );
   return { urls, providers, readProvider };
-}
-
-/**
- * @deprecated Compatibility-only single-pass helper. Live CLI writes use the
- * chain package's high-level `waitForTransactionReceiptWithFailover` boundary.
- */
-async function getCliReceiptWithFailover(
-  providers: ethers.JsonRpcProvider[],
-  txHash: string,
-  urls?: string[],
-  options: { attemptTimeoutMs?: number; deadlineMs?: number } = {},
-): Promise<ethers.TransactionReceipt | null> {
-  let lastRetryable: unknown;
-  let sawNonErrorResponse = false;
-  const attemptTimeoutMs = options.attemptTimeoutMs ?? CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS;
-  for (let i = 0; i < providers.length; i += 1) {
-    const remainingMs = options.deadlineMs === undefined
-      ? attemptTimeoutMs
-      : options.deadlineMs - Date.now();
-    if (remainingMs <= 0) break;
-    try {
-      const receipt = await cliWithTimeout(
-        providers[i].getTransactionReceipt(txHash),
-        Math.min(attemptTimeoutMs, remainingMs),
-        `receipt lookup via RPC #${i + 1}`,
-      );
-      sawNonErrorResponse = true;
-      if (receipt) return receipt;
-    } catch (err) {
-      if (!isCliRetryableRpcError(err)) throw err;
-      lastRetryable = err;
-      const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
-      if (urls && i < providers.length - 1 && canTryNext) {
-        noteRpcFailover('cli receipt lookup', urls[i], err, urls[i + 1]);
-      }
-    }
-  }
-  if (lastRetryable && !sawNonErrorResponse) {
-    if (urls) noteRpcExhaustion('cli receipt lookup', urls);
-    throw new ChainRpcTransportError(
-      'RPC_RECEIPT_LOOKUP_FAILED',
-      `Receipt lookup for transaction ${txHash} failed on all configured RPC endpoints: ${cliErrorMessage(lastRetryable)}`,
-      { cause: lastRetryable, txHash },
-    );
-  }
-  return null;
-}
-
-function assertCliSuccessfulReceipt(receipt: ethers.TransactionReceipt, txHash: string): void {
-  if (receipt.status !== 0) return;
-  const err = new Error(`Transaction ${txHash} was mined but reverted (status=0)`);
-  (err as any).code = 'CALL_EXCEPTION';
-  (err as any).receipt = receipt;
-  throw err;
 }
 
 async function sendCliRawTransactionWithFailover(
@@ -184,14 +123,9 @@ async function sendCliRawTransactionWithFailover(
 export {
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
   cliWithTimeout,
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
 };

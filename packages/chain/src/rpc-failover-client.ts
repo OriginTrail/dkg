@@ -31,12 +31,11 @@
  *      family never signs.
  *
  * The read family (`read` / `readContract`) shares one private
- * `runAcrossProviders` core; the write transport (`populateAndSign` /
- * `broadcast` / `getReceipt`) is kept as explicit separate methods so each
- * tx-critical divergence stays visible: the broadcast `isKnownTransactionError`
- * idempotent short-circuit, the estimate-failover-only-if-more-providers nuance,
- * and `getReceipt`'s `sawNonErrorResponse` / null / `RPC_RECEIPT_LOOKUP_FAILED`
- * shape.
+ * `runAcrossProviders` core. Transaction preparation and broadcast stay explicit
+ * so their tx-critical divergences remain visible. `getReceipt` contributes
+ * adapter-only validation, stickiness, tracing, and metric hooks to the shared
+ * receipt endpoint-pass state machine in `receipt-wait.ts`; null/exhaustion and
+ * retry/failover control flow therefore cannot drift from direct CLI writes.
  */
 
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
@@ -55,7 +54,10 @@ import {
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   STICKY_PREFERRED_TTL_MS,
 } from './evm-adapter-constants.js';
-import type { ReceiptLookupOptions } from './receipt-wait.js';
+import {
+  getReceiptAcrossEndpoints,
+  type ReceiptLookupOptions,
+} from './receipt-wait.js';
 
 /**
  * One RPC endpoint as a SINGLE boundary: the bare per-endpoint provider paired
@@ -597,67 +599,69 @@ export class RpcFailoverClient {
         try {
           const canonical = this.getEndpoints();
           const attempts = this.stickiness.attempts(canonical, 'write');
-          let lastRetryable: unknown;
-          let sawNonErrorResponse = false;
-          for (let i = 0; i < attempts.length; i += 1) {
-            const attempt = attempts[i];
-            const endpoint = attempt.endpoint;
-            const provider = endpoint.provider;
-            const remainingBeforeValidation = options.deadlineMs === undefined
-              ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
-              : options.deadlineMs - Date.now();
-            if (remainingBeforeValidation <= 0) break;
-            span.addEvent('receipt.attempt', { attempt: i + 1 });
-            try {
-              await this.validateEndpointForAttempt(
-                endpoint,
-                Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingBeforeValidation),
-                `receipt lookup chainId validation via RPC #${i + 1}`,
-              );
-              const remainingBeforeLookup = options.deadlineMs === undefined
-                ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
-                : options.deadlineMs - Date.now();
-              if (remainingBeforeLookup <= 0) break;
-              const receipt = await withTimeout(
-                provider.getTransactionReceipt(txHash),
-                Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingBeforeLookup),
-                `receipt lookup via RPC #${i + 1}`,
-              );
-              sawNonErrorResponse = true;
-              if (receipt) {
-                span.setAttribute('dkg.tx_hash', txHash);
-                this.recordRpcOutcome('eth_getTransactionReceipt', 'ok');
-                // A DEFINITIVE hit (non-null receipt) on this endpoint → prefer
-                // it. A null "not mined yet" response is NOT a stickiness signal
-                // (no single winning endpoint), so we only note on a real
-                // receipt — the self-heal still polls every endpoint per tick.
-                attempt.recordSuccess();
-                noteRpcServed('receipt lookup', endpoint.rpcUrl, { mode: 'read', key: this.servedWriteKey('receipt-lookup') });
-                return receipt;
+          const receipt = await getReceiptAcrossEndpoints({
+            endpoints: attempts.map((attempt) => {
+              const endpoint = attempt.endpoint;
+              return {
+                rpcUrl: endpoint.rpcUrl,
+                recordSuccess: () => attempt.recordSuccess(),
+                recordFailure: () => attempt.recordFailure(),
+                lookup: async (hash, context) => {
+                  span.addEvent('receipt.attempt', { attempt: context.attempt });
+                  const remainingBeforeValidation = context.deadlineMs === undefined
+                    ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
+                    : context.deadlineMs - Date.now();
+                  if (remainingBeforeValidation <= 0) return { kind: 'deadline' as const };
+
+                  await this.validateEndpointForAttempt(
+                    endpoint,
+                    Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingBeforeValidation),
+                    `receipt lookup chainId validation via RPC #${context.attempt}`,
+                  );
+                  const remainingBeforeLookup = context.deadlineMs === undefined
+                    ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
+                    : context.deadlineMs - Date.now();
+                  if (remainingBeforeLookup <= 0) return { kind: 'deadline' as const };
+
+                  return {
+                    kind: 'response' as const,
+                    receipt: await withTimeout(
+                      endpoint.provider.getTransactionReceipt(hash),
+                      Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingBeforeLookup),
+                      `receipt lookup via RPC #${context.attempt}`,
+                    ),
+                  };
+                },
+              };
+            }),
+            txHash,
+            ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+            logLabel: 'receipt lookup',
+            exhaustionRpcUrls: canonical.map(endpoint => endpoint.rpcUrl),
+            formatExhaustionMessage: lastError =>
+              `Receipt lookup for tx ${txHash} failed on all configured RPC endpoints: ${errorMessage(lastError)}`,
+            onReceipt: (endpoint) => {
+              span.setAttribute('dkg.tx_hash', txHash);
+              this.recordRpcOutcome('eth_getTransactionReceipt', 'ok');
+              if (endpoint.rpcUrl) {
+                noteRpcServed('receipt lookup', endpoint.rpcUrl, {
+                  mode: 'read',
+                  key: this.servedWriteKey('receipt-lookup'),
+                });
               }
-            } catch (err) {
-              if (!isRetryableRpcError(err)) {
-                this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(err), { retryable: false });
-                throw err;
-              }
-              lastRetryable = err;
-              attempt.recordFailure(); // de-prefer a failed backend
-              const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
-              if (i < attempts.length - 1 && canTryNext) {
-                noteRpcFailover('receipt lookup', endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
-              }
-            }
-          }
-          if (lastRetryable && !sawNonErrorResponse) {
-            // No backend could even answer the lookup → endpoints exhausted.
-            this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(lastRetryable), { retryable: true, exhausted: true });
-            noteRpcExhaustion('receipt lookup', canonical.map((e) => e.rpcUrl));
-            throw new ChainRpcTransportError(
-              'RPC_RECEIPT_LOOKUP_FAILED',
-              `Receipt lookup for tx ${txHash} failed on all configured RPC endpoints: ${errorMessage(lastRetryable)}`,
-              { cause: lastRetryable, txHash },
-            );
-          }
+            },
+            onNonRetryableError: (err) => {
+              this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(err), { retryable: false });
+            },
+            onExhausted: (lastError) => {
+              this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(lastError), {
+                retryable: true,
+                exhausted: true,
+              });
+            },
+          });
+
+          if (receipt) return receipt;
           // At least one backend answered but the tx is not yet mined (null
           // receipt). This is a benign poll tick, not a terminal outcome, so we
           // intentionally do NOT emit an outcome metric here (the surrounding
