@@ -25,11 +25,11 @@ describe('resolvePublisherCandidatePricing', () => {
     });
 
     expect(pricing).toMatchObject({
+      source: 'pca',
       publishEpochs: 24,
       tokenAmount: 24n,
-      pcaAccountId: 42n,
-      pcaLockDurationEpochs: 24,
-      pcaApplied: true,
+      pca: { accountId: 42n, lockDurationEpochs: 24 },
+      diagnostics: {},
     });
     expect(quote).toHaveBeenCalledTimes(1);
     expect(quote).toHaveBeenCalledWith(24);
@@ -51,11 +51,12 @@ describe('resolvePublisherCandidatePricing', () => {
     });
 
     expect(pricing).toMatchObject({
+      source: 'direct',
       publishEpochs: 12,
       tokenAmount: 120n,
-      pcaAccountId: 7n,
-      pcaLockDurationEpochs: 24,
-      pcaApplied: false,
+      diagnostics: {
+        pcaCandidate: { accountId: 7n, lockDurationEpochs: 24 },
+      },
     });
     expect(quote.mock.calls).toEqual([[24], [12]]);
   });
@@ -74,8 +75,9 @@ describe('resolvePublisherCandidatePricing', () => {
 
     expect(pricing.publishEpochs).toBe(12);
     expect(pricing.tokenAmount).toBe(12n);
-    expect(pricing.pcaApplied).toBe(false);
-    expect(pricing.pcaProbeError).toBeInstanceOf(Error);
-    expect(pricing.quoteError).toBeInstanceOf(Error);
+    expect(pricing.source).toBe('direct');
+    if (pricing.source !== 'direct') throw new Error('expected direct pricing');
+    expect(pricing.diagnostics.pcaProbeError).toBeInstanceOf(Error);
+    expect(pricing.diagnostics.quoteError).toBeInstanceOf(Error);
   });
 });

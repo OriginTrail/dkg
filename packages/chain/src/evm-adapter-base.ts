@@ -2197,17 +2197,18 @@ export class EVMChainAdapterBase {
         ? this.publisherConvictionPlanReader()
         : undefined,
     });
-    if (pricing.pcaProbeError !== undefined) {
+    const diagnostics = pricing.source === 'direct' ? pricing.diagnostics : undefined;
+    if (diagnostics?.pcaProbeError !== undefined) {
       console.warn(
         `[chain] PCA publish-plan probe failed for signer=${signer.address}; ` +
-        `using direct-spend lifetime=${pricing.publishEpochs}: ${errorMessage(pricing.pcaProbeError)}`,
+        `using direct-spend lifetime=${pricing.publishEpochs}: ${errorMessage(diagnostics.pcaProbeError)}`,
       );
     }
-    if (pricing.quoteError !== undefined) {
+    if (diagnostics?.quoteError !== undefined) {
       console.warn(
         `[chain] Publish-plan quote failed for byteSize=${request.effectiveByteSize}, ` +
         `epochs=${pricing.publishEpochs}; using protocol minimum ${pricing.tokenAmount}: ` +
-        `${errorMessage(pricing.quoteError)}`,
+        `${errorMessage(diagnostics.quoteError)}`,
       );
     }
 

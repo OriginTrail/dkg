@@ -187,6 +187,12 @@ interface PublisherAddressResolutionOptions {
   includeGenericSignMessageProbe?: boolean;
 }
 
+interface PublisherAddressResolution {
+  address?: string;
+  planningPin?: string;
+  planningPinLabel?: 'publisherPrivateKey' | 'configured publisherAddress' | 'publisherAddressResolver';
+}
+
 function normalizePublisherAddress(address: string | undefined): string | undefined {
   if (address === undefined) return undefined;
   if (!ethers.isAddress(address)) {
@@ -821,12 +827,33 @@ export class DKGPublisher implements Publisher {
     contextGraphId?: bigint,
     options: PublisherAddressResolutionOptions = {},
   ): Promise<string | undefined> {
-    if (this.publisherAddress) return this.publisherAddress;
+    return (await this.resolvePublisherAddressSelection(contextGraphId, options)).address;
+  }
+
+  private async resolvePublisherAddressSelection(
+    contextGraphId?: bigint,
+    options: PublisherAddressResolutionOptions = {},
+  ): Promise<PublisherAddressResolution> {
+    if (this.publisherAddress) {
+      return {
+        address: this.publisherAddress,
+        planningPin: this.publisherAddress,
+        planningPinLabel: this.publisherWallet
+          ? 'publisherPrivateKey'
+          : 'configured publisherAddress',
+      };
+    }
     if (this.publisherAddressResolver) {
       const resolved = normalizePublisherAddress(await this.publisherAddressResolver(contextGraphId));
-      if (resolved) return resolved;
+      if (resolved) {
+        return {
+          address: resolved,
+          planningPin: resolved,
+          planningPinLabel: 'publisherAddressResolver',
+        };
+      }
     }
-    return this.inferAdapterPublisherAddress(contextGraphId, options);
+    return { address: await this.inferAdapterPublisherAddress(contextGraphId, options) };
   }
 
   /** RFC-001 §9 fallback author when no agent override is supplied. Returns undefined if no signer configured. */
@@ -988,32 +1015,38 @@ export class DKGPublisher implements Publisher {
       conviction,
     });
 
-    if (pricing.pcaApplied) {
+    if (pricing.source === 'pca') {
       this.log.info(
         input.ctx,
-        `PCA-funded publish detected (signer=${input.publisherAddress}, accountId=${pricing.pcaAccountId}) — ` +
+        `PCA-funded publish detected (signer=${input.publisherAddress}, accountId=${pricing.pca.accountId}) — ` +
         `coercing publishEpochs to lockDurationEpochs=${pricing.publishEpochs}`,
       );
-    } else if (pricing.pcaAccountId !== undefined) {
+    } else if (pricing.diagnostics.pcaCandidate !== undefined) {
       this.log.info(
         input.ctx,
-        `Signer ${input.publisherAddress} is a registered PCA agent (accountId=${pricing.pcaAccountId}) ` +
+        `Signer ${input.publisherAddress} is a registered PCA agent ` +
+        `(accountId=${pricing.diagnostics.pcaCandidate.accountId}) ` +
         `but funding for this publish's discounted cost could not be confirmed — NOT coercing ` +
         `publishEpochs; publishing at requested lifetime=${pricing.publishEpochs} via direct spend`,
       );
     }
-    if (pricing.pcaProbeError !== undefined) {
+    const diagnostics = pricing.source === 'direct' ? pricing.diagnostics : undefined;
+    if (diagnostics?.pcaProbeError !== undefined) {
       this.log.warn(
         input.ctx,
         `PCA epochs probe failed — falling back to publishEpochs=${pricing.publishEpochs}: ` +
-        `${pricing.pcaProbeError instanceof Error ? pricing.pcaProbeError.message : String(pricing.pcaProbeError)}`,
+        `${diagnostics.pcaProbeError instanceof Error
+          ? diagnostics.pcaProbeError.message
+          : String(diagnostics.pcaProbeError)}`,
       );
     }
-    if (pricing.quoteError !== undefined) {
+    if (diagnostics?.quoteError !== undefined) {
       this.log.warn(
         input.ctx,
         `getRequiredPublishTokenAmount failed — using protocol minimum ${pricing.tokenAmount}: ` +
-        `${pricing.quoteError instanceof Error ? pricing.quoteError.message : String(pricing.quoteError)}`,
+        `${diagnostics.quoteError instanceof Error
+          ? diagnostics.quoteError.message
+          : String(diagnostics.quoteError)}`,
       );
     }
     return {
@@ -1026,6 +1059,8 @@ export class DKGPublisher implements Publisher {
   private async resolveOnChainPublishPlan(input: {
     contextGraphId: bigint;
     initialSigner?: PublisherSigner;
+    pinnedPublisherAddress?: string;
+    pinnedPublisherLabel?: string;
     explicitPublishEpochs: number | undefined;
     effectiveByteSize: bigint;
     ctx: OperationContext;
@@ -1054,12 +1089,8 @@ export class DKGPublisher implements Publisher {
     // The adapter owns candidate iteration, PCA probing, exact pricing, strict
     // funding validation, and cursor advancement as one operation. The
     // publisher only binds the returned final signer to ACK/transaction data.
-    const pinnedPublisherAddress = this.publisherAddress !== undefined
-      ? (input.initialSigner?.address ?? this.publisherAddress)
-      : undefined;
-    const pinnedPublisherLabel = this.publisherWallet
-      ? 'publisherPrivateKey'
-      : 'configured publisherAddress';
+    const pinnedPublisherAddress = input.pinnedPublisherAddress;
+    const pinnedPublisherLabel = input.pinnedPublisherLabel ?? 'publisher address';
     const resolvedPlan = await this.chain.resolvePublisherPublishPlan({
       contextGraphId: input.contextGraphId,
       effectiveByteSize: input.effectiveByteSize,
@@ -2185,8 +2216,8 @@ export class DKGPublisher implements Publisher {
     const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
     const adapterOwnedPublishPlanningAvailable = canResolveOnChainPublisher
       && typeof this.chain.resolvePublisherPublishPlan === 'function';
-    const resolvedPublisherAddress = canResolveOnChainPublisher
-      ? await this.resolvePublisherAddress(publisherContextGraphId, {
+    const resolvedPublisherSelection = canResolveOnChainPublisher
+      ? await this.resolvePublisherAddressSelection(publisherContextGraphId, {
         // The adapter-owned plan below is the one cursor-moving selection for
         // this publish. A prior getAuthorizedPublisherAddress probe would move
         // the cursor once more and make two-wallet pools always submit from the
@@ -2194,10 +2225,11 @@ export class DKGPublisher implements Publisher {
         // signer exists before payload preparation.
         includeReservingPublisherProbe: !adapterOwnedPublishPlanningAvailable,
       })
-      : await this.resolvePublisherAddress(undefined, {
+      : await this.resolvePublisherAddressSelection(undefined, {
         includeReservingPublisherProbe: false,
         includeGenericSignMessageProbe: false,
       });
+    const resolvedPublisherAddress = resolvedPublisherSelection.address;
     let publisherSigner = canResolveOnChainPublisher
       ? await this.getPublisherSigner(resolvedPublisherAddress)
       : undefined;
@@ -2553,6 +2585,8 @@ export class DKGPublisher implements Publisher {
       ? await this.resolveOnChainPublishPlan({
         contextGraphId: publisherContextGraphId,
         initialSigner: publisherSigner,
+        pinnedPublisherAddress: resolvedPublisherSelection.planningPin,
+        pinnedPublisherLabel: resolvedPublisherSelection.planningPinLabel,
         explicitPublishEpochs,
         effectiveByteSize,
         ctx,

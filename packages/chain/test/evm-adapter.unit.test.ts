@@ -4170,6 +4170,36 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(coverCalls.some((call) => call.accountId === 42n && call.cost === 24n)).toBe(true);
   });
 
+  it('retries a transient PCA quote failure for the same direct-spend lifetime', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } =
+      makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 2_000n); tracByAddr.set(lc(walletB.address), 2_000n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 12);
+    (a as any).convictionAccountCanCover = recorder(async () => true);
+    let quoteCalls = 0;
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async (_bytes: bigint, epochs: number) => {
+      quoteCalls += 1;
+      if (quoteCalls === 1) throw new Error('transient AskStorage failure');
+      expect(epochs).toBe(12);
+      return 1_000n;
+    });
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      defaultPublishEpochs: 12,
+    })).resolves.toMatchObject({
+      publisherAddress: walletA.address,
+      publishEpochs: 12,
+      tokenAmount: 1_000n,
+    });
+    expect(quoteCalls).toBe(2);
+  });
+
   // ── dispatcher Phase 3: the generalized selectSigner seam (RS/relay/update
   // route through this later). Publish behaviour above is proven byte-identical
   // through the nextAuthorizedSigner wrapper; these cover the NEW capabilities.

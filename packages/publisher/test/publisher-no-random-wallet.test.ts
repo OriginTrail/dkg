@@ -197,6 +197,20 @@ class EpochCapturingChain extends LegacyEpochCapturingChain {
   }
 }
 
+class CatalogPlanningChain extends LegacyEpochCapturingChain {
+  readonly planRequests: PublisherPublishPlanRequest[] = [];
+
+  async resolvePublisherPublishPlan(request: PublisherPublishPlanRequest) {
+    this.planRequests.push(request);
+    const publishEpochs = request.explicitPublishEpochs ?? request.defaultPublishEpochs;
+    return {
+      publisherAddress: this.signerAddress,
+      publishEpochs,
+      tokenAmount: request.effectiveByteSize,
+    };
+  }
+}
+
 class NoFundedReservationChain extends EpochCapturingChain {
   async resolvePublisherPublishPlan(): Promise<never> {
     const error = new Error('No configured publisher wallet can fund this publish') as Error & { code: string };
@@ -208,6 +222,7 @@ class NoFundedReservationChain extends EpochCapturingChain {
 interface AckEpochCapture {
   epochs?: number;
   tokenAmount?: bigint;
+  publicByteSize?: bigint;
 }
 
 function captureACKInputs(capture: AckEpochCapture): V10ACKProvider {
@@ -215,6 +230,7 @@ function captureACKInputs(capture: AckEpochCapture): V10ACKProvider {
   return async (params: V10ACKProviderParams) => {
     capture.epochs = params.epochs;
     capture.tokenAmount = params.tokenAmount;
+    capture.publicByteSize = params.publicByteSize;
     return provider(params);
   };
 }
@@ -1377,6 +1393,35 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(chain.planRequests.every((request) => request.publisherAddress === undefined)).toBe(true);
   });
 
+  it('preserves publisherAddressResolver output as a hard adapter-planning pin', async () => {
+    const walletA = new ethers.Wallet(TEST_KEY);
+    const walletB = new ethers.Wallet(TEST_KEY_ALT);
+    const chain = new AlternatingReservationChain([walletA, walletB]);
+    const keypair = await generateEd25519Keypair();
+    const publisher = await sealForWallet(new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherAddressResolver: async (contextGraphId) =>
+        contextGraphId === 1n ? walletB.address : undefined,
+      publisherNodeIdentityId: 7n,
+    }), walletB, chain);
+
+    const result = await publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('resolver-pinned-planning'),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(chain.authorizedProbeCalls).toBe(0);
+    expect(chain.planRequests).toHaveLength(1);
+    expect(chain.planRequests[0].publisherAddress?.toLowerCase())
+      .toBe(walletB.address.toLowerCase());
+    expect(chain.submittedPublishers.at(-1)?.toLowerCase())
+      .toBe(walletB.address.toLowerCase());
+  });
+
   it('invokes adapter-owned planning before signer discovery and binds the planned address', async () => {
     const wallet = new ethers.Wallet(TEST_KEY_ALT);
     const chain = new PlanOnlySigningChain(wallet);
@@ -1522,6 +1567,51 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
 
     expect(encryptInlineChunked).not.toHaveBeenCalled();
     expect(ackProvider).not.toHaveBeenCalled();
+  });
+
+  it('prices curated publishes from the exact public catalog bytes across plan, ACK, and tx', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new CatalogPlanningChain(wallet);
+    const publisher = await makeEpochPublisher(chain, wallet);
+    const ack: AckEpochCapture = {};
+    const contextGraphDid = 'did:dkg:context-graph:1';
+    const rdfType = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const privateContextGraph = 'https://dkg.network/ontology#PrivateContextGraph';
+    const catalogNTriple =
+      `<${contextGraphDid}> <${rdfType}> <${privateContextGraph}> .`;
+    const expectedCatalogByteSize = BigInt(new TextEncoder().encode(catalogNTriple).length);
+
+    const result = await publisher.publish({
+      contextGraphId: '1',
+      quads: [
+        {
+          subject: contextGraphDid,
+          predicate: rdfType,
+          object: privateContextGraph,
+          graph: contextGraphDid,
+        },
+        {
+          subject: 'urn:test:curated-byte-size-data',
+          predicate: 'http://schema.org/description',
+          object: '"This non-catalog payload must not be included in public catalog pricing"',
+          graph: contextGraphDid,
+        },
+      ],
+      encryptInlinePayload: async (plaintext) => plaintext,
+      v10ACKProvider: captureACKInputs(ack),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(chain.planRequests).toHaveLength(1);
+    expect(chain.planRequests[0].effectiveByteSize).toBe(expectedCatalogByteSize);
+    expect(ack).toMatchObject({
+      publicByteSize: expectedCatalogByteSize,
+      tokenAmount: expectedCatalogByteSize,
+    });
+    expect(chain.capturedCreateParams).toMatchObject({
+      byteSize: expectedCatalogByteSize,
+      tokenAmount: expectedCatalogByteSize,
+    });
   });
 
   it('keeps explicit publishEpochs when the publisher is also a PCA agent', async () => {

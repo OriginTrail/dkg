@@ -19,15 +19,42 @@ export interface PublisherCandidatePricingRequest {
   conviction?: PublisherConvictionPlanReader;
 }
 
-export interface PublisherCandidatePricing {
+export interface PublisherCandidatePricingPcaSource {
+  source: 'pca';
   publishEpochs: number;
   tokenAmount: bigint;
-  pcaAccountId?: bigint;
-  pcaLockDurationEpochs?: number;
-  pcaApplied: boolean;
-  pcaProbeError?: unknown;
-  quoteError?: unknown;
+  pca: {
+    accountId: bigint;
+    lockDurationEpochs: number;
+  };
+  diagnostics: {
+    pcaProbeError?: never;
+    quoteError?: never;
+  };
 }
+
+export interface PublisherCandidatePricingDirectSource {
+  source: 'direct';
+  publishEpochs: number;
+  tokenAmount: bigint;
+  diagnostics: {
+    pcaCandidate?: {
+      accountId: bigint;
+      lockDurationEpochs?: number;
+    };
+    pcaProbeError?: unknown;
+    quoteError?: unknown;
+  };
+}
+
+/**
+ * A pricing decision whose funding source is explicit at the public boundary.
+ * PCA decisions always carry a complete account + lock pair; direct decisions
+ * keep best-effort PCA/quote observations under diagnostics.
+ */
+export type PublisherCandidatePricing =
+  | PublisherCandidatePricingPcaSource
+  | PublisherCandidatePricingDirectSource;
 
 function protocolMinimum(epochs: number): bigint {
   return BigInt(epochs);
@@ -52,7 +79,6 @@ export async function resolvePublisherCandidatePricing(
   let tokenAmount: bigint | undefined;
   let pcaAccountId: bigint | undefined;
   let pcaLockDurationEpochs: number | undefined;
-  let pcaApplied = false;
   let pcaProbeError: unknown;
 
   if (
@@ -70,9 +96,13 @@ export async function resolvePublisherCandidatePricing(
           const quoted = await request.quote(lockEpochs);
           const lockTokenAmount = clampQuote(quoted, lockEpochs);
           if (await request.conviction.canCover(accountId, lockTokenAmount)) {
-            publishEpochs = lockEpochs;
-            tokenAmount = lockTokenAmount;
-            pcaApplied = true;
+            return {
+              source: 'pca',
+              publishEpochs: lockEpochs,
+              tokenAmount: lockTokenAmount,
+              pca: { accountId, lockDurationEpochs: lockEpochs },
+              diagnostics: {},
+            };
           }
         }
       }
@@ -94,12 +124,22 @@ export async function resolvePublisherCandidatePricing(
   }
 
   return {
+    source: 'direct',
     publishEpochs,
     tokenAmount,
-    pcaAccountId,
-    pcaLockDurationEpochs,
-    pcaApplied,
-    pcaProbeError,
-    quoteError,
+    diagnostics: {
+      ...(pcaAccountId !== undefined
+        ? {
+          pcaCandidate: {
+            accountId: pcaAccountId,
+            ...(pcaLockDurationEpochs !== undefined
+              ? { lockDurationEpochs: pcaLockDurationEpochs }
+              : {}),
+          },
+        }
+        : {}),
+      ...(pcaProbeError !== undefined ? { pcaProbeError } : {}),
+      ...(quoteError !== undefined ? { quoteError } : {}),
+    },
   };
 }
