@@ -120,7 +120,7 @@ import {
 } from '../../../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
 import { FileStore } from '../../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
+import { VectorStore, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
 import { handleCaptureAsync, EpcisValidationError, handleEventsQuery, EpcisQueryError, type AsyncPublisher as EpcisAsyncPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).

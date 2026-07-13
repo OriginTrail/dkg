@@ -21,21 +21,24 @@ export interface RetrievedAnchor {
   score: number;
 }
 
+/** The result of one semantic-retrieval call. Never shared across requests. */
+export interface EntityRetrievalResult {
+  /** Ranked semantic entry points for this call. */
+  anchors: RetrievedAnchor[];
+  /** True when this call could not use the configured embedding model. */
+  degraded: boolean;
+}
+
 export interface EntityRetriever {
   /** The embedding model id (e.g. `Xenova/all-MiniLM-L6-v2`, `hashing-v1`) — surfaced for honesty about which path ran. */
   readonly model: string;
   /**
-   * Set by the last {@link retrieve} call when the embedder could not run (e.g.
-   * the optional local model is not installed). Lets the answer distinguish
-   * "semantic unavailable on this node" from a genuine "no matches" empty.
-   */
-  degraded?: boolean;
-  /**
    * Embed `question`, ANN-search the context graph's indexed verifiable-memory
-   * entities, and return up to `limit` ranked anchors. Implementations index
-   * lazily (build-then-search on first use) and keep the index fresh.
+   * entities, and return up to `limit` ranked anchors plus this call's degraded
+   * status. Implementations index lazily (build-then-search on first use) and
+   * keep the index fresh.
    */
-  retrieve(question: string, contextGraphName: string, limit: number): Promise<RetrievedAnchor[]>;
+  retrieve(question: string, contextGraphName: string, limit: number): Promise<EntityRetrievalResult>;
   /**
    * Optional: warm the index for a context graph ahead of any query (e.g. right
    * after a publish). Best-effort and must never throw; indexing is incremental

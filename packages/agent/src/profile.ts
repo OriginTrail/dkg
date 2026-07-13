@@ -106,6 +106,8 @@ export interface AgentProfileConfig {
   framework?: string;
   skills: SkillOfferingConfig[];
   contextGraphsServed?: string[];
+  /** Public CGs for which this node has explicitly enabled the dRAG answer protocol. */
+  dragContextGraphsServed?: string[];
   nodeRole?: 'core' | 'edge';
   publicKey?: string;
   relayAddress?: string;
@@ -282,12 +284,16 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   q(activityUri, `${PROV}atTime`, `"${new Date().toISOString()}"`);
 
   const served = config.contextGraphsServed;
-  if (served?.length) {
+  const dragServed = config.dragContextGraphsServed;
+  if (served?.length || dragServed?.length) {
     const hostingUri = `${entity}/.well-known/genid/hosting`;
     q(entity, `${SKILL}hostingProfile`, hostingUri);
     q(hostingUri, RDF_TYPE, `${SKILL}HostingProfile`);
-    for (const cg of served) {
+    for (const cg of served ?? []) {
       q(hostingUri, `${SKILL}contextGraphsServed`, `"${cg}"`);
+    }
+    for (const cg of dragServed ?? []) {
+      q(hostingUri, `${SKILL}dragContextGraphsServed`, `"${cg}"`);
     }
   }
 

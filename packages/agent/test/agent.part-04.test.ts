@@ -59,6 +59,30 @@ describe('Discovery Client', () => {
     });
 
 
+    it('discovers only CG hosts that explicitly advertise dRAG answering', async () => {
+      const store = new OxigraphStore();
+      const engine = new DKGQueryEngine(store);
+      const discovery = new DiscoveryClient(engine);
+
+      const { quads: genericHost } = buildAgentProfile({
+        peerId: 'QmGenericHost',
+        name: 'GenericHost',
+        skills: [],
+        contextGraphsServed: ['public-cg'],
+      });
+      const { quads: dragHost } = buildAgentProfile({
+        peerId: 'QmDragHost',
+        name: 'DragHost',
+        skills: [],
+        contextGraphsServed: ['public-cg'],
+        dragContextGraphsServed: ['public-cg'],
+      });
+      await store.insert([...genericHost, ...dragHost]);
+
+      await expect(discovery.findNodesServingCG('public-cg')).resolves.toEqual(['QmDragHost']);
+    });
+
+
     it('finds agent by peerId', async () => {
       const store = new OxigraphStore();
       const engine = new DKGQueryEngine(store);

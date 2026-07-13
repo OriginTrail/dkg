@@ -61,6 +61,27 @@ describe('buildAgentProfile contextGraphsServed fix', () => {
     expect(unique.size).toBe(cgsQuads.length);
   });
 
+  it('advertises dRAG answering as a separate opt-in hosting capability', () => {
+    const { quads } = buildAgentProfile({
+      peerId: 'QmDragHost',
+      name: 'DragHost',
+      skills: [],
+      contextGraphsServed: ['cg-alpha', 'cg-beta'],
+      dragContextGraphsServed: ['cg-beta'],
+    });
+
+    const generic = quads.filter(
+      (q) => q.predicate === 'https://dkg.origintrail.io/skill#contextGraphsServed',
+    );
+    const drag = quads.filter(
+      (q) => q.predicate === 'https://dkg.origintrail.io/skill#dragContextGraphsServed',
+    );
+
+    expect(generic.map((q) => q.object)).toEqual(['"cg-alpha"', '"cg-beta"']);
+    expect(drag.map((q) => q.object)).toEqual(['"cg-beta"']);
+    expect(drag[0].subject).toBe(generic[0].subject);
+  });
+
   it('omits contextGraphsServed when not configured', () => {
     const { quads } = buildAgentProfile({
       peerId: 'QmEmpty',

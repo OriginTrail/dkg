@@ -103,7 +103,9 @@ Private context graphs use keyword retrieval and reject synthesis/semantic
 requests by default, so graph text cannot silently leave the node through a
 configured model endpoint. An operator who has reviewed that endpoint (for
 example a loopback Ollama instance) can opt in with
-`drag.allowPrivateModelCalls: true`.
+`drag.allowPrivateModelCalls: true`. Background publish-time index warming uses
+the same fail-closed policy: private, unknown, and policy-lookup failures do not
+reach the embedder without that explicit opt-in.
 
 ## Payments (off by default)
 
@@ -223,8 +225,13 @@ correctness.
   For larger graphs, swap the `VectorStore` search for `sqlite-vec` (ANN) behind
   the same interface.
 - Cross-node serving is explicit operator opt-in (`drag.networkServing: true`),
-  public-only, rate/concurrency bounded, and forces keyword retrieval so an
+  and only opted-in nodes advertise the capability-specific
+  `skill:dragContextGraphsServed` phonebook entries. Merely hosting a public CG
+  does not make a node an answer responder. The handler is public-only,
+  rate/concurrency bounded, and forces keyword retrieval so an
   unauthenticated peer cannot trigger model calls or whole-index construction.
+  During a rolling upgrade, responders become discoverable after republishing
+  their profile; explicit `peers` remain the deterministic compatibility path.
   The asker queries at most 12 serving peers and allocates its verification budget
   round-robin; `peersSkipped`/`notEvaluated` expose partial coverage. Decentralized
   semantic routing over the public catalog is a later phase.

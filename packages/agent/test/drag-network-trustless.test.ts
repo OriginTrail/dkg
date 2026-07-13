@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   buildV10ProofMaterial,
@@ -143,6 +143,41 @@ const run = (asker: DKGAgent, peers: string[]) =>
   DragMethods.prototype.dragAnswerNetwork.call(asker, { question: 'q', contextGraphId: 'cg', peers });
 
 describe('dRAG P3 — trustless aggregation (asker re-verifies, never trusts a peer verdict)', () => {
+  it('forces keyword retrieval for includeSelf instead of invoking the attached semantic retriever', async () => {
+    const retrieve = vi.fn(async () => ({ anchors: [], degraded: false }));
+    const asker = {
+      peerId: '12D3KooWAsker',
+      entityRetriever: { model: 'semantic-test', retrieve },
+      isContextGraphPublicOnChain: async () => true,
+      getContextGraphOnChainId: async () => '1',
+      discovery: { findNodesServingCG: async () => [] },
+      store: { query: async () => ({ type: 'bindings', bindings: [] }) },
+      chain: {
+        getEvmChainId: async () => CHAIN_ID,
+        getDKGKnowledgeAssetsAddress: async () => KNOWLEDGE_ASSETS,
+        getKAContextGraphId: async () => 1n,
+      },
+      dragAnswerLocal(
+        args: { question: string; contextGraphId: string; maxCitations?: number; maxKas?: number },
+        options?: { forceKeyword?: boolean },
+      ) {
+        return DragMethods.prototype.dragAnswerLocal.call(this as unknown as DKGAgent, args, options);
+      },
+    } as unknown as DKGAgent;
+
+    const res = await DragMethods.prototype.dragAnswerNetwork.call(asker, {
+      question: 'flagged supplier',
+      contextGraphId: 'cg',
+      peers: [],
+      includeSelf: true,
+    });
+
+    expect(retrieve).not.toHaveBeenCalled();
+    expect(res.perNode).toEqual([
+      { peerId: '12D3KooWAsker', factsCited: 0, verified: 0 },
+    ]);
+  });
+
   it("flips a lying peer's checks.verified=true to false on a tampered triple", async () => {
     const wallet = ethers.Wallet.createRandom() as unknown as ethers.Wallet;
     const { citation, root } = await buildSignedCitation(wallet, 1);

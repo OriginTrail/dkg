@@ -83,6 +83,7 @@ describe('DKGAgent (integration)', () => {
         listenPort: 0,
         store,
         skills: [],
+        dragNetworkServing: true,
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       });
       await agent.start();
@@ -113,6 +114,17 @@ describe('DKGAgent (integration)', () => {
         const joined = served.join(',');
         expect(joined).toContain('public-research');
         expect(joined).not.toContain('secret-ops');
+
+        const dragResult = await store.query(
+          `SELECT ?served WHERE { GRAPH <${agentsGraph}> { ?h <https://dkg.origintrail.io/skill#dragContextGraphsServed> ?served } }`,
+        );
+        expect(dragResult.type).toBe('bindings');
+        const dragServed = dragResult.type === 'bindings'
+          ? (dragResult.bindings.map(b => b['served']).filter(Boolean) as string[])
+          : [];
+        const dragJoined = dragServed.join(',');
+        expect(dragJoined).toContain('public-research');
+        expect(dragJoined).not.toContain('secret-ops');
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -170,6 +182,12 @@ describe('DKGAgent (integration)', () => {
         const joined = served.join(',');
         expect(joined).toContain('normal-public');
         expect(joined).not.toContain('discovered-only');
+
+        const dragResult = await store.query(
+          `SELECT ?served WHERE { GRAPH <${agentsGraph}> { ?h <https://dkg.origintrail.io/skill#dragContextGraphsServed> ?served } }`,
+        );
+        expect(dragResult.type).toBe('bindings');
+        expect(dragResult.type === 'bindings' ? dragResult.bindings : []).toHaveLength(0);
       } finally {
         await agent.stop().catch(() => {});
       }

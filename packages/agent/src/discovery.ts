@@ -95,10 +95,11 @@ export class DiscoveryClient {
 
   /**
    * OT-RFC-55 §5.1 — the READ side of the "context-oracle" phonebook: which peers
-   * advertise that they serve the (public) context graph `contextGraphId`. Reads
-   * the `skill:contextGraphsServed` triples published by {@link buildAgentProfile}
-   * into the agents registry CG. Only public, subscribed, non-system CGs are ever
-   * advertised there (the publish side filters), so this never leaks private CGs.
+   * advertise that they serve dRAG answers for the (public) context graph
+   * `contextGraphId`. Reads the capability-specific
+   * `skill:dragContextGraphsServed` triples published by {@link buildAgentProfile}
+   * into the agents registry CG. A generic CG host is not necessarily a dRAG
+   * responder because network serving is explicit opt-in.
    *
    * Strictly local (over this node's synced copy of the agents CG), so coverage is
    * bounded by agents-CG gossip freshness — same caveat as {@link findAgents}.
@@ -108,7 +109,7 @@ export class DiscoveryClient {
       SELECT DISTINCT ?peerId WHERE {
         ?agent <${DKG}peerId> ?peerId ;
                <${SKILL}hostingProfile> ?hosting .
-        ?hosting <${SKILL}contextGraphsServed> "${escapeSparqlLiteral(contextGraphId)}" .
+        ?hosting <${SKILL}dragContextGraphsServed> "${escapeSparqlLiteral(contextGraphId)}" .
       }
     `;
     const result = await this.engine.query(sparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });

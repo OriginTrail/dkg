@@ -47,10 +47,10 @@ describe('VectorEntityRetriever — incremental indexing', () => {
     const r = new VectorEntityRetriever(vs, emb, store);
 
     // First query: cold index → embed both entities (2) + the question (1).
-    await r.retrieve('hello', cg, 10);
+    const first = await r.retrieve('hello', cg, 10);
     expect(emb.calls).toBe(3);
     expect(await vs.count(cg, emb.model)).toBe(2);
-    expect(r.degraded).toBe(false); // working embedder → NOT degraded (the "no matches" ≠ "no model" half)
+    expect(first.degraded).toBe(false); // working embedder → NOT degraded (the "no matches" ≠ "no model" half)
 
     // Publish a third entity, then query again.
     store.entities.push({
@@ -91,7 +91,7 @@ describe('VectorEntityRetriever — incremental indexing', () => {
     expect(queried).toBe(false); // validateContextGraphId rejected it before any SPARQL ran
   });
 
-  it('sets degraded=true and returns no anchors when the embedder cannot run (no model)', async () => {
+  it('returns degraded=true and no anchors when the embedder cannot run (no model)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'drag-vs-'));
     dirs.push(dir);
     const vs = new VectorStore(dir);
@@ -105,9 +105,51 @@ describe('VectorEntityRetriever — incremental indexing', () => {
     const store = new FakeStore();
     store.entities.push({ g: `did:dkg:context-graph:cgd/_verifiable_memory/0x/1`, s: 'urn:a', p: 'http://ex/name', o: '"A"' });
     const r = new VectorEntityRetriever(vs, broken, store);
-    const anchors = await r.retrieve('anything', 'cgd', 10);
-    expect(anchors).toEqual([]); // no silent crash
-    expect(r.degraded).toBe(true); // the actionable "no model" signal, distinct from "no matches"
+    const result = await r.retrieve('anything', 'cgd', 10);
+    expect(result.anchors).toEqual([]); // no silent crash
+    expect(result.degraded).toBe(true); // the actionable "no model" signal, distinct from "no matches"
+  });
+
+  it('keeps overlapping calls isolated when one embed fails and the other succeeds', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'drag-vs-'));
+    dirs.push(dir);
+    const vs = new VectorStore(dir);
+    let rejectFailed!: (reason?: unknown) => void;
+    let resolveSuccessful!: (embedding: number[]) => void;
+    const failedEmbedding = new Promise<number[]>((_, reject) => {
+      rejectFailed = reject;
+    });
+    const successfulEmbedding = new Promise<number[]>((resolve) => {
+      resolveSuccessful = resolve;
+    });
+    let started = 0;
+    let bothStarted!: () => void;
+    const bothCallsStarted = new Promise<void>((resolve) => {
+      bothStarted = resolve;
+    });
+    const embedder: EmbeddingProvider = {
+      model: 'overlap-model',
+      dimensions: 4,
+      embed: (text) => {
+        started++;
+        if (started === 2) bothStarted();
+        return text === 'fails' ? failedEmbedding : successfulEmbedding;
+      },
+    };
+    const r = new VectorEntityRetriever(vs, embedder, new FakeStore());
+
+    const failedCall = r.retrieve('fails', 'cgoverlap', 10);
+    const successfulCall = r.retrieve('succeeds', 'cgoverlap', 10);
+    await bothCallsStarted;
+
+    // Complete the failed call first. A shared last-call flag would now taint
+    // the still-running successful call and misreport its genuine empty result.
+    rejectFailed(new Error('model request failed'));
+    expect(await failedCall).toEqual({ anchors: [], degraded: true });
+    resolveSuccessful([1, 0, 0, 0]);
+    expect(await successfulCall).toEqual({ anchors: [], degraded: false });
+
+    vs.close();
   });
 
   it('re-indexes a new entity even when a subject recurs across VM graphs (gate counts pairs, not subjects)', async () => {

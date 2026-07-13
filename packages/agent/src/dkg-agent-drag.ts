@@ -27,7 +27,7 @@ import {
 import { PROTOCOL_DRAG_ANSWER, validateContextGraphId } from '@origintrail-official/dkg-core';
 import type { VerifiableCitation, CitationTriple, CitationChecks } from '@origintrail-official/dkg-core';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
-import type { EntityRetriever, RetrievedAnchor } from './drag/retriever.js';
+import type { EntityRetrievalResult, EntityRetriever } from './drag/retriever.js';
 
 /** Per-KA VM graph: `…/_verifiable_memory/<author>/<number>` → {author, number}. */
 const VM_GRAPH_RE = /\/_verifiable_memory\/(0x[0-9a-fA-F]{40})\/(\d+)$/;
@@ -221,9 +221,9 @@ export class DragMethods extends DKGAgentBase {
 
     if (retriever) {
       retrieval = `vector:${retriever.model}`;
-      const anchors = await retriever
+      const { anchors, degraded } = await retriever
         .retrieve(args.question, args.contextGraphId, maxKas)
-        .catch((): RetrievedAnchor[] => []);
+        .catch((): EntityRetrievalResult => ({ anchors: [], degraded: false }));
       const seen = new Set<string>();
       const anchorEntities: string[] = [];
       for (const a of anchors) {
@@ -246,7 +246,7 @@ export class DragMethods extends DKGAgentBase {
         }
       }
       if (selections.length === 0) {
-        if (retriever.degraded === true) {
+        if (degraded) {
           return empty(
             `Semantic retrieval is unavailable on this node — no embedding model is reachable. ` +
               `Configure config.drag.embedder (e.g. a local Ollama via embedderBaseURL) or install the optional local model.`,
@@ -548,7 +548,7 @@ export class DragMethods extends DKGAgentBase {
        * Explicit serving peerIds to fan out to, UNION'd with the phonebook
        * discovery. Useful when the caller already knows serving nodes, or when
        * an advertisement has not yet gossiped into this node's agents-CG (the
-       * phonebook integrates fresh `contextGraphsServed` updates on a heartbeat
+       * phonebook integrates fresh `dragContextGraphsServed` updates on a heartbeat
        * cadence, so discovery can lag a just-created CG).
        */
       peers?: string[];
@@ -621,7 +621,10 @@ export class DragMethods extends DKGAgentBase {
     const thunks: Array<() => Promise<NodeResult>> = [];
     if (includeSelf) {
       thunks.push(() =>
-        this.dragAnswerLocal(args)
+        // Network answering has one retrieval contract regardless of where a
+        // participant runs: bounded keyword only. Do not let includeSelf reuse
+        // this node's attached semantic retriever and trigger model/index work.
+        this.dragAnswerLocal(args, { forceKeyword: true })
           .then((result) => ({ peerId: myPeerId, result }))
           .catch((e) => ({ peerId: myPeerId, error: e instanceof Error ? e.message : String(e) })),
       );

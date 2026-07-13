@@ -163,9 +163,11 @@ import {
 } from '../../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../extraction-status.js';
 import { FileStore } from '../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
+import { VectorStore, type EmbeddingProvider } from '../vector-store.js';
+import { OpenAIEmbeddingProvider } from './embedding-providers.js';
 import { VectorEntityRetriever } from './drag-retriever.js';
 import { defaultDragEmbedder } from './drag-embedder.js';
+import { warmDragIndexIfAllowed } from './drag-warm-policy.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
@@ -2731,8 +2733,13 @@ export async function runDaemonInner(
     });
     // dRAG: warm the semantic index for this CG after a memory change (e.g. a
     // publish) so the first query against fresh facts is not the one that pays
-    // for embedding. Best-effort + incremental (a no-op when nothing is new).
-    void agent.entityRetriever?.warm?.(event.contextGraphId);
+    // for embedding. The event has no authenticated caller, so fail closed
+    // unless the CG is proven public or private model calls are explicitly on.
+    void warmDragIndexIfAllowed(
+      agent,
+      event.contextGraphId,
+      config.drag?.allowPrivateModelCalls === true,
+    );
   }
   // A5: single generic `notification` SSE refresh for the bell pane. Fired
   // once per scoped notification write (join_* + assertion_activity) so the

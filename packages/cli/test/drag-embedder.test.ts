@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { HashingEmbeddingProvider } from '../src/vector-store.js';
+import { HashingEmbeddingProvider } from '../src/daemon/embedding-providers.js';
 
 function cosine(a: number[], b: number[]): number {
   let dot = 0;

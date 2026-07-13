@@ -81,7 +81,7 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
-export type { EntityRetriever, RetrievedAnchor } from './drag/retriever.js';
+export type { EntityRetriever, EntityRetrievalResult, RetrievedAnchor } from './drag/retriever.js';
 export type { DragFact, DragAnswerResult, DragNetworkAnswerResult, DragPerNode } from './dkg-agent-drag.js';
 export type { PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 export {

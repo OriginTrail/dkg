@@ -9,7 +9,7 @@
 // question, and ANN-search for the top anchors. The agent then graph-expands +
 // builds verifiable citations.
 
-import type { EntityRetriever, RetrievedAnchor } from '@origintrail-official/dkg-agent';
+import type { EntityRetrievalResult, EntityRetriever } from '@origintrail-official/dkg-agent';
 import { validateContextGraphId } from '@origintrail-official/dkg-core';
 import type { VectorStore, EmbeddingProvider } from '../vector-store.js';
 
@@ -20,8 +20,6 @@ export interface QueryableStore {
 
 export class VectorEntityRetriever implements EntityRetriever {
   readonly model: string;
-  /** Set true when the embedder could not run (e.g. local model not installed) — lets the answer distinguish "no model" from "no matches". */
-  degraded = false;
   private readonly warming = new Set<string>();
 
   constructor(
@@ -32,15 +30,13 @@ export class VectorEntityRetriever implements EntityRetriever {
     this.model = embedder.model;
   }
 
-  async retrieve(question: string, cgName: string, limit: number): Promise<RetrievedAnchor[]> {
-    this.degraded = false;
+  async retrieve(question: string, cgName: string, limit: number): Promise<EntityRetrievalResult> {
     await this.ensureIndexed(cgName);
     let queryVec: number[];
     try {
       queryVec = await this.embedder.embed(question);
     } catch {
-      this.degraded = true; // embedder unavailable — surface it rather than a silent empty
-      return [];
+      return { anchors: [], degraded: true }; // embedder unavailable — surface it rather than a silent empty
     }
     const results = await this.vectorStore.search(queryVec, {
       contextGraphId: cgName,
@@ -52,7 +48,10 @@ export class VectorEntityRetriever implements EntityRetriever {
       // see the dRAG guide's "retrieval precision is a known limitation" note.
       minSimilarity: 0.05,
     });
-    return results.map((r) => ({ sourceGraph: r.sourceUri, entityUri: r.entityUri, score: r.similarity }));
+    return {
+      anchors: results.map((r) => ({ sourceGraph: r.sourceUri, entityUri: r.entityUri, score: r.similarity })),
+      degraded: false,
+    };
   }
 
   /**

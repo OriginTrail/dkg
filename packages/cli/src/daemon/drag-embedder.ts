@@ -8,8 +8,8 @@ import {
   OpenAIEmbeddingProvider,
   HashingEmbeddingProvider,
   LocalEmbeddingProvider,
-  type EmbeddingProvider,
-} from '../vector-store.js';
+} from './embedding-providers.js';
+import type { EmbeddingProvider } from '../vector-store.js';
 import type { DkgConfig } from '../config.js';
 
 export type EmbedderKind = 'keyword' | 'hashing' | 'local' | 'openai';

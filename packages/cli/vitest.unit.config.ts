@@ -77,6 +77,7 @@ export default defineConfig({
           'test/publisher-runner-ack-transport.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
+          'test/drag-warm-policy.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
