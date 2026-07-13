@@ -102,12 +102,16 @@ export async function waitForReceiptWithDeadline<TReceipt>(
 }
 
 export interface TransactionReceiptWaitOptions {
-  /** Provider URLs paired by index for failover telemetry and diagnostics. */
-  rpcUrls?: readonly string[];
   /** Overall submitted-transaction receipt deadline (default 10 minutes). */
   receiptTimeoutMs?: number;
   /** Low-cardinality transport label. Defaults to `direct transaction`. */
   logLabel?: string;
+}
+
+/** One direct receipt endpoint with optional telemetry metadata kept in-band. */
+export interface TransactionReceiptEndpoint {
+  provider: JsonRpcProvider;
+  rpcUrl?: string;
 }
 
 /**
@@ -116,7 +120,7 @@ export interface TransactionReceiptWaitOptions {
  * callers supply providers, a tx hash, and operator-facing timeout config.
  */
 export async function waitForTransactionReceiptWithFailover(
-  providers: readonly JsonRpcProvider[],
+  endpoints: readonly TransactionReceiptEndpoint[],
   txHash: string,
   options: TransactionReceiptWaitOptions = {},
 ): Promise<TransactionReceipt> {
@@ -131,12 +135,13 @@ export async function waitForTransactionReceiptWithFailover(
       let lastRetryable: unknown;
       let sawNonErrorResponse = false;
 
-      for (let i = 0; i < providers.length; i += 1) {
+      for (let i = 0; i < endpoints.length; i += 1) {
+        const endpoint = endpoints[i];
         const remainingMs = deadlineMs - Date.now();
         if (remainingMs <= 0) break;
         try {
           const receipt = await withTimeout(
-            providers[i].getTransactionReceipt(hash),
+            endpoint.provider.getTransactionReceipt(hash),
             Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingMs),
             `receipt lookup via RPC #${i + 1}`,
           );
@@ -146,19 +151,23 @@ export async function waitForTransactionReceiptWithFailover(
           if (!isRetryableRpcError(err)) throw err;
           lastRetryable = err;
           const canTryNext = Date.now() < deadlineMs;
-          if (options.rpcUrls && i < providers.length - 1 && canTryNext) {
+          const nextEndpoint = endpoints[i + 1];
+          if (endpoint.rpcUrl && nextEndpoint?.rpcUrl && canTryNext) {
             noteRpcFailover(
               `${logLabel} receipt lookup`,
-              options.rpcUrls[i],
+              endpoint.rpcUrl,
               err,
-              options.rpcUrls[i + 1],
+              nextEndpoint.rpcUrl,
             );
           }
         }
       }
 
       if (lastRetryable && !sawNonErrorResponse) {
-        if (options.rpcUrls) noteRpcExhaustion(`${logLabel} receipt lookup`, options.rpcUrls);
+        const rpcUrls = endpoints.map(endpoint => endpoint.rpcUrl);
+        if (rpcUrls.every((url): url is string => typeof url === 'string')) {
+          noteRpcExhaustion(`${logLabel} receipt lookup`, rpcUrls);
+        }
         throw new ChainRpcTransportError(
           'RPC_RECEIPT_LOOKUP_FAILED',
           `Receipt lookup for transaction ${hash} failed on all configured RPC endpoints: ${errorMessage(lastRetryable)}`,

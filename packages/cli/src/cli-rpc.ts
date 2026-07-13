@@ -171,8 +171,11 @@ async function sendCliRawTransactionWithFailover(
     );
   }
 
-  return waitForTransactionReceiptWithFailover(providers, txHash, {
-    rpcUrls: urls,
+  const receiptEndpoints = providers.map((provider, index) => {
+    const rpcUrl = urls?.[index];
+    return rpcUrl ? { provider, rpcUrl } : { provider };
+  });
+  return waitForTransactionReceiptWithFailover(receiptEndpoints, txHash, {
     receiptTimeoutMs,
     logLabel: 'cli',
   });

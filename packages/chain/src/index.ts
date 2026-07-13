@@ -63,5 +63,6 @@ export {
 } from './evm-adapter-constants.js';
 export {
   waitForTransactionReceiptWithFailover,
+  type TransactionReceiptEndpoint,
   type TransactionReceiptWaitOptions,
 } from './receipt-wait.js';
