@@ -395,7 +395,11 @@ import { QueryMethods } from './dkg-agent-query.js';
 import { AgentRegistryMethods } from './dkg-agent-registry.js';
 import { WorkspaceCryptoMethods } from './dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
-import { PublishMethods, SEAL_CAPABILITY_GAP_CODE } from './dkg-agent-publish.js';
+import {
+  PublishMethods,
+  SEAL_CAPABILITY_GAP_CODE,
+  sharedMemoryScopeForFinalizedLifecycle,
+} from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';
@@ -2522,6 +2526,28 @@ export class DKGAgent extends DKGAgentBase {
           preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
           schemeVersion: opts?.schemeVersion,
         });
+        // A full `skipSeal` share predates KA-number allocation and therefore
+        // lives in the legacy SWM bucket. Finalize has now allocated the packed
+        // id bound by the seal; migrate that exact root closure into its
+        // canonical named lifecycle before publish starts using exact-scope
+        // reads. This is also idempotent, so retrying a finalize that failed
+        // after the data move repairs the lifecycle pointer safely.
+        const finalizedScope = sharedMemoryScopeForFinalizedLifecycle(
+          swmSeal.authorAddress,
+          swmSeal.reservedKaId,
+        );
+        if (finalizedScope.kind !== 'named-lifecycle') {
+          throw new Error('seal-in-SWM finalized without a named lifecycle identity');
+        }
+        await agent.publisher.migrateLegacyBucketRootsToNamedLifecycle(
+          contextGraphId,
+          name,
+          finalizeAgentAddress,
+          swmSeal.rootEntities,
+          opts?.subGraphName,
+          finalizedScope,
+          createOperationContext('share'),
+        );
         // #1116 FIX 2 — make the SWM-resident position observable. The original
         // (possibly skipSeal) promote had no seal yet, so `_stampSwmPointer` ran a
         // no-op then; now that the seal EXISTS, stamp dkg:swmCurrentAssertion to it

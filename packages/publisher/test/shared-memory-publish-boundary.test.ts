@@ -9,6 +9,7 @@ import {
   generateEd25519Keypair,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
+  assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -237,11 +238,58 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     ]);
   });
 
+  it('migrates a finalized skipSeal payload from the legacy bucket into its canonical named graph', async () => {
+    const { publisher, store } = await makeRealPublisher();
+    const root = 'urn:test:root:skip-seal';
+    const child = `${root}/.well-known/genid/child`;
+    const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const canonicalGraph = `${SWM_GRAPH}/${checksummedAuthor.toLowerCase()}/7`;
+    const lifecycle = assertionLifecycleUri(CONTEXT_GRAPH, checksummedAuthor, 'skip-seal');
+    await store.insert([
+      q(root, 'http://schema.org/name', '"legacy"', SWM_GRAPH),
+      q(child, 'http://schema.org/value', '"child"', SWM_GRAPH),
+      {
+        subject: lifecycle,
+        predicate: 'http://dkg.io/ontology/assertionGraph',
+        object: SWM_GRAPH,
+        graph: `${CONTEXT_GRAPH_URI}/_meta`,
+      },
+    ]);
+    const scope = {
+      kind: 'named-lifecycle',
+      identity: { agentAddress: checksummedAuthor, kaNumber: 7n },
+    } as const;
+
+    const moved = await publisher.migrateLegacyBucketRootsToNamedLifecycle(
+      CONTEXT_GRAPH,
+      'skip-seal',
+      checksummedAuthor,
+      [root],
+      undefined,
+      scope,
+      createOperationContext('test'),
+    );
+
+    expect(moved).toBe(2);
+    expect(await store.deleteByPattern({ graph: SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteByPattern({ graph: SWM_GRAPH, subject: child })).toBe(0);
+    expect(await store.deleteByPattern({ graph: canonicalGraph, subject: root })).toBe(1);
+    expect(await store.deleteByPattern({ graph: canonicalGraph, subject: child })).toBe(1);
+    const pointer = await store.query(
+      `SELECT ?g WHERE { GRAPH <${CONTEXT_GRAPH_URI}/_meta> { ` +
+      `<${lifecycle}> <http://dkg.io/ontology/assertionGraph> ?g } }`,
+    );
+    expect(pointer.type).toBe('bindings');
+    expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(canonicalGraph);
+  });
+
   it('confirmed exact cleanup removes stale ownership when the local KA was the last share', async () => {
     const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
     const root = 'urn:test:root:one';
+    const mixedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const mixedCaseGraph = `${SWM_GRAPH}/${mixedAuthor}/1`;
     await store.insert([
-      q(root, 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q(root, 'http://schema.org/name', '"local"', mixedCaseGraph),
       q(root, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
     ]);
 
@@ -249,13 +297,13 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       sharedMemoryScope: {
         kind: 'named-lifecycle',
         identity: {
-          agentAddress: '0x1111111111111111111111111111111111111111',
+          agentAddress: mixedAuthor.toLowerCase(),
           kaNumber: 1n,
         },
       },
     });
 
-    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteByPattern({ graph: mixedCaseGraph, subject: root })).toBe(0);
     expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(0);
     const owners = await (publisher as any).sharedMemoryOwnersForPromotion(
       CONTEXT_GRAPH, undefined, CONTEXT_GRAPH, [root],

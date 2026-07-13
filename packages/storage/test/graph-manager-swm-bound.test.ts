@@ -236,7 +236,7 @@ describe('resolveSharedMemoryReadGraphs — bound only prunes real SWM children 
 });
 
 describe('the generic SWM loader cannot be pruned (bound is not an option)', () => {
-  it('exact named-KA reads preserve checksum graph casing and exclude the bucket', async () => {
+  it('reads legacy checksum casing, excludes the bucket, and writes to the canonical lowercase graph', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('named-exact-casing');
     const root = 'urn:test:named:root';
@@ -260,7 +260,40 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
         scope,
       );
       expect(quads.map((quad) => quad.object)).toEqual(['"exact"']);
-      expect(await resolveSharedMemoryScopeWriteGraph(store, swm, scope)).toBe(exact);
+      expect(await resolveSharedMemoryScopeWriteGraph(store, swm, scope)).toBe(
+        `${swm}/${AUTHOR_A}/7`,
+      );
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('reads every legacy casing alias but never chooses a write target from store order', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('named-aliases');
+    const root = 'urn:test:named:aliases';
+    const upperAlias = `${swm}/${AUTHOR_A_MIXED.toUpperCase().replace('0X', '0x')}/7`;
+    const mixedAlias = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const canonical = `${swm}/${AUTHOR_A}/7`;
+    const scope = {
+      kind: 'named-lifecycle',
+      identity: { agentAddress: AUTHOR_A_MIXED, kaNumber: 7n },
+    } as const;
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"upper"', graph: upperAlias },
+        { subject: root, predicate: 'urn:p', object: '"mixed"', graph: mixedAlias },
+      ]);
+
+      const quads = await loadSharedMemoryQuadsForScope(
+        store,
+        swm,
+        { rootEntities: [root] },
+        scope,
+      );
+
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"mixed"', '"upper"']);
+      expect(await resolveSharedMemoryScopeWriteGraph(store, swm, scope)).toBe(canonical);
     } finally {
       await store.close();
     }

@@ -427,7 +427,7 @@ function normalizeOptionalContextGraphId(value: string | null | undefined): stri
   return trimmed ? trimmed : undefined;
 }
 
-function sharedMemoryScopeForFinalizedLifecycle(
+export function sharedMemoryScopeForFinalizedLifecycle(
   authorAddress: string,
   packedKaId: bigint | undefined,
 ): SharedMemoryGraphScope {
@@ -2076,6 +2076,10 @@ export class PublishMethods extends DKGAgentBase {
     assertionUri: string;
     merkleRoot: Uint8Array;
     authorAddress: string;
+    /** Internal lifecycle identity used by seal-in-SWM migration. */
+    reservedKaId: bigint;
+    /** Internal exact payload boundary used by seal-in-SWM migration. */
+    rootEntities: string[];
     schemeVersion: number;
     chainId: bigint;
     kav10Address: string;
@@ -2288,6 +2292,8 @@ export class PublishMethods extends DKGAgentBase {
         assertionUri,
         merkleRoot: existingSeal.merkleRoot,
         authorAddress: existingSeal.authorAddress,
+        reservedKaId: reReservedKaId,
+        rootEntities: [...existingSeal.rootEntities],
         schemeVersion: existingSeal.authorSchemeVersion,
         chainId: existingSeal.chainId,
         kav10Address: existingSeal.kav10Address,
@@ -2661,6 +2667,8 @@ export class PublishMethods extends DKGAgentBase {
       assertionUri,
       merkleRoot,
       authorAddress,
+      reservedKaId,
+      rootEntities: [...rootEntities],
       schemeVersion,
       chainId,
       kav10Address,
@@ -4298,6 +4306,42 @@ export class PublishMethods extends DKGAgentBase {
       seal.authorAddress,
       seal.reservedKaId ?? packedKaId,
     );
+    const loadFinalizedLifecycleSwmQuads = async (): Promise<Quad[]> => {
+      const selection = { rootEntities: seal.rootEntities };
+      let quads = await this._loadSelectedSWMQuads(
+        contextGraphId,
+        selection,
+        opts?.subGraphName,
+        sharedMemoryScope,
+      );
+      if (quads.length > 0 || sharedMemoryScope.kind !== 'named-lifecycle') return quads;
+
+      // Compatibility for assets finalized from a full `skipSeal` share by an
+      // older process: their payload can still be in the legacy SWM bucket.
+      // Move it to the deterministic named graph and retry the exact read. New
+      // finalize(layer:"swm") calls already migrate eagerly in dkg-agent.ts.
+      try {
+        await publisher.migrateLegacyBucketRootsToNamedLifecycle(
+          contextGraphId,
+          name,
+          agentAddress,
+          seal.rootEntities,
+          opts?.subGraphName,
+          sharedMemoryScope,
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+        );
+      } catch (err) {
+        if ((err as { code?: string })?.code !== 'SWM_MIGRATION_SOURCE_EMPTY') throw err;
+        return quads;
+      }
+      quads = await this._loadSelectedSWMQuads(
+        contextGraphId,
+        selection,
+        opts?.subGraphName,
+        sharedMemoryScope,
+      );
+      return quads;
+    };
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
 
@@ -4309,12 +4353,7 @@ export class PublishMethods extends DKGAgentBase {
       // the merkle from the SWM-selected quads and requires a
       // precomputedUpdateAttestation over (kaId, newMerkleRoot, author); we
       // mint it here from the seal's merkle using the seal's author signer.
-      const updateQuads = await this._loadSelectedSWMQuads(
-        contextGraphId,
-        { rootEntities: seal.rootEntities },
-        opts?.subGraphName,
-        sharedMemoryScope,
-      );
+      const updateQuads = await loadFinalizedLifecycleSwmQuads();
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
         seal,
@@ -4429,12 +4468,7 @@ export class PublishMethods extends DKGAgentBase {
       // it here so the no-data precondition fires for ALL callers regardless of
       // registration. Match the publisher's wording so the route's existing 409
       // mapping (/No quads in shared memory/) still applies.
-      const sealedSwmQuads = await this._loadSelectedSWMQuads(
-        contextGraphId,
-        { rootEntities: seal.rootEntities },
-        opts?.subGraphName,
-        sharedMemoryScope,
-      );
+      const sealedSwmQuads = await loadFinalizedLifecycleSwmQuads();
       if (sealedSwmQuads.length === 0) {
         throw new Error(
           `No quads in shared memory for context graph ${contextGraphId} matching selection`,
