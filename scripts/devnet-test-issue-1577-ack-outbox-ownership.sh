@@ -20,17 +20,69 @@ cleanup() {
 trap cleanup EXIT INT TERM
 . "$ROOT/scripts/devnet-lib.sh"
 
+PROTOCOL_STORAGE_ACK="$(protocol_const PROTOCOL_STORAGE_ACK)"
+PROTOCOL_STORAGE_ACK_V2="$(protocol_const PROTOCOL_STORAGE_ACK_V2)"
+PROTOCOL_STORAGE_UPDATE_ACK="$(protocol_const PROTOCOL_STORAGE_UPDATE_ACK)"
+[[ -n "$PROTOCOL_STORAGE_ACK" ]] || fail "canonical PROTOCOL_STORAGE_ACK is unavailable"
+[[ -n "$PROTOCOL_STORAGE_ACK_V2" ]] || fail "canonical PROTOCOL_STORAGE_ACK_V2 is unavailable"
+[[ -n "$PROTOCOL_STORAGE_UPDATE_ACK" ]] || fail "canonical PROTOCOL_STORAGE_UPDATE_ACK is unavailable"
+
+# Compiled-package integration preflight: a request-owned address failure must
+# trigger routing recovery immediately while keeping durable ownership empty.
+ROOT="$ROOT" node --input-type=module <<'NODE'
+import { pathToFileURL } from 'node:url';
+const root = process.env.ROOT;
+const { Messenger } = await import(pathToFileURL(`${root}/packages/agent/dist/p2p/messenger.js`).href);
+const {
+  InMemoryMessageIdempotencyStore,
+  InMemoryProtocolOutboxStore,
+} = await import(pathToFileURL(`${root}/packages/core/dist/index.js`).href);
+const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10], maxAgeMs: 60_000 });
+let resolveCalls = 0;
+const messenger = new Messenger({
+  router: {
+    send: async () => { throw new Error('no valid addresses for peer'); },
+    register: () => undefined,
+  },
+  idempotencyStore: new InMemoryMessageIdempotencyStore(),
+  outboxStore,
+  resolvePeer: async () => { resolveCalls += 1; },
+});
+let failed = false;
+try {
+  await messenger.sendRequestOwned('12D3KooWIssue1577Target', '/dkg/test/storage-ack', new Uint8Array([1]));
+} catch {
+  failed = true;
+}
+await Promise.resolve();
+if (!failed || resolveCalls !== 1 || outboxStore.size() !== 0) {
+  throw new Error(`request-owned recovery invariant failed: failed=${failed} resolveCalls=${resolveCalls} outbox=${outboxStore.size()}`);
+}
+NODE
+if [[ "${ACK_OUTBOX_PREFLIGHT_ONLY:-0}" == 1 ]]; then
+  echo "[#1577] PASS: request-owned address recovery fired with no durable outbox row"
+  exit 0
+fi
+
 for n in 1 2 3 4 5; do
   [[ "$(code_of "$(api "$n" GET /api/status)")" == 200 ]] || fail "node$n is not ready (need 4 cores + edge)"
 done
 [[ -f "$DB" ]] || fail "publisher database missing: $DB"
 
 count_ack_rows() {
-  DB="$DB" node --input-type=module <<'NODE'
+  DB="$DB" \
+    PROTOCOL_STORAGE_ACK="$PROTOCOL_STORAGE_ACK" \
+    PROTOCOL_STORAGE_ACK_V2="$PROTOCOL_STORAGE_ACK_V2" \
+    PROTOCOL_STORAGE_UPDATE_ACK="$PROTOCOL_STORAGE_UPDATE_ACK" \
+    node --input-type=module <<'NODE'
 import Database from 'better-sqlite3';
 const db = new Database(process.env.DB, { readonly: true });
 const row = db.prepare(`SELECT COUNT(*) AS n FROM protocol_outbox
-  WHERE protocol IN ('/dkg/10.0.1/storage-ack','/dkg/10.0.2/storage-ack','/dkg/10.0.1/storage-update-ack')`).get();
+  WHERE protocol IN (?, ?, ?)`).get(
+    process.env.PROTOCOL_STORAGE_ACK,
+    process.env.PROTOCOL_STORAGE_ACK_V2,
+    process.env.PROTOCOL_STORAGE_UPDATE_ACK,
+  );
 process.stdout.write(String(row.n)); db.close();
 NODE
 }

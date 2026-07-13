@@ -35,3 +35,15 @@ body_of() { printf '%s' "$1" | tail -n +2; }
 
 # JSON: field <json> <dot.path> -> value ("" if missing; objects/arrays JSON'd) -
 field() { J="$2" node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{let j;try{j=JSON.parse(d)}catch(e){process.stdout.write("");return}let v=j;for(const k of process.env.J.split("."))v=(v==null?undefined:v[k]);process.stdout.write(v==null?"":(typeof v==="object"?JSON.stringify(v):String(v)))})' <<<"$1"; }
+
+# Protocol constants ---------------------------------------------------------
+# Resolve a string constant from the canonical core source. Callers may set
+# CORE_CONSTANTS_TS explicitly; otherwise resolve it relative to this library.
+protocol_const() {
+  local const_name="$1" constants_file="${CORE_CONSTANTS_TS:-}" lib_dir
+  if [[ -z "$constants_file" ]]; then
+    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    constants_file="$lib_dir/../packages/core/src/constants.ts"
+  fi
+  sed -nE "s|^export const ${const_name} = '([^']+)';$|\1|p" "$constants_file" 2>/dev/null | head -n 1
+}

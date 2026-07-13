@@ -77,7 +77,10 @@ function makeRouter(
   return router;
 }
 
-function makeSubstrate(overrides: { router?: RouterDouble } = {}) {
+function makeSubstrate(overrides: {
+  router?: RouterDouble;
+  resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
+} = {}) {
   const router = overrides.router ?? makeRouter();
   const idempotencyStore = new InMemoryMessageIdempotencyStore();
   const outboxStore = new InMemoryProtocolOutboxStore({
@@ -92,6 +95,7 @@ function makeSubstrate(overrides: { router?: RouterDouble } = {}) {
     backoffs: [10],
     maxAgeMs: 60_000,
     clock,
+    resolvePeer: overrides.resolvePeer,
   });
   return { messenger, router, idempotencyStore, outboxStore, clock };
 }
@@ -154,7 +158,10 @@ describe('Messenger.sendRequestOwned', () => {
     const router = makeRouter(async () => {
       throw new Error('no valid addresses for peer');
     });
-    const { messenger, outboxStore } = makeSubstrate({ router });
+    const resolvePeer = recorder(
+      async (_peerId: string, _opts: { signal: AbortSignal }): Promise<void> => undefined,
+    );
+    const { messenger, outboxStore } = makeSubstrate({ router, resolvePeer });
 
     await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
@@ -162,6 +169,17 @@ describe('Messenger.sendRequestOwned', () => {
     expect(outboxStore.size()).toBe(0);
     expect(() => decodeReliableEnvelope(router.send.calls[0][2] as Uint8Array)).not.toThrow();
     expect((messenger as any).firstAttemptAt.size).toBe(0);
+    expect(resolvePeer.calls).toEqual([[PEER_A, { signal: expect.any(AbortSignal) }]]);
+
+    // ACKCollector retries with a fresh message id. Recovery remains
+    // request-owned and rate-limited rather than creating an outbox attempt
+    // counter just to reach the normal durable-send DHT threshold.
+    await expect(messenger.sendRequestOwned(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: '00000000-0000-4000-8000-000000000002',
+    })).rejects.toThrow('no valid addresses for peer');
+    expect(outboxStore.size()).toBe(0);
+    expect((messenger as any).firstAttemptAt.size).toBe(0);
+    expect(resolvePeer.calls).toHaveLength(1);
   });
 });
 
@@ -245,6 +263,7 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
       }),
     ).rejects.toThrow(/something unexpected/);
     expect(outboxStore.size()).toBe(0);
+    expect((messenger as any).firstAttemptAt.size).toBe(0);
   });
 
   it('releases the inflight slot even when the send rejects', async () => {

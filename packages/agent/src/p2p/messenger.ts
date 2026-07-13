@@ -270,6 +270,13 @@ export type ThrowingReliableSendResult = Exclude<
   { delivered: false; queued: true }
 >;
 
+/** Internal ownership policy; public callers use distinct named methods. */
+type FramedFailurePolicy = 'durable-outbox' | 'request-owned';
+
+type DhtWalkTrigger =
+  | { kind: 'outbox'; attempts: number }
+  | { kind: 'request-owned' };
+
 /** Handler signature for `Messenger.register`. */
 export type ReliableHandler = (
   payload: Uint8Array,
@@ -602,7 +609,7 @@ export class Messenger {
     payload: Uint8Array,
     opts: SendReliableOpts = {},
   ): Promise<ReliableSendResult> {
-    return this.sendFramed(peerId, protocolId, payload, opts, true);
+    return this.sendFramed(peerId, protocolId, payload, opts, 'durable-outbox');
   }
 
   /** Reliable framing/idempotency for bounded request-owned retries; never queues. */
@@ -612,15 +619,31 @@ export class Messenger {
     payload: Uint8Array,
     opts: SendReliableOpts = {},
   ): Promise<ThrowingReliableSendResult> {
-    return this.sendFramed(peerId, protocolId, payload, opts, false) as Promise<ThrowingReliableSendResult>;
+    return this.sendFramed(peerId, protocolId, payload, opts, 'request-owned');
   }
+
+  private sendFramed(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts: SendReliableOpts,
+    failurePolicy: 'durable-outbox',
+  ): Promise<ReliableSendResult>;
+
+  private sendFramed(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts: SendReliableOpts,
+    failurePolicy: 'request-owned',
+  ): Promise<ThrowingReliableSendResult>;
 
   private async sendFramed(
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
     opts: SendReliableOpts,
-    queueRecoverableFailure: boolean,
+    failurePolicy: FramedFailurePolicy,
   ): Promise<ReliableSendResult> {
     this.requireSubstrate('sendReliable');
 
@@ -714,13 +737,19 @@ export class Messenger {
       // the outbox stays out of it because retrying an encoding
       // bug / unhandled protocol won't help.
       if (!isRecoverableMessengerSendError(err, errMsg)) {
+        this.firstAttemptAt.delete(sloK);
         throw err;
       }
-      if (!queueRecoverableFailure) {
+      if (failurePolicy === 'request-owned') {
         // No durable row can later deliver or expire this request, so its SLO
         // start marker has no future owner. Clear it before returning control
         // to the request-scoped retry loop.
         this.firstAttemptAt.delete(sloK);
+        // ACKCollector owns the retry schedule, but address refresh still
+        // belongs to Messenger. Trigger it immediately: request-owned retries
+        // commonly use fresh message ids, so no durable attempt counter exists
+        // that could ever reach the outbox stall threshold.
+        this.maybeScheduleDhtWalk(peerId, { kind: 'request-owned' }, errMsg);
         throw err;
       }
       const entry = outbox.enqueueFailure(
@@ -732,7 +761,7 @@ export class Messenger {
         this.clock(),
       );
       this.noteQueuedForSlo(protocolId);
-      this.maybeScheduleDhtWalk(peerId, entry.attempts, errMsg);
+      this.maybeScheduleDhtWalk(peerId, { kind: 'outbox', attempts: entry.attempts }, errMsg);
       return {
         delivered: false,
         queued: true,
@@ -903,7 +932,11 @@ export class Messenger {
         this.clock(),
       );
       if (isRecoverableMessengerSendError(err, errMsg)) {
-        this.maybeScheduleDhtWalk(entry.peer, updated.attempts, errMsg);
+        this.maybeScheduleDhtWalk(
+          entry.peer,
+          { kind: 'outbox', attempts: updated.attempts },
+          errMsg,
+        );
       }
       // A non-recoverable retry remains visible for operator intervention, but
       // advances on the backoff ladder so it cannot permanently occupy the
@@ -927,18 +960,19 @@ export class Messenger {
    *
    * Guards:
    *   1. No-op when `resolvePeer` not wired.
-   *   2. No-op below `OUTBOX_STALL_THRESHOLD` attempts (don't
-   *      spend a DHT walk on a transient blip the backoff would
-   *      have healed anyway).
+   *   2. Durable outbox sends are a no-op below
+   *      `OUTBOX_STALL_THRESHOLD` attempts (don't spend a DHT walk on a
+   *      transient blip). Request-owned sends recover immediately because
+   *      their external retry loop has no durable attempt counter here.
    *   3. No-op for non-address-resolution errors (DHT walk
    *      doesn't fix stream resets or NO_RESERVATION-after-handshake).
    *   4. Per-peer rate limit (`DHT_WALK_RATE_LIMIT_MS`).
    *   5. Time-bounded (`DHT_WALK_TIMEOUT_MS`) — failures logged,
    *      never bubble.
    */
-  private maybeScheduleDhtWalk(peerId: string, attempts: number, errMsg: string): void {
+  private maybeScheduleDhtWalk(peerId: string, trigger: DhtWalkTrigger, errMsg: string): void {
     if (!this.resolvePeer) return;
-    if (attempts < OUTBOX_STALL_THRESHOLD) return;
+    if (trigger.kind === 'outbox' && trigger.attempts < OUTBOX_STALL_THRESHOLD) return;
     if (!shouldTriggerDhtWalk(errMsg)) return;
     const last = this.lastDhtWalkAt.get(peerId);
     const now = this.clock();
@@ -946,6 +980,9 @@ export class Messenger {
 
     this.lastDhtWalkAt.set(peerId, now);
     const signal = AbortSignal.timeout(DHT_WALK_TIMEOUT_MS);
+    const reason = trigger.kind === 'outbox'
+      ? `after ${trigger.attempts} stalled outbox attempts`
+      : 'after a request-owned address failure';
     // Fire-and-forget; never await. Any error swallowed + logged.
     // The walk's value is its side-effect (peerStore population),
     // not its return value, so we don't even need the resolved
@@ -953,13 +990,13 @@ export class Messenger {
     void this.resolvePeer(peerId, { signal })
       .then(() => {
         console.warn(
-          `[Messenger] DHT walk completed for ${peerId.slice(-8)} after ${attempts} stalled outbox attempts — peerStore should now be primed`,
+          `[Messenger] DHT walk completed for ${peerId.slice(-8)} ${reason} — peerStore should now be primed`,
         );
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(
-          `[Messenger] DHT walk for ${peerId.slice(-8)} failed (attempts=${attempts}): ${msg}`,
+          `[Messenger] DHT walk for ${peerId.slice(-8)} failed (${reason}): ${msg}`,
         );
       });
   }
