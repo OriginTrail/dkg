@@ -2,6 +2,7 @@
 // throws → 500 PluginError before response start, else destroy the socket so a truncated body isn't seen as 200.
 
 import { jsonResponse } from '../http-utils.js';
+import type { RequestContext as PluginRequestContext } from '../plugin-api.js';
 import type { RequestContext } from './context.js';
 
 function responseStarted(res: RequestContext['res']): boolean {
@@ -9,10 +10,15 @@ function responseStarted(res: RequestContext['res']): boolean {
 }
 
 export async function handlePluginRoutes(ctx: RequestContext): Promise<void> {
+  const pluginContext: PluginRequestContext = {
+    ...ctx,
+    publisherRuntime: ctx.publisherState.runtime,
+    publisherAvailability: ctx.publisherState.availability,
+  };
   for (const plugin of ctx.routePlugins) {
     if (responseStarted(ctx.res)) return;
     try {
-      await plugin.handle(ctx);
+      await plugin.handle(pluginContext);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Daemon-side breadcrumb — the client's 500 only carries the message, not the stack.

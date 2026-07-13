@@ -35,3 +35,13 @@ body_of() { printf '%s' "$1" | tail -n +2; }
 
 # JSON: field <json> <dot.path> -> value ("" if missing; objects/arrays JSON'd) -
 field() { J="$2" node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{let j;try{j=JSON.parse(d)}catch(e){process.stdout.write("");return}let v=j;for(const k of process.env.J.split("."))v=(v==null?undefined:v[k]);process.stdout.write(v==null?"":(typeof v==="object"?JSON.stringify(v):String(v)))})' <<<"$1"; }
+
+# Protocol constants ---------------------------------------------------------
+# Resolve a string constant through the built core package API. This is a real
+# module/export boundary: harmless TypeScript formatting changes cannot break
+# devnet scripts that consume canonical wire identifiers.
+protocol_const() {
+  local const_name="$1" lib_dir
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  node "$lib_dir/lib/core-constant.mjs" "$const_name"
+}

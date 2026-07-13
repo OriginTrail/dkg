@@ -408,11 +408,23 @@ function createRouteEvmProvider(rpcUrl: string, rpcUrls?: string[]): ethers.Json
 // expensive on a large namespace, and the route is polled by the
 // dashboard, telemetry, and `dkg status` operators. 30 s TTL is short
 // enough that a fresh wipe / bulk publish shows up quickly without
-// flooding Blazegraph. Local backends bypass this entirely (file-bytes
-// metric stays on the metrics collector tick).
+// flooding Blazegraph. Cold/stale callers get the current snapshot while
+// one refresh runs in the background, so status never waits on the count.
+// Local backends bypass this entirely (file-bytes metric stays on the
+// metrics collector tick).
 const STORE_QUADS_CACHE_TTL_MS = 30_000;
-let storeQuadsCache: { value: number | null; fetchedAt: number } | null = null;
-let storeQuadsInflight: Promise<number | null> | null = null;
+type StoreQuadsStatus = 'pending' | 'ready' | 'unreachable';
+interface StoreQuadsSnapshot {
+  value: number | null;
+  status: StoreQuadsStatus;
+}
+
+let storeQuadsCache: {
+  value: number | null;
+  status: Exclude<StoreQuadsStatus, 'pending'>;
+  fetchedAt: number;
+} | null = null;
+let storeQuadsInflight: Promise<void> | null = null;
 
 /** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
 export function invalidateExternalStoreQuadsCache(): void {
@@ -420,40 +432,48 @@ export function invalidateExternalStoreQuadsCache(): void {
   storeQuadsInflight = null;
 }
 
-async function getCachedExternalStoreQuads(
+function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
-): Promise<number | null> {
+): StoreQuadsSnapshot {
   if (storeQuadsCache && now - storeQuadsCache.fetchedAt < STORE_QUADS_CACHE_TTL_MS) {
-    return storeQuadsCache.value;
+    return { value: storeQuadsCache.value, status: storeQuadsCache.status };
   }
-  if (storeQuadsInflight) return storeQuadsInflight;
 
-  storeQuadsInflight = (async () => {
-    try {
-      const r = await agent.store.query(
-        'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
-      );
-      let value: number | null = null;
-      if (r.type === 'bindings' && r.bindings.length > 0) {
-        const cell = r.bindings[0].c ?? '';
-        const digits = cell.match(/\d+/)?.[0];
-        value = digits ? parseInt(digits, 10) : 0;
+  const currentSnapshot: StoreQuadsSnapshot = storeQuadsCache
+    ? { value: storeQuadsCache.value, status: storeQuadsCache.status }
+    : { value: null, status: 'pending' };
+  if (!storeQuadsInflight) {
+    const refresh = (async () => {
+      try {
+        const r = await agent.store.query(
+          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
+        );
+        let value: number | null = null;
+        if (r.type === 'bindings' && r.bindings.length > 0) {
+          const cell = r.bindings[0].c ?? '';
+          const digits = cell.match(/\d+/)?.[0];
+          value = digits ? parseInt(digits, 10) : 0;
+        }
+        storeQuadsCache = {
+          value,
+          status: value === null ? 'unreachable' : 'ready',
+          fetchedAt: Date.now(),
+        };
+      } catch {
+        // Surface "unknown" rather than a stale value; operators can
+        // distinguish unreachable from genuinely-empty via storeBackend +
+        // their network logs. Cache the null briefly to avoid hammering
+        // a flapping endpoint.
+        storeQuadsCache = { value: null, status: 'unreachable', fetchedAt: Date.now() };
       }
-      storeQuadsCache = { value, fetchedAt: Date.now() };
-      return value;
-    } catch {
-      // Surface "unknown" rather than a stale value; operators can
-      // distinguish unreachable from genuinely-empty via storeBackend +
-      // their network logs. Cache the null briefly to avoid hammering
-      // a flapping endpoint.
-      storeQuadsCache = { value: null, fetchedAt: Date.now() };
-      return null;
-    } finally {
-      storeQuadsInflight = null;
-    }
-  })();
-  return storeQuadsInflight;
+    })();
+    storeQuadsInflight = refresh;
+    void refresh.finally(() => {
+      if (storeQuadsInflight === refresh) storeQuadsInflight = null;
+    });
+  }
+  return currentSnapshot;
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
@@ -497,6 +517,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
+    publisherState,
     config,
     startedAt,
     dashDb,
@@ -645,6 +666,11 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       advertisedAddresses: agent.multiaddrs,
       configuredAnnounceAddresses: config.announceAddresses ?? [],
     });
+    const reportsExternalStoreQuads =
+      isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
+    const storeQuadsSnapshot = reportsExternalStoreQuads
+      ? getCachedExternalStoreQuads(agent, Date.now())
+      : null;
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to
     // the {commit: "uncommitted", distTag: "monorepo", ...}
@@ -668,8 +694,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       networkName: network?.networkName ?? null,
       storeBackend: config.store?.backend ?? "oxigraph-worker",
       // External backend visibility (RFC 120 / plan PR 1 item 3). For
-      // local backends both fields stay null so the response shape is
-      // stable across deployments.
+      // local backends the URL/count stay null and count status is omitted.
       storeUrl: isExternalBackend(config.store?.backend)
         ? (() => {
             const opts = (config.store?.options ?? {}) as Record<string, unknown>;
@@ -694,10 +719,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // for that backend (getStoreBytes is null, there's no store.nq), and a
       // failed query here is how operators see the managed server is down
       // (e.g. after a failed revive) instead of it always looking healthy.
-      storeQuads:
-        isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server'
-          ? await getCachedExternalStoreQuads(agent, Date.now())
-          : null,
+      storeQuads: storeQuadsSnapshot?.value ?? null,
+      storeQuadsStatus: storeQuadsSnapshot?.status,
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
       // holding a slot, max = the configured cap (0 = disabled), rejectedTotal =
@@ -720,6 +743,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
+      asyncPublisher: publisherState.availability,
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
@@ -1070,8 +1094,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // GET /api/random-sampling/status — V10 RandomSampling prover snapshot.
   // Read-only; no chain calls. Cheap enough to call every few seconds
-  // from a dashboard or watch loop. Disabled-handle nodes (edge / no
-  // identity) return enabled:false with the reason in role / identityId.
+  // from a dashboard or watch loop. Disabled nodes return enabled:false
+  // with an explicit reason (edge, no identity, awaiting admission, etc.).
   if (req.method === 'GET' && path === '/api/random-sampling/status') {
     const status = agent.getRandomSamplingStatus();
     return jsonResponse(res, 200, status);

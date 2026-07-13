@@ -64,6 +64,7 @@ export default defineConfig({
       "test/network-admission-coordinator.test.ts",
       "test/explicit-connect-admission.test.ts",
       "test/sync-responder-agents-meta-serve-skip.test.ts",
+      "test/messenger-substrate.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

@@ -295,6 +295,29 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     });
   });
 
+  it('returns request-owned address failures to the ACK collector retry loop', async () => {
+    const boot = await bootProviderAgent({ ackSendTimeoutMs: 60_000 });
+    agent = boot.agent;
+    const internals = boot.internals;
+    const payload = new Uint8Array([1, 2, 3]);
+    const sendRequestOwned = vi.fn(async () => {
+      throw new Error('no valid addresses for peer');
+    });
+    internals.messenger = { sendRequestOwned };
+
+    internals.createV10ACKProvider('test-cg');
+    const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+    await expect(
+      publishDeps.sendP2P!('peer-a', '/dkg/test/storage-ack', payload),
+    ).rejects.toThrow('no valid addresses for peer');
+    expect(sendRequestOwned).toHaveBeenCalledWith(
+      'peer-a',
+      '/dkg/test/storage-ack',
+      payload,
+      { timeoutMs: 60_000 },
+    );
+  });
+
   it('normalizes legacy handler-only ACK timing before publish sendP2P wiring', async () => {
     const boot = await bootProviderAgent({ ackHandlerDeadlineMs: 55_000 });
     agent = boot.agent;

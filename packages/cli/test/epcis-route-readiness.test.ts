@@ -76,9 +76,37 @@ function createGetRequest(url: string): RequestContext['req'] {
   return request as RequestContext['req'];
 }
 
+function unavailablePublisherState(
+  reason: 'publisher_disabled' | 'publisher_starting' | 'no_publisher_wallets' | 'publisher_startup_failed',
+  retryable = reason === 'publisher_starting',
+): RequestContext['publisherState'] {
+  return {
+    runtime: null,
+    availability: {
+      available: false,
+      reason,
+      retryable,
+      operatorActionRequired: !retryable,
+    },
+    ...(reason === 'publisher_startup_failed' ? { error: new Error('test startup failure') } : {}),
+  } as RequestContext['publisherState'];
+}
+
+function readyPublisherState(): RequestContext['publisherState'] {
+  return {
+    runtime: {
+      walletIds: ['0xpublisher'],
+      runner: {},
+      publisher: {},
+      stop: async () => {},
+    },
+    availability: { available: true },
+  } as RequestContext['publisherState'];
+}
+
 function createContext(overrides: Partial<RequestContext> = {}): RequestContext {
   const url = new URL('http://127.0.0.1/api/epcis/capture');
-  return {
+  const context: RequestContext = {
     req: createRequest(),
     res: createResponse() as unknown as ServerResponse,
     agent: {
@@ -87,7 +115,7 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
       },
     } as unknown as RequestContext['agent'],
     publisherControl: {} as RequestContext['publisherControl'],
-    publisherRuntime: null,
+    publisherState: unavailablePublisherState('publisher_startup_failed'),
     config: {
       epcis: { contextGraphId: 'epcis-test' },
       publisher: { enabled: true },
@@ -117,6 +145,12 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
     requestAgentAddress: '0x0',
     ...overrides,
   };
+  if (overrides.publisherState === undefined) {
+    context.publisherState = context.config.publisher?.enabled
+      ? unavailablePublisherState('publisher_startup_failed')
+      : unavailablePublisherState('publisher_disabled');
+  }
+  return context;
 }
 
 function responseBody(ctx: RequestContext): Record<string, unknown> {
@@ -133,6 +167,36 @@ describe('EPCIS async capture publisher readiness', () => {
     expect(responseBody(ctx)).toMatchObject({
       error: 'PublisherUnavailable',
     });
+  });
+
+  it.each([
+    {
+      reason: 'publisher_starting' as const,
+      retryable: true,
+      operatorActionRequired: false,
+    },
+    {
+      reason: 'no_publisher_wallets' as const,
+      retryable: false,
+      operatorActionRequired: true,
+    },
+  ])('preserves lifecycle $reason details without invoking capture', async (availability) => {
+    let publishCalls = 0;
+    const ctx = createContext({
+      agent: {
+        publishAsync: async () => { publishCalls += 1; },
+      } as unknown as RequestContext['agent'],
+      publisherState: unavailablePublisherState(availability.reason, availability.retryable),
+    });
+
+    await handleEpcisRoutes(ctx);
+
+    expect(ctx.res.statusCode).toBe(503);
+    expect(responseBody(ctx)).toMatchObject({
+      error: 'PublisherUnavailable',
+      ...availability,
+    });
+    expect(publishCalls).toBe(0);
   });
 
   it('keeps disabled publisher config mapped to PublisherDisabled', async () => {
@@ -164,12 +228,7 @@ describe('EPCIS async capture publisher readiness', () => {
           return { captureID: 'capture-route-1' };
         },
       } as unknown as RequestContext['agent'],
-      publisherRuntime: {
-        walletIds: ['0xpublisher'],
-        runner: {},
-        publisher: {},
-        stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      publisherState: readyPublisherState(),
     });
 
     await handleEpcisRoutes(ctx);
@@ -203,12 +262,7 @@ describe('EPCIS async capture publisher readiness', () => {
           return { captureID: 'capture-route-2' };
         },
       } as unknown as RequestContext['agent'],
-      publisherRuntime: {
-        walletIds: ['0xpublisher'],
-        runner: {},
-        publisher: {},
-        stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      publisherState: readyPublisherState(),
     });
 
     await handleEpcisRoutes(ctx);
@@ -240,12 +294,7 @@ describe('EPCIS async capture publisher readiness', () => {
           throw oversized;
         },
       } as unknown as RequestContext['agent'],
-      publisherRuntime: {
-        walletIds: ['0xpublisher'],
-        runner: {},
-        publisher: {},
-        stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      publisherState: readyPublisherState(),
     });
 
     await handleEpcisRoutes(ctx);
@@ -266,12 +315,7 @@ describe('EPCIS async capture publisher readiness', () => {
         epcis: {},
         publisher: { enabled: true },
       } as RequestContext['config'],
-      publisherRuntime: {
-        walletIds: ['0xpublisher'],
-        runner: {},
-        publisher: {},
-        stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      publisherState: readyPublisherState(),
     });
 
     await handleEpcisRoutes(ctx);
@@ -289,12 +333,7 @@ describe('EPCIS async capture publisher readiness', () => {
         contextGraphId: 'bad cg with spaces',
         epcisDocument: VALID_OBJECT_EVENT_DOC,
       }),
-      publisherRuntime: {
-        walletIds: ['0xpublisher'],
-        runner: {},
-        publisher: {},
-        stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      publisherState: readyPublisherState(),
     });
 
     await handleEpcisRoutes(ctx);
@@ -311,12 +350,7 @@ describe('EPCIS async capture publisher readiness', () => {
         subGraphName: '_reserved',
         epcisDocument: VALID_OBJECT_EVENT_DOC,
       }),
-      publisherRuntime: {
-        walletIds: ['0xpublisher'],
-        runner: {},
-        publisher: {},
-        stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      publisherState: readyPublisherState(),
     });
 
     await handleEpcisRoutes(ctx);

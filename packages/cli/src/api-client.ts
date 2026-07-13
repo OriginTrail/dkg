@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
+import type { RandomSamplingDisabledReason } from '@origintrail-official/dkg-agent';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -235,12 +236,15 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
  * lives here so the CLI doesn't take a runtime dep on the agent
  * package (only types). The `loop.lastOutcome` is intentionally
  * `unknown` -- the CLI prints it as JSON; the structured discrimination
- * is the prover's concern, not the CLI's.
+ * is the prover's concern, not the CLI's. `disabledReason` distinguishes
+ * identity, admission, adapter, and bind failures without a chain call.
  */
 export interface RandomSamplingStatusResponse {
   enabled: boolean;
   role: 'core' | 'edge';
   identityId: string;
+  /** Optional for compatibility with daemons that predate explicit status reasons. */
+  disabledReason?: RandomSamplingDisabledReason | null;
   loop: null | {
     totalTicks: number;
     inflight: boolean;
@@ -284,11 +288,14 @@ export interface DaemonStatusResponse {
   } | null;
   // Triple-store backend fields (RFC 120). For local backends only
   // `storeBackend` is meaningful; external backends additionally surface
-  // `storeUrl` and a TTL-cached `storeQuads` count. `null` when local /
-  // unreachable.
+  // `storeUrl` and a TTL-cached `storeQuads` count. `storeQuadsStatus`
+  // distinguishes an initial background refresh from an unreachable store.
+  // Older daemons omit the status; consumers should retain the legacy
+  // `null` = unreachable fallback in that case.
   storeBackend?: string;
   storeUrl?: string | null;
   storeQuads?: number | null;
+  storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
   // Concurrency admission control (PR #1209 limiter, surfaced by #1230):
   // inFlight = requests currently holding a slot, max = effective cap
   // (0 = disabled), rejectedTotal = cumulative 503-shed count since boot.
@@ -517,9 +524,9 @@ export class ApiClient {
 
   /**
    * V10 Random Sampling prover snapshot. Cheap; safe to poll. Returns
-   * `enabled: false` when the bind layer no-op'd (edge node, no
-   * identity, or chain adapter missing methods); the `loop` field is
-   * `null` in that case.
+   * `enabled: false` when the node is ineligible or binding failed
+   * (edge node, no identity, awaiting sharding-table admission, etc.).
+   * Read `disabledReason` for the exact state; `loop` is then `null`.
    */
   async randomSamplingStatus(): Promise<RandomSamplingStatusResponse> {
     return this.get('/api/random-sampling/status');
