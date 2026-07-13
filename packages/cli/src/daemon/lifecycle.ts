@@ -104,6 +104,7 @@ import {
   loadConfig,
   saveConfig,
   loadNetworkConfig,
+  loadResolvedNetworkConfig,
   resolveAutoUpdateConfig,
   resolveChainConfig,
   dkgDir,
@@ -125,7 +126,6 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
-  resolveNetworkConfigName,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
   repoDir,
@@ -1118,9 +1118,11 @@ export async function runDaemonInner(
   }
 
   const storageAckTiming = resolveStorageAckTiming(config.storageAck);
-  const selectedNetworkConfig = config.networkConfig?.trim();
-  const network = await loadNetworkConfig(selectedNetworkConfig);
-  if (selectedNetworkConfig && !network) {
+  const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
+    config,
+    loadNetworkConfig,
+  );
+  if (!network) {
     log(`FATAL: network config "${selectedNetworkConfig}" was not found (expected network/${selectedNetworkConfig}.json).`);
     process.exit(1);
   }
@@ -1169,7 +1171,7 @@ export async function runDaemonInner(
   // 'testnet' fallback and never spuriously trips on a normal restart.
   const networkSwitch = detectNetworkSwitch({
     dataDir: dkgDir(),
-    currentNetworkConfig: resolveNetworkConfigName(config),
+    currentNetworkConfig: selectedNetworkConfig,
     acceptNetworkSwitch: process.env.DKG_ACCEPT_NETWORK_SWITCH === '1',
     log,
   });
@@ -1542,7 +1544,7 @@ export async function runDaemonInner(
       genesisId: network?.genesisId,
       networkId,
       chainId: chainBase?.chainId,
-      networkConfigName: resolveNetworkConfigName(config),
+      networkConfigName: selectedNetworkConfig,
     },
     framework: "DKG",
     listenPort: config.listenPort,

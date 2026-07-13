@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { join, dirname, basename } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
@@ -482,7 +482,9 @@ export interface DkgConfig {
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
-   * When omitted, runtime falls back to project.json#defaultNetwork.
+   * When omitted, legacy configs infer the overlay from chain.chainId when it
+   * matches a bundled network; otherwise runtime falls back to
+   * project.json#defaultNetwork.
    */
   networkConfig?: string;
   relay?: string;
@@ -1103,10 +1105,12 @@ export function parseWeiFloor(
 
 let _networkConfig: NetworkConfig | null = null;
 let _networkConfigName: string | null = null;
+let _bundledNetworkRegistry: Readonly<Record<string, NetworkConfig>> | null = null;
 
 export function _resetNetworkConfigCache(): void {
   _networkConfig = null;
   _networkConfigName = null;
+  _bundledNetworkRegistry = null;
 }
 
 export interface ProjectConfig {
@@ -1483,8 +1487,127 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-export function resolveNetworkConfigName(config?: Pick<DkgConfig, 'networkConfig'> | null): string {
-  return config?.networkConfig?.trim() || loadProjectConfig().defaultNetwork;
+function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+  if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
+
+  _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());
+  return _bundledNetworkRegistry;
+}
+
+/** Every valid network overlay bundled with this CLI, including entries that
+ * are intentionally omitted from the interactive setup menu. Persisted-config
+ * inference must use this registry rather than UI curation. */
+export function listBundledNetworkConfigNames(): readonly string[] {
+  return Object.keys(loadBundledNetworkRegistry()).sort();
+}
+
+/**
+ * Build the bundled registry entry-by-entry in root priority order.
+ *
+ * A malformed optional/experimental overlay must not make every known network
+ * unavailable. If a higher-priority root contains a bad copy of one entry, a
+ * valid package-local fallback for that same entry can still supply it.
+ */
+export function loadNetworkRegistryFromRoots(
+  roots: readonly string[],
+): Readonly<Record<string, NetworkConfig>> {
+  const registry: Record<string, NetworkConfig> = {};
+
+  for (const root of roots) {
+    const networkDir = join(root, 'network');
+    let entries;
+    try {
+      entries = readdirSync(networkDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const name = entry.name.slice(0, -'.json'.length);
+      if (registry[name] !== undefined) continue;
+      try {
+        registry[name] = JSON.parse(
+          readFileSync(join(networkDir, entry.name), 'utf-8'),
+        ) as NetworkConfig;
+      } catch { /* isolate a malformed entry and continue */ }
+    }
+  }
+
+  return registry;
+}
+
+/**
+ * Infer an overlay from its canonical bundled network config's chain ID.
+ * Production reads network/*.json, so adding a network needs no second table.
+ * Tests and embedders may supply a registry explicitly.
+ */
+export interface NetworkChainIdentity {
+  chain?: { chainId?: string | null };
+}
+
+export function inferNetworkConfigNameFromChainId(
+  chainId: string | null | undefined,
+  registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
+): string | undefined {
+  const normalized = chainId?.trim().toLowerCase();
+  if (!normalized) return undefined;
+
+  let matchedName: string | undefined;
+  for (const [name, network] of Object.entries(registry)) {
+    if (network.chain?.chainId?.trim().toLowerCase() !== normalized) continue;
+    // Ambiguous chain ownership is not safe to infer. Require an explicit
+    // networkConfig until the bundled registry is unique again.
+    if (matchedName && matchedName !== name) return undefined;
+    matchedName = name;
+  }
+  return matchedName;
+}
+
+/**
+ * Resolve only network identities that are actually known from persisted
+ * state. Unlike {@link resolveNetworkConfigName}, this does not collapse an
+ * unknown legacy chain into the project default. Setup uses the distinction
+ * when deciding whether it is safe to discard operator chain overrides.
+ */
+export function resolveKnownNetworkConfigName(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
+): string | undefined {
+  const explicitNetwork = config?.networkConfig?.trim();
+  if (explicitNetwork) return explicitNetwork;
+  return inferNetworkConfigNameFromChainId(config?.chain?.chainId, registry);
+}
+
+/**
+ * Resolve the bundled network overlay for both current and legacy configs.
+ *
+ * Older homes predate `networkConfig` and only persisted the selected chain.
+ * Falling straight through to project.json#defaultNetwork can silently place
+ * one of those homes on the wrong p2p overlay. Infer known bundled networks
+ * from chainId; explicit operator selection always takes precedence.
+ */
+export function resolveNetworkConfigName(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+): string {
+  return resolveKnownNetworkConfigName(config) ?? loadProjectConfig().defaultNetwork;
+}
+
+export interface LoadedResolvedNetworkConfig {
+  name: string;
+  network: NetworkConfig | null;
+}
+
+/**
+ * Resolve legacy chain-only homes and load their effective overlay at one
+ * boundary. Callers that need network metadata should use this instead of
+ * manually composing resolveNetworkConfigName() and loadNetworkConfig().
+ */
+export async function loadResolvedNetworkConfig(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  loader: (name: string) => Promise<NetworkConfig | null> = loadNetworkConfig,
+): Promise<LoadedResolvedNetworkConfig> {
+  const name = resolveNetworkConfigName(config);
+  return { name, network: await loader(name) };
 }
 
 /**
