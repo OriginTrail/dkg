@@ -1,4 +1,4 @@
 {
   "image": "islandora/blazegraph:6.4.3@sha256:015e308ae0a296cdb87c83c10da976ed970d2bfa971290aa1147593df8cf445d",
-  "containerPort": 80
+  "containerPort": 8080
 }
