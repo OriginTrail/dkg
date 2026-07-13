@@ -71,7 +71,7 @@ describe('ProtocolOutbox.enqueueFailure', () => {
     payload[0] = 9;
     entry.payload[1] = 8;
 
-    const pending = outbox.pendingFor(PEER_A);
+    const pending = outbox.list().filter((entry) => entry.peer === PEER_A);
     expect(Array.from(pending[0].payload)).toEqual([1, 2, 3]);
 
     pending[0].payload[2] = 7;
@@ -128,7 +128,7 @@ describe('ProtocolOutbox.tryBeginAttempt / endAttempt', () => {
   });
 });
 
-describe('ProtocolOutbox.due / pendingFor', () => {
+describe('ProtocolOutbox.due / peer presence', () => {
   it('due returns entries whose nextAttemptAt is at or before now', () => {
     const { outbox } = fixture();
     outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1000);
@@ -137,14 +137,14 @@ describe('ProtocolOutbox.due / pendingFor', () => {
     expect(outbox.due(expectedNext)).toHaveLength(1);
   });
 
-  it('pendingFor returns all entries for a peer in firstFailureAt ascending order', () => {
+  it('hasPendingFor tracks peer rows without exposing a reconnect drain snapshot', () => {
     const { outbox } = fixture();
     outbox.enqueueFailure(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2000);
     outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1000);
     outbox.enqueueFailure(PEER_B, PROTO, MSG_1, PAYLOAD, 'e', 500);
-    const peerA = outbox.pendingFor(PEER_A);
-    expect(peerA.map((e) => e.messageId)).toEqual([MSG_1, MSG_2]);
-    expect(outbox.pendingFor(PEER_B)).toHaveLength(1);
+    expect(outbox.hasPendingFor(PEER_A)).toBe(true);
+    expect(outbox.hasPendingFor(PEER_B)).toBe(true);
+    expect(outbox.hasPendingFor('peer-c')).toBe(false);
   });
 });
 

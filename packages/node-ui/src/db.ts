@@ -2774,23 +2774,8 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     return row !== undefined;
   }
 
-  pendingFor(peer: string): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox WHERE peer_id = ? ORDER BY first_failure_at ASC`,
-      )
-      .all(peer) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  hasPendingFor(peer: string): boolean {
+    return this.db.prepare('SELECT 1 FROM protocol_outbox WHERE peer_id = ? LIMIT 1').get(peer) !== undefined;
   }
 
   due(now: number): ProtocolOutboxEntry[] {

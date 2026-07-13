@@ -633,8 +633,8 @@ export class Messenger {
 
     // Inflight guard (rc.9 #521 lesson lifted): two parallel
     // attempters on the same `(peer, protocol, messageId)` can race
-    // when the periodic tick + an opportunistic-flush fire close
-    // together. Second attempter exits without dialing.
+    // when a first sender + periodic retry (or overlapping explicit callers)
+    // race. Second attempter exits without dialing.
     if (!outbox.tryBeginAttempt(peerId, protocolId, messageId)) {
       // Another attempt is in flight. This is not the same thing as
       // durable queued: the winning attempt may still be on its first
@@ -798,24 +798,6 @@ export class Messenger {
     }
   }
 
-  /**
-   * Opportunistic-flush retry loop. The lifecycle.ts wiring (PR-3)
-   * calls this from a libp2p `connection:open` event for `peerId`:
-   * a reconnection is the signal we were waiting for, so attempt
-   * every pending entry for `peer` NOW even if `nextAttemptAt` is
-   * still in the future.
-   *
-   * Same guards as `processOutboxTick` — must check `hasEntry`
-   * after `tryBeginAttempt` to defend against the rc.9 #538 race.
-   */
-  async processOutboxOnConnect(peerId: string): Promise<void> {
-    if (!this.outbox) return;
-    const pending = this.outbox.pendingFor(peerId);
-    for (const entry of pending) {
-      await this.retryOutboxEntry(entry);
-    }
-  }
-
   private async retryOutboxEntry(entry: {
     peer: string;
     protocol: string;
@@ -827,7 +809,7 @@ export class Messenger {
       return;
     }
     try {
-      // Stale-snapshot guard — between the moment `due`/`pendingFor`
+      // Stale-snapshot guard — between the moment `due`
       // gave us the snapshot and the moment `tryBeginAttempt` won,
       // a sibling flush may have completed delivery and called
       // `markDelivered`. Re-check `hasEntry` and bail if gone.
@@ -879,7 +861,7 @@ export class Messenger {
    *
    * Fire-and-forget: never blocks the caller. The DHT walk's
    * side-effect (populating `peerStore` for the peer) heals the
-   * next opportunistic-flush or periodic-tick retry, not the
+   * next periodic-tick retry, not the
    * current one. This is intentional — the current retry has
    * already failed; the walk is for the next attempt.
    *
@@ -923,7 +905,7 @@ export class Messenger {
   }
 
   private clearDhtWalkRateLimitIfDrained(peerId: string): void {
-    if (!this.outbox || this.outbox.pendingFor(peerId).length === 0) {
+    if (!this.outbox || !this.outbox.hasPendingFor(peerId)) {
       this.lastDhtWalkAt.delete(peerId);
     }
   }
