@@ -1083,7 +1083,15 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
-    this.signerWriteLane = new SignerWriteLane(SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS);
+    this.signerWriteLane = new SignerWriteLane(
+      SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
+      ({ signerAddress, label, queueDepth, waitMs, deadlineAt }) => {
+        console.warn(
+          `[chain] signer write queued: signer=${signerAddress} operation=${label} ` +
+          `queueDepth=${queueDepth} admissionWaitMs=${waitMs} deadlineAt=${new Date(deadlineAt).toISOString()}`,
+        );
+      },
+    );
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])

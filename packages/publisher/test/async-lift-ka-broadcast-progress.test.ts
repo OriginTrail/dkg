@@ -135,6 +135,34 @@ describe('KA async VM publish broadcast progress', () => {
     expect(processed?.broadcast?.txHash).toBe(txHash);
   });
 
+  it('ignores an unmarked legacy txsigned event when its supplied signal is aborted', async () => {
+    const txHash = `0x${'ca'.repeat(32)}` as `0x${string}`;
+    const controller = new AbortController();
+    controller.abort();
+    let jobId = '';
+    let statusDuringExecutor: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        await input.publishOptions.onPhase?.(
+          `chain:txsigned:tx-${txHash}`,
+          'start',
+          { signal: controller.signal },
+        );
+        statusDuringExecutor = await publisher.getStatus(jobId);
+        throw new Error('aborted legacy executor did not broadcast');
+      },
+    });
+    await stageShareSnapshot();
+
+    jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(statusDuringExecutor?.status).toBe('validated');
+    expect(statusDuringExecutor?.broadcast).toBeUndefined();
+    expect(processed?.status).toBe('failed');
+    expect(processed?.broadcast).toBeUndefined();
+  });
+
   it('keeps KA write-ahead compatible with a TripleStore that omits update()', async () => {
     const txHash = `0x${'cf'.repeat(32)}` as `0x${string}`;
     const storeWithoutUpdate = new Proxy(store, {
