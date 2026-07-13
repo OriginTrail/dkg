@@ -14,6 +14,17 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import {
+  rpcBroadcastPassExecutionBudgetMs,
+  rpcPopulateAndSignExecutionBudgetMs,
+  rpcReceiptLookupPassExecutionBudgetMs,
+} from '../src/rpc-failover-client.js';
+import {
+  RPC_ENDPOINT_SET_RETRIES,
+  RPC_ENDPOINT_SET_RETRY_BACKOFF_MS,
+  RPC_RECEIPT_POLL_INTERVAL_MS,
+  RPC_RECEIPT_TIMEOUT_MS,
+} from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -87,8 +98,17 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         rpcUrls: ['http://127.0.0.1:59998', 'http://127.0.0.1:59997'],
       }));
       const signer = new ethers.Wallet(DEPLOYER_PK);
-      const operationBudgetMs = (a as any).signerTxOperationExecutionBudgetMs as number;
-      expect(operationBudgetMs).toBeGreaterThan(240_000);
+      const operationBudgetMs = (a as any)
+        .signerTxExecutionBudgetMs['single-transaction'] as number;
+      const endpointCount = 2;
+      const expectedOperationBudgetMs =
+        rpcPopulateAndSignExecutionBudgetMs(endpointCount)
+        + (RPC_ENDPOINT_SET_RETRIES + 1) * rpcBroadcastPassExecutionBudgetMs(endpointCount)
+        + RPC_ENDPOINT_SET_RETRIES * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS
+        + RPC_RECEIPT_TIMEOUT_MS
+        + rpcReceiptLookupPassExecutionBudgetMs(endpointCount)
+        + RPC_RECEIPT_POLL_INTERVAL_MS;
+      expect(operationBudgetMs).toBe(expectedOperationBudgetMs);
 
       let release!: () => void;
       const blocked = new Promise<void>((resolve) => { release = resolve; });
@@ -103,8 +123,11 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         (error: unknown) => { secondSettled = true; throw error; },
       );
 
-      // The old fixed 240s budget would reject and skip this queued write.
-      await vi.advanceTimersByTimeAsync(300_000);
+      // Exercise the complete production budget, including the second
+      // broadcast pass, its backoff, and the final receipt-lookup overrun. A
+      // formula that omits the retry pass both fails the exact assertion above
+      // and rejects this successor before this checkpoint.
+      await vi.advanceTimersByTimeAsync(operationBudgetMs - 1);
       expect(secondStarted).toBe(false);
       expect(secondSettled).toBe(false);
 
@@ -117,16 +140,47 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     }
   });
 
-  it('keeps a queued adapter write alive behind a valid three-transaction V10 operation', async () => {
+  it('keeps a queued write alive through V10 stale-allowance recovery beyond three transaction budgets', async () => {
     vi.useFakeTimers();
     try {
       const a = new EVMChainAdapter(minimalConfig());
       const signer = new ethers.Wallet(DEPLOYER_PK);
-      const receiptWindow = 181_000;
       const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+      const budgets = (a as any).signerTxExecutionBudgetMs as Record<string, number>;
+      const transactionBudgetMs = budgets['single-transaction'];
+      const v10BudgetMs = budgets['v10-allowance-recovery'];
+      const failedPopulateBudgetMs = rpcPopulateAndSignExecutionBudgetMs(1);
+      const oldThreeTransactionBudgetMs = 3 * transactionBudgetMs;
+      expect(v10BudgetMs).toBe(oldThreeTransactionBudgetMs + failedPopulateBudgetMs);
+
+      const tokenWithSigner = connectable({});
+      (a as any).contracts.token = { connect: recorder(() => tokenWithSigner) };
+      (a as any).readContract = recorder(async () => 0n);
+      (a as any).confirmAllowanceVisible = recorder(async () => undefined);
+
+      // Initial approve and forced re-approve each legitimately consume almost
+      // one full transaction envelope while the serializer lane is held.
+      const approvalSends = recorder(async () => {
+        await delay(transactionBudgetMs - 1);
+        return fakeReceipt('approve');
+      });
+      (a as any).sendContractTransactionUnlocked = approvalSends;
+
+      let populateCalls = 0;
+      (a as any).populateAndSignAcrossProviders = recorder(async () => {
+        populateCalls += 1;
+        if (populateCalls === 1) {
+          await delay(failedPopulateBudgetMs - 1);
+          throw Object.assign(new Error('execution reverted'), {
+            revert: { name: 'TooLowAllowance' },
+          });
+        }
+        return { signedTx: 'first', txHash: '0xfirst' };
+      });
+
       let secondBuilt = false;
       (a as any).sendSignedTransactionAndWait = async (signedTx: string) => {
-        if (signedTx === 'first') await delay(receiptWindow);
+        if (signedTx === 'first') await delay(transactionBudgetMs - 1);
         return fakeReceipt(signedTx);
       };
 
@@ -134,16 +188,23 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         signer,
         'publish',
         undefined,
-        async () => {
-          // Model an initial approval and stale-allowance re-approval before
-          // the final publish receipt wait in sendSignedTransactionAndWait.
-          await delay(receiptWindow);
-          await delay(receiptWindow);
-          return { signedTx: 'first', txHash: '0xfirst' };
+        async (ctx: any) => {
+          await ctx.sendContractTransaction({}, 'approve', [], signer, 'initial V10 approve');
+          return (a as any).populateAndSignV10WithAllowanceRecovery(
+            signer,
+            {} as any,
+            'publish',
+            {},
+            V10_KA_ADDRESS,
+            1n,
+            'forced V10 re-approve',
+            ctx.sendContractTransaction,
+          );
         },
         neverNull,
       );
       let secondSettled = false;
+      let secondError: unknown;
       const second = (a as any).dispatchSerializedV10Write(
         signer,
         'publish',
@@ -155,17 +216,27 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         neverNull,
       ).then(
         (value: ethers.TransactionReceipt) => { secondSettled = true; return value; },
-        (error: unknown) => { secondSettled = true; throw error; },
+        (error: unknown) => {
+          secondSettled = true;
+          secondError = error;
+          return undefined;
+        },
       );
 
-      await vi.advanceTimersByTimeAsync(500_000);
+      // This is just beyond the old 3x-transaction budget. The predecessor is
+      // still validly completing its final publish, so the queued write must
+      // remain admitted rather than being rejected and skipped.
+      await vi.advanceTimersByTimeAsync(oldThreeTransactionBudgetMs + 1);
       expect(secondBuilt).toBe(false);
       expect(secondSettled).toBe(false);
 
-      await vi.advanceTimersByTimeAsync(50_000);
+      await vi.advanceTimersByTimeAsync(failedPopulateBudgetMs);
       await expect(first).resolves.toMatchObject({ hash: 'first' });
-      await expect(second).resolves.toMatchObject({ hash: 'second' });
+      await second;
+      expect(secondError).toBeUndefined();
       expect(secondBuilt).toBe(true);
+      expect(populateCalls).toBe(2);
+      expect(approvalSends.calls).toHaveLength(2);
     } finally {
       vi.useRealTimers();
     }

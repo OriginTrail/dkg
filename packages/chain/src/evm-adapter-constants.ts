@@ -104,9 +104,6 @@ export const RPC_ENDPOINT_SET_RETRIES = 1;
 
 export const RPC_ENDPOINT_SET_RETRY_BACKOFF_MS = 500;
 
-/** Maximum transaction count inside one serialized V10 publish/update lane. */
-export const V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS = 3;
-
 export const ADMIN_KEY_PURPOSE = 1;
 
 export const OPERATIONAL_KEY_PURPOSE = 2;

@@ -56,33 +56,50 @@ import {
   STICKY_PREFERRED_TTL_MS,
 } from './evm-adapter-constants.js';
 
-const POPULATE_AND_SIGN_BOUNDED_STEPS = [
-  'chain-id-validation',
-  'transaction-population',
-  'optional-buffered-gas-estimate',
-  'transaction-signing',
-] as const;
-const BROADCAST_BOUNDED_STEPS = [
-  'chain-id-validation',
-  'transaction-broadcast',
-] as const;
+/**
+ * Write-phase timeout policy. These named values are consumed by both the live
+ * RPC calls below and the signer-lane budget helpers, so changing a phase cap
+ * cannot silently leave a detached step-count model behind.
+ */
+const POPULATE_AND_SIGN_PHASE_TIMEOUT_MS = {
+  endpointValidation: RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+  transactionPopulation: RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+  optionalBufferedGasEstimate: RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+  transactionSigning: RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+} as const;
+const BROADCAST_PHASE_TIMEOUT_MS = {
+  endpointValidation: RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
+  transactionBroadcast: RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
+} as const;
+const RECEIPT_LOOKUP_PHASE_TIMEOUT_MS = {
+  endpointValidation: RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+  transactionReceiptLookup: RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+} as const;
 
 function normalizedEndpointCount(endpointCount: number): number {
   return Number.isFinite(endpointCount) ? Math.max(1, Math.floor(endpointCount)) : 1;
 }
 
+function phaseTimeoutTotalMs(phases: Readonly<Record<string, number>>): number {
+  return Object.values(phases).reduce((total, timeoutMs) => total + timeoutMs, 0);
+}
+
 /** Worst-case bound owned beside the populate/sign endpoint loop below. */
 export function rpcPopulateAndSignExecutionBudgetMs(endpointCount: number): number {
   return normalizedEndpointCount(endpointCount)
-    * POPULATE_AND_SIGN_BOUNDED_STEPS.length
-    * RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS;
+    * phaseTimeoutTotalMs(POPULATE_AND_SIGN_PHASE_TIMEOUT_MS);
 }
 
 /** Worst-case bound for one pass through the broadcast endpoint loop below. */
 export function rpcBroadcastPassExecutionBudgetMs(endpointCount: number): number {
   return normalizedEndpointCount(endpointCount)
-    * BROADCAST_BOUNDED_STEPS.length
-    * RPC_BROADCAST_ATTEMPT_TIMEOUT_MS;
+    * phaseTimeoutTotalMs(BROADCAST_PHASE_TIMEOUT_MS);
+}
+
+/** Worst-case bound for one pass through the receipt lookup endpoint loop. */
+export function rpcReceiptLookupPassExecutionBudgetMs(endpointCount: number): number {
+  return normalizedEndpointCount(endpointCount)
+    * phaseTimeoutTotalMs(RECEIPT_LOOKUP_PHASE_TIMEOUT_MS);
 }
 
 /**
@@ -440,21 +457,21 @@ export class RpcFailoverClient {
       try {
         await this.validateEndpointForAttempt(
           endpoint,
-          RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+          POPULATE_AND_SIGN_PHASE_TIMEOUT_MS.endpointValidation,
           `${label} chainId validation via RPC #${i + 1}`,
         );
         const rpcSigner = this.rebindSigner(signer, endpoint.provider);
         const connected = this.rebindContract(contract, rpcSigner) as any;
         const populated = await withTimeout<ethers.TransactionRequest>(
           connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
-          RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+          POPULATE_AND_SIGN_PHASE_TIMEOUT_MS.transactionPopulation,
           `${label} transaction population via RPC #${i + 1}`,
         );
         if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
           try {
             const est = (await withTimeout<bigint>(
               connected[method].estimateGas(...args) as Promise<bigint>,
-              RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+              POPULATE_AND_SIGN_PHASE_TIMEOUT_MS.optionalBufferedGasEstimate,
               `${label} gas estimation via RPC #${i + 1}`,
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
@@ -478,7 +495,7 @@ export class RpcFailoverClient {
         }
         const signed = await withTimeout(
           this.signPopulated(rpcSigner, populated),
-          RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+          POPULATE_AND_SIGN_PHASE_TIMEOUT_MS.transactionSigning,
           `${label} transaction signing via RPC #${i + 1}`,
         );
         // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
@@ -547,12 +564,12 @@ export class RpcFailoverClient {
             try {
               await this.validateEndpointForAttempt(
                 endpoint,
-                RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
+                BROADCAST_PHASE_TIMEOUT_MS.endpointValidation,
                 `${label} chainId validation via RPC #${i + 1}`,
               );
               await withTimeout(
                 provider.broadcastTransaction(signedTx),
-                RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
+                BROADCAST_PHASE_TIMEOUT_MS.transactionBroadcast,
                 `${label} broadcast via RPC #${i + 1}`,
               );
               span.setAttribute('dkg.tx_hash', txHash);
@@ -632,12 +649,12 @@ export class RpcFailoverClient {
             try {
               await this.validateEndpointForAttempt(
                 endpoint,
-                RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+                RECEIPT_LOOKUP_PHASE_TIMEOUT_MS.endpointValidation,
                 `receipt lookup chainId validation via RPC #${i + 1}`,
               );
               const receipt = await withTimeout(
                 provider.getTransactionReceipt(txHash),
-                RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+                RECEIPT_LOOKUP_PHASE_TIMEOUT_MS.transactionReceiptLookup,
                 `receipt lookup via RPC #${i + 1}`,
               );
               sawNonErrorResponse = true;

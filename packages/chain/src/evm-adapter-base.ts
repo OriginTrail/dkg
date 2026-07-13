@@ -33,6 +33,7 @@ import {
   RpcFailoverClient,
   rpcBroadcastPassExecutionBudgetMs,
   rpcPopulateAndSignExecutionBudgetMs,
+  rpcReceiptLookupPassExecutionBudgetMs,
   type ReadOpts,
 } from './rpc-failover-client.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
@@ -43,7 +44,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -58,17 +59,54 @@ type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
 };
 
+type SignerWriteProfileName = 'single-transaction' | 'v10-allowance-recovery';
+
+interface SignerWriteProfile {
+  /** Maximum on-chain transactions sent while this serializer entry is held. */
+  maxTransactions: number;
+  /** Failed prepare passes allowed in addition to each transaction's prepare. */
+  maxAdditionalPopulateAndSignAttempts: number;
+}
+
+/**
+ * The write orchestration owns the profiles that reserve signer-lane time.
+ * V10 can send initial approve + forced re-approve + publish/update, and its
+ * one-shot stale-allowance recovery adds one failed populate/sign pass.
+ */
+const SIGNER_WRITE_PROFILES: Readonly<Record<SignerWriteProfileName, SignerWriteProfile>> = {
+  'single-transaction': {
+    maxTransactions: 1,
+    maxAdditionalPopulateAndSignAttempts: 0,
+  },
+  'v10-allowance-recovery': {
+    maxTransactions: 3,
+    maxAdditionalPopulateAndSignAttempts: 1,
+  },
+};
+
 /**
  * Conservative occupancy of one serialized transaction. Phase-specific
  * transport bounds stay beside the failover loops that own those phases; this
  * orchestration layer adds broadcast retries/backoff and receipt confirmation.
  */
-function signerTxOperationExecutionBudgetMs(endpointCount: number): number {
+function signerTxExecutionBudgetMs(
+  endpointCount: number,
+  profile: SignerWriteProfile,
+): number {
   const broadcastPasses = RPC_ENDPOINT_SET_RETRIES + 1;
-  return rpcPopulateAndSignExecutionBudgetMs(endpointCount)
+  const populateAndSignBudgetMs = rpcPopulateAndSignExecutionBudgetMs(endpointCount);
+  const transactionBudgetMs = populateAndSignBudgetMs
     + broadcastPasses * rpcBroadcastPassExecutionBudgetMs(endpointCount)
     + RPC_ENDPOINT_SET_RETRIES * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS
-    + RPC_RECEIPT_TIMEOUT_MS;
+    // A receipt lookup may begin just before the poll deadline and still
+    // complete successfully after it. Reserve that final endpoint pass (and a
+    // terminal poll sleep for the no-receipt path) rather than dropping the
+    // next queued write while its predecessor is still legitimately settling.
+    + RPC_RECEIPT_TIMEOUT_MS
+    + rpcReceiptLookupPassExecutionBudgetMs(endpointCount)
+    + RPC_RECEIPT_POLL_INTERVAL_MS;
+  return profile.maxTransactions * transactionBudgetMs
+    + profile.maxAdditionalPopulateAndSignAttempts * populateAndSignBudgetMs;
 }
 
 /**
@@ -674,8 +712,7 @@ export class EVMChainAdapterBase {
    * preserved.
    */
   protected readonly signerTxSerializer: KeyedSerializer;
-  protected readonly signerTxOperationExecutionBudgetMs: number;
-  protected readonly v10SignerTxOperationExecutionBudgetMs: number;
+  protected readonly signerTxExecutionBudgetMs: Readonly<Record<SignerWriteProfileName, number>>;
 
   /**
    * Lowercased addresses of operational wallets CONFIRMED registered on-chain
@@ -1032,11 +1069,18 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
-    this.signerTxOperationExecutionBudgetMs = signerTxOperationExecutionBudgetMs(this.rpcUrls.length);
-    this.v10SignerTxOperationExecutionBudgetMs =
-      V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS * this.signerTxOperationExecutionBudgetMs;
+    this.signerTxExecutionBudgetMs = {
+      'single-transaction': signerTxExecutionBudgetMs(
+        this.rpcUrls.length,
+        SIGNER_WRITE_PROFILES['single-transaction'],
+      ),
+      'v10-allowance-recovery': signerTxExecutionBudgetMs(
+        this.rpcUrls.length,
+        SIGNER_WRITE_PROFILES['v10-allowance-recovery'],
+      ),
+    };
     this.signerTxSerializer = new KeyedSerializer({
-      defaultExecutionBudgetMs: this.signerTxOperationExecutionBudgetMs,
+      defaultExecutionBudgetMs: this.signerTxExecutionBudgetMs['single-transaction'],
       laneLabel: 'transaction lane',
     });
     this.walletRpcUrls = Array.from(new Set(
@@ -1486,14 +1530,15 @@ export class EVMChainAdapterBase {
     // Per-endpoint populate+sign failover lives in the shared
     // `populateAndSignAcrossProviders` (so a 429ing primary can't fail-fast the
     // publish); the #888 stale-allowance recovery stays a strict ONE-SHOT. OUTER
-    // (this loop) owns the SINGLE `forcedReapprove` latch + the lone forced
+    // (this loop) owns the SINGLE recovery allowance + the lone forced
     // approve; INNER iterates the bare providers. `TooLowAllowance` is a
     // CALL_EXCEPTION (non-retryable), so the inner loop does NOT fail over on it —
-    // it propagates up here. The latch is never reset per endpoint, so at most
+    // it propagates up here. The allowance is never reset per endpoint, so at most
     // ONE forced approve fires per publish regardless of endpoints tried. Only the
     // one returned signed tx is broadcast; the whole thing runs inside the
     // per-wallet `KeyedSerializer` (#953), strictly pre-broadcast / pre-WAL.
-    let forcedReapprove = false;
+    let allowanceRecoveriesRemaining =
+      SIGNER_WRITE_PROFILES['v10-allowance-recovery'].maxAdditionalPopulateAndSignAttempts;
     for (;;) {
       try {
         return await this.populateAndSignAcrossProviders(
@@ -1505,8 +1550,8 @@ export class EVMChainAdapterBase {
         );
       } catch (err) {
         enrichEvmError(err);
-        if (!forcedReapprove && isTooLowAllowanceError(err)) {
-          forcedReapprove = true;
+        if (allowanceRecoveriesRemaining > 0 && isTooLowAllowanceError(err)) {
+          allowanceRecoveriesRemaining -= 1;
           console.warn(
             `[chain] V10 ${method} gas-estimation reverted TooLowAllowance for ` +
             `signer=${signer.address} — forcing a fresh TRAC approve and ` +
@@ -1599,7 +1644,7 @@ export class EVMChainAdapterBase {
       );
       if (!receipt) onNullReceipt(preBroadcastTxHash);
       return receipt;
-    }, { executionBudgetMs: this.v10SignerTxOperationExecutionBudgetMs });
+    }, 'v10-allowance-recovery');
   }
 
   protected async sendPopulatedTransaction(
@@ -1615,7 +1660,7 @@ export class EVMChainAdapterBase {
    * Thin delegator to `this.rpcFailover.populateAndSign` — the per-endpoint
    * populate+sign loop (which reaches `signPopulatedTransaction` via the injected
    * callback). Called by `populateAndSignV10WithAllowanceRecovery` (the
-   * `forcedReapprove` latch owner) and `sendContractTransaction`. STRICTLY
+   * one-shot recovery owner) and `sendContractTransaction`. STRICTLY
    * pre-broadcast — the caller owns the WAL split and broadcasts the single
    * returned tx.
    */
@@ -1656,7 +1701,7 @@ export class EVMChainAdapterBase {
   protected async withSerializedSignerWrite<T>(
     signer: Wallet,
     fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
-    policy: { executionBudgetMs?: number } = {},
+    profile: SignerWriteProfileName = 'single-transaction',
   ): Promise<T> {
     return this.signerTxSerializer.run(signer.address, () =>
       fn({
@@ -1670,8 +1715,7 @@ export class EVMChainAdapterBase {
         },
       }),
       {
-        executionBudgetMs: policy.executionBudgetMs
-          ?? this.signerTxOperationExecutionBudgetMs,
+        executionBudgetMs: this.signerTxExecutionBudgetMs[profile],
       },
     );
   }

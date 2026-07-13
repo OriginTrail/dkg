@@ -137,6 +137,56 @@ describe('KeyedSerializer', () => {
     }
   });
 
+  it('holds a later caller through the cumulative budgets of every queued predecessor', async () => {
+    vi.useFakeTimers();
+    try {
+      const s = new KeyedSerializer({
+        defaultExecutionBudgetMs: 5_000,
+        laneLabel: 'test lane',
+      });
+      const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+      const first = s.run(
+        'mixed-lane',
+        async () => delay(29_999),
+        { executionBudgetMs: 30_000 },
+      );
+      const second = s.run(
+        'mixed-lane',
+        async () => delay(19_999),
+        { executionBudgetMs: 20_000 },
+      );
+      let thirdStarted = false;
+      let thirdSettled = false;
+      let thirdError: unknown;
+      const third = s.run('mixed-lane', async () => {
+        thirdStarted = true;
+        return 'third';
+      }).then(
+        (value) => { thirdSettled = true; return value; },
+        (error: unknown) => {
+          thirdSettled = true;
+          thirdError = error;
+          return undefined;
+        },
+      );
+
+      // The second predecessor has started, but the total lane hold has passed
+      // either individual predecessor budget. Only the cumulative 30s + 20s
+      // acquisition budget keeps the third entry admitted here.
+      await vi.advanceTimersByTimeAsync(35_000);
+      expect(thirdStarted).toBe(false);
+      expect(thirdSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      await Promise.all([first, second, third]);
+      expect(thirdError).toBeUndefined();
+      expect(thirdStarted).toBe(true);
+      expect(s.isActive('mixed-lane')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('prevents the publisher nonce race: same-wallet sends get distinct, monotonic nonces', async () => {
     // Model the real bug (OriginTrail/dkg#953): an op-wallet's `pending`
     // nonce only advances AFTER a tx is broadcast, and there's an async gap
