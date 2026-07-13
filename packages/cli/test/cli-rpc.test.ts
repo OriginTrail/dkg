@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect, vi } from 'vitest';
 import {
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
   isCliRetryableRpcError,
   isCliKnownTransactionError,
   sendCliRawTransactionWithFailover,
@@ -170,17 +169,32 @@ describe('cli-rpc classifier consolidation (W4)', () => {
         [provider],
         '0xsigned',
         '0xdefault-deadline',
-      ).catch((err) => err);
+      ).then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      );
+      let settled = false;
+      void result.finally(() => { settled = true; });
 
-      // Pin the documented/canonical ten-minute contract independently of the
-      // production constant so a drift back to the old three-minute CLI value
-      // fails this regression test.
-      expect(CLI_RPC_RECEIPT_TIMEOUT_MS).toBe(600_000);
-      await vi.advanceTimersByTimeAsync(600_001);
-      await expect(result).resolves.toMatchObject({
-        code: 'RPC_TIMEOUT',
-        txHash: '0xdefault-deadline',
+      // Pin the observable boundary independently of every production constant.
+      // Checking only after ten minutes would miss an early regression: a
+      // three-minute timeout is also settled by then.
+      await vi.advanceTimersByTimeAsync(180_001);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(419_998);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+
+      const outcome = await result;
+      expect(outcome).toMatchObject({
+        status: 'rejected',
+        reason: {
+          code: 'RPC_TIMEOUT',
+          txHash: '0xdefault-deadline',
+        },
       });
+      expect(outcome.status === 'rejected' ? outcome.reason.message : '')
+        .toContain('within 600000ms');
     } finally {
       vi.useRealTimers();
     }
