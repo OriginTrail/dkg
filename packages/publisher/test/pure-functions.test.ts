@@ -13,6 +13,7 @@ import {
   computeKCRootV10 as computeKCRoot,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
+  prepareGeneratedPrivateCatalogFloor,
   catalogTripleKey,
   validatePublishRequest,
   assertTrustedCatalogTriplesAreGeneratedFloor,
@@ -136,6 +137,47 @@ describe('merkle', () => {
     const r2 = computePublicRoot([q('did:dkg:agent:QmBot2', 'http://ex.org/p', '"b"')])!;
     const kcRoot = computeKCRoot([r1, r2]);
     expect(kcRoot).toHaveLength(32);
+  });
+});
+
+describe('generated private catalog preparation', () => {
+  it('fills a partial legacy floor without duplicating existing triples', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const floor = generatedPrivateCatalogFloorQuads(contextGraphId);
+    const legacyFloorQuad = { ...floor[0], graph: 'urn:legacy:catalog' };
+    const content = q('urn:test:shipment:1', 'http://schema.org/name', '"Shipment 1"');
+
+    const prepared = prepareGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, legacyFloorQuad],
+    );
+
+    expect(prepared.quads[0]).toBe(content);
+    expect(prepared.quads[1]).toBe(legacyFloorQuad);
+    for (const key of generatedPrivateCatalogTripleKeys(contextGraphId)) {
+      expect(prepared.quads.filter((quad) => catalogTripleKey(quad) === key)).toHaveLength(1);
+    }
+    expect(prepared.trustedNonManifestCatalogTriples)
+      .toEqual(generatedPrivateCatalogTripleKeys(contextGraphId));
+  });
+
+  it('replaces only recognized catalog triples and preserves private CG-DID data', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const cgDid = `did:dkg:context-graph:${contextGraphId}`;
+    const privateCgDidQuad = q(cgDid, 'urn:test:private-note', '"keep encrypted"');
+    const staleFloor = generatedPrivateCatalogFloorQuads(contextGraphId, 'urn:stale');
+
+    const prepared = prepareGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [privateCgDidQuad, ...staleFloor],
+      { graph: cgDid, mode: 'replace-generated' },
+    );
+
+    expect(prepared.quads[0]).toBe(privateCgDidQuad);
+    expect(prepared.quads.slice(1)).toEqual(
+      generatedPrivateCatalogFloorQuads(contextGraphId, cgDid),
+    );
+    expect(prepared.quads.filter((quad) => quad.graph === 'urn:stale')).toHaveLength(0);
   });
 });
 

@@ -1,4 +1,8 @@
-import { DKG_ONTOLOGY, contextGraphDataUri } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  contextGraphDataUri,
+  partitionCatalogQuads,
+} from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 export type TrustedCatalogTripleKeys = ReadonlySet<string> | readonly string[] | undefined;
@@ -54,6 +58,64 @@ export function generatedPrivateCatalogFloorQuads(
 
 export function generatedPrivateCatalogTripleKeys(contextGraphId: string): ReadonlySet<string> {
   return new Set(generatedPrivateCatalogFloorQuads(contextGraphId).map(catalogTripleKey));
+}
+
+export interface PrepareGeneratedPrivateCatalogFloorOptions {
+  /** Graph term applied to newly generated floor quads. */
+  graph?: string;
+  /**
+   * append-missing preserves immutable/legacy snapshots and fills only absent
+   * deterministic triples. replace-generated rebuilds the recognized catalog
+   * partition while retaining ordinary private data on the CG-DID subject.
+   */
+  mode?: 'append-missing' | 'replace-generated';
+}
+
+export interface PreparedGeneratedPrivateCatalogFloor {
+  quads: Quad[];
+  trustedNonManifestCatalogTriples: ReadonlySet<string>;
+}
+
+/**
+ * Single preparation boundary for the deterministic private-CG catalog floor.
+ *
+ * Callers receive the publish quads and their exact trust allow-list together,
+ * so queue, sync, and update paths cannot drift by generating one without the
+ * other. This helper does not decide whether a CG is private; that security
+ * decision remains with the live chain-policy resolver at each call site.
+ */
+export function prepareGeneratedPrivateCatalogFloor(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  options: PrepareGeneratedPrivateCatalogFloorOptions = {},
+): PreparedGeneratedPrivateCatalogFloor {
+  const floor = generatedPrivateCatalogFloorQuads(
+    contextGraphId,
+    options.graph ?? '',
+  );
+  const trustedNonManifestCatalogTriples = generatedPrivateCatalogTripleKeys(
+    contextGraphId,
+  );
+
+  if (options.mode === 'replace-generated') {
+    const { otherQuads } = partitionCatalogQuads(
+      quads,
+      contextGraphDataUri(contextGraphId),
+    );
+    return {
+      quads: [...otherQuads, ...floor],
+      trustedNonManifestCatalogTriples,
+    };
+  }
+
+  const present = new Set(quads.map(catalogTripleKey));
+  return {
+    quads: [
+      ...quads,
+      ...floor.filter((quad) => !present.has(catalogTripleKey(quad))),
+    ],
+    trustedNonManifestCatalogTriples,
+  };
 }
 
 export function assertTrustedCatalogTriplesAreGeneratedFloor(
