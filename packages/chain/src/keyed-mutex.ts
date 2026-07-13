@@ -7,8 +7,9 @@
  * still runs.
  *
  * This primitive deliberately owns ordering only. It never times out or skips
- * queued work. The domain-specific bounded admission queue for nonce-critical
- * EVM writes lives separately in `signer-write-lane.ts`.
+ * queued work. Domain-specific policies, such as the bounded admission policy
+ * for nonce-critical EVM writes, compose it rather than implementing another
+ * keyed tail queue.
  */
 export class KeyedSerializer {
   private readonly tails = new Map<string, Promise<void>>();

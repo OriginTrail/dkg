@@ -1,5 +1,5 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, tryUpdateWithTouchedGraphs } from '@origintrail-official/dkg-storage';
 import { invokePhaseCallback, type PhaseCallback, type PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
@@ -1080,31 +1080,76 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
-    if (params.signal?.aborted) return false;
-    try {
-      await this.update(params.jobId, 'broadcast', {
+    return this.transitionJobIfActive({
+      current,
+      expectedStatus: 'validated',
+      status: 'broadcast',
+      data: {
         broadcast: {
           txHash: params.txHash,
           walletId: params.walletId,
           merkleRoot: params.merkleRoot,
           publicByteSize: params.publicByteSize,
         },
-      });
-    } catch (error) {
-      if (!params.signal?.aborted) throw error;
-      await this.restoreAbortedWriteAheadJob(current);
-      return false;
-    }
-    if (params.signal?.aborted) {
-      await this.restoreAbortedWriteAheadJob(current);
-      return false;
-    }
-    return true;
+      },
+      signal: params.signal,
+    });
   }
 
-  private async restoreAbortedWriteAheadJob(job: LiftJob): Promise<void> {
-    await this.writeJob(job);
-    await this.syncWalletLockForJob(job);
+  /**
+   * Atomically replace one job only while it is still in the expected state.
+   * Cancellation is checked at this commit boundary and passed to the store;
+   * there is no observable write-then-rollback state.
+   */
+  private async transitionJobIfActive(params: {
+    current: LiftJob;
+    expectedStatus: LiftJobState;
+    status: LiftJobState;
+    data: Partial<LiftJob>;
+    signal?: AbortSignal;
+  }): Promise<boolean> {
+    if (params.signal?.aborted) return false;
+    await this.assertActiveClaimLock(params.current);
+    if (params.signal?.aborted) return false;
+
+    const next = this.refreshActiveLease(this.mergeJob(params.current, params.status, params.data));
+    this.assertJobMatchesStatus(next);
+    const subject = jobSubject(next.jobId);
+    const replacement = serializeJob(next, this.graphUri)
+      .filter((quad) => quad.subject === subject)
+      .map((quad) => `<${quad.subject}> <${quad.predicate}> ${quad.object} .`)
+      .join('\n');
+    const update = `
+      DELETE { GRAPH <${this.graphUri}> { <${subject}> ?predicate ?object } }
+      INSERT { GRAPH <${this.graphUri}> { ${replacement} } }
+      WHERE {
+        GRAPH <${this.graphUri}> {
+          <${subject}> <${STATUS_PREDICATE}> ${literal(params.expectedStatus)} .
+          <${subject}> ?predicate ?object .
+        }
+      }
+    `;
+
+    if (params.signal?.aborted) return false;
+    const supported = await tryUpdateWithTouchedGraphs(
+      this.store,
+      update,
+      [this.graphUri],
+      { signal: params.signal },
+    );
+    if (!supported) {
+      throw new Error('Atomic async-lift job transitions require TripleStore.update support');
+    }
+
+    const committed = await this.getRequiredJob(next.jobId);
+    if (committed.status !== next.status) {
+      if (params.signal?.aborted) return false;
+      throw new Error(
+        `Async-lift job ${next.jobId} changed from ${params.expectedStatus} before the ${next.status} transition`,
+      );
+    }
+    await this.syncWalletLockForJob(committed);
+    return true;
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {

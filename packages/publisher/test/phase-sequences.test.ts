@@ -704,8 +704,12 @@ describe('Phase-sequence contracts', () => {
       const quads = [q(ENTITY, 'http://schema.org/name', '"Hashed"')];
       const calls: [string, 'start' | 'end'][] = [];
       let writeAheadTxHash: string | undefined;
+      let legacyContextTxHash: string | undefined;
       const fn: PhaseCallback = (phase, status, context) => {
         calls.push([phase, status]);
+        if (phase.startsWith('chain:txsigned:tx-') && status === 'start') {
+          legacyContextTxHash = context?.txHash;
+        }
         if (phase === 'chain:writeahead' && status === 'start') {
           writeAheadTxHash = context?.txHash;
         }
@@ -719,6 +723,7 @@ describe('Phase-sequence contracts', () => {
       expect(txsignedStarts.length).toBe(1);
       const [txPhase] = txsignedStarts[0];
       expect(txPhase).toMatch(/^chain:txsigned:tx-0x[0-9a-fA-F]{64}$/);
+      expect(legacyContextTxHash).toBeUndefined();
       expect(writeAheadTxHash).toBe(txPhase.slice('chain:txsigned:tx-'.length));
 
       // Keep the legacy breadcrumb before the typed durable boundary for

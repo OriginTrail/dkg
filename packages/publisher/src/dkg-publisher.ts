@@ -83,38 +83,56 @@ function assertWriteAheadPhaseActive(signal?: AbortSignal): void {
   }
 }
 
+async function emitCancellationAwarePhase(
+  onPhase: PhaseCallback | undefined,
+  phase: string,
+  status: 'start' | 'end',
+  context?: PhaseCallbackContext,
+): Promise<void> {
+  assertWriteAheadPhaseActive(context?.signal);
+  await invokePhaseCallback(onPhase, phase, status, context);
+  // A listener may resume after the adapter deadline. Re-check before the
+  // caller advances to another phase or opens durable state.
+  assertWriteAheadPhaseActive(context?.signal);
+}
+
+/**
+ * Stateless compatibility adapter for legacy phase-name consumers. Durable
+ * listeners must use the typed chain:writeahead context instead.
+ */
+function createLegacyTxSignedPhaseAdapter(onPhase?: PhaseCallback): (
+  context: PhaseCallbackContext,
+) => Promise<void> {
+  return async ({ signal, txHash }) => {
+    if (!txHash) return;
+    const phase = `chain:txsigned:tx-${txHash}`;
+    // Deliberately omit txHash from the legacy callback context: the encoded
+    // phase name is its compatibility representation, while typed metadata is
+    // authoritative only at chain:writeahead.
+    const legacyContext = { signal };
+    await emitCancellationAwarePhase(onPhase, phase, 'start', legacyContext);
+    await emitCancellationAwarePhase(onPhase, phase, 'end', legacyContext);
+  };
+}
+
 /**
  * One cancellation-aware write-ahead protocol shared by V10 publish and
- * update. The hash-bearing phase is a balanced compatibility breadcrumb; the
- * generic write-ahead phase is the durable pre-broadcast window.
+ * update. Typed chain:writeahead context is the sole durable pre-broadcast
+ * boundary; the legacy hash-bearing phase is emitted by a stateless adapter.
  */
 function createWriteAheadPhaseEmitter(onPhase?: PhaseCallback): {
   onBroadcast: (info?: V10WriteAheadHookInfo) => Promise<void>;
   close: () => Promise<void>;
 } {
   let opened = false;
-  const emit = async (
-    phase: string,
-    status: 'start' | 'end',
-    context?: PhaseCallbackContext,
-  ) => {
-    assertWriteAheadPhaseActive(context?.signal);
-    await invokePhaseCallback(onPhase, phase, status, context);
-    // A listener may resume after the adapter deadline. Re-check before
-    // advancing to another durable phase or marking the window open.
-    assertWriteAheadPhaseActive(context?.signal);
-  };
+  const emitLegacyTxSigned = createLegacyTxSignedPhaseAdapter(onPhase);
 
   return {
     onBroadcast: async (info) => {
       if (opened) return;
       const context = { signal: info?.signal, txHash: info?.txHash };
-      if (info?.txHash) {
-        const phase = `chain:txsigned:tx-${info.txHash}`;
-        await emit(phase, 'start', context);
-        await emit(phase, 'end', context);
-      }
-      await emit('chain:writeahead', 'start', context);
+      await emitLegacyTxSigned(context);
+      await emitCancellationAwarePhase(onPhase, 'chain:writeahead', 'start', context);
       // A timed-out listener fails one of the checked awaits above, so close()
       // never emits an end for a window that was not successfully opened.
       opened = true;

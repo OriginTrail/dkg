@@ -168,7 +168,7 @@ describe('KA async VM publish broadcast progress', () => {
     expect(processed?.broadcast).toBeUndefined();
   });
 
-  it('rolls back broadcast progress when cancellation wins during the durable commit', async () => {
+  it('does not begin the atomic broadcast transition when cancellation wins at its commit boundary', async () => {
     const txHash = `0x${'df'.repeat(32)}` as `0x${string}`;
     let jobId = '';
     const controller = new AbortController();
@@ -194,10 +194,13 @@ describe('KA async VM publish broadcast progress', () => {
         throw new Error('write-ahead hook timed out; transaction not broadcast');
       },
     });
-    const originalUpdate = publisher.update.bind(publisher);
-    publisher.update = async (id, status, data) => {
-      await originalUpdate(id, status, data);
-      if (status === 'broadcast') controller.abort();
+    const transitionOwner = publisher as unknown as {
+      transitionJobIfActive: (params: unknown) => Promise<boolean>;
+    };
+    const originalTransition = transitionOwner.transitionJobIfActive.bind(publisher);
+    transitionOwner.transitionJobIfActive = async (params) => {
+      controller.abort();
+      return originalTransition(params);
     };
     await stageShareSnapshot();
 
