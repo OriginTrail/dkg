@@ -2,7 +2,7 @@ import { parentPort } from 'node:worker_threads';
 import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
+import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
 import { appendInPlace } from './sync/append-in-place.js';
 
@@ -33,7 +33,7 @@ parentPort?.on('message', async (message: { id: number; method: string; args: un
     }
     if (message.method === 'processDurableBatch') {
       const [dataQuads, metaQuads, acceptUnverified] = message.args as [Quad[], Quad[], boolean];
-      const result = processDurableBatch(dataQuads, metaQuads, acceptUnverified);
+      const result = processDurableBatchForWire(dataQuads, metaQuads, acceptUnverified);
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -479,6 +479,37 @@ function processDurableBatch(
     dataRejectedMissingMeta: 0,
     logs: [...logs, ...verified.logs],
   };
+}
+
+function processDurableBatchForWire(
+  dataQuads: Quad[],
+  metaQuads: Quad[],
+  acceptUnverified: boolean,
+): DurableBatchProcessWireResult {
+  const result = processDurableBatch(dataQuads, metaQuads, acceptUnverified);
+  const {
+    verifiedData,
+    verifiedMeta,
+    ...summary
+  } = result;
+  return {
+    ...summary,
+    // The selected arrays contain references from the worker-owned input
+    // arrays. Send their positions instead of cloning the complete Quad object
+    // graphs back into the requester isolate.
+    verifiedDataIndexes: selectedQuadIndexes(dataQuads, verifiedData),
+    verifiedMetaIndexes: selectedQuadIndexes(metaQuads, verifiedMeta),
+  };
+}
+
+function selectedQuadIndexes(source: Quad[], selected: Quad[]): number[] {
+  if (selected.length === 0) return [];
+  const selectedSet = new Set(selected);
+  const indexes: number[] = [];
+  for (let i = 0; i < source.length; i++) {
+    if (selectedSet.has(source[i])) indexes.push(i);
+  }
+  return indexes;
 }
 
 function processSharedMemoryBatch(

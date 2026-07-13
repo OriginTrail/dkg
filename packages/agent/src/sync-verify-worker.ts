@@ -49,6 +49,22 @@ export interface DurableBatchProcessResult {
   logs: SyncVerifyLogEntry[];
 }
 
+/**
+ * Worker-wire form of {@link DurableBatchProcessResult}.
+ *
+ * Returning verified Quad objects through `postMessage()` structured-clones
+ * every accepted quad back into the requester heap. The requester already
+ * retains the original input arrays, so that clone briefly doubles the
+ * complete durable phase immediately before store serialization. Return only
+ * indexes across the worker boundary and rebuild arrays of references to the
+ * caller-owned quads on the main thread.
+ */
+export interface DurableBatchProcessWireResult
+  extends Omit<DurableBatchProcessResult, 'verifiedData' | 'verifiedMeta'> {
+  verifiedDataIndexes: number[];
+  verifiedMetaIndexes: number[];
+}
+
 export class SyncVerifyWorker {
   private readonly worker: Worker;
   private nextId = 0;
@@ -150,7 +166,7 @@ export class SyncVerifyWorker {
     }
 
     this.worker = new Worker(workerPath);
-    this.worker.on('message', (message: { id: number; result?: SyncVerifyResult; error?: string }) => {
+    this.worker.on('message', (message: { id: number; result?: unknown; error?: string }) => {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -193,9 +209,20 @@ export class SyncVerifyWorker {
     acceptUnverified: boolean,
   ): Promise<DurableBatchProcessResult> {
     const id = this.nextId++;
-    return new Promise<DurableBatchProcessResult>((resolve, reject) => {
+    return new Promise<DurableBatchProcessWireResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.worker.postMessage({ id, method: 'processDurableBatch', args: [dataQuads, metaQuads, acceptUnverified] });
+    }).then((wireResult) => {
+      const {
+        verifiedDataIndexes,
+        verifiedMetaIndexes,
+        ...summary
+      } = wireResult;
+      return {
+        ...summary,
+        verifiedData: selectQuadReferences(dataQuads, verifiedDataIndexes, 'data'),
+        verifiedMeta: selectQuadReferences(metaQuads, verifiedMetaIndexes, 'meta'),
+      };
     });
   }
 
@@ -220,4 +247,20 @@ export class SyncVerifyWorker {
   async close(): Promise<void> {
     await this.worker.terminate();
   }
+}
+
+function selectQuadReferences(
+  source: Quad[],
+  indexes: readonly number[],
+  phase: 'data' | 'meta',
+): Quad[] {
+  const selected = new Array<Quad>(indexes.length);
+  for (let i = 0; i < indexes.length; i++) {
+    const index = indexes[i];
+    if (!Number.isSafeInteger(index) || index < 0 || index >= source.length) {
+      throw new Error(`Sync verify worker returned an invalid ${phase} quad index: ${index}`);
+    }
+    selected[i] = source[index];
+  }
+  return selected;
 }
