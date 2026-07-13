@@ -88,9 +88,14 @@ export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 export const RPC_RECEIPT_TIMEOUT_MS = 180_000;
 
 // One serialized transaction may legitimately occupy its signer lane for the
-// full receipt window plus populate/broadcast overhead. Deeper queue positions
-// receive one such budget per predecessor in KeyedSerializer.
+// full receipt window plus populate/broadcast overhead.
 export const SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS = 240_000;
+
+// A V10 publish/update critical section can submit an allowance approval, a
+// stale-allowance recovery approval, and the final write. Successors budget for
+// all three valid receipt windows instead of assuming one lane entry is one tx.
+export const V10_SIGNER_TX_SERIALIZER_EXECUTION_BUDGET_MS =
+  3 * SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS;
 
 /**
  * Bounded "retry the whole endpoint set" for the BROADCAST phase (S2). After a

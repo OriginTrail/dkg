@@ -11,7 +11,7 @@
  * via `as any`, the same convention the rest of evm-adapter.unit.test.ts uses)
  * so deleting the `signerTxSerializer.run(...)` wrap turns the suite red.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { connectable } from './connectable.js';
@@ -80,6 +80,60 @@ function minimalPublishParams(): any {
 }
 
 describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)', () => {
+  it('keeps a queued adapter write alive behind a valid three-transaction V10 operation', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      const receiptWindow = 181_000;
+      const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+      let secondBuilt = false;
+      (a as any).sendSignedTransactionAndWait = async (signedTx: string) => {
+        if (signedTx === 'first') await delay(receiptWindow);
+        return fakeReceipt(signedTx);
+      };
+
+      const first = (a as any).dispatchSerializedV10Write(
+        signer,
+        'publish',
+        undefined,
+        async () => {
+          // Model an initial approval and stale-allowance re-approval before
+          // the final publish receipt wait in sendSignedTransactionAndWait.
+          await delay(receiptWindow);
+          await delay(receiptWindow);
+          return { signedTx: 'first', txHash: '0xfirst' };
+        },
+        neverNull,
+      );
+      let secondSettled = false;
+      const second = (a as any).dispatchSerializedV10Write(
+        signer,
+        'publish',
+        undefined,
+        async () => {
+          secondBuilt = true;
+          return { signedTx: 'second', txHash: '0xsecond' };
+        },
+        neverNull,
+      ).then(
+        (value: ethers.TransactionReceipt) => { secondSettled = true; return value; },
+        (error: unknown) => { secondSettled = true; throw error; },
+      );
+
+      await vi.advanceTimersByTimeAsync(500_000);
+      expect(secondBuilt).toBe(false);
+      expect(secondSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(50_000);
+      await expect(first).resolves.toMatchObject({ hash: 'first' });
+      await expect(second).resolves.toMatchObject({ hash: 'second' });
+      expect(secondBuilt).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('serializes concurrent writes routed to the SAME wallet (no overlapping send windows)', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);

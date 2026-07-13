@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
 import { KeyedSerializer, KeyedSerializerAcquireTimeoutError } from '../src/keyed-mutex.js';
-import { SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 
 const tick = (ms = 0) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -95,7 +94,7 @@ describe('KeyedSerializer', () => {
   });
 
   it('times out queued callers with the key and depth, then skips their work', async () => {
-    const s = new KeyedSerializer({ acquireTimeoutMs: 15, laneLabel: 'test lane' });
+    const s = new KeyedSerializer({ defaultExecutionBudgetMs: 15, laneLabel: 'test lane' });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const first = s.run('0xwallet', async () => gate);
@@ -114,22 +113,22 @@ describe('KeyedSerializer', () => {
     expect(s.isActive('0xwallet')).toBe(false);
   });
 
-  it('keeps an EVM signer write queued beyond the full 180s receipt window', async () => {
+  it('budgets acquisition from the actual predecessor operation types', async () => {
     vi.useFakeTimers();
     try {
       const s = new KeyedSerializer({
-        acquireTimeoutMs: SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS,
-        laneLabel: 'transaction lane',
+        defaultExecutionBudgetMs: 10_000,
+        laneLabel: 'test lane',
       });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      const first = s.run('0xslow-wallet', async () => gate);
+      const first = s.run('slow-key', async () => gate, { executionBudgetMs: 30_000 });
       let ran = false;
-      const second = s.run('0xslow-wallet', async () => { ran = true; return 'sent'; });
+      const second = s.run('slow-key', async () => { ran = true; return 'sent'; });
 
-      await vi.advanceTimersByTimeAsync(181_000);
+      await vi.advanceTimersByTimeAsync(20_000);
       expect(ran).toBe(false);
-      expect(s.isActive('0xslow-wallet')).toBe(true);
+      expect(s.isActive('slow-key')).toBe(true);
       release();
       await first;
       await expect(second).resolves.toBe('sent');
