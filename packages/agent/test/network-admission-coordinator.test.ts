@@ -9,9 +9,11 @@ import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionProbeError,
   NetworkAdmissionRejectedError,
+} from '../src/p2p/network-admission-coordinator.js';
+import {
   createNetworkAdmissionProtocolCheck,
   translateNetworkAdmissionErrorAtProtocolBoundary,
-} from '../src/p2p/network-admission-coordinator.js';
+} from '../src/p2p/network-admission-protocol-adapter.js';
 import { NetworkAdmissionService, type NetworkAdmissionOptions } from '../src/p2p/network-admission.js';
 import { signNetworkIdentityResponse } from '../src/p2p/network-identity-proof.js';
 

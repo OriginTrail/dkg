@@ -29,8 +29,10 @@ describe('buildActiveRelayNetworkPolicy', () => {
     const logs: string[] = [];
     const policy = buildActiveRelayNetworkPolicy(
       new Set([RELAY_A]),
-      message => logs.push(message),
-      () => 1_000,
+      {
+        log: message => logs.push(message),
+        now: () => 1_000,
+      },
     )!;
 
     expect(policy.relayPathGate({
@@ -50,8 +52,10 @@ describe('buildActiveRelayPathGate', () => {
     const logs: string[] = [];
     const gate = buildActiveRelayPathGate(
       new Set([RELAY_A]),
-      message => logs.push(message),
-      () => 1_000,
+      {
+        log: message => logs.push(message),
+        now: () => 1_000,
+      },
     );
     const relays = Array.from({ length: 129 }, (_, index) => `12D3KooWForeignRelay${index}`);
 
@@ -87,8 +91,10 @@ describe('buildActiveRelayConnectionGater', () => {
     const logs: string[] = [];
     const gater = buildActiveRelayConnectionGater(
       new Set([RELAY_A]),
-      message => logs.push(message),
-      () => now,
+      {
+        log: message => logs.push(message),
+        now: () => now,
+      },
     );
 
     expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_B}/p2p-circuit/p2p/${REMOTE_A}`)).toBe(true);

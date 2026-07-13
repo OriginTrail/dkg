@@ -23,6 +23,11 @@ export interface RelayNetworkPolicy {
   connectionGater: RelayedConnectionGater;
 }
 
+export interface RelayNetworkPolicyOptions {
+  log?: (message: string) => void;
+  now?: () => number;
+}
+
 const RELAY_DENIAL_LOG_INTERVAL_MS = 60_000;
 const RELAY_DENIAL_LOG_CACHE_MAX = 128;
 
@@ -61,14 +66,13 @@ function createRelayDenialLogger(
 
 export function buildActiveRelayNetworkPolicy(
   activeRelayPeerIds: ReadonlySet<string> | undefined,
-  log: (message: string) => void = () => {},
-  now: () => number = Date.now,
+  options: RelayNetworkPolicyOptions = {},
 ): RelayNetworkPolicy | undefined {
   if (activeRelayPeerIds == null) return undefined;
   // One policy owns one denial gate/logger. Both public policy surfaces adapt
   // this exact gate so the same direction/relay cannot log twice merely
   // because libp2p reached it through a different hook.
-  const relayPathGate = buildActiveRelayPathGate(activeRelayPeerIds, log, now);
+  const relayPathGate = buildActiveRelayPathGate(activeRelayPeerIds, options);
   return {
     discoveryFilter: buildActiveRelayDiscoveryFilter(activeRelayPeerIds),
     relayPathGate,
@@ -97,9 +101,10 @@ export function buildActiveRelayDiscoveryFilter(
 
 export function buildActiveRelayPathGate(
   activeRelayPeerIds: ReadonlySet<string>,
-  log: (message: string) => void = () => {},
-  now: () => number = Date.now,
+  options: RelayNetworkPolicyOptions = {},
 ): RelayPathGate {
+  const log = options.log ?? (() => {});
+  const now = options.now ?? Date.now;
   const logDenial = createRelayDenialLogger(log, now);
   return (input) => {
     const { relayPeerId } = input;
@@ -117,10 +122,9 @@ export function buildActiveRelayPathGate(
 
 export function buildActiveRelayConnectionGater(
   activeRelayPeerIds: ReadonlySet<string>,
-  log: (message: string) => void = () => {},
-  now: () => number = Date.now,
+  options: RelayNetworkPolicyOptions = {},
 ): RelayedConnectionGater {
-  const relayPathGate = buildActiveRelayPathGate(activeRelayPeerIds, log, now);
+  const relayPathGate = buildActiveRelayPathGate(activeRelayPeerIds, options);
   return adaptRelayPathGateToConnectionGater(relayPathGate);
 }
 

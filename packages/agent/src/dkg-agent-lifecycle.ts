@@ -155,8 +155,8 @@ import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
-  createNetworkAdmissionProtocolCheck,
 } from './p2p/network-admission-coordinator.js';
+import { createNetworkAdmissionProtocolCheck } from './p2p/network-admission-protocol-adapter.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,

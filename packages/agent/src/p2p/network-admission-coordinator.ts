@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_NETWORK_IDENTITY,
-  QuietRetryableHandlerError,
-  createOperationContext,
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -130,48 +128,6 @@ export class NetworkAdmissionProbeError extends Error {
     super(`Network identity probe failed for ${peerId}: ${reason}`);
     this.name = 'NetworkAdmissionProbeError';
   }
-}
-
-/**
- * Translate agent-owned probe backoff into the core router's generic quiet
- * retryable concept at the admission boundary. Outbound callers retain the
- * original error so connect/send diagnostics and retry policy stay unchanged.
- */
-export function translateNetworkAdmissionErrorAtProtocolBoundary(
-  error: unknown,
-  direction: 'inbound' | 'outbound',
-): unknown {
-  if (direction === 'inbound' && error instanceof NetworkAdmissionProbeError) {
-    return new QuietRetryableHandlerError(error.message);
-  }
-  return error;
-}
-
-/**
- * Build the exact admission callback installed into ProtocolRouter by the
- * agent lifecycle. Keeping the translation in this adapter makes the
- * agent-owned probe error invisible to the generic core router while giving
- * the lifecycle wiring a focused regression-test surface.
- */
-export function createNetworkAdmissionProtocolCheck(
-  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted'>,
-): (
-  peerId: string,
-  protocolId: string,
-  direction: 'inbound' | 'outbound',
-  options?: NetworkAdmissionAttemptOptions,
-) => Promise<boolean> {
-  return async (peerId, _protocolId, direction, options) => {
-    try {
-      return await coordinator.ensureAdmitted(
-        peerId,
-        createOperationContext('connect'),
-        options,
-      );
-    } catch (error) {
-      throw translateNetworkAdmissionErrorAtProtocolBoundary(error, direction);
-    }
-  };
 }
 
 export class NetworkAdmissionRejectedError extends Error {
