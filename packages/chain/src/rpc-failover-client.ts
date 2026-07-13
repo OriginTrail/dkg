@@ -55,6 +55,7 @@ import {
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   STICKY_PREFERRED_TTL_MS,
 } from './evm-adapter-constants.js';
+import type { ReceiptLookupOptions } from './receipt-wait.js';
 
 /**
  * One RPC endpoint as a SINGLE boundary: the bare per-endpoint provider paired
@@ -579,11 +580,14 @@ export class RpcFailoverClient {
    * "not yet mined" receipt) sets `sawNonErrorResponse` and the method yields
    * `null` rather than an exhaustion — only an all-endpoints-ERRORED lookup throws
    * the typed `RPC_RECEIPT_LOOKUP_FAILED` (kept DISTINCT from
-   * `RPC_ENDPOINTS_EXHAUSTED` so the receipt-wait poll can tell "no receipt yet"
-   * from "transport down"). Polled by the adapter's `waitForReceiptWithFailover`
-   * deadline.
+   * `RPC_ENDPOINTS_EXHAUSTED` so the shared receipt-wait primitive can tell "no
+   * receipt yet" from "transport down"). When supplied, `deadlineMs` caps the
+   * COMPLETE endpoint pass so no per-attempt timer outlives the operation.
    */
-  async getReceipt(txHash: string): Promise<ethers.TransactionReceipt | null> {
+  async getReceipt(
+    txHash: string,
+    options: ReceiptLookupOptions = {},
+  ): Promise<ethers.TransactionReceipt | null> {
     const chainId = this.chainId();
     return withSpan(
       'chain.tx_wait',
@@ -599,16 +603,24 @@ export class RpcFailoverClient {
             const attempt = attempts[i];
             const endpoint = attempt.endpoint;
             const provider = endpoint.provider;
+            const remainingBeforeValidation = options.deadlineMs === undefined
+              ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
+              : options.deadlineMs - Date.now();
+            if (remainingBeforeValidation <= 0) break;
             span.addEvent('receipt.attempt', { attempt: i + 1 });
             try {
               await this.validateEndpointForAttempt(
                 endpoint,
-                RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+                Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingBeforeValidation),
                 `receipt lookup chainId validation via RPC #${i + 1}`,
               );
+              const remainingBeforeLookup = options.deadlineMs === undefined
+                ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
+                : options.deadlineMs - Date.now();
+              if (remainingBeforeLookup <= 0) break;
               const receipt = await withTimeout(
                 provider.getTransactionReceipt(txHash),
-                RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+                Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingBeforeLookup),
                 `receipt lookup via RPC #${i + 1}`,
               );
               sawNonErrorResponse = true;
@@ -630,7 +642,8 @@ export class RpcFailoverClient {
               }
               lastRetryable = err;
               attempt.recordFailure(); // de-prefer a failed backend
-              if (i < attempts.length - 1) {
+              const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
+              if (i < attempts.length - 1 && canTryNext) {
                 noteRpcFailover('receipt lookup', endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
               }
             }

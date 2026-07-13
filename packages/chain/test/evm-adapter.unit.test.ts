@@ -1403,23 +1403,31 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
   it('classifies receipt wait expiry as a timeout and preserves the transaction hash', async () => {
     vi.useFakeTimers();
     try {
-      const a = new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 1_000 }));
+      const a = new EVMChainAdapter(minimalConfig({
+        receiptTimeoutMs: 1_000,
+        rpcUrls: ['https://backup.example'],
+      }));
       const signedTx = '0xdeadbeef';
       const txHash = '0x' + '66'.repeat(32);
-      const provider = {
+      const primary = {
         name: 'primary',
         broadcastTransaction: recorder(async () => ({ hash: txHash })),
         // Hung lower-level receipt attempt: the overall 1s budget must win over
         // the transport's normal 5s per-attempt cap.
         getTransactionReceipt: recorder(async () => new Promise<never>(() => {})),
       };
-      const signer = new ethers.Wallet(DEPLOYER_PK, provider as any);
+      const backup = {
+        name: 'backup',
+        broadcastTransaction: recorder(async () => ({ hash: txHash })),
+        getTransactionReceipt: recorder(async () => null),
+      };
+      const signer = new ethers.Wallet(DEPLOYER_PK, primary as any);
       const populated = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };
       const populateTransaction = recorder(async () => populated);
       const contract = {
         connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
       };
-      (a as any).providers = [provider];
+      (a as any).providers = [primary, backup];
       const signPopulatedTransaction = recorder(async () => ({ signedTx, txHash }));
       (a as any).signPopulatedTransaction = signPopulatedTransaction;
 
@@ -1446,8 +1454,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       expect(isChainRpcTransportError(timeoutErr)).toBe(true);
       expect(populateTransaction.calls).toHaveLength(1);
       expect(signPopulatedTransaction.calls).toHaveLength(1);
-      expect(provider.broadcastTransaction.calls).toContainEqual([signedTx]);
-      expect(provider.getTransactionReceipt.calls.length).toBeGreaterThan(0);
+      expect(primary.broadcastTransaction.calls).toContainEqual([signedTx]);
+      expect(primary.getTransactionReceipt.calls).toHaveLength(1);
+      // The first hung lookup consumes the shared operation budget; the
+      // transport pass must stop instead of continuing in the background.
+      expect(backup.getTransactionReceipt.calls).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }

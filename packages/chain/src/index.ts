@@ -61,3 +61,9 @@ export {
   RPC_RECEIPT_TIMEOUT_MS,
   resolveReceiptTimeoutMs,
 } from './evm-adapter-constants.js';
+export {
+  waitForReceiptWithDeadline,
+  type ReceiptLookupOptions,
+  type ReceiptWaitTimeoutContext,
+  type WaitForReceiptWithDeadlineOptions,
+} from './receipt-wait.js';

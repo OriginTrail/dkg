@@ -9,8 +9,10 @@ import {
   createRpcTimeoutError,
   RPC_RECEIPT_TIMEOUT_MS,
   resolveReceiptTimeoutMs,
+  waitForReceiptWithDeadline,
+  type ReceiptLookupOptions,
 } from '@origintrail-official/dkg-chain';
-import { cliSleep, cliErrorMessage } from './cli-helpers.js';
+import { cliErrorMessage } from './cli-helpers.js';
 
 const CLI_RPC_READ_STALL_TIMEOUT_MS = 4_000;
 const CLI_RPC_BROADCAST_TIMEOUT_MS = 10_000;
@@ -75,7 +77,7 @@ async function getCliReceiptWithFailover(
   providers: ethers.JsonRpcProvider[],
   txHash: string,
   urls?: string[],
-  options: { attemptTimeoutMs?: number; deadlineMs?: number } = {},
+  options: ReceiptLookupOptions & { attemptTimeoutMs?: number } = {},
 ): Promise<ethers.TransactionReceipt | null> {
   let lastRetryable: unknown;
   let sawNonErrorResponse = false;
@@ -166,40 +168,20 @@ async function sendCliRawTransactionWithFailover(
     );
   }
 
-  const deadline = Date.now() + receiptTimeoutMs;
-  let lastReceiptError: unknown;
-  while (Date.now() < deadline) {
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) break;
-    try {
-      const receipt = await getCliReceiptWithFailover(
-        providers,
-        txHash,
-        urls,
-        { deadlineMs: deadline },
-      );
-      if (receipt) {
-        assertCliSuccessfulReceipt(receipt, txHash);
-        return receipt;
-      }
-    } catch (err) {
-      // A lookup may wrap its per-attempt timeout as
-      // RPC_RECEIPT_LOOKUP_FAILED. Once that attempt consumed the entire
-      // remaining budget, the operation-level deadline is authoritative.
-      if (Date.now() >= deadline) {
-        lastReceiptError = err;
-        break;
-      }
-      if (!isCliRetryableRpcError(err)) throw err;
-      lastReceiptError = err;
-    }
-    const sleepMs = Math.min(CLI_RPC_RECEIPT_POLL_INTERVAL_MS, deadline - Date.now());
-    if (sleepMs > 0) await cliSleep(sleepMs);
-  }
-  throw createRpcTimeoutError(
-    `Transaction ${txHash} was broadcast but no receipt was found within ${receiptTimeoutMs}ms`,
-    { cause: lastReceiptError, txHash },
-  );
+  return waitForReceiptWithDeadline({
+    txHash,
+    receiptTimeoutMs,
+    pollIntervalMs: CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
+    getReceipt: (hash, { deadlineMs }) => getCliReceiptWithFailover(
+      providers,
+      hash,
+      urls,
+      { deadlineMs },
+    ),
+    assertSuccessfulReceipt: (receipt) => assertCliSuccessfulReceipt(receipt, txHash),
+    formatTimeoutMessage: () =>
+      `Transaction ${txHash} was broadcast but no receipt was found within ${receiptTimeoutMs}ms`,
+  });
 }
 
 export {

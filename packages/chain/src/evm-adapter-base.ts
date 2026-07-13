@@ -28,8 +28,9 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
+import { waitForReceiptWithDeadline, type ReceiptLookupOptions } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
@@ -1297,8 +1298,11 @@ export class EVMChainAdapterBase {
    * Thin delegator to `this.rpcFailover.getReceipt` — the per-endpoint receipt
    * loop. Used by `waitForReceiptWithFailover` and the `publish.ts` callers.
    */
-  protected getTransactionReceiptWithFailover(txHash: string): Promise<ethers.TransactionReceipt | null> {
-    return this.rpcFailover.getReceipt(txHash);
+  protected getTransactionReceiptWithFailover(
+    txHash: string,
+    options?: ReceiptLookupOptions,
+  ): Promise<ethers.TransactionReceipt | null> {
+    return this.rpcFailover.getReceipt(txHash, options);
   }
 
   /**
@@ -1408,33 +1412,16 @@ export class EVMChainAdapterBase {
     txHash: string,
     label: string,
   ): Promise<ethers.TransactionReceipt> {
-    const deadline = Date.now() + this.receiptTimeoutMs;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) break;
-      try {
-        const receipt = await withTimeout(
-          this.getTransactionReceiptWithFailover(txHash),
-          remainingMs,
-          `${label} receipt deadline`,
-        );
-        if (receipt) {
-          assertSuccessfulReceipt(receipt, label);
-          return receipt;
-        }
-      } catch (err) {
-        if (!isRetryableRpcError(err)) throw err;
-        lastError = err;
-      }
-      const sleepMs = Math.min(RPC_RECEIPT_POLL_INTERVAL_MS, deadline - Date.now());
-      if (sleepMs > 0) await sleep(sleepMs);
-    }
-    throw createRpcTimeoutError(
-      `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
-      (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
-      { cause: lastError, txHash },
-    );
+    return waitForReceiptWithDeadline({
+      txHash,
+      receiptTimeoutMs: this.receiptTimeoutMs,
+      pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
+      getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
+      assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
+      formatTimeoutMessage: ({ lastError }) =>
+        `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
+        (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
+    });
   }
 
   protected async signPopulatedTransaction(
