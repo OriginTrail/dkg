@@ -12,12 +12,17 @@ RPC="${DEVNET_RPC:-http://127.0.0.1:8545}"
 NODE="${RECEIPT_TIMEOUT_TEST_NODE:-7}"
 NODE_DIR="$DEVNET_DIR/node$NODE"
 CG="${DEVNET_CONTEXT_GRAPH:-devnet-test}"
-automine_off=0
+RESTORE_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
+mining_paused=0
 
 fail() { echo "[#1562] FAIL: $*" >&2; exit 1; }
 rpc() { curl -fsS -H 'Content-Type: application/json' --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}" "$RPC" >/dev/null; }
 cleanup() {
-  if [[ "$automine_off" == 1 ]]; then rpc evm_setAutomine '[true]' || true; rpc evm_mine '[]' || true; fi
+  if [[ "$mining_paused" == 1 ]]; then
+    rpc evm_setAutomine '[true]' || true
+    rpc evm_setIntervalMining "[$RESTORE_INTERVAL_MS]" || true
+    rpc evm_mine '[]' || true
+  fi
   "$ROOT/scripts/devnet.sh" stop-node "$NODE" >/dev/null 2>&1 || true
   rm -rf "$NODE_DIR"
 }
@@ -50,7 +55,12 @@ api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
 api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}" >/dev/null
 api "$NODE" POST "/api/knowledge-assets/$name/swm/share" "{\"contextGraphId\":\"$CG\"}" >/dev/null
 
-rpc evm_setAutomine '[false]'; automine_off=1
+# Devnet enables interval mining by default. Disabling automine alone still
+# creates a block every second and can confirm the probe transaction, so pause
+# both mining modes and restore the configured interval in cleanup.
+mining_paused=1
+rpc evm_setIntervalMining '[0]'
+rpc evm_setAutomine '[false]'
 started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
 response="$(api "$NODE" POST "/api/knowledge-assets/$name/vm/publish" "{\"contextGraphId\":\"$CG\"}")"
 elapsed_ms=$(( $(node -e 'process.stdout.write(String(Date.now()))') - started_ms ))
