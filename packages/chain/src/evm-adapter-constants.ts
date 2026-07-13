@@ -87,16 +87,6 @@ export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 
 export const RPC_RECEIPT_TIMEOUT_MS = 180_000;
 
-// One serialized transaction may legitimately occupy its signer lane for the
-// full receipt window plus populate/broadcast overhead.
-export const SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS = 240_000;
-
-// A V10 publish/update critical section can submit an allowance approval, a
-// stale-allowance recovery approval, and the final write. Successors budget for
-// all three valid receipt windows instead of assuming one lane entry is one tx.
-export const V10_SIGNER_TX_SERIALIZER_EXECUTION_BUDGET_MS =
-  3 * SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS;
-
 /**
  * Bounded "retry the whole endpoint set" for the BROADCAST phase (S2). After a
  * full per-endpoint broadcast pass exhausts with a retryable error (e.g. a brief
@@ -113,6 +103,33 @@ export const V10_SIGNER_TX_SERIALIZER_EXECUTION_BUDGET_MS =
 export const RPC_ENDPOINT_SET_RETRIES = 1;
 
 export const RPC_ENDPOINT_SET_RETRY_BACKOFF_MS = 500;
+
+/** Maximum transaction count inside one serialized V10 publish/update lane. */
+export const V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS = 3;
+
+/**
+ * Conservative lane-occupancy budget for one transaction on the configured
+ * endpoint set. A successful transaction can legitimately spend time in every
+ * bounded preparation phase (validation, population, estimation, signing), in
+ * every endpoint of each broadcast pass, and then in the full receipt window.
+ *
+ * This is an execution budget, not an acquisition timeout. `KeyedSerializer`
+ * derives a queued caller's wait deadline from the sum of its predecessors'
+ * execution budgets.
+ */
+export function signerTxSerializerOperationBudgetMs(endpointCount: number): number {
+  const endpoints = Number.isFinite(endpointCount)
+    ? Math.max(1, Math.floor(endpointCount))
+    : 1;
+  const preparationBudgetMs = endpoints * 4 * RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS;
+  const broadcastPasses = RPC_ENDPOINT_SET_RETRIES + 1;
+  const broadcastBudgetMs = endpoints * broadcastPasses * 2 * RPC_BROADCAST_ATTEMPT_TIMEOUT_MS;
+  const broadcastBackoffBudgetMs = RPC_ENDPOINT_SET_RETRIES * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS;
+  return preparationBudgetMs
+    + broadcastBudgetMs
+    + broadcastBackoffBudgetMs
+    + RPC_RECEIPT_TIMEOUT_MS;
+}
 
 export const ADMIN_KEY_PURPOSE = 1;
 

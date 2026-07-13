@@ -38,7 +38,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS, V10_SIGNER_TX_SERIALIZER_EXECUTION_BUDGET_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS, signerTxSerializerOperationBudgetMs } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -655,10 +655,9 @@ export class EVMChainAdapterBase {
    * `Nonce too low` (OriginTrail/dkg#953). Cross-wallet concurrency is
    * preserved.
    */
-  protected readonly signerTxSerializer = new KeyedSerializer({
-    defaultExecutionBudgetMs: SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS,
-    laneLabel: 'transaction lane',
-  });
+  protected readonly signerTxSerializer: KeyedSerializer;
+  protected readonly signerTxOperationExecutionBudgetMs: number;
+  protected readonly v10SignerTxOperationExecutionBudgetMs: number;
 
   /**
    * Lowercased addresses of operational wallets CONFIRMED registered on-chain
@@ -1015,6 +1014,13 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
+    this.signerTxOperationExecutionBudgetMs = signerTxSerializerOperationBudgetMs(this.rpcUrls.length);
+    this.v10SignerTxOperationExecutionBudgetMs =
+      V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS * this.signerTxOperationExecutionBudgetMs;
+    this.signerTxSerializer = new KeyedSerializer({
+      defaultExecutionBudgetMs: this.signerTxOperationExecutionBudgetMs,
+      laneLabel: 'transaction lane',
+    });
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1575,7 +1581,7 @@ export class EVMChainAdapterBase {
       );
       if (!receipt) onNullReceipt(preBroadcastTxHash);
       return receipt;
-    }, V10_SIGNER_TX_SERIALIZER_EXECUTION_BUDGET_MS);
+    }, { executionBudgetMs: this.v10SignerTxOperationExecutionBudgetMs });
   }
 
   protected async sendPopulatedTransaction(
@@ -1632,7 +1638,7 @@ export class EVMChainAdapterBase {
   protected async withSerializedSignerWrite<T>(
     signer: Wallet,
     fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
-    executionBudgetMs = SIGNER_TX_SERIALIZER_ACQUIRE_TIMEOUT_MS,
+    policy: { executionBudgetMs?: number } = {},
   ): Promise<T> {
     return this.signerTxSerializer.run(signer.address, () =>
       fn({
@@ -1645,7 +1651,10 @@ export class EVMChainAdapterBase {
           return this.sendContractTransactionUnlocked(contract, method, args, innerSigner, label, opts);
         },
       }),
-      { executionBudgetMs },
+      {
+        executionBudgetMs: policy.executionBudgetMs
+          ?? this.signerTxOperationExecutionBudgetMs,
+      },
     );
   }
 

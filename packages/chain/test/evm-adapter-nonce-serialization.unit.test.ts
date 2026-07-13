@@ -14,6 +14,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { signerTxSerializerOperationBudgetMs } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -80,6 +81,43 @@ function minimalPublishParams(): any {
 }
 
 describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)', () => {
+  it('keeps a queued adapter write alive through valid two-endpoint failover latency', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig({
+        rpcUrls: ['http://127.0.0.1:59998', 'http://127.0.0.1:59997'],
+      }));
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      const operationBudgetMs = signerTxSerializerOperationBudgetMs(2);
+      expect(operationBudgetMs).toBeGreaterThan(240_000);
+
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const first = (a as any).withSerializedSignerWrite(signer, async () => blocked);
+      let secondStarted = false;
+      let secondSettled = false;
+      const second = (a as any).withSerializedSignerWrite(signer, async () => {
+        secondStarted = true;
+        return 'second';
+      }).then(
+        (value: string) => { secondSettled = true; return value; },
+        (error: unknown) => { secondSettled = true; throw error; },
+      );
+
+      // The old fixed 240s budget would reject and skip this queued write.
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(secondStarted).toBe(false);
+      expect(secondSettled).toBe(false);
+
+      release();
+      await expect(first).resolves.toBeUndefined();
+      await expect(second).resolves.toBe('second');
+      expect(secondStarted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a queued adapter write alive behind a valid three-transaction V10 operation', async () => {
     vi.useFakeTimers();
     try {
