@@ -14,7 +14,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { signerTxSerializerOperationBudgetMs } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -88,7 +87,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         rpcUrls: ['http://127.0.0.1:59998', 'http://127.0.0.1:59997'],
       }));
       const signer = new ethers.Wallet(DEPLOYER_PK);
-      const operationBudgetMs = signerTxSerializerOperationBudgetMs(2);
+      const operationBudgetMs = (a as any).signerTxOperationExecutionBudgetMs as number;
       expect(operationBudgetMs).toBeGreaterThan(240_000);
 
       let release!: () => void;

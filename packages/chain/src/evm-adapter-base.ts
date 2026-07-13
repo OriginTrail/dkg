@@ -29,7 +29,12 @@ import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvm
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
-import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
+import {
+  RpcFailoverClient,
+  rpcBroadcastPassExecutionBudgetMs,
+  rpcPopulateAndSignExecutionBudgetMs,
+  type ReadOpts,
+} from './rpc-failover-client.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
@@ -38,7 +43,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS, signerTxSerializerOperationBudgetMs } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -52,6 +57,19 @@ type ContractWriteSender = (
 type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
 };
+
+/**
+ * Conservative occupancy of one serialized transaction. Phase-specific
+ * transport bounds stay beside the failover loops that own those phases; this
+ * orchestration layer adds broadcast retries/backoff and receipt confirmation.
+ */
+function signerTxOperationExecutionBudgetMs(endpointCount: number): number {
+  const broadcastPasses = RPC_ENDPOINT_SET_RETRIES + 1;
+  return rpcPopulateAndSignExecutionBudgetMs(endpointCount)
+    + broadcastPasses * rpcBroadcastPassExecutionBudgetMs(endpointCount)
+    + RPC_ENDPOINT_SET_RETRIES * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS
+    + RPC_RECEIPT_TIMEOUT_MS;
+}
 
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
@@ -1014,7 +1032,7 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
-    this.signerTxOperationExecutionBudgetMs = signerTxSerializerOperationBudgetMs(this.rpcUrls.length);
+    this.signerTxOperationExecutionBudgetMs = signerTxOperationExecutionBudgetMs(this.rpcUrls.length);
     this.v10SignerTxOperationExecutionBudgetMs =
       V10_SIGNER_TX_SERIALIZER_MAX_TRANSACTIONS * this.signerTxOperationExecutionBudgetMs;
     this.signerTxSerializer = new KeyedSerializer({

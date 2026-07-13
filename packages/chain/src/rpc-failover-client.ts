@@ -56,6 +56,35 @@ import {
   STICKY_PREFERRED_TTL_MS,
 } from './evm-adapter-constants.js';
 
+const POPULATE_AND_SIGN_BOUNDED_STEPS = [
+  'chain-id-validation',
+  'transaction-population',
+  'optional-buffered-gas-estimate',
+  'transaction-signing',
+] as const;
+const BROADCAST_BOUNDED_STEPS = [
+  'chain-id-validation',
+  'transaction-broadcast',
+] as const;
+
+function normalizedEndpointCount(endpointCount: number): number {
+  return Number.isFinite(endpointCount) ? Math.max(1, Math.floor(endpointCount)) : 1;
+}
+
+/** Worst-case bound owned beside the populate/sign endpoint loop below. */
+export function rpcPopulateAndSignExecutionBudgetMs(endpointCount: number): number {
+  return normalizedEndpointCount(endpointCount)
+    * POPULATE_AND_SIGN_BOUNDED_STEPS.length
+    * RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS;
+}
+
+/** Worst-case bound for one pass through the broadcast endpoint loop below. */
+export function rpcBroadcastPassExecutionBudgetMs(endpointCount: number): number {
+  return normalizedEndpointCount(endpointCount)
+    * BROADCAST_BOUNDED_STEPS.length
+    * RPC_BROADCAST_ATTEMPT_TIMEOUT_MS;
+}
+
 /**
  * One RPC endpoint as a SINGLE boundary: the bare per-endpoint provider paired
  * with its configured URL. Modeling the pair as one object (instead of two
