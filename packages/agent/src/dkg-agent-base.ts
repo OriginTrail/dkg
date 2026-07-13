@@ -421,6 +421,9 @@ export function createListContextGraphsCacheInvalidatingStore(
     get queryCancellation() {
       return innerStore.queryCancellation;
     },
+    getPressureSnapshot() {
+      return innerStore.getPressureSnapshot?.();
+    },
     insert(quads, options) {
       return invalidateAfterMutation(
         () => innerStore.insert(quads, options),
@@ -449,8 +452,8 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => markProjectionDirty?.(),
       );
     },
-    hasGraph(graphUri) {
-      return innerStore.hasGraph(graphUri);
+    hasGraph(graphUri, options) {
+      return innerStore.hasGraph(graphUri, options);
     },
     createGraph(graphUri) {
       return innerStore.createGraph(graphUri);
@@ -1120,8 +1123,8 @@ export class DKGAgentBase {
    *      the access policy as soon as the core sees the `ContextGraphCreated`
    *      / `NameClaimed` event from chain, BEFORE the publisher's
    *      first publish intent arrives.
-   *   2. `isCgCurated` callback (lazy) — when local store has no
-   *      access-policy triple AND the cache is cold, the callback falls
+   *   2. {@link resolveCgCurationForAck} (lazy) — when local store has no
+   *      access-policy triple AND the cache is cold, the resolver falls
    *      back to a single `chain.getContextGraphAccessPolicy` RPC and
    *      memoizes the answer here.
    *

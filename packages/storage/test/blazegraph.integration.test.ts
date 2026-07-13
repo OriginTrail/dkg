@@ -64,6 +64,21 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     if (store) await store.dropGraph(GRAPH).catch(() => {});
   });
 
+  it('runs live requests under the configured deadline and recovers after pre-dispatch cancellation', async () => {
+    const deadlineStore = new BlazegraphStore(BLAZEGRAPH_URL as string, { timeout: 5_000 });
+    const controller = new AbortController();
+    const reason = new Error('cancel live probe');
+    controller.abort(reason);
+
+    await expect(
+      deadlineStore.query('ASK { ?s ?p ?o }', { signal: controller.signal }),
+    ).rejects.toBe(reason);
+
+    const result = await deadlineStore.query('ASK { ?s ?p ?o }');
+    expect(result.type).toBe('boolean');
+    await deadlineStore.close();
+  });
+
   it(
     'large DELETE DATA (publish path) succeeds — the form-content-limit regression',
     async () => {

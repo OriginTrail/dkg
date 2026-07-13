@@ -40,6 +40,15 @@ import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from '.
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
+const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
+  runtime: null,
+  availability: {
+    available: false,
+    reason: 'publisher_disabled',
+    retryable: false,
+    operatorActionRequired: true,
+  },
+};
 
 describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => {
   let daemon: LiveDaemon;
@@ -76,6 +85,12 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
     expect(body.chain).not.toHaveProperty('rpcUrl');
     expect(body.chain).not.toHaveProperty('rpcUrls');
     expect(body.chain).not.toHaveProperty('hubAddress');
+    expect(body.asyncPublisher).toEqual({
+      available: false,
+      reason: 'publisher_disabled',
+      retryable: false,
+      operatorActionRequired: true,
+    });
     // Multi-RPC failover observability (W3): scalar counts + bounded by-class
     // map only — host-only, never a full RPC URL.
     expect(typeof body.chain.rpcFailovers).toBe('number');
@@ -127,6 +142,7 @@ describe('/api/status selected overlay details', () => {
       await handleStatusRoutes({
         req,
         res,
+        publisherState: DISABLED_PUBLISHER_STATE,
         path: url.pathname,
         url,
         network,
@@ -192,6 +208,7 @@ describe('/api/status selected overlay details', () => {
         await handleStatusRoutes({
           req,
           res,
+          publisherState: DISABLED_PUBLISHER_STATE,
           path: url.pathname,
           url,
           network,
@@ -257,6 +274,7 @@ describe('/api/status selected overlay details', () => {
       await handleStatusRoutes({
         req,
         res,
+        publisherState: DISABLED_PUBLISHER_STATE,
         path: url.pathname,
         url,
         network: null,

@@ -6,8 +6,8 @@ import {
   RESPONSE_GONE_MARKER,
   isRecoverableSendError,
   ProtocolOutbox,
+  type CompatibleProtocolOutboxStore,
   type MessageIdempotencyStore,
-  type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
@@ -128,7 +128,7 @@ export interface MessengerDeps {
    * `ProtocolOutbox` internally (which owns the backoff ladder +
    * inflight guard).
    */
-  outboxStore?: ProtocolOutboxStore;
+  outboxStore?: CompatibleProtocolOutboxStore;
   /**
    * Override the default backoff ladder (5s → 2h, mirrors rc.8 chat
    * outbox). Caller can pass a tighter / looser ladder per Messenger

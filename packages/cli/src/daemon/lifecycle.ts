@@ -147,7 +147,7 @@ import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
-import { createPublicSnapshotStore, createPublisherControlFromStore, resolveAsyncPublisherAvailability, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../publisher-runner.js';
+import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -1707,12 +1707,7 @@ export async function runDaemonInner(
     },
   });
 
-  let publisherRuntime: PublisherRuntime | null = null;
-  let publisherAvailability: AsyncPublisherAvailability = resolveAsyncPublisherAvailability({
-    config,
-    runtime: null,
-    lifecycleReason: config.publisher?.enabled ? 'publisher_starting' : 'publisher_disabled',
-  });
+  let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the
   // async-promote-queue series). Initialised in `startPostApiPublishing`
   // after the API is up so a recoverOnStartup hiccup never blocks boot;
@@ -1959,34 +1954,26 @@ export async function runDaemonInner(
 
     const publisherTimer = setTimeout(() => {
       void (async () => {
-        try {
-          const runtime = await startPublisherRuntimeIfEnabled({
-            dataDir: dkgDir(),
-            config,
-            store: agent.store,
-            keypair: agent.wallet.keypair,
-            chainBase: publisherChainBase,
-            ackTransportFactory: agent.createACKTransportFactory({
-              sendTimeoutMs: storageAckTiming.sendTimeoutMs,
-              log,
-            }),
-            publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
-            knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
-            knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+        const outcome = await startPublisherRuntimeWithOutcome({
+          dataDir: dkgDir(),
+          config,
+          store: agent.store,
+          keypair: agent.wallet.keypair,
+          chainBase: publisherChainBase,
+          ackTransportFactory: agent.createACKTransportFactory({
+            sendTimeoutMs: storageAckTiming.sendTimeoutMs,
             log,
-          });
-          publisherRuntime = runtime;
-          publisherAvailability = resolveAsyncPublisherAvailability({
-            config,
-            runtime,
-            ...(runtime ? {} : { lifecycleReason: 'no_publisher_wallets' as const }),
-          });
-        } catch (err: any) {
-          publisherAvailability = resolveAsyncPublisherAvailability({
-            config,
-            runtime: null,
-            lifecycleReason: 'publisher_startup_failed',
-          });
+          }),
+          publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
+          knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
+          knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+          log,
+        });
+        publisherState = outcome;
+        if (!outcome.availability.available
+          && outcome.availability.reason === 'publisher_startup_failed'
+          && 'error' in outcome) {
+          const err = outcome.error as any;
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
         }
       })();
@@ -2611,7 +2598,7 @@ export async function runDaemonInner(
   // Wiring only (scheduling/format live in rpc-usage-log.ts, unit-tested).
   // The composite source merges EVERY drainable this process owns: the agent
   // (its chain adapter) plus the async-publisher runtime's per-wallet
-  // adapters — `publisherRuntime` is late-bound, so read the live variable at
+  // adapters — `publisherState` is late-bound, so read the live runtime at
   // each drain. chainId is the EFFECTIVE one (chainBase resolves field-level
   // inheritance; config.chain?.chainId alone is undefined for configs that
   // override only rpcUrl).
@@ -2620,7 +2607,7 @@ export async function runDaemonInner(
     source: {
       drainRpcUsage: () => mergeRpcUsageWindows(
         agent.drainRpcUsage(),
-        publisherRuntime?.drainRpcUsage(),
+        publisherState.runtime?.drainRpcUsage(),
       ),
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
@@ -3337,12 +3324,12 @@ export async function runDaemonInner(
       const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
       if (handled) return;
 
-      await handleRequest(
+      await handleRequest({
         req,
         res,
         agent,
         publisherControl,
-        publisherRuntime,
+        publisherState,
         config,
         startedAt,
         dashDb,
@@ -3364,11 +3351,10 @@ export async function runDaemonInner(
         apiHost,
         apiPortRef,
         routePlugins,
-        admissionStats,
+        admission: admissionStats,
         emitMemoryGraphChanged,
         emitNotification,
-        publisherAvailability,
-      );
+      });
     } catch (err: any) {
       // Single top-level error→HTTP mapping (in http-utils.ts
       // respondWithDaemonError): 413 payload-too-large; 400 SyntaxError /
@@ -3472,7 +3458,7 @@ export async function runDaemonInner(
         await stopTelemetry();
         natStatusWatcherStop?.();
         resetNatStatus();
-        await publisherRuntime
+        await publisherState.runtime
           ?.stop()
           .catch((err: any) =>
             log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),

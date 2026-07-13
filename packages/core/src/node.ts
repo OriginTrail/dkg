@@ -104,6 +104,40 @@ export function connectionsBusyAppProtocols(conns: readonly unknown[]): string[]
 }
 
 /**
+ * Best-effort reset of busy application streams before the relay watchdog
+ * closes their transport. Stream discovery stays behind
+ * `readConnectionStreams`, because libp2p may temporarily expose a missing
+ * stream array or an incompletely negotiated stream during teardown.
+ * Returns the number of distinct streams whose abort function was invoked.
+ */
+export function abortWatchdogBusyStreams(
+  conns: readonly unknown[],
+  reason: Error,
+): number {
+  const reaped = new Set<unknown>();
+  let aborted = 0;
+  for (const connection of conns) {
+    for (const stream of readConnectionStreams(connection) ?? []) {
+      if (reaped.has(stream)) continue;
+      const { protocol, abort } = stream;
+      if (typeof protocol !== 'string'
+        || !isWatchdogBusyProtocol(protocol)
+        || typeof abort !== 'function') {
+        continue;
+      }
+      reaped.add(stream);
+      try {
+        abort.call(stream, reason);
+        aborted += 1;
+      } catch {
+        // Best-effort; connection teardown remains the final reaper.
+      }
+    }
+  }
+  return aborted;
+}
+
+/**
  * Per-relay forced-redial bookkeeping (one object per relay instead of
  * parallel maps, so the invariants live in one place): `strikes` counts
  * consecutive futile forced redials, `cooldownUntil` suppresses the forced
@@ -1568,6 +1602,22 @@ export class DKGNode {
           );
         } else {
           this.relayForcedRedialState.set(relayPidStr, { ...redialState, strikes, busyDeferralTicks: 0 });
+        }
+
+        // Past the busy-deferral cap, reap the stuck application streams while
+        // the transport is still writable. Letting `Connection.close()` abort
+        // them concurrently with the underlying socket close can make Yamux's
+        // reset frame race the socket teardown (`StreamStateError: Cannot write
+        // to a stream that is closing`). Besides surfacing as an unhandled
+        // rejection, that race defeats the cap's explicit stuck-stream-reaper
+        // purpose. Aborting first gives the reset a turn to flush before the
+        // connection itself is closed.
+        if (busyProtocols.length > 0) {
+          abortWatchdogBusyStreams(
+            [...conns, ...relayedConns],
+            new Error('relay watchdog busy-deferral cap reached'),
+          );
+          await new Promise(r => setTimeout(r, 0));
         }
 
         for (const c of conns) {

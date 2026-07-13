@@ -1201,7 +1201,13 @@ export class SharedMemoryHandler {
       // Uniform layout: write the gossiped KA into its per-KA SWM graph
       // …/_shared_memory/{author}/{number} (carried on the wire); else legacy bucket.
       const swmGraph = (kaAuthorAddress && kaNumber)
-        ? contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, kaAuthorAddress, kaNumber, subGraphName)
+        ? contextGraphLayerUri(
+            contextGraphId,
+            MemoryLayer.SharedWorkingMemory,
+            kaAuthorAddress,
+            BigInt(kaNumber),
+            subGraphName,
+          )
         : this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
       const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
 

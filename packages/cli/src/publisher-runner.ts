@@ -44,14 +44,61 @@ export type AsyncPublisherUnavailableReason =
   | 'no_publisher_wallets'
   | 'publisher_startup_failed';
 
+type PublisherDisabledAvailability = {
+  available: false;
+  reason: 'publisher_disabled';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type PublisherStartingAvailability = {
+  available: false;
+  reason: 'publisher_starting';
+  retryable: true;
+  operatorActionRequired: false;
+};
+
+type NoPublisherWalletsAvailability = {
+  available: false;
+  reason: 'no_publisher_wallets';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type PublisherStartupFailedAvailability = {
+  available: false;
+  reason: 'publisher_startup_failed';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type AsyncPublisherUnavailableAvailability =
+  | PublisherDisabledAvailability
+  | PublisherStartingAvailability
+  | NoPublisherWalletsAvailability
+  | PublisherStartupFailedAvailability;
+
 export type AsyncPublisherAvailability =
   | { available: true }
-  | {
-      available: false;
-      reason: AsyncPublisherUnavailableReason;
-      retryable: boolean;
-      operatorActionRequired: boolean;
-    };
+  | AsyncPublisherUnavailableAvailability;
+
+function unavailablePublisherAvailability(reason: 'publisher_disabled'): PublisherDisabledAvailability;
+function unavailablePublisherAvailability(reason: 'publisher_starting'): PublisherStartingAvailability;
+function unavailablePublisherAvailability(reason: 'no_publisher_wallets'): NoPublisherWalletsAvailability;
+function unavailablePublisherAvailability(reason: 'publisher_startup_failed'): PublisherStartupFailedAvailability;
+function unavailablePublisherAvailability(reason: AsyncPublisherUnavailableReason): AsyncPublisherUnavailableAvailability;
+function unavailablePublisherAvailability(
+  reason: AsyncPublisherUnavailableReason,
+): AsyncPublisherUnavailableAvailability {
+  switch (reason) {
+    case 'publisher_starting':
+      return { available: false, reason, retryable: true, operatorActionRequired: false };
+    case 'publisher_disabled':
+    case 'no_publisher_wallets':
+    case 'publisher_startup_failed':
+      return { available: false, reason, retryable: false, operatorActionRequired: true };
+  }
+}
 
 /**
  * Canonical readiness boundary for every async-ingress route. Lifecycle may
@@ -62,9 +109,7 @@ export function resolveAsyncPublisherAvailability(args: {
   config: DkgConfig;
   runtime: PublisherRuntime | null;
   lifecycleReason?: AsyncPublisherUnavailableReason;
-  lifecycleAvailability?: AsyncPublisherAvailability;
 }): AsyncPublisherAvailability {
-  if (args.lifecycleAvailability) return args.lifecycleAvailability;
   if (args.runtime?.walletIds.length) return { available: true };
   const reason = args.lifecycleReason
     ?? (args.runtime
@@ -72,14 +117,7 @@ export function resolveAsyncPublisherAvailability(args: {
       : args.config.publisher?.enabled
         ? 'publisher_startup_failed'
         : 'publisher_disabled');
-  return {
-    available: false,
-    reason,
-    // Only the in-progress state can recover from the same client retry without
-    // operator/config/daemon intervention.
-    retryable: reason === 'publisher_starting',
-    operatorActionRequired: reason !== 'publisher_starting',
-  };
+  return unavailablePublisherAvailability(reason);
 }
 
 export interface PublisherInspector {
@@ -141,6 +179,83 @@ export async function startPublisherRuntimeIfEnabled(args: {
       return null;
     }
     throw err;
+  }
+}
+
+export type PublisherStartupOutcome =
+  | {
+      runtime: PublisherRuntime;
+      availability: Extract<AsyncPublisherAvailability, { available: true }>;
+    }
+  | {
+      runtime: null;
+      availability: PublisherDisabledAvailability;
+    }
+  | {
+      runtime: null;
+      availability: NoPublisherWalletsAvailability;
+    }
+  | {
+      runtime: null;
+      availability: PublisherStartupFailedAvailability;
+      error: unknown;
+    };
+
+export type PublisherState =
+  | PublisherStartupOutcome
+  | {
+      runtime: null;
+      availability: PublisherStartingAvailability;
+    };
+
+/**
+ * Initial daemon state before the deferred publisher bootstrap settles. Routes
+ * receive this whole discriminated value, so runtime and readiness cannot
+ * disagree in a request context.
+ */
+export function createInitialPublisherState(config: DkgConfig): PublisherState {
+  if (!config.publisher?.enabled) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_disabled'),
+    };
+  }
+  return {
+    runtime: null,
+    availability: unavailablePublisherAvailability('publisher_starting'),
+  };
+}
+
+/**
+ * Explicit daemon-startup boundary. The compatibility helper above retains its
+ * historical nullable return, while lifecycle code consumes this discriminant
+ * and never has to guess which unavailable state a null runtime represents.
+ */
+export async function startPublisherRuntimeWithOutcome(
+  args: Parameters<typeof startPublisherRuntimeIfEnabled>[0],
+): Promise<PublisherStartupOutcome> {
+  if (!args.config.publisher?.enabled) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_disabled'),
+    };
+  }
+
+  try {
+    const runtime = await startPublisherRuntimeIfEnabled(args);
+    if (!runtime) {
+      return {
+        runtime: null,
+        availability: unavailablePublisherAvailability('no_publisher_wallets'),
+      };
+    }
+    return { runtime, availability: { available: true } };
+  } catch (error) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_startup_failed'),
+      error,
+    };
   }
 }
 

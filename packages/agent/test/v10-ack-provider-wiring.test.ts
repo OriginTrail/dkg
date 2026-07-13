@@ -100,6 +100,10 @@ interface ACKCollectorDepsCapture {
   ) => Promise<VerifyACKIdentityResult>;
 }
 
+interface StorageACKHandlerConfigCapture {
+  isCgCurated?: (cgId: string, swmGraphId?: string) => Promise<boolean | null>;
+}
+
 /**
  * Reach into the agent's `private createV10ACKProvider(cgId)` so the
  * ACK collector is actually constructed and its deps are captured.
@@ -415,5 +419,37 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(capturedStorageACKHandlerConfigs).toContainEqual(
       expect.objectContaining({ ackHandlerDeadlineMs: 55_000 }),
     );
+  });
+
+  it('delegates StorageACK curation config to the named target-policy resolver', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+
+    agent = await DKGAgent.create({
+      name: 'ACKCurationFastPathTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    await agent.start();
+
+    const resolver = vi.spyOn(agent, 'resolveCgCurationForAck').mockResolvedValue(true);
+
+    const handlerConfig = capturedStorageACKHandlerConfigs.find(
+      (config): config is StorageACKHandlerConfigCapture =>
+        typeof (config as StorageACKHandlerConfigCapture).isCgCurated === 'function',
+    );
+    expect(handlerConfig?.isCgCurated).toBeTypeOf('function');
+
+    // StorageACKHandler uses this one callback from both handler() and
+    // updateHandler(). The source SWM graph must not enter the target-policy
+    // resolver; only the PublishIntent's target cgId determines curation.
+    await expect(handlerConfig!.isCgCurated!('101', 'private-looking-source')).resolves.toBe(true);
+    expect(resolver).toHaveBeenCalledOnce();
+    expect(resolver).toHaveBeenCalledWith('101', expect.any(Object));
   });
 });
