@@ -35,7 +35,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   resolveCapMs,
-  rpcBoundedPointReadExecutionBudgetMs,
+  rpcAlwaysCappedPointReadExecutionBudgetMs,
   type SignPopulatedFn,
 } from '../src/rpc-failover-client.js';
 import {
@@ -87,11 +87,11 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
     expect(resolveCapMs('failOpenFundingRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
   });
 
-  it('boundedPointRead: caps write-phase reads and budgets every live endpoint', () => {
-    expect(resolveCapMs('boundedPointRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(resolveCapMs('boundedPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(rpcBoundedPointReadExecutionBudgetMs(1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(rpcBoundedPointReadExecutionBudgetMs(2)).toBe(2 * RPC_READ_STALL_TIMEOUT_MS);
+  it('alwaysCappedPointRead: caps foreground reads and budgets every live endpoint', () => {
+    expect(resolveCapMs('alwaysCappedPointRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(resolveCapMs('alwaysCappedPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(rpcAlwaysCappedPointReadExecutionBudgetMs(1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(rpcAlwaysCappedPointReadExecutionBudgetMs(2)).toBe(2 * RPC_READ_STALL_TIMEOUT_MS);
   });
 });
 
@@ -182,7 +182,7 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     expect(slowView.calls).toHaveLength(1);
   });
 
-  it('readContract SINGLE-RPC boundedPointRead caps a write-phase allowance gate', async () => {
+  it('readContract SINGLE-RPC alwaysCappedPointRead caps a foreground allowance gate', async () => {
     vi.useFakeTimers();
     const hungAllowance = recorder(() => new Promise<bigint>(() => {}));
     const contract = { connect: () => ({ allowance: hungAllowance }) } as any;
@@ -192,7 +192,7 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
       'token.allowance',
       contract,
       (c: any) => c.allowance('owner', 'spender'),
-      { policy: 'boundedPointRead' },
+      { policy: 'alwaysCappedPointRead' },
     ).then((r: unknown) => r, (e: unknown) => e);
     await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1);
 

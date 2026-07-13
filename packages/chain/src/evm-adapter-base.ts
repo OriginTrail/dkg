@@ -31,7 +31,7 @@ import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import {
   RpcFailoverClient,
-  rpcBoundedPointReadExecutionBudgetMs,
+  rpcAlwaysCappedPointReadExecutionBudgetMs,
   rpcBroadcastPassExecutionBudgetMs,
   rpcPopulateAndSignExecutionBudgetMs,
   rpcReceiptLookupPassExecutionBudgetMs,
@@ -82,7 +82,7 @@ function allowanceVisibilityPollBackoffMs(attemptIndex: number): number {
 }
 
 function allowanceVisibilityPollExecutionBudgetMs(endpointCount: number): number {
-  const readBudgetMs = rpcBoundedPointReadExecutionBudgetMs(endpointCount);
+  const readBudgetMs = rpcAlwaysCappedPointReadExecutionBudgetMs(endpointCount);
   let backoffBudgetMs = 0;
   for (let i = 0; i < V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS - 1; i += 1) {
     backoffBudgetMs += allowanceVisibilityPollBackoffMs(i);
@@ -135,7 +135,7 @@ function signerTxExecutionBudgetMs(
     + RPC_RECEIPT_POLL_INTERVAL_MS;
   return profile.maxTransactions * transactionBudgetMs
     + profile.maxAdditionalPopulateAndSignAttempts * populateAndSignBudgetMs
-    + profile.maxAllowanceReadPasses * rpcBoundedPointReadExecutionBudgetMs(endpointCount)
+    + profile.maxAllowanceReadPasses * rpcAlwaysCappedPointReadExecutionBudgetMs(endpointCount)
     + profile.maxAllowanceVisibilityPollSequences
       * allowanceVisibilityPollExecutionBudgetMs(endpointCount);
 }
@@ -1820,7 +1820,7 @@ export class EVMChainAdapterBase {
       tokenWithSigner,
       'token.allowance',
       (token) => token.allowance(signer.address, kav10Address),
-      { policy: 'boundedPointRead' },
+      { policy: 'alwaysCappedPointRead' },
     );
     const { needsApprove, targetAllowance } = computeApprovalAction(
       this.approvalPolicy,
@@ -1908,7 +1908,7 @@ export class EVMChainAdapterBase {
           token,
           'allowance visibility poll',
           (c) => c.allowance(owner, spender),
-          { policy: 'boundedPointRead' },
+          { policy: 'alwaysCappedPointRead' },
         )) as bigint;
       } catch {
         // Transient read failure / stall timeout — treat as not-yet-visible

@@ -2803,6 +2803,47 @@ function getApproveCallArgs(sendSpy: SendRecorder): {
 
 describe('ensureV10ApproveTrac — per-publish (default) approval gate', () => {
 
+  it('bounds a stalled initial allowance gate on a single-RPC adapter', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      const allowance = recorder(() => new Promise<bigint>(() => {}));
+      const tokenWithSigner = connectable({ allowance });
+      (a as any).contracts.token = {
+        connect: recorder(() => tokenWithSigner),
+      };
+      const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
+      (a as any).sendContractTransaction = sendSpy;
+      (a as any).sendContractTransactionUnlocked = sendSpy;
+
+      let outcome: { ok: true } | { ok: false; error: unknown } | undefined;
+      const settled = (a as any).ensureV10ApproveTrac(
+        signer,
+        V10_KA_ADDRESS,
+        1n,
+        'approve V10 publish TRAC',
+      ).then(
+        () => { outcome = { ok: true }; },
+        (error: unknown) => { outcome = { ok: false, error }; },
+      );
+
+      await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS - 1);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await settled;
+
+      expect(outcome).toMatchObject({
+        ok: false,
+        error: { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      });
+      expect(allowance.calls).toHaveLength(1);
+      expect(sendSpy.calls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('zero-cost publish on a fresh wallet → approves the 1n floor (#720 mainnet revert fix)', async () => {
     // The exact scenario that reverted on mainnet pre-#720: a publish with
     // `tokenAmount=0n` against a wallet that has never approved TRAC to the

@@ -15,7 +15,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import {
-  rpcBoundedPointReadExecutionBudgetMs,
+  rpcAlwaysCappedPointReadExecutionBudgetMs,
   rpcBroadcastPassExecutionBudgetMs,
   rpcPopulateAndSignExecutionBudgetMs,
   rpcReceiptLookupPassExecutionBudgetMs,
@@ -197,7 +197,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       const v10BudgetMs = (a as any)
         .signerWriteExecutionBudgetMs('v10-allowance-recovery') as number;
       const failedPopulateBudgetMs = rpcPopulateAndSignExecutionBudgetMs(1);
-      const allowanceReadBudgetMs = rpcBoundedPointReadExecutionBudgetMs(1);
+      const allowanceReadBudgetMs = rpcAlwaysCappedPointReadExecutionBudgetMs(1);
       const allowanceVisibilityBudgetMs = 6 * allowanceReadBudgetMs
         + [250, 500, 750, 1000, 1250].reduce((total, value) => total + value, 0);
       const oldBudgetWithoutAllowancePhases = 3 * transactionBudgetMs + failedPopulateBudgetMs;
