@@ -138,8 +138,6 @@ interface ProviderInternals {
       identityId: bigint,
     ) => Promise<VerifyACKIdentityResult>;
   };
-  onChainAccessPolicyCache: Map<string, number>;
-  isPrivateContextGraph(contextGraphId: string): Promise<boolean>;
   node: { libp2p: { getPeers(): unknown[] } };
 }
 
@@ -423,7 +421,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     );
   });
 
-  it('uses immutable cached access policy before touching the local store on publish/update ACKs', async () => {
+  it('delegates StorageACK curation config to the named target-policy resolver', async () => {
     const primary = ethers.Wallet.createRandom();
     const ackSigner = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', primary.address);
@@ -439,14 +437,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     });
     await agent.start();
 
-    const internals = agent as unknown as ProviderInternals;
-    const localProbe = vi.fn(async () => {
-      throw new Error('local projection must not run for an authoritative cache hit');
-    });
-    internals.isPrivateContextGraph = localProbe;
-    const chainProbe = vi.spyOn(chain, 'getContextGraphAccessPolicy');
-    internals.onChainAccessPolicyCache.set('101', 1);
-    internals.onChainAccessPolicyCache.set('102', 0);
+    const resolver = vi.spyOn(agent, 'resolveCgCurationForAck').mockResolvedValue(true);
 
     const handlerConfig = capturedStorageACKHandlerConfigs.find(
       (config): config is StorageACKHandlerConfigCapture =>
@@ -455,10 +446,10 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(handlerConfig?.isCgCurated).toBeTypeOf('function');
 
     // StorageACKHandler uses this one callback from both handler() and
-    // updateHandler(), so the fast path covers publish and update ACKs.
+    // updateHandler(). The source SWM graph must not enter the target-policy
+    // resolver; only the PublishIntent's target cgId determines curation.
     await expect(handlerConfig!.isCgCurated!('101', 'private-looking-source')).resolves.toBe(true);
-    await expect(handlerConfig!.isCgCurated!('102', 'private-looking-source')).resolves.toBe(false);
-    expect(localProbe).not.toHaveBeenCalled();
-    expect(chainProbe).not.toHaveBeenCalled();
+    expect(resolver).toHaveBeenCalledOnce();
+    expect(resolver).toHaveBeenCalledWith('101', expect.any(Object));
   });
 });

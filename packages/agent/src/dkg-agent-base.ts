@@ -1123,8 +1123,8 @@ export class DKGAgentBase {
    *      the access policy as soon as the core sees the `ContextGraphCreated`
    *      / `NameClaimed` event from chain, BEFORE the publisher's
    *      first publish intent arrives.
-   *   2. `isCgCurated` callback (lazy) — when local store has no
-   *      access-policy triple AND the cache is cold, the callback falls
+   *   2. {@link resolveCgCurationForAck} (lazy) — when local store has no
+   *      access-policy triple AND the cache is cold, the resolver falls
    *      back to a single `chain.getContextGraphAccessPolicy` RPC and
    *      memoizes the answer here.
    *
