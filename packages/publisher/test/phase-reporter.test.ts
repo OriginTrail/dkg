@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PhaseReporter } from '../src/publisher.js';
+import { PhaseReporter, runWithPhaseCleanup } from '../src/publisher.js';
 
 describe('PhaseReporter', () => {
   it('awaits start, work and end in order with their respective contexts', async () => {
@@ -58,6 +58,16 @@ describe('PhaseReporter', () => {
     });
 
     await expect(reporter.scope('test', async () => 'ok')).rejects.toBe(endFailure);
+  });
+
+  it('does not duplicate one lazy-open rejection observed by work and cleanup', async () => {
+    const openingFailure = new Error('opening failed');
+
+    await expect(runWithPhaseCleanup(
+      'test',
+      async () => { throw openingFailure; },
+      async () => { throw openingFailure; },
+    )).rejects.toBe(openingFailure);
   });
 
   it('does not run work or emit end when start rejects', async () => {

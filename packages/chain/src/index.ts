@@ -66,3 +66,13 @@ export {
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
+export {
+  MIN_RPC_RECEIPT_TIMEOUT_MS,
+  RPC_RECEIPT_TIMEOUT_MS,
+  resolveReceiptTimeoutMs,
+} from './evm-adapter-constants.js';
+export {
+  waitForTransactionReceiptWithFailover,
+  type TransactionReceiptEndpoint,
+  type TransactionReceiptWaitOptions,
+} from './rpc-failover-client.js';

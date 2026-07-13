@@ -80,6 +80,7 @@ type AsyncLiftJobHandler = {
 
 export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private static readonly claimQueues = new Map<string, Promise<void>>();
+  private static readonly jobWriteQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
   private static readonly DEFAULT_RETRY_BACKOFF_BASE_MS = 5_000;
@@ -852,6 +853,18 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     job: LiftJob,
     options: { expectedStatus?: LiftJobState; signal?: AbortSignal } = {},
   ): Promise<'written' | 'conflict' | 'unsupported'> {
+    // The server-side conditional UPDATE is already atomic and must not hold
+    // the process-local fallback lane while invoking the store: an adapter may
+    // synchronously expose a concurrent writer from that boundary. Legacy
+    // delete/insert writes still share the lane with the no-UPDATE fallback.
+    if (options.expectedStatus !== undefined) return this.writeJobUnlocked(job, options);
+    return this.withJobWriteLock(() => this.writeJobUnlocked(job, options));
+  }
+
+  private async writeJobUnlocked(
+    job: LiftJob,
+    options: { expectedStatus?: LiftJobState; signal?: AbortSignal } = {},
+  ): Promise<'written' | 'conflict' | 'unsupported'> {
     if (options.expectedStatus === undefined) {
       await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
       await this.store.insert(serializeJob(job, this.graphUri));
@@ -1197,22 +1210,24 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     signal?: AbortSignal;
   }): Promise<boolean> {
     return this.withClaimLock(async () => {
-      if (params.signal?.aborted) return false;
-      const current = await this.getRequiredJob(params.current.jobId);
-      if (params.signal?.aborted) return false;
-      if (current.status !== params.expectedStatus) {
-        throw new Error(
-          `Async-lift job ${current.jobId} changed from ${params.expectedStatus} before the ${params.status} transition`,
-        );
-      }
-      await this.assertActiveClaimLock(current);
-      if (params.signal?.aborted) return false;
+      return this.withJobWriteLock(async () => {
+        if (params.signal?.aborted) return false;
+        const current = await this.getRequiredJob(params.current.jobId);
+        if (params.signal?.aborted) return false;
+        if (current.status !== params.expectedStatus) {
+          throw new Error(
+            `Async-lift job ${current.jobId} changed from ${params.expectedStatus} before the ${params.status} transition`,
+          );
+        }
+        await this.assertActiveClaimLock(current);
+        if (params.signal?.aborted) return false;
 
-      const next = this.refreshActiveLease(this.mergeJob(current, params.status, params.data));
-      this.assertJobMatchesStatus(next);
-      await this.writeJob(next);
-      await this.syncWalletLockForJob(next);
-      return true;
+        const next = this.refreshActiveLease(this.mergeJob(current, params.status, params.data));
+        this.assertJobMatchesStatus(next);
+        await this.writeJobUnlocked(next);
+        await this.syncWalletLockForJob(next);
+        return true;
+      });
     });
   }
 
@@ -1333,6 +1348,32 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       release();
       if (TripleStoreAsyncLiftPublisher.claimQueues.get(this.graphUri) === next) {
         TripleStoreAsyncLiftPublisher.claimQueues.delete(this.graphUri);
+      }
+    }
+  }
+
+  /**
+   * Process-local persistence lane shared by every job write for this graph.
+   * The no-SPARQL-update compatibility CAS holds it across re-read + replace;
+   * ordinary writers enter through writeJob(), so none can interleave inside
+   * that fallback commit window. Server-side UPDATE remains the cross-process
+   * atomic path when the backend supports it.
+   */
+  private async withJobWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = TripleStoreAsyncLiftPublisher.jobWriteQueues.get(this.graphUri) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    TripleStoreAsyncLiftPublisher.jobWriteQueues.set(this.graphUri, next);
+
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (TripleStoreAsyncLiftPublisher.jobWriteQueues.get(this.graphUri) === next) {
+        TripleStoreAsyncLiftPublisher.jobWriteQueues.delete(this.graphUri);
       }
     }
   }

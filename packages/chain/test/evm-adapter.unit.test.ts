@@ -27,7 +27,7 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
-import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { resolveReceiptTimeoutMs, RPC_READ_STALL_TIMEOUT_MS, RPC_RECEIPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 const TEST_SIGNER_WRITE_LABEL = 'test busy signer lane';
@@ -38,6 +38,16 @@ const TEST_SIGNER_WRITE_LABEL = 'test busy signer lane';
 // failover-log lines are observed against a clean slate (otReviewAgent #1329).
 beforeEach(() => {
   _resetRpcFailoverStatsForTest();
+});
+
+it('defaults an omitted receipt deadline to ten minutes', () => {
+  expect(resolveReceiptTimeoutMs(undefined)).toBe(600_000);
+  expect(RPC_RECEIPT_TIMEOUT_MS).toBe(600_000);
+});
+
+it('rejects an explicitly invalid receipt deadline at the adapter boundary', () => {
+  expect(() => new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 999 })))
+    .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 });
 
 describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
@@ -1395,21 +1405,31 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
   it('classifies receipt wait expiry as a timeout and preserves the transaction hash', async () => {
     vi.useFakeTimers();
     try {
-      const a = new EVMChainAdapter(minimalConfig());
+      const a = new EVMChainAdapter(minimalConfig({
+        receiptTimeoutMs: 1_000,
+        rpcUrls: ['https://backup.example'],
+      }));
       const signedTx = '0xdeadbeef';
       const txHash = '0x' + '66'.repeat(32);
-      const provider = {
+      const primary = {
         name: 'primary',
+        broadcastTransaction: recorder(async () => ({ hash: txHash })),
+        // Hung lower-level receipt attempt: the overall 1s budget must win over
+        // the transport's normal 5s per-attempt cap.
+        getTransactionReceipt: recorder(async () => new Promise<never>(() => {})),
+      };
+      const backup = {
+        name: 'backup',
         broadcastTransaction: recorder(async () => ({ hash: txHash })),
         getTransactionReceipt: recorder(async () => null),
       };
-      const signer = new ethers.Wallet(DEPLOYER_PK, provider as any);
+      const signer = new ethers.Wallet(DEPLOYER_PK, primary as any);
       const populated = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };
       const populateTransaction = recorder(async () => populated);
       const contract = {
         connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
       };
-      (a as any).providers = [provider];
+      (a as any).providers = [primary, backup];
       const signPopulatedTransaction = recorder(async () => ({ signedTx, txHash }));
       (a as any).signPopulatedTransaction = signPopulatedTransaction;
 
@@ -1427,13 +1447,74 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
           return err;
         }
       })();
-      await vi.advanceTimersByTimeAsync(180_001);
+      await vi.advanceTimersByTimeAsync(1_001);
 
       const timeoutErr = await thrown;
       expect(timeoutErr).toMatchObject({ code: 'RPC_TIMEOUT', txHash });
       // The production receipt-wait timeout emitter must throw a recognised
       // chain-transport error (so the daemon maps it to 504), not a bare shape.
       expect(isChainRpcTransportError(timeoutErr)).toBe(true);
+      expect(populateTransaction.calls).toHaveLength(1);
+      expect(signPopulatedTransaction.calls).toHaveLength(1);
+      expect(primary.broadcastTransaction.calls).toContainEqual([signedTx]);
+      expect(primary.getTransactionReceipt.calls).toHaveLength(1);
+      // The first hung lookup consumes the shared operation budget; the
+      // transport pass must stop instead of continuing in the background.
+      expect(backup.getTransactionReceipt.calls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('enforces the ten-minute receipt deadline when adapter config omits it', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signedTx = '0xdeadbeef';
+      const txHash = '0x' + '67'.repeat(32);
+      const provider = {
+        name: 'primary',
+        broadcastTransaction: recorder(async () => ({ hash: txHash })),
+        getTransactionReceipt: recorder(async () => null),
+      };
+      const signer = new ethers.Wallet(DEPLOYER_PK, provider as any);
+      const populated = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };
+      const populateTransaction = recorder(async () => populated);
+      const contract = {
+        connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
+      };
+      (a as any).providers = [provider];
+      const signPopulatedTransaction = recorder(async () => ({ signedTx, txHash }));
+      (a as any).signPopulatedTransaction = signPopulatedTransaction;
+
+      const outcome = (a as any).sendContractTransaction(
+        contract,
+        'createContextGraph',
+        [],
+        signer,
+        'create on-chain context graph',
+      ).then(
+        (value: unknown) => ({ status: 'fulfilled' as const, value }),
+        (reason: unknown) => ({ status: 'rejected' as const, reason }),
+      );
+      let settled = false;
+      void outcome.finally(() => { settled = true; });
+
+      // Pin the adapter's observable boundary without consulting the production
+      // timeout constant: the old three-minute default must remain pending.
+      await vi.advanceTimersByTimeAsync(180_001);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(419_998);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+
+      const result = await outcome;
+      expect(result).toMatchObject({
+        status: 'rejected',
+        reason: { code: 'RPC_TIMEOUT', txHash },
+      });
+      expect(result.status === 'rejected' ? (result.reason as Error).message : '')
+        .toContain('after 600000ms');
       expect(populateTransaction.calls).toHaveLength(1);
       expect(signPopulatedTransaction.calls).toHaveLength(1);
       expect(provider.broadcastTransaction.calls).toContainEqual([signedTx]);

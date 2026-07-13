@@ -219,6 +219,84 @@ describe('KA async VM publish broadcast progress', () => {
     expect(committed?.broadcast).toBeUndefined();
   });
 
+  it('serializes the no-update fallback with an ordinary concurrent status writer', async () => {
+    const txHash = `0x${'d1'.repeat(32)}` as `0x${string}`;
+    const storeWithoutUpdate = new Proxy(store, {
+      get(target, property) {
+        if (property === 'update') return undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const publisher = createPublisher({}, storeWithoutUpdate);
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+
+    let releaseWriteLane!: () => void;
+    let writeLaneEntered!: () => void;
+    const writeLaneGate = new Promise<void>((resolve) => { releaseWriteLane = resolve; });
+    const didEnterWriteLane = new Promise<void>((resolve) => { writeLaneEntered = resolve; });
+    let failureReachedWriter!: () => void;
+    const failureDidReachWriter = new Promise<void>((resolve) => { failureReachedWriter = resolve; });
+    const internals = publisher as unknown as {
+      withJobWriteLock<T>(fn: () => Promise<T>): Promise<T>;
+      writeJob(job: { status: string }, options?: unknown): Promise<unknown>;
+      recordKnowledgeAssetVmPublishBroadcastProgress(params: {
+        jobId: string;
+        walletId: string;
+        txHash: `0x${string}`;
+        merkleRoot: `0x${string}`;
+      }): Promise<boolean>;
+    };
+    const originalWriteJob = internals.writeJob.bind(publisher);
+    internals.writeJob = async (job, options) => {
+      if (job.status === 'failed') failureReachedWriter();
+      return originalWriteJob(job, options);
+    };
+    const blocker = internals.withJobWriteLock(async () => {
+      writeLaneEntered();
+      await writeLaneGate;
+    });
+    await didEnterWriteLane;
+
+    const concurrentFailure = publisher.update(jobId, 'failed', {
+      failure: createLiftJobFailureMetadata({
+        failedFromState: 'validated',
+        code: 'canonicalization_failed',
+        message: 'concurrent no-update failure',
+        errorPayloadRef: `urn:dkg:publisher:error:${jobId}`,
+      }),
+    } as never);
+    await failureDidReachWriter;
+    const staleBroadcast = internals.recordKnowledgeAssetVmPublishBroadcastProgress({
+      jobId,
+      walletId: 'wallet-1',
+      txHash,
+      merkleRoot: `0x${'12'.repeat(32)}`,
+    });
+
+    releaseWriteLane();
+    await blocker;
+    await concurrentFailure;
+    await expect(staleBroadcast).rejects.toThrow(
+      'changed from validated before the broadcast transition',
+    );
+    const committed = await publisher.getStatus(jobId);
+    expect(committed?.status).toBe('failed');
+    expect(committed?.failure?.message).toBe('concurrent no-update failure');
+    expect(committed?.broadcast).toBeUndefined();
+  });
+
   it('does not persist staged tx progress when a later write-ahead listener times out', async () => {
     const txHash = `0x${'de'.repeat(32)}` as `0x${string}`;
     let jobId = '';

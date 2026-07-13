@@ -37,6 +37,14 @@ export class SignerWriteLaneAdmissionTimeoutError extends Error {
   }
 }
 
+export interface SignerWriteLaneQueuedEvent {
+  readonly signerAddress: string;
+  readonly label: string;
+  readonly queueDepth: number;
+  readonly waitMs: number;
+  readonly deadlineAt: number;
+}
+
 /**
  * Domain facade for nonce-critical EVM writes.
  *
@@ -47,7 +55,10 @@ export class SignerWriteLaneAdmissionTimeoutError extends Error {
 export class SignerWriteLane {
   private readonly serializer = new KeyedSerializer();
 
-  constructor(private readonly admissionBudgetMs: number) {
+  constructor(
+    private readonly admissionBudgetMs: number,
+    private readonly onQueued?: (event: SignerWriteLaneQueuedEvent) => void,
+  ) {
     if (!Number.isFinite(admissionBudgetMs) || admissionBudgetMs <= 0) {
       throw new Error('Signer write lane must define a positive admission budget');
     }
@@ -69,6 +80,13 @@ export class SignerWriteLane {
           queueDepth,
           label,
         ),
+        onQueued: (waitMs, queueDepth) => this.onQueued?.({
+          signerAddress,
+          label,
+          queueDepth,
+          waitMs,
+          deadlineAt: Date.now() + waitMs,
+        }),
       },
       fn,
     );

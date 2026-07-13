@@ -19,6 +19,10 @@ import {
   STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
+import {
+  resolveReceiptTimeoutMs,
+  type ApprovalPolicy,
+} from '@origintrail-official/dkg-chain';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -193,6 +197,7 @@ export interface NetworkConfig {
     hubAddress: string;
     tokenAddress?: string;
     chainId: string;
+    receiptTimeoutMs?: number;
     /**
      * ContextGraphNameRegistry discovery scan `eth_getLogs` block-window.
      * Defaults to the EVM adapter's 2,000-block common provider cap.
@@ -323,6 +328,8 @@ export interface ChainConfig {
    */
   minPublisherNativeWei?: bigint | string | number;
   minPublisherTracWei?: bigint | string | number;
+  /** Overall submitted-transaction receipt deadline (default 10 minutes). */
+  receiptTimeoutMs?: number;
 }
 
 export type ResolvedChainConfig = Partial<
@@ -1007,7 +1014,7 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
  */
 export function resolveApprovalPolicy(
   policy: ApprovalPolicyConfig | undefined,
-): { mode: ApprovalPolicyMode; targetAllowance?: bigint; refillBelowFraction?: number } | undefined {
+): ApprovalPolicy | undefined {
   if (!policy) return undefined;
   const mode = policy.mode ?? 'per-publish';
   if (mode !== 'per-publish' && mode !== 'replenishing' && mode !== 'unlimited') {
@@ -1456,6 +1463,16 @@ export function resolveChainConfig(
   if (approvalPolicy !== undefined) merged.approvalPolicy = approvalPolicy;
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
+  // Presence matters here: persisted `null` is an explicit invalid operator
+  // value and must not silently fall through to the network/default timeout.
+  const operatorHasReceiptTimeout = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'receiptTimeoutMs');
+  const receiptTimeoutMs: unknown = operatorHasReceiptTimeout
+    ? cfg.receiptTimeoutMs
+    : net?.receiptTimeoutMs;
+  if (operatorHasReceiptTimeout || receiptTimeoutMs !== undefined) {
+    merged.receiptTimeoutMs = resolveReceiptTimeoutMs(receiptTimeoutMs);
+  }
   // Funding floors: local config wins, else the network overlay's per-chain
   // default (both default 0n downstream in the adapter when unset). Persisted
   // values arrive as string/number — normalize to bigint here, failing fast on

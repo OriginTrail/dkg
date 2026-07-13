@@ -68,7 +68,6 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
-  type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -128,7 +127,6 @@ import {
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
   resolveNetworkConfigName,
-  resolveApprovalPolicy,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
   repoDir,
@@ -145,6 +143,7 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
+import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
@@ -1342,6 +1341,7 @@ export async function runDaemonInner(
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
   const chainBase = resolveChainConfig(config, network);
+  const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -1593,21 +1593,12 @@ export async function runDaemonInner(
     // Only forward chain to the agent when both required fields resolved.
     // resolveChainConfig() may return a partial block if neither config nor
     // network supplies one of them; the agent expects rpcUrl + hubAddress.
-    chainConfig: chainBase?.rpcUrl && chainBase?.hubAddress ? {
-      rpcUrl: chainBase.rpcUrl,
-      rpcUrls: chainBase.rpcUrls,
-      walletRpcUrls: chainBase.walletRpcUrls,
-      hubAddress: chainBase.hubAddress,
-      tokenAddress: chainBase.tokenAddress,
+    chainConfig: runtimeEvmChainConfig ? {
+      ...runtimeEvmChainConfig,
       ...(opWallets.adminWallet
         ? { adminPrivateKey: opWallets.adminWallet.privateKey }
         : {}),
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
-      chainId: chainBase.chainId,
-      approvalPolicy: resolveApprovalPolicy(chainBase.approvalPolicy) as ApprovalPolicy | undefined,
-      cgRegistryScanPageSize: chainBase.cgRegistryScanPageSize,
-      minPublisherNativeWei: chainBase.minPublisherNativeWei,
-      minPublisherTracWei: chainBase.minPublisherTracWei,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
@@ -1937,15 +1928,7 @@ export async function runDaemonInner(
     resetNatStatus();
   }
 
-  const publisherChainBase = chainBase?.rpcUrl && chainBase?.hubAddress
-    ? {
-        rpcUrl: chainBase.rpcUrl,
-        rpcUrls: chainBase.rpcUrls,
-        hubAddress: chainBase.hubAddress,
-        tokenAddress: chainBase.tokenAddress,
-        chainId: chainBase.chainId,
-      }
-    : undefined;
+  const publisherChainBase = runtimeEvmChainConfig;
   const startPostApiPublishing = () => {
     const profileTimer = setTimeout(() => {
       void agent.publishProfile().catch((err: any) => {

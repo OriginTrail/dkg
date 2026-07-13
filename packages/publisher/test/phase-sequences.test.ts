@@ -420,7 +420,7 @@ describe('Phase-sequence contracts', () => {
   );
 
   it(
-    'publish: chain:writeahead pairs start with end when adapter calls onBroadcast THEN throws ' +
+    'publish: concurrent onBroadcast calls open one chain:writeahead scope and close it on throw ' +
       '(P-1 iter-2 regression — recoverable "tx on wire / no receipt" window)',
     async () => {
       const store = new OxigraphStore();
@@ -434,7 +434,7 @@ describe('Phase-sequence contracts', () => {
 
       (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => Promise<void> | void }) => Promise<never> }).createKnowledgeAssets =
         async (params) => {
-          await params.onBroadcast?.();
+          await Promise.all([params.onBroadcast?.(), params.onBroadcast?.()]);
           throw new Error('simulated publish broadcast failure');
         };
 
@@ -657,7 +657,7 @@ describe('Phase-sequence contracts', () => {
     },
   );
 
-  it('update propagates an async chain:writeahead:end listener failure', async () => {
+  it('update preserves adapter and async chain:writeahead:end listener failures', async () => {
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
@@ -670,11 +670,13 @@ describe('Phase-sequence contracts', () => {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"Before close failure"')],
     });
+    const adapterFailure = new Error('simulated post-broadcast update failure');
+    const closeFailure = new Error('durable write-ahead close failed');
     (chain as unknown as {
       updateKnowledgeCollectionV10: (params: { onBroadcast?: () => Promise<void> | void }) => Promise<never>;
     }).updateKnowledgeCollectionV10 = async (params) => {
       await params.onBroadcast?.();
-      throw new Error('simulated post-broadcast update failure');
+      throw adapterFailure;
     };
 
     await expect(publisher.update(original.kaId, {
@@ -683,10 +685,13 @@ describe('Phase-sequence contracts', () => {
       onPhase: async (phase, status) => {
         if (phase === 'chain:writeahead' && status === 'end') {
           await Promise.resolve();
-          throw new Error('durable write-ahead close failed');
+          throw closeFailure;
         }
       },
-    })).rejects.toThrow('durable write-ahead close failed');
+    })).rejects.toMatchObject({
+      name: 'AggregateError',
+      errors: [adapterFailure, closeFailure],
+    });
   });
 
   it(

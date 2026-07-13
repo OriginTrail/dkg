@@ -49,6 +49,44 @@ export interface PhaseScope {
 }
 
 /**
+ * Settle phase-owned work and its cleanup without losing either failure.
+ * This is shared by ordinary reporter scopes and callbacks that open their
+ * phase lazily from inside an adapter operation.
+ */
+export async function runWithPhaseCleanup<T>(
+  phase: string,
+  work: () => Promise<T>,
+  cleanup: () => Promise<void>,
+): Promise<T> {
+  let value!: T;
+  let workFailed = false;
+  let workError: unknown;
+  try {
+    value = await work();
+  } catch (error) {
+    workFailed = true;
+    workError = error;
+  }
+  try {
+    await cleanup();
+  } catch (cleanupError) {
+    if (workFailed) {
+      // A lazy opener can be awaited by both the adapter and cleanup path.
+      // If both observed the exact same rejection, preserve it once rather
+      // than manufacturing an AggregateError with duplicate entries.
+      if (cleanupError === workError) throw workError;
+      throw new AggregateError(
+        [workError, cleanupError],
+        `Phase ${phase} work and end callback both failed`,
+      );
+    }
+    throw cleanupError;
+  }
+  if (workFailed) throw workError;
+  return value;
+}
+
+/**
  * Awaited phase lifecycle boundary with closeable and scoped orchestration.
  *
  * `open()` never returns a scope when the start listener rejects, so an end is
@@ -84,28 +122,7 @@ export class PhaseReporter {
     options: PhaseScopeOptions = {},
   ): Promise<T> {
     const scope = await this.open(phase, options);
-    let value!: T;
-    let workFailed = false;
-    let workError: unknown;
-    try {
-      value = await work();
-    } catch (error) {
-      workFailed = true;
-      workError = error;
-    }
-    try {
-      await scope.close();
-    } catch (closeError) {
-      if (workFailed) {
-        throw new AggregateError(
-          [workError, closeError],
-          `Phase ${phase} work and end callback both failed`,
-        );
-      }
-      throw closeError;
-    }
-    if (workFailed) throw workError;
-    return value;
+    return runWithPhaseCleanup(phase, work, scope.close);
   }
 }
 

@@ -9,7 +9,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, invokePhaseCallback, PhaseReporter, type PhaseScope, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type PhaseCallbackContext, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, invokePhaseCallback, PhaseReporter, runWithPhaseCleanup, type PhaseScope, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type PhaseCallbackContext, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
@@ -138,25 +138,40 @@ function createWriteAheadPhaseEmitter(onPhase?: PhaseCallback): {
   close: () => Promise<void>;
 } {
   let opened: PhaseScope | undefined;
+  let opening: Promise<void> | undefined;
+  let closePromise: Promise<void> | undefined;
+  let closed = false;
   const phases = new PhaseReporter((phase, status, context) =>
     emitCancellationAwarePhase(onPhase, phase, status, context));
   const emitLegacyTxSigned = createLegacyTxSignedPhaseAdapter(phases);
 
   return {
-    onBroadcast: async (info) => {
-      if (opened) return;
+    onBroadcast: (info) => {
+      if (closed || opened) return Promise.resolve();
+      if (opening) return opening;
       const context = { signal: info?.signal, txHash: info?.txHash };
-      await emitLegacyTxSigned(context);
-      const scope = await phases.open('chain:writeahead', { startContext: context });
-      // A timed-out listener fails one of the checked awaits above, so close()
-      // never emits an end for a window that was not successfully opened.
-      opened = scope;
+      let trackedOpening!: Promise<void>;
+      trackedOpening = (async () => {
+        await emitLegacyTxSigned(context);
+        const scope = await phases.open('chain:writeahead', { startContext: context });
+        // A timed-out listener fails one of the checked awaits above, so close()
+        // never emits an end for a window that was not successfully opened.
+        opened = scope;
+      })().finally(() => {
+        if (opening === trackedOpening) opening = undefined;
+      });
+      opening = trackedOpening;
+      return trackedOpening;
     },
-    close: async () => {
-      if (!opened) return;
-      const scope = opened;
-      opened = undefined;
-      await scope.close();
+    close: () => {
+      closePromise ??= (async () => {
+        closed = true;
+        await opening;
+        const scope = opened;
+        opened = undefined;
+        await scope?.close();
+      })();
+      return closePromise;
     },
   };
 }
@@ -3111,6 +3126,7 @@ export class DKGPublisher implements Publisher {
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
         }
+        const collectedV10ACKs = v10ACKs;
         if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) {
           throw new Error(
             'Chain adapter is not V10-ready (isV10Ready() returned false or is missing). ' +
@@ -3214,7 +3230,7 @@ export class DKGPublisher implements Publisher {
             },
           });
         }
-        try {
+        onChainResult = await runWithPhaseCleanup('chain:writeahead', async () => {
           // OT-RFC-49 / WS-D — handshake hardening. When the publisher ran the
           // curated catalog path, the chain submit MUST carry the same
           // `(catalogRoot, catalogLeafCount)` pair that was signed into the ACK
@@ -3246,11 +3262,11 @@ export class DKGPublisher implements Publisher {
               kaId: reservedKaId?.toString(),
               byteSize: effectiveByteSize.toString(),
               tokenAmount: tokenAmount.toString(),
-              ackCount: v10ACKs.length,
+              ackCount: collectedV10ACKs.length,
               merkleLeafCount: kcMerkleLeafCount,
             },
           });
-          onChainResult = await this.chain.createKnowledgeAssets!({
+          return this.chain.createKnowledgeAssets!({
             publishOperationId,
             contextGraphId: v10CgId,
             publisherAddress: publisherSigner.address,
@@ -3282,16 +3298,14 @@ export class DKGPublisher implements Publisher {
               },
               schemeVersion: effectiveSchemeVersion,
             },
-            ackSignatures: v10ACKs.map(ack => ({
+            ackSignatures: collectedV10ACKs.map(ack => ({
               identityId: ack.nodeIdentityId,
               r: ack.signatureR,
               vs: ack.signatureVS,
             })),
             onBroadcast: writeAhead.onBroadcast,
           });
-        } finally {
-          await writeAhead.close();
-        }
+        }, writeAhead.close);
 
         onChainResult.tokenAmount = tokenAmount;
 
@@ -4192,10 +4206,10 @@ export class DKGPublisher implements Publisher {
       });
     }
 
-    try {
+    txResult = await runWithPhaseCleanup('chain:writeahead', async () => {
       if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
         try {
-          txResult = await this.chain.updateKnowledgeCollectionV10({
+          return await this.chain.updateKnowledgeCollectionV10({
             kaId,
             newMerkleRoot: kcMerkleRoot,
             // THE BYTESIZE TRAP (§3): the tx byteSize MUST equal the value signed
@@ -4253,7 +4267,7 @@ export class DKGPublisher implements Publisher {
               status: 'failed',
               publicQuads: allSkolemizedQuads,
             };
-            txResult = { success: false, hash: '' };
+            return { success: false, hash: '' };
           } else {
             // V9 legacy update fallback archived (issue 0004).
             throw v10Err;
@@ -4262,9 +4276,7 @@ export class DKGPublisher implements Publisher {
       } else {
         throw new Error('Chain adapter does not support V10 updates (updateKnowledgeCollectionV10 missing)');
       }
-    } finally {
-      await writeAhead.close();
-    }
+    }, writeAhead.close);
 
     if (earlyReturn) {
       await invokePhaseCallback(onPhase, 'chain:submit', 'end');

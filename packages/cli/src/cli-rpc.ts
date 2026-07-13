@@ -7,14 +7,13 @@ import {
   noteRpcExhaustion,
   ChainRpcTransportError,
   createRpcTimeoutError,
+  resolveReceiptTimeoutMs,
+  waitForTransactionReceiptWithFailover,
 } from '@origintrail-official/dkg-chain';
-import { cliSleep, cliErrorMessage } from './cli-helpers.js';
+import { cliErrorMessage } from './cli-helpers.js';
 
 const CLI_RPC_READ_STALL_TIMEOUT_MS = 4_000;
 const CLI_RPC_BROADCAST_TIMEOUT_MS = 10_000;
-const CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS = 5_000;
-const CLI_RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
-const CLI_RPC_RECEIPT_TIMEOUT_MS = 180_000;
 
 function cliWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -44,18 +43,35 @@ function isCliRetryableRpcError(err: unknown): boolean {
   return isRetryableRpcError(err);
 }
 
-function createCliEvmProviders(rpcUrl: string, rpcUrls?: string[]): {
-  urls: string[];
-  providers: ethers.JsonRpcProvider[];
+interface CliEvmRpcEndpoint {
+  rpcUrl: string;
+  provider: ethers.JsonRpcProvider;
+}
+
+interface CliEvmWriteContext {
+  endpoints: readonly CliEvmRpcEndpoint[];
+  /** Resolved once with the endpoint set so direct writes cannot drop it. */
+  receiptTimeoutMs: number;
+}
+
+interface CliEvmRpcContext extends CliEvmWriteContext {
   readProvider: ethers.JsonRpcProvider | ethers.FallbackProvider;
-} {
-  const urls = resolveRpcUrls(rpcUrl, rpcUrls);
-  const providers = urls.map((url) => new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 }));
-  const readProvider = providers.length === 1
-    ? providers[0]
+}
+
+function createCliEvmProviders(
+  rpcUrl: string,
+  rpcUrls?: string[],
+  receiptTimeoutMs?: number,
+): CliEvmRpcContext {
+  const endpoints = resolveRpcUrls(rpcUrl, rpcUrls).map((resolvedRpcUrl) => ({
+    rpcUrl: resolvedRpcUrl,
+    provider: new ethers.JsonRpcProvider(resolvedRpcUrl, undefined, { cacheTimeout: -1 }),
+  }));
+  const readProvider = endpoints.length === 1
+    ? endpoints[0].provider
     : new ethers.FallbackProvider(
-      providers.map((provider, index) => ({
-        provider,
+      endpoints.map((endpoint, index) => ({
+        provider: endpoint.provider,
         priority: index + 1,
         stallTimeout: CLI_RPC_READ_STALL_TIMEOUT_MS,
         weight: 1,
@@ -63,63 +79,29 @@ function createCliEvmProviders(rpcUrl: string, rpcUrls?: string[]): {
       undefined,
       { quorum: 1 },
     );
-  return { urls, providers, readProvider };
-}
-
-async function getCliReceiptWithFailover(
-  providers: ethers.JsonRpcProvider[],
-  txHash: string,
-  urls?: string[],
-): Promise<ethers.TransactionReceipt | null> {
-  let lastRetryable: unknown;
-  let sawNonErrorResponse = false;
-  for (let i = 0; i < providers.length; i += 1) {
-    try {
-      const receipt = await cliWithTimeout(
-        providers[i].getTransactionReceipt(txHash),
-        CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-        `receipt lookup via RPC #${i + 1}`,
-      );
-      sawNonErrorResponse = true;
-      if (receipt) return receipt;
-    } catch (err) {
-      if (!isCliRetryableRpcError(err)) throw err;
-      lastRetryable = err;
-      if (urls && i < providers.length - 1) {
-        noteRpcFailover('cli receipt lookup', urls[i], err, urls[i + 1]);
-      }
-    }
-  }
-  if (lastRetryable && !sawNonErrorResponse) {
-    if (urls) noteRpcExhaustion('cli receipt lookup', urls);
-    throw new ChainRpcTransportError(
-      'RPC_RECEIPT_LOOKUP_FAILED',
-      `Receipt lookup for transaction ${txHash} failed on all configured RPC endpoints: ${cliErrorMessage(lastRetryable)}`,
-      { cause: lastRetryable, txHash },
-    );
-  }
-  return null;
-}
-
-function assertCliSuccessfulReceipt(receipt: ethers.TransactionReceipt, txHash: string): void {
-  if (receipt.status !== 0) return;
-  const err = new Error(`Transaction ${txHash} was mined but reverted (status=0)`);
-  (err as any).code = 'CALL_EXCEPTION';
-  (err as any).receipt = receipt;
-  throw err;
+  return {
+    endpoints,
+    readProvider,
+    receiptTimeoutMs: resolveReceiptTimeoutMs(receiptTimeoutMs),
+  };
 }
 
 async function sendCliRawTransactionWithFailover(
-  providers: ethers.JsonRpcProvider[],
+  context: CliEvmWriteContext,
   signedTx: string,
   txHash: string,
-  urls?: string[],
 ): Promise<ethers.TransactionReceipt> {
+  const { endpoints } = context;
+  // Validate every caller-supplied option before broadcasting. A configuration
+  // error must never report command failure after the signed transaction has
+  // already reached the chain.
+  const receiptTimeoutMs = resolveReceiptTimeoutMs(context.receiptTimeoutMs);
   let lastError: unknown;
-  for (let i = 0; i < providers.length; i += 1) {
+  for (let i = 0; i < endpoints.length; i += 1) {
+    const endpoint = endpoints[i];
     try {
       await cliWithTimeout(
-        providers[i].broadcastTransaction(signedTx),
+        endpoint.provider.broadcastTransaction(signedTx),
         CLI_RPC_BROADCAST_TIMEOUT_MS,
         `broadcast via RPC #${i + 1}`,
       );
@@ -132,47 +114,37 @@ async function sendCliRawTransactionWithFailover(
       }
       if (!isCliRetryableRpcError(err)) throw err;
       lastError = err;
-      if (urls && i < providers.length - 1) {
-        noteRpcFailover('cli broadcast', urls[i], err, urls[i + 1]);
+      const nextEndpoint = endpoints[i + 1];
+      if (nextEndpoint) {
+        noteRpcFailover('cli broadcast', endpoint.rpcUrl, err, nextEndpoint.rpcUrl);
       }
     }
   }
   if (lastError) {
-    if (urls) noteRpcExhaustion('cli broadcast', urls);
+    const rpcUrls = endpoints.map(endpoint => endpoint.rpcUrl);
+    noteRpcExhaustion('cli broadcast', rpcUrls);
     // The typed transport error mirrors the chain adapter so CLI callers (and
     // any daemon-route mapping over CLI flows) can distinguish a transient
     // all-endpoints-exhausted failure from a deterministic revert.
     throw new ChainRpcTransportError(
       'RPC_ENDPOINTS_EXHAUSTED',
       `Broadcast failed on all configured RPC endpoints: ${cliErrorMessage(lastError)}`,
-      { cause: lastError, ...(urls ? { rpcUrls: urls } : {}) },
+      { cause: lastError, rpcUrls },
     );
   }
 
-  const deadline = Date.now() + CLI_RPC_RECEIPT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const receipt = await getCliReceiptWithFailover(providers, txHash, urls);
-    if (receipt) {
-      assertCliSuccessfulReceipt(receipt, txHash);
-      return receipt;
-    }
-    await cliSleep(CLI_RPC_RECEIPT_POLL_INTERVAL_MS);
-  }
-  throw new Error(`Transaction ${txHash} was broadcast but no receipt was found within ${CLI_RPC_RECEIPT_TIMEOUT_MS}ms`);
+  return waitForTransactionReceiptWithFailover(endpoints, txHash, {
+    receiptTimeoutMs,
+    logLabel: 'cli',
+  });
 }
 
 export {
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
   cliWithTimeout,
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
 };
-
