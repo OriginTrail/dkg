@@ -3722,17 +3722,27 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(caught.cause).toBeDefined(); // original error preserved
   });
 
-  it('kill-switch DKG_DISABLE_FUNDED_WALLET_SELECTION reverts to balance-blind round-robin', async () => {
+  it('kill-switch keeps legacy routing balance-blind but cannot bypass strict publish planning', async () => {
     const prev = process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION;
     process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION = '1';
     try {
       // Kill-switch is read in the constructor, so it must be set BEFORE the
       // adapter is built (inside the helper).
-      const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
-      nativeByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletA.address), 0n);
+      const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), 0n);
+      tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
       const chosen = await (a as any).nextAuthorizedSigner(CG);
       expect(chosen.address).toBe(walletA.address); // round-robin head, balance-blind
       expect((a as any).provider.getBalance.calls.length).toBe(0); // no balance reads
+
+      (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+      await expect(a.resolvePublisherPublishPlan({
+        contextGraphId: CG,
+        effectiveByteSize: 100n,
+        explicitPublishEpochs: 12,
+        defaultPublishEpochs: 12,
+      })).rejects.toMatchObject({ code: 'NO_FUNDED_PUBLISHER_WALLET' });
+      expect((a as any).provider.getBalance.calls.length).toBeGreaterThan(0);
     } finally {
       if (prev === undefined) delete process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION;
       else process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION = prev;
@@ -3870,6 +3880,109 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(caught.code).toBe('NO_FUNDED_PUBLISHER_WALLET');
   });
 
+  it('classifies the V10 TooLowBalance custom error as insufficient funds', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const error: any = new Error('execution reverted: TooLowBalance(0xabc, 1000, 2000)');
+      error.code = 'CALL_EXCEPTION';
+      throw error;
+    });
+    await expect(a.createKnowledgeAssets(makeV10PublishParams())).rejects.toMatchObject({
+      code: 'NO_FUNDED_PUBLISHER_WALLET',
+    });
+  });
+
+  it('fails a priced publisher reservation before transaction work when no wallet can cover it', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 1n); tracByAddr.set(lc(walletB.address), 2n);
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 2,
+      defaultPublishEpochs: 12,
+    })).rejects.toMatchObject({
+      code: 'NO_FUNDED_PUBLISHER_WALLET',
+    });
+  });
+
+  it('force-refreshes cached balances before a terminal no-funded-wallet decision', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    // Warm the advisory cache with the wallet still empty.
+    await (a as any).nextAuthorizedSigner(CG);
+    tracByAddr.set(lc(walletA.address), 2_000n);
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 2,
+      defaultPublishEpochs: 12,
+    })).resolves.toMatchObject({ publisherAddress: walletA.address, publishEpochs: 2, tokenAmount: 1_000n });
+  });
+
+  it('selects a later signer inside one exact adapter-owned publish plan', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 1n); tracByAddr.set(lc(walletB.address), 2_000n);
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    const plan = await a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 2,
+      defaultPublishEpochs: 12,
+    });
+    expect(plan).toEqual({ publisherAddress: walletB.address, publishEpochs: 2, tokenAmount: 1_000n });
+    expect((plan as { signer?: unknown }).signer).toBeUndefined();
+  });
+
+  it('never rotates away from an explicitly pinned publisher during strict reservation', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 2_000n);
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 2,
+      defaultPublishEpochs: 12,
+      publisherAddress: walletA.address,
+    })).rejects.toMatchObject({ code: 'NO_FUNDED_PUBLISHER_WALLET' });
+
+    tracByAddr.set(lc(walletA.address), 2_000n);
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 2,
+      defaultPublishEpochs: 12,
+      publisherAddress: walletA.address,
+    })).resolves.toMatchObject({ publisherAddress: walletA.address, publishEpochs: 2, tokenAmount: 1_000n });
+  });
+
+  it('rejects a funded but unauthorized explicitly pinned publisher', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 2_000n); tracByAddr.set(lc(walletB.address), 2_000n);
+    (a as any).contracts.contextGraphs.isAuthorizedPublisher = recorder(async (_cg: bigint, addr: string) =>
+      addr.toLowerCase() !== walletA.address.toLowerCase());
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 2,
+      defaultPublishEpochs: 12,
+      publisherAddress: walletA.address,
+    })).rejects.toThrow(/publisherAddress .* is not authorized.*context graph/i);
+  });
+
   it('expires the funding cache past the TTL: a newly funded wallet is re-read and selected', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     // walletA (head) unfunded (0 TRAC); walletB funded → B chosen first.
@@ -3969,24 +4082,158 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     // walletB: own-TRAC covers the cost. createKnowledgeAssets must price the PCA
     // coverage check at floorPublishTokenAmount(tokenAmount) (NOT the 1-wei probe),
     // so walletA is rejected and walletB is chosen.
+    const params = makeV10PublishParams();
+    params.tokenAmount = 1000n;
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
     (a as any).contracts.dkgPublishingConvictionNFT = {};
     (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
       addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => params.epochs);
     const coverCalls: bigint[] = [];
     (a as any).convictionAccountCanCover = recorder(async (_id: bigint, cost: bigint) => {
       coverCalls.push(cost);
       return cost <= 1n; // covers the 1-wei liveness probe only, NOT a real publish cost
     });
-    const params = makeV10PublishParams();
-    params.tokenAmount = 1000n;
     let chosenSigner: any;
     (a as any).signPopulatedTransaction = recorder(async (signer: any) => { chosenSigner = signer; throw new Error('SENTINEL'); });
     await expect(a.createKnowledgeAssets(params)).rejects.toThrow('SENTINEL');
     expect(chosenSigner.address).toBe(walletB.address); // PCA head can't cover the REAL cost → skipped
     expect(coverCalls.length).toBe(1); // only walletA's PCA was probed (walletB fundable via own-TRAC)
     expect(coverCalls[0] > 1n).toBe(true); // priced at the REAL publish cost, not the 1-wei liveness probe
+  });
+
+  it('does not count PCA coverage when its lock differs from the submitted publish lifetime', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
+    (a as any).convictionAccountCanCover = recorder(async () => true);
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 5,
+      defaultPublishEpochs: 12,
+    })).resolves.toMatchObject({ publisherAddress: walletB.address, publishEpochs: 5, tokenAmount: 1_000n });
+  });
+
+  it('applies exact PCA lock matching on the public createKnowledgeAssets path', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
+    (a as any).convictionAccountCanCover = recorder(async () => true);
+
+    const params = makeV10PublishParams();
+    params.epochs = 5;
+    params.tokenAmount = 1_000n;
+    let chosenSigner: ethers.Wallet | undefined;
+    (a as any).signPopulatedTransaction = recorder(async (signer: ethers.Wallet) => {
+      chosenSigner = signer;
+      throw new Error('SENTINEL');
+    });
+
+    await expect(a.createKnowledgeAssets(params)).rejects.toThrow('SENTINEL');
+    expect(chosenSigner?.address).toBe(walletB.address);
+  });
+
+  it('discovers a shorter-lock PCA from its own quote without probing the default lifetime first', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } =
+      makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE);
+    nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n);
+    tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (address: string) =>
+      address.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 6);
+    const coverageCosts: bigint[] = [];
+    (a as any).convictionAccountCanCover = recorder(async (_accountId: bigint, cost: bigint) => {
+      coverageCosts.push(cost);
+      return cost <= 6n;
+    });
+    const quotedEpochs: number[] = [];
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async (_bytes: bigint, epochs: number) => {
+      quotedEpochs.push(epochs);
+      return BigInt(epochs);
+    });
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      defaultPublishEpochs: 12,
+    })).resolves.toMatchObject({
+      publisherAddress: walletA.address,
+      publishEpochs: 6,
+      tokenAmount: 6n,
+    });
+    expect(coverageCosts.length).toBeGreaterThan(0);
+    expect(coverageCosts.every((cost) => cost === 6n)).toBe(true);
+    expect(quotedEpochs).toContain(6);
+  });
+
+  it('resolves weak-candidate retry and a non-default PCA lock inside one publish-plan operation', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletA.address) ? 41n : 42n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async (accountId: bigint) =>
+      accountId === 41n ? 12 : 24);
+    const coverCalls: Array<{ accountId: bigint; cost: bigint }> = [];
+    (a as any).convictionAccountCanCover = recorder(async (accountId: bigint, cost: bigint) => {
+      coverCalls.push({ accountId, cost });
+      return accountId === 42n && cost <= 24n;
+    });
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async (_bytes: bigint, epochs: number) => BigInt(epochs));
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      defaultPublishEpochs: 12,
+    })).resolves.toMatchObject({ publisherAddress: walletB.address, publishEpochs: 24, tokenAmount: 24n });
+    expect(coverCalls.some((call) => call.accountId === 41n && call.cost === 12n)).toBe(true);
+    expect(coverCalls.some((call) => call.accountId === 42n && call.cost === 24n)).toBe(true);
+  });
+
+  it('retries a transient PCA quote failure for the same direct-spend lifetime', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } =
+      makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 2_000n); tracByAddr.set(lc(walletB.address), 2_000n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 12);
+    (a as any).convictionAccountCanCover = recorder(async () => true);
+    let quoteCalls = 0;
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async (_bytes: bigint, epochs: number) => {
+      quoteCalls += 1;
+      if (quoteCalls === 1) throw new Error('transient AskStorage failure');
+      expect(epochs).toBe(12);
+      return 1_000n;
+    });
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      defaultPublishEpochs: 12,
+    })).resolves.toMatchObject({
+      publisherAddress: walletA.address,
+      publishEpochs: 12,
+      tokenAmount: 1_000n,
+    });
+    expect(quoteCalls).toBe(2);
   });
 
   // ── dispatcher Phase 3: the generalized selectSigner seam (RS/relay/update
@@ -4007,7 +4254,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       nativeFloorWei: 0n,
       tracFloorWei: 0n,
       requiredTracWei: 0n,
-      consultPca: true,
+      pca: { kind: 'provisional-publish' as const },
     };
 
     it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {

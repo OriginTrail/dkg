@@ -14,7 +14,9 @@ import {
   CG_REGISTRY_MAX_SCAN_PAGES,
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from './evm-adapter-base.js';
-import { isTooLowAllowanceError } from './evm-adapter-errors.js';
+import {
+  isTooLowAllowanceError,
+} from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -170,17 +172,12 @@ function buildCursorContextGraphRegistryScanPlan(
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
-   * Reserve the next authorized signer and return its address. The publisher
-   * uses this to bind off-chain signatures to the tx signer before
-   * `publishDirect` is submitted. This pre-pin runs BEFORE the publish cost is
-   * known (and the ChainAdapter interface advertises no cost arg), so it selects
-   * on the funding floor only — cost-aware selection lives inside
-   * `createKnowledgeAssets` (the no-`publisherAddress` path), and pin-time
-   * pricing is tracked as a follow-up (#1328).
+   * Legacy cost-independent authorized signer selection. New publish flows use
+   * resolvePublisherPublishPlan once byte size is known so signer, lifetime,
+   * price, and strict funding are fixed by one adapter operation.
    */
   async getAuthorizedPublisherAddress(contextGraphId: bigint): Promise<string> {
     await this.init();
-
     return (await this.nextAuthorizedSigner(contextGraphId)).address;
   }
 
