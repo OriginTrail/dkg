@@ -1,4 +1,4 @@
-import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { formatAdapterRdfLiteralBinding } from './rdf-literal-binding.js';
 
 type SparqlJsonLiteralTerm = {
   type: 'literal' | 'typed-literal';
@@ -22,21 +22,11 @@ export interface AdapterSparqlJsonSelectResponse {
 function formatSparqlJsonTerm(term: AdapterSparqlJsonTerm): string {
   if (term.type === 'bnode') return `_:${term.value}`;
   if (term.type === 'literal' || term.type === 'typed-literal') {
-    if (term['xml:lang']) {
-      return formatCanonicalRdfLiteralTerm({
-        kind: 'language',
-        value: term.value,
-        language: term['xml:lang'],
-      });
-    }
-    if (term.datatype) {
-      return formatCanonicalRdfLiteralTerm({
-        kind: 'typed',
-        value: term.value,
-        datatype: term.datatype,
-      });
-    }
-    return formatCanonicalRdfLiteralTerm({ kind: 'plain', value: term.value });
+    return formatAdapterRdfLiteralBinding({
+      value: term.value,
+      language: term['xml:lang'],
+      datatype: term.datatype,
+    });
   }
   return term.value;
 }

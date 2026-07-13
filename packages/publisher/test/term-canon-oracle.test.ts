@@ -309,9 +309,13 @@ describe('term-canon oracle: fuzz-hardened edge classes (#1386)', () => {
     await expectMatchesOxigraph([`"x"^^<http://example.org/\\u0041>`]);
   });
 
-  it('a \\U escape beyond U+10FFFF never throws (the leaf computation must not crash)', () => {
-    expect(() => canonicalizeObjectTermForHash(`"\\U00110000"^^<${xsd('string')}>`)).not.toThrow();
-    expect(() => canonicalizeObjectTermForHash(`"x\\Uffffffffy"^^<${xsd('string')}>`)).not.toThrow();
+  it('preserves exact consensus bytes for Unicode escapes beyond U+10FFFF', () => {
+    expect(canonicalizeObjectTermForHash(`"\\U00110000"^^<${xsd('string')}>`))
+      .toBe('"\\\\U00110000"');
+    expect(canonicalizeObjectTermForHash(`"x\\Uffffffffy"^^<${xsd('string')}>`))
+      .toBe('"x\\\\Uffffffffy"');
+    expect(canonicalizeObjectTermForHash('"x\\Uffffffffy"^^<urn:test:datatype>'))
+      .toBe('"x\\\\Uffffffffy"^^<urn:test:datatype>');
   });
 
   it('NO-MIGRATION + idempotence over a broad battery: canon is the identity on oxigraph output', async () => {
