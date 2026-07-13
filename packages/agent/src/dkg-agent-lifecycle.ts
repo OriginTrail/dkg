@@ -916,7 +916,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // through the full PeerResolver instead of raw DHT findPeer.
       // The dial fast-path (ProtocolRouter) already prefers
       // PeerResolver.resolve() on every attempt, but the outbox
-      // stall-walk (`messenger.maybeScheduleDhtWalk`) was hardcoded
+      // stall-walk (the Messenger peer-recovery scheduler) was hardcoded
       // to a DHT-only path — so an entry that timed out 5x because
       // its addresses were stale couldn't recover by consulting
       // agents-CG. Routing through PeerResolver picks up the
