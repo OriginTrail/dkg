@@ -47,9 +47,22 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
+interface StoreOperationResponse {
+  readonly ok: boolean;
+  readonly status: number;
+  text(): Promise<string>;
+  textOrEmpty(): Promise<string>;
+  json<T>(): Promise<T>;
+}
+
+type StoreOperationRequest = (
+  input: string | URL | Request,
+  init?: Omit<RequestInit, 'signal'>,
+) => Promise<StoreOperationResponse>;
+
 interface StoreOperationDeadline {
   readonly signal: AbortSignal;
-  waitFor<T>(work: Promise<T>): Promise<T>;
+  readonly request: StoreOperationRequest;
   check(): void;
   dispose(): void;
 }
@@ -97,10 +110,26 @@ function createStoreOperationDeadline(timeoutMs: number, callerSignal?: AbortSig
     check();
     return result;
   };
+  const request: StoreOperationRequest = async (input, init) => {
+    const response = await waitFor(fetch(input, {
+      ...init,
+      signal: controller.signal,
+    }));
+    return {
+      ok: response.ok,
+      status: response.status,
+      text: () => waitFor(response.text()),
+      // Catch only the underlying body-read failure. A deadline failure from
+      // waitFor must still propagate instead of being rewritten as an empty
+      // HTTP error body.
+      textOrEmpty: () => waitFor(response.text().catch(() => '')),
+      json: <T>() => waitFor(response.json() as Promise<T>),
+    };
+  };
 
   return {
     signal: controller.signal,
-    waitFor,
+    request,
     check,
     dispose: () => {
       if (timer) {
@@ -252,7 +281,7 @@ export class SparqlHttpStore implements TripleStore {
   private runStoreWorkWithinDeadline<T>(
     operation: string,
     options: QueryOptions | undefined,
-    work: (deadline: StoreOperationDeadline) => Promise<T>,
+    work: (request: StoreOperationRequest) => Promise<T>,
   ): Promise<T> {
     const deadline = createStoreOperationDeadline(this.timeout, options?.signal);
     const scheduled = externalStorePriorityScheduler.run(
@@ -260,7 +289,7 @@ export class SparqlHttpStore implements TripleStore {
       options?.source ?? `sparql-http.${operation}`,
       async () => {
         deadline.check();
-        const result = await work(deadline);
+        const result = await work(deadline.request);
         deadline.check();
         return result;
       },
@@ -281,8 +310,8 @@ export class SparqlHttpStore implements TripleStore {
   private async postQuery(
     sparql: string,
     accept: string,
-    deadline: StoreOperationDeadline,
-  ): Promise<Response> {
+    request: StoreOperationRequest,
+  ): Promise<StoreOperationResponse> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
     // data. Form-encoded bodies (`query=...`) are parsed by the server's
@@ -294,13 +323,11 @@ export class SparqlHttpStore implements TripleStore {
     // Content-Type lacks a charset parameter as ISO-8859-1 (servlet default),
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
-    const request = fetch(this.queryEndpoint, {
+    return request(this.queryEndpoint, {
       method: 'POST',
       headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
       body: sparql,
-      signal: deadline.signal,
     });
-    return deadline.waitFor(request);
   }
 
   private async postUpdate(
@@ -311,19 +338,17 @@ export class SparqlHttpStore implements TripleStore {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
-    return this.runStoreWorkWithinDeadline(operation, options, async (deadline) => {
+    return this.runStoreWorkWithinDeadline(operation, options, async (request) => {
       // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
-      const request = fetch(this.updateEndpoint, {
+      const response = await request(this.updateEndpoint, {
         method: 'POST',
         headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
         body: update,
-        signal: deadline.signal,
       });
-      const response = await deadline.waitFor(request);
       if (!response.ok) {
-        const text = await deadline.waitFor(response.text().catch(() => ''));
+        const text = await response.textOrEmpty();
         throw new Error(`SPARQL HTTP ${operation} failed (${response.status}): ${text.slice(0, 300)}`);
       }
     });
@@ -447,7 +472,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
-    return this.runStoreWorkWithinDeadline('query', options, async (deadline) => {
+    return this.runStoreWorkWithinDeadline('query', options, async (request) => {
       const startedAt = this.now();
       const trimmed = sparql.trim();
       const upper = trimmed.toUpperCase();
@@ -457,18 +482,16 @@ export class SparqlHttpStore implements TripleStore {
 
       try {
         if (isConstruct) {
-          return await this.queryConstruct(trimmed, deadline);
+          return await this.queryConstruct(trimmed, request);
         }
 
-        const res = await this.postQuery(trimmed, 'application/sparql-results+json', deadline);
+        const res = await this.postQuery(trimmed, 'application/sparql-results+json', request);
         if (!res.ok) {
-          const text = await deadline.waitFor(res.text().catch(() => ''));
+          const text = await res.textOrEmpty();
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = await deadline.waitFor(
-          res.json() as Promise<W3CSelectResponse | W3CAskResponse>,
-        );
+        const json = await res.json<W3CSelectResponse | W3CAskResponse>();
 
         if (isAsk || 'boolean' in json) {
           return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
@@ -498,14 +521,14 @@ export class SparqlHttpStore implements TripleStore {
 
   private async queryConstruct(
     sparql: string,
-    deadline: StoreOperationDeadline,
+    request: StoreOperationRequest,
   ): Promise<ConstructResult> {
-    const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', deadline);
+    const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', request);
     if (!res.ok) {
-      const text = await deadline.waitFor(res.text().catch(() => ''));
+      const text = await res.textOrEmpty();
       throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    const text = await deadline.waitFor(res.text());
+    const text = await res.text();
     const quads = parseNQuadsText(text);
     return { type: 'quads', quads };
   }
