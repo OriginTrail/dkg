@@ -32,7 +32,10 @@ import type {
   AskResult,
   StorePressureSnapshot,
 } from '../triple-store.js';
-import { formatRdfLiteralBinding } from '@origintrail-official/dkg-rdf-utils';
+import {
+  formatSparqlJsonTerm,
+  type SparqlJsonTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
@@ -439,7 +442,7 @@ export class SparqlHttpStore implements TripleStore {
           const obj: Record<string, string> = {};
           for (const v of vars) {
             const cell = row[v];
-            if (cell) obj[v] = w3cTermToString(cell);
+            if (cell) obj[v] = formatSparqlJsonTerm(cell);
           }
           return obj;
         });
@@ -653,32 +656,13 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
 // W3C SPARQL 1.1 JSON result types
 // ---------------------------------------------------------------------------
 
-interface W3CTerm {
-  type: 'uri' | 'literal' | 'bnode' | 'typed-literal';
-  value: string;
-  datatype?: string;
-  'xml:lang'?: string;
-}
-
 interface W3CSelectResponse {
   head: { vars: string[] };
-  results: { bindings: Array<Record<string, W3CTerm>> };
+  results: { bindings: Array<Record<string, SparqlJsonTerm>> };
 }
 
 interface W3CAskResponse {
   boolean: boolean;
-}
-
-function w3cTermToString(t: W3CTerm): string {
-  if (t.type === 'bnode') return `_:${t.value}`;
-  if (t.type === 'literal' || t.type === 'typed-literal') {
-    return formatRdfLiteralBinding({
-      value: t.value,
-      language: t['xml:lang'],
-      datatype: t.datatype,
-    });
-  }
-  return t.value;
 }
 
 // ---------------------------------------------------------------------------

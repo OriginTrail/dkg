@@ -11,7 +11,10 @@ import type {
   ConstructResult,
   AskResult,
 } from '../triple-store.js';
-import { formatRdfLiteralBinding } from '@origintrail-official/dkg-rdf-utils';
+import {
+  formatSparqlJsonTerm,
+  type SparqlJsonTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
@@ -370,7 +373,7 @@ export class BlazegraphStore implements TripleStore {
         const obj: Record<string, string> = {};
         for (const v of vars) {
           const cell = row[v];
-          if (cell) obj[v] = blazeTermToString(cell);
+          if (cell) obj[v] = formatSparqlJsonTerm(cell);
         }
         return obj;
       });
@@ -499,32 +502,13 @@ export class BlazegraphStore implements TripleStore {
 // Blazegraph JSON result types
 // =====================================================================
 
-interface BlazeTermValue {
-  type: 'uri' | 'literal' | 'bnode' | 'typed-literal';
-  value: string;
-  datatype?: string;
-  'xml:lang'?: string;
-}
-
 interface BlazeSelectResponse {
   head: { vars: string[] };
-  results: { bindings: Array<Record<string, BlazeTermValue>> };
+  results: { bindings: Array<Record<string, SparqlJsonTerm>> };
 }
 
 interface BlazeAskResponse {
   boolean: boolean;
-}
-
-function blazeTermToString(t: BlazeTermValue): string {
-  if (t.type === 'bnode') return `_:${t.value}`;
-  if (t.type === 'literal' || t.type === 'typed-literal') {
-    return formatRdfLiteralBinding({
-      value: t.value,
-      language: t['xml:lang'],
-      datatype: t.datatype,
-    });
-  }
-  return t.value;
 }
 
 // =====================================================================

@@ -34,6 +34,13 @@ export interface RdfLiteralBinding {
   datatype?: string;
 }
 
+export interface SparqlJsonTerm {
+  type: 'uri' | 'literal' | 'bnode' | 'typed-literal';
+  value: string;
+  datatype?: string;
+  'xml:lang'?: string;
+}
+
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const RDF_LITERAL_TERM_PATTERN =
   /^"((?:[^"\\\u0000-\u0008\u000A-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*)"(?:@([A-Za-z]+(?:-[A-Za-z0-9]+)*)|\^\^<([^>]+)>)?$/;
@@ -65,6 +72,19 @@ export function formatRdfLiteralBinding(binding: RdfLiteralBinding): string {
     });
   }
   return formatRdfLiteralTerm({ kind: 'plain', value: binding.value });
+}
+
+/** Serialize one W3C SPARQL Results JSON term into the DKG API term format. */
+export function formatSparqlJsonTerm(term: SparqlJsonTerm): string {
+  if (term.type === 'bnode') return `_:${term.value}`;
+  if (term.type === 'literal' || term.type === 'typed-literal') {
+    return formatRdfLiteralBinding({
+      value: term.value,
+      language: term['xml:lang'],
+      datatype: term.datatype,
+    });
+  }
+  return term.value;
 }
 
 /**

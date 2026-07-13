@@ -3,6 +3,7 @@ import {
   escapeRdfLiteral,
   formatRdfLiteralBinding,
   formatRdfLiteralTerm,
+  formatSparqlJsonTerm,
   isRdfTerm,
   normalizeRdfObject,
   parseRdfLiteralTerm,
@@ -52,6 +53,25 @@ describe('RDF literal term codec', () => {
       language: 'en',
       datatype: 'urn:test:ignored-when-language-is-present',
     })).toBe(`"${body}"@en`);
+  });
+
+  it('owns complete SPARQL JSON term conversion', () => {
+    expect(formatSparqlJsonTerm({ type: 'uri', value: 'urn:test:entity' }))
+      .toBe('urn:test:entity');
+    expect(formatSparqlJsonTerm({ type: 'bnode', value: 'blank' })).toBe('_:blank');
+    expect(formatSparqlJsonTerm({ type: 'literal', value })).toBe(`"${body}"`);
+    expect(formatSparqlJsonTerm({ type: 'literal', value, 'xml:lang': 'en' }))
+      .toBe(`"${body}"@en`);
+    expect(formatSparqlJsonTerm({
+      type: 'typed-literal',
+      value,
+      datatype: 'urn:test:datatype',
+    })).toBe(`"${body}"^^<urn:test:datatype>`);
+    expect(formatSparqlJsonTerm({
+      type: 'typed-literal',
+      value,
+      datatype: 'http://www.w3.org/2001/XMLSchema#string',
+    })).toBe(`"${body}"`);
   });
 
   it.each<RdfLiteralTerm>([
