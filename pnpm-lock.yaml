@@ -1129,6 +1129,9 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       oxigraph:
         specifier: ^0.5
         version: 0.5.5

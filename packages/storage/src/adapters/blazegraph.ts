@@ -11,7 +11,7 @@ import type {
   ConstructResult,
   AskResult,
 } from '../triple-store.js';
-import { escapeNQuadsLiteral } from '../rdf-literal-escape.js';
+import { escapeRdfLiteral as escapeNQuadsLiteral } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';

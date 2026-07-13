@@ -13,7 +13,7 @@ import type {
   TripleStoreQueryOptions,
   UpdateOptions,
 } from '../triple-store.js';
-import { escapeNQuadsLiteral } from '../rdf-literal-escape.js';
+import { escapeRdfLiteral as escapeNQuadsLiteral } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';

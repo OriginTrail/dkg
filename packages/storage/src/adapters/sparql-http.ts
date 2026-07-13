@@ -32,7 +32,7 @@ import type {
   AskResult,
   StorePressureSnapshot,
 } from '../triple-store.js';
-import { escapeNQuadsLiteral } from '../rdf-literal-escape.js';
+import { escapeRdfLiteral as escapeNQuadsLiteral } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';

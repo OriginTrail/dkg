@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "oxigraph": "^0.5"
   },
   "devDependencies": {
