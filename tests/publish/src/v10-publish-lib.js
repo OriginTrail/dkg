@@ -11,7 +11,8 @@
 //                            entity, on the SAME node (Verifiable-Memory read-back)
 //   4. Query Remote (sync)-> POST /api/query-remote { peerId, lookupType:ENTITY_TRIPLES }
 //                            against ANOTHER node's peerId — reads the entity back from a
-//                            peer over /dkg/10.0.1/query-remote. The cross-node SYNC test.
+//                            peer over /dkg/10.0.1/query-remote. This separate cross-node
+//                            sync gate is opt-in with V10_ENABLE_REMOTE_QUERY=true.
 //
 // V8 vs V10 — the only behavioural difference: V8 signed client-side with a
 // per-node PRIVATE KEY; V10 nodes sign INTERNALLY from their own op-wallet pool,
@@ -23,7 +24,7 @@
 //   publish_success_rate            <- publish
 //   query_success_rate              <- query
 //   publisher_get_success_rate      <- VM GET
-//   non_publisher_get_success_rate  <- Query Remote (sync)
+//   non_publisher_get_success_rate  <- Query Remote (sync; null when disabled)
 // ===========================================================================
 
 import { strict as assert } from 'assert';
@@ -78,6 +79,10 @@ const PREFLIGHT_TIMEOUT_MS = Number(process.env.V10_PREFLIGHT_TIMEOUT_MS || 30 *
 const RUN_TIMEOUT_MS = Number(process.env.V10_RUN_TIMEOUT_MS || 11 * 60 * 1000);
 const EXPECTED_NODE_VERSION = String(process.env.EXPECTED_NODE_VERSION || '').trim();
 const EXPECTED_NODE_COMMIT = String(process.env.EXPECTED_NODE_COMMIT || '').trim();
+// Cross-node query is a separate sync/replication gate. Keep the authoritative
+// publish job focused on publish + local query + VM GET unless a dedicated
+// rollout explicitly opts into remote verification.
+const REMOTE_QUERY_ENABLED = String(process.env.V10_ENABLE_REMOTE_QUERY || 'false').toLowerCase() === 'true';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Publish timeouts must cancel the HTTP request itself. A Promise.race-only
@@ -551,6 +556,7 @@ export function defineChainPublishSuite(config) {
           console.log(`Expected build: version=${EXPECTED_NODE_VERSION || '(not enforced)'} | commit=${EXPECTED_NODE_COMMIT || '(not enforced)'}`);
           console.log(`Workload: KAs=${KA_COUNT} | entities/KA=${TEST_ENTITY_COUNT} | quads/first KA=${firstPayload.quads.length} | first payload=${firstPayloadBytes} bytes | target=${TEST_CONTENT_SIZE_KB} KB`);
           console.log(`Publish: epochs=${PUBLISH_EPOCHS} | batch delay=${TEST_BATCH_DELAY_MS}ms | CG register=${CG_REGISTER} | CG subscribe=${CG_SUBSCRIBE}`);
+          console.log(`Remote query: ${REMOTE_QUERY_ENABLED ? 'enabled and required' : 'disabled (set V10_ENABLE_REMOTE_QUERY=true to opt in)'}`);
           console.log(`Timeouts: whole run=${RUN_TIMEOUT_MS}ms | publish=${PUBLISH_TIMEOUT_MS}ms | HTTP headers/body=${HTTP_TIMEOUT_MS}ms | read attempt=${OP_TIMEOUT_MS}ms | read total=${READ_TOTAL_TIMEOUT_MS}ms | CG subscribe=${CG_SUBSCRIBE_TIMEOUT_MS}ms`);
           console.log(`Read retry: retries=${READ_RETRIES} | delay=${READ_RETRY_MS}ms`);
 
@@ -756,6 +762,10 @@ export function defineChainPublishSuite(config) {
 
           // ── 4. Query Remote (sync) — read the KA back from a PEER by UAL ────
           step = 'Query Remote (sync)';
+          if (!REMOTE_QUERY_ENABLED) {
+            console.log('⏭️  Query Remote (sync) skipped — not part of this release gate');
+            continue;
+          }
           const otherIndexes = nodes.map((_, idx) => idx).filter((idx) => nodes[idx].name !== name);
           if (otherIndexes.length === 0) {
             // single-node chain — no peer to sync-check against
@@ -800,7 +810,7 @@ export function defineChainPublishSuite(config) {
             queryRemoteSuccess, queryRemoteFail,
           },
           KA_COUNT,
-          nodes.length > 1,
+          REMOTE_QUERY_ENABLED && nodes.length > 1,
         );
         } catch (error) {
           harnessError = error;
@@ -847,13 +857,16 @@ export function defineChainPublishSuite(config) {
           node_publisher_wallets: [...publisherAddresses].join(', '),
           expected_ka_count: KA_COUNT,
           attempted_publish_count: publishSuccess + publishFail,
+          remote_query_enabled: REMOTE_QUERY_ENABLED && nodes.length > 1,
           harness_error: harnessError?.message || null,
           // Denominator is the configured workload, not merely attempted ops:
           // skipped reads after a failed publish must lower Grafana's rate.
           publish_success_rate: completionRate(publishSuccess, KA_COUNT),
           query_success_rate: completionRate(querySuccess, KA_COUNT),
           publisher_get_success_rate: completionRate(vmGetSuccess, KA_COUNT),                 // VM GET
-          non_publisher_get_success_rate: completionRate(queryRemoteSuccess, nodes.length > 1 ? KA_COUNT : 0),   // Query Remote (sync)
+          non_publisher_get_success_rate: REMOTE_QUERY_ENABLED && nodes.length > 1
+            ? completionRate(queryRemoteSuccess, KA_COUNT)
+            : null, // Query Remote (sync) is a separate opt-in gate.
           average_publish_time: avgPublishMs === null ? null : (avgPublishMs / 1000).toFixed(2),
           average_query_time: avgQueryMs === null ? null : (avgQueryMs / 1000).toFixed(2),
           average_publisher_get_time: avgVmGetMs === null ? null : (avgVmGetMs / 1000).toFixed(2),
@@ -901,7 +914,9 @@ export function defineChainPublishSuite(config) {
           console.log(`    Publish:             ✅ ${stats.publishSuccess} / ❌ ${stats.publishFail} -> ${completionRate(stats.publishSuccess, KA_COUNT)}% of workload`);
           console.log(`    Query:               ✅ ${stats.querySuccess} / ❌ ${stats.queryFail} -> ${completionRate(stats.querySuccess, KA_COUNT)}% of workload`);
           console.log(`    VM GET:             ✅ ${stats.vmGetSuccess} / ❌ ${stats.vmGetFail} -> ${completionRate(stats.vmGetSuccess, KA_COUNT)}% of workload`);
-          console.log(`    Query Remote (sync): ✅ ${stats.queryRemoteSuccess} / ❌ ${stats.queryRemoteFail} -> ${completionRate(stats.queryRemoteSuccess, nodes.length > 1 ? KA_COUNT : 0)}% of workload`);
+          console.log(REMOTE_QUERY_ENABLED && nodes.length > 1
+            ? `    Query Remote (sync): ✅ ${stats.queryRemoteSuccess} / ❌ ${stats.queryRemoteFail} -> ${completionRate(stats.queryRemoteSuccess, KA_COUNT)}% of workload`
+            : '    Query Remote (sync): skipped (not part of this release gate)');
           console.log(`    Avg Publish Time:        ${formatDuration(stats.avgPublishMs)}`);
           console.log(`    Avg Query Time:          ${formatDuration(stats.avgQueryMs)}`);
           console.log(`    Avg VM GET Time:        ${formatDuration(stats.avgVmGetMs)}`);

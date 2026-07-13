@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "private": true,
-  "description": "DKG v10 publish/query lifecycle tests \u2014 a faithful port of the dkg.js V8 test suite (per-node parallel stages, 10 KAs/node, publish/query/local-get/remote-get, same Grafana import)",
+  "description": "DKG v10 publish/query lifecycle tests \u2014 per-node publish/query/local-get verification with opt-in remote-get and Grafana import",
   "scripts": {
     "test": "mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
     "test:harness": "mocha test/v10-publish-harness.test.js --timeout 5000 --exit",
