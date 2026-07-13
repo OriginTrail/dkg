@@ -72,6 +72,23 @@ async function portAnswers(port: number): Promise<boolean> {
   }
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessesToExit(
+  pids: readonly number[],
+  timeoutMs = 3_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (pids.some(processExists) && Date.now() < deadline) await sleep(20);
+}
+
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'oxi-server-real-'));
   standin = join(dir, 'oxigraph-standin.cjs');
@@ -201,6 +218,42 @@ describe('buildOxigraphSpawnSpec', () => {
       return 99;
     });
     expect(ownership).toBe('process-tree');
+  });
+
+  it('force-kills the complete Windows watchdog process tree', () => {
+    const invocations: Array<{
+      command: string;
+      args: readonly string[];
+      options: Record<string, unknown>;
+    }> = [];
+    const signals: NodeJS.Signals[] = [];
+    const strategy = createOxigraphLaunchStrategy({
+      platform: 'win32',
+      parentPid: 42,
+      uid: -1,
+      io: {
+        spawnSync: ((command: string, args: readonly string[], options: Record<string, unknown>) => {
+          invocations.push({ command, args, options });
+          return { status: 0 };
+        }) as typeof import('node:child_process').spawnSync,
+      },
+    });
+    const child = {
+      pid: 4321,
+      connected: false,
+      kill: (signal: NodeJS.Signals) => {
+        signals.push(signal);
+        return true;
+      },
+    } as unknown as import('node:child_process').ChildProcess;
+
+    expect(strategy.shutdown(child, 'force')).toBe(true);
+    expect(invocations).toEqual([{
+      command: 'taskkill.exe',
+      args: ['/PID', '4321', '/T', '/F'],
+      options: { stdio: 'ignore', windowsHide: true },
+    }]);
+    expect(signals).toEqual([]);
   });
 
   it('wraps Oxigraph in a finite systemd user scope', () => {
@@ -443,6 +496,7 @@ describe('startOxigraphServer (real child processes)', () => {
 
     handle.killSync();
     for (let i = 0; i < 50 && await portAnswers(port); i++) await sleep(20);
+    await waitForProcessesToExit([listenerPid, wrapperPid]);
 
     expect(await portAnswers(port)).toBe(false);
     expect(() => process.kill(listenerPid, 0)).toThrow();
