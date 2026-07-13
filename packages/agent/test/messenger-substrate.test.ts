@@ -6,8 +6,8 @@ import {
   encodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
+  type LegacyProtocolOutboxStore,
   type ProtocolRouter,
-  type ProtocolOutboxStore,
   type StreamHandler,
 } from '@origintrail-official/dkg-core';
 import {
@@ -100,7 +100,7 @@ function makeSubstrate(overrides: { router?: RouterDouble } = {}) {
 describe('Messenger.sendReliable (happy path semantics)', () => {
   it('accepts a legacy custom outbox store with pendingFor but no hasPendingFor', async () => {
     const backing = new InMemoryProtocolOutboxStore({ backoffs: [10], maxAgeMs: 60_000 });
-    const legacyStore: ProtocolOutboxStore = {
+    const legacyStore: LegacyProtocolOutboxStore = {
       enqueue: backing.enqueue.bind(backing),
       markDelivered: backing.markDelivered.bind(backing),
       hasEntry: backing.hasEntry.bind(backing),

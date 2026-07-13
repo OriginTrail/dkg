@@ -28,6 +28,7 @@
  */
 
 import type {
+  CompatibleProtocolOutboxStore,
   IdempotencyCheckResult,
   MessageDirection,
   MessageIdempotencyStore,
@@ -97,6 +98,12 @@ function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): numb
     || a.messageId.localeCompare(b.messageId);
 }
 
+function comparePendingEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
+  return a.firstFailureAt - b.firstFailureAt
+    || a.protocol.localeCompare(b.protocol)
+    || a.messageId.localeCompare(b.messageId);
+}
+
 function normalizeDuePageLimit(limit: number | undefined): number | undefined {
   if (limit === undefined || !Number.isFinite(limit)) return undefined;
   return Math.max(0, Math.floor(limit));
@@ -106,12 +113,12 @@ interface ProtocolOutboxStorePolicy extends ProtocolOutboxOptions {
   backoffFor: (attempts: number) => number;
 }
 
-type PolicyAwareProtocolOutboxStore = ProtocolOutboxStore & {
+type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
   configurePolicy?: (policy: ProtocolOutboxStorePolicy) => void;
 };
 
 export class ProtocolOutbox {
-  private readonly store: ProtocolOutboxStore;
+  private readonly store: CompatibleProtocolOutboxStore;
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
@@ -129,7 +136,7 @@ export class ProtocolOutbox {
    */
   private readonly inflight = new Set<string>();
 
-  constructor(store: ProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+  constructor(store: CompatibleProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
     const backoffs = options.backoffs ?? DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
     if (backoffs.length === 0) {
       throw new Error('ProtocolOutbox: backoffs must be non-empty');
@@ -228,7 +235,12 @@ export class ProtocolOutbox {
   }
 
   hasPendingFor(peer: string): boolean {
-    return this.store.hasPendingFor?.(peer) ?? this.store.pendingFor(peer).length > 0;
+    const hasPendingFor = this.store.hasPendingFor;
+    if (hasPendingFor) return hasPendingFor.call(this.store, peer);
+    const pendingFor = this.store.pendingFor;
+    return pendingFor
+      ? pendingFor.call(this.store, peer).length > 0
+      : this.store.list().some((entry) => entry.peer === peer);
   }
 
   /**
@@ -236,7 +248,11 @@ export class ProtocolOutbox {
    * retry selection; scheduled drains remain exclusively `duePage`-driven.
    */
   pendingFor(peer: string): ProtocolOutboxEntry[] {
-    return this.store.pendingFor(peer);
+    const pendingFor = this.store.pendingFor;
+    const snapshot = pendingFor
+      ? pendingFor.call(this.store, peer)
+      : this.store.list().filter((entry) => entry.peer === peer);
+    return [...snapshot].sort(comparePendingEntries).map(cloneOutboxEntry);
   }
 
   /** Drop entries older than the store's configured max-age. */

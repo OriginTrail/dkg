@@ -169,7 +169,7 @@ export interface ProtocolOutboxEntry {
   lastError: string;
 }
 
-export interface ProtocolOutboxStore {
+interface ProtocolOutboxStoreBase {
   /**
    * Insert or update an outbox entry for `(peer, protocol, messageId)`.
    * First failure creates the entry with `attempts = 1`. Subsequent
@@ -204,19 +204,6 @@ export interface ProtocolOutboxStore {
    * generic substrate.
    */
   hasEntry(peer: string, protocol: string, messageId: string): boolean;
-
-  /**
-   * Snapshot every durable row for one peer. This is the pre-#1579 public
-   * contract retained for custom store compatibility and diagnostics/DHT
-   * bookkeeping only. Results are ordered by `firstFailureAt` ascending (with
-   * implementation-defined tie order), matching the legacy contract.
-   * Automatic retries MUST continue to select from `due` or `duePage`; a
-   * connection event must never drain this snapshot.
-   */
-  pendingFor(peer: string): ProtocolOutboxEntry[];
-
-  /** Optional storage-level fast path for peer-presence bookkeeping. */
-  hasPendingFor?(peer: string): boolean;
 
   /**
    * All entries whose `nextAttemptAt <= now`.
@@ -266,6 +253,39 @@ export interface ProtocolOutboxStore {
    */
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
 }
+
+/**
+ * Current sender-side outbox store contract. Peer bookkeeping uses a boolean
+ * fast path; retry selection remains exclusively `due`/`duePage`-driven.
+ *
+ * `pendingFor` is an optional compatibility/diagnostic capability. New stores
+ * do not need to materialize full payload-bearing peer snapshots.
+ */
+export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
+  /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
+  hasPendingFor(peer: string): boolean;
+
+  /**
+   * Optional snapshot of one peer's rows, ordered by `firstFailureAt`.
+   * Automatic retries MUST NOT select work from this diagnostic snapshot.
+   */
+  pendingFor?(peer: string): ProtocolOutboxEntry[];
+}
+
+/**
+ * Pre-#1579 custom-store shape retained at the `ProtocolOutbox` boundary.
+ * Legacy stores exposed the full peer snapshot instead of a boolean fast path.
+ */
+export interface LegacyProtocolOutboxStore extends ProtocolOutboxStoreBase {
+  /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
+  pendingFor(peer: string): ProtocolOutboxEntry[];
+
+  /** Optional forward-compatible peer-presence fast path. */
+  hasPendingFor?(peer: string): boolean;
+}
+
+/** Store input accepted by the compatibility-normalizing outbox wrapper. */
+export type CompatibleProtocolOutboxStore = ProtocolOutboxStore | LegacyProtocolOutboxStore;
 
 
 /**
