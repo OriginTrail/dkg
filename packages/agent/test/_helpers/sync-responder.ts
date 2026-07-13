@@ -43,6 +43,7 @@ export function registerTestSyncHandler(
     syncPageSize?: number;
     snapshotBudget?: SyncResponderSnapshotBudgetOptions;
     authorize?: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
+    logDebug?: (ctx: OperationContext, message: string) => void;
   } = {},
 ): CapturedSyncHandler {
   const cap = captureSyncHandler();
@@ -57,7 +58,7 @@ export function registerTestSyncHandler(
     parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
     authorizeSyncRequest: options.authorize ?? (async () => true),
     logWarn: noopLog,
-    logDebug: noopLog,
+    logDebug: options.logDebug ?? noopLog,
     snapshotBudget: options.snapshotBudget,
   });
   return cap;
