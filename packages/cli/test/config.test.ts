@@ -512,9 +512,31 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveNetworkConfigName(loaded)).toBe('mainnet-base');
   });
 
-  it('falls back to project default network when networkConfig is unset or blank', () => {
+  it('infers legacy network selection from a known chainId', () => {
+    expect(resolveNetworkConfigName({ chain: { chainId: 'base:84532' } })).toBe('testnet');
+    expect(resolveNetworkConfigName({ chain: { chainId: ' BASE:8453 ' } })).toBe('mainnet-base');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'gnosis:100' } })).toBe('mainnet-gnosis');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'neuroweb:2043' } })).toBe('mainnet-neuroweb');
+  });
+
+  it('keeps explicit networkConfig authoritative over chain inference', () => {
+    expect(resolveNetworkConfigName({
+      networkConfig: 'mainnet-base',
+      chain: { chainId: 'gnosis:100' },
+    })).toBe('mainnet-base');
+  });
+
+  it('infers from chain when networkConfig is blank', () => {
+    expect(resolveNetworkConfigName({
+      networkConfig: '   ',
+      chain: { chainId: 'gnosis:100' },
+    })).toBe('mainnet-gnosis');
+  });
+
+  it('falls back to project default network without a known legacy chain', () => {
     expect(resolveNetworkConfigName({})).toBe('testnet');
     expect(resolveNetworkConfigName({ networkConfig: '   ' })).toBe('testnet');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'evm:31337' } })).toBe('testnet');
   });
 
   it('round-trips relayServerCapacity through saveConfig/loadConfig (operator override)', async () => {

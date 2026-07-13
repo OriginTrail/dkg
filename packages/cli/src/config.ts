@@ -482,7 +482,9 @@ export interface DkgConfig {
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
-   * When omitted, runtime falls back to project.json#defaultNetwork.
+   * When omitted, legacy configs infer the overlay from chain.chainId when it
+   * matches a bundled network; otherwise runtime falls back to
+   * project.json#defaultNetwork.
    */
   networkConfig?: string;
   relay?: string;
@@ -1483,8 +1485,34 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-export function resolveNetworkConfigName(config?: Pick<DkgConfig, 'networkConfig'> | null): string {
-  return config?.networkConfig?.trim() || loadProjectConfig().defaultNetwork;
+const LEGACY_NETWORK_BY_CHAIN_ID: Readonly<Record<string, string>> = {
+  'base:84532': 'testnet',
+  'base:8453': 'mainnet-base',
+  'gnosis:100': 'mainnet-gnosis',
+  'neuroweb:2043': 'mainnet-neuroweb',
+};
+
+/**
+ * Resolve the bundled network overlay for both current and legacy configs.
+ *
+ * Older homes predate `networkConfig` and only persisted the selected chain.
+ * Falling straight through to project.json#defaultNetwork can silently place
+ * one of those homes on the wrong p2p overlay. Infer known bundled networks
+ * from chainId; explicit operator selection always takes precedence.
+ */
+export function resolveNetworkConfigName(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+): string {
+  const explicitNetwork = config?.networkConfig?.trim();
+  if (explicitNetwork) return explicitNetwork;
+
+  const chainId = config?.chain?.chainId?.trim().toLowerCase();
+  if (chainId) {
+    const inferredNetwork = LEGACY_NETWORK_BY_CHAIN_ID[chainId];
+    if (inferredNetwork) return inferredNetwork;
+  }
+
+  return loadProjectConfig().defaultNetwork;
 }
 
 /**

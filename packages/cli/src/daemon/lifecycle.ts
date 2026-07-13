@@ -1118,9 +1118,9 @@ export async function runDaemonInner(
   }
 
   const storageAckTiming = resolveStorageAckTiming(config.storageAck);
-  const selectedNetworkConfig = config.networkConfig?.trim();
+  const selectedNetworkConfig = resolveNetworkConfigName(config);
   const network = await loadNetworkConfig(selectedNetworkConfig);
-  if (selectedNetworkConfig && !network) {
+  if (!network) {
     log(`FATAL: network config "${selectedNetworkConfig}" was not found (expected network/${selectedNetworkConfig}.json).`);
     process.exit(1);
   }

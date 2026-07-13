@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { mkdir, rm, readFile, readlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
-import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, gitCommandEnv, gitCommandArgs, slotReady, activeSlot, dkgDir } from './config.js';
+import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, resolveNetworkConfigName, gitCommandEnv, gitCommandArgs, slotReady, activeSlot, dkgDir } from './config.js';
 import {
   FULL_BUILD_COMMAND,
   isNodeUiGitLayoutSlot,
@@ -102,7 +102,7 @@ export async function migrateToBlueGreen(
   }
 
   const config = await loadConfig().catch(() => ({} as any));
-  const network = await loadNetworkConfig(config?.networkConfig).catch(() => undefined);
+  const network = await loadNetworkConfig(resolveNetworkConfigName(config)).catch(() => undefined);
   const gitEnv = gitCommandEnv(config?.autoUpdate ?? network?.autoUpdate);
   const localRepo = repoDir();
   const hasLocalRepo = Boolean(localRepo && existsSync(join(localRepo, '.git')));

@@ -201,7 +201,7 @@ describe('daemon startup network validation', () => {
     );
   });
 
-  it('passes the selected network genesis id into agent creation', async () => {
+  it('infers a legacy network from chainId and passes its genesis id into agent creation', async () => {
     tempHome = await mkdtemp(join(tmpdir(), 'dkg-genesis-startup-'));
     originalDkgHome = process.env.DKG_HOME;
     process.env.DKG_HOME = tempHome;
@@ -223,14 +223,13 @@ describe('daemon startup network validation', () => {
 
     await expect(runDaemonInner(true, {
       name: 'genesis-startup-test',
-      networkConfig: 'mainnet-gnosis',
       listenPort: 0,
       nodeRole: 'edge',
       chain: {
         type: 'evm',
         rpcUrl: 'https://private-rpc.example',
         hubAddress: '0x1234567890123456789012345678901234567890',
-        chainId: 'evm:100',
+        chainId: 'gnosis:100',
       },
     } as any, Date.now())).rejects.toThrow('after-agent-create');
 
@@ -249,7 +248,7 @@ describe('daemon startup network validation', () => {
       },
     });
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
-      chainId: 'evm:100',
+      chainId: 'gnosis:100',
       hubAddress: '0x1234567890123456789012345678901234567890',
     }));
     closeDashboardDbFromAgentCreateArg(createArg);
