@@ -1,10 +1,16 @@
 import { describe, it, expect } from 'vitest';
+import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
 import { buildInitAutoUpdate, isInitNetworkSwitch } from '../src/commands/init.js';
+import {
+  loadNetworkConfig,
+  resolveChainConfig,
+  resolveNetworkConfigName,
+} from '../src/config.js';
 
 // Guards the network-SWITCH decision that drives whether `dkg init` discards
 // the existing chain block (new-network/old-chain Frankenstein prevention) or
-// preserves it (operator RPC override). Only an EXPLICIT prior networkConfig
-// that differs counts as a switch.
+// preserves it (operator RPC override). The prior effective network may be
+// explicit or inferred from a legacy chain ID.
 describe('isInitNetworkSwitch', () => {
   it('is NOT a switch for a fresh node (no networkConfig)', () => {
     expect(isInitNetworkSwitch(undefined, 'mainnet-gnosis')).toBe(false);
@@ -17,15 +23,46 @@ describe('isInitNetworkSwitch', () => {
     expect(isInitNetworkSwitch('  mainnet-base  ', 'mainnet-base')).toBe(false);
   });
 
-  it('IS a switch when an explicit prior networkConfig differs from the selection', () => {
+  it('IS a switch when the effective prior network differs from the selection', () => {
     expect(isInitNetworkSwitch('mainnet-base', 'testnet')).toBe(true);
     expect(isInitNetworkSwitch('testnet', 'mainnet-gnosis')).toBe(true);
   });
 
-  it('a legacy node (no networkConfig) re-inited to a real network is NOT a switch — its chain override is preserved', () => {
-    // The legacy node never persisted networkConfig, so its true network is
-    // unknown; treat as same-network so resolveChainConfig keeps existing.chain.
-    expect(isInitNetworkSwitch(undefined, 'mainnet-gnosis')).toBe(false);
+  it('a legacy node with no recognizable chain remains on the testnet fallback', () => {
+    expect(isInitNetworkSwitch('testnet', 'testnet')).toBe(false);
+  });
+
+  it('keeps legacy Base/Gnosis setup defaults and persisted chain fields consistent', async () => {
+    for (const [chainId, expectedNetwork] of [
+      ['base:8453', 'mainnet-base'],
+      ['gnosis:100', 'mainnet-gnosis'],
+    ] as const) {
+      const existing = {
+        chain: {
+          type: 'evm' as const,
+          chainId,
+          rpcUrl: `https://operator-${expectedNetwork}.invalid`,
+          hubAddress: '0x0000000000000000000000000000000000000042',
+        },
+      };
+      const existingNetwork = resolveNetworkConfigName(existing);
+      const selectedNetwork = resolveSetupNetworkName({
+        existingNetworkConfig: existingNetwork,
+        configExisted: true,
+      });
+      const network = await loadNetworkConfig(selectedNetwork);
+      const switching = isInitNetworkSwitch(existingNetwork, selectedNetwork);
+      const persisted = {
+        ...existing,
+        networkConfig: selectedNetwork,
+        chain: resolveChainConfig(switching ? undefined : existing, network),
+      };
+
+      expect(persisted.networkConfig).toBe(expectedNetwork);
+      expect(persisted.chain?.chainId).toBe(chainId);
+      expect(persisted.chain?.rpcUrl).toBe(`https://operator-${expectedNetwork}.invalid`);
+      expect(switching).toBe(false);
+    }
   });
 });
 

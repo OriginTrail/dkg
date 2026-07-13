@@ -13,9 +13,10 @@
  * below encodes that split:
  *
  *   - a genuinely fresh node    → {@link DEFAULT_SETUP_NETWORK} (mainnet-gnosis)
- *   - a legacy node (config on
- *     disk but no networkConfig) → {@link LEGACY_FALLBACK_NETWORK} (testnet),
- *     preserving its current behaviour — no flip to a real-money chain
+ *   - a legacy node whose caller can infer a bundled network from its chain
+ *     → keep that inferred network via `existingNetworkConfig`
+ *   - any other legacy node (config on disk but no networkConfig)
+ *     → {@link LEGACY_FALLBACK_NETWORK} (testnet)
  *   - a node that already chose  → keep its choice
  *   - an explicit `--network` /
  *     interactive answer         → wins outright
@@ -50,7 +51,10 @@ export interface ResolveSetupNetworkNameOptions {
    * interactive answer. When non-empty it wins over everything else.
    */
   explicit?: string | null;
-  /** The `networkConfig` already present in the existing config, if any. */
+  /**
+   * The existing effective network, if known. Callers with access to bundled
+   * network metadata should pass a chain-inferred name for legacy configs.
+   */
   existingNetworkConfig?: string | null;
   /**
    * Whether a config file already existed on disk before this setup run.

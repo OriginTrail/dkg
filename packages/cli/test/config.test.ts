@@ -24,6 +24,7 @@ import {
   classifyMonorepoInit,
   sharedHomeInitGate,
   repoDir,
+  inferNetworkConfigNameFromChainId,
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
@@ -517,6 +518,32 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveNetworkConfigName({ chain: { chainId: ' BASE:8453 ' } })).toBe('mainnet-base');
     expect(resolveNetworkConfigName({ chain: { chainId: 'gnosis:100' } })).toBe('mainnet-gnosis');
     expect(resolveNetworkConfigName({ chain: { chainId: 'neuroweb:2043' } })).toBe('mainnet-neuroweb');
+  });
+
+  it('derives legacy inference from the supplied bundled-network registry', () => {
+    expect(inferNetworkConfigNameFromChainId('fixture:42', {
+      'fixture-network': {
+        chain: {
+          type: 'evm',
+          chainId: 'fixture:42',
+          rpcUrl: 'https://fixture.invalid',
+          hubAddress: '0x0000000000000000000000000000000000000042',
+        },
+      },
+    })).toBe('fixture-network');
+  });
+
+  it('refuses to infer an ambiguous chain shared by two overlays', () => {
+    const chain = {
+      type: 'evm' as const,
+      chainId: 'fixture:42',
+      rpcUrl: 'https://fixture.invalid',
+      hubAddress: '0x0000000000000000000000000000000000000042',
+    };
+    expect(inferNetworkConfigNameFromChainId('fixture:42', {
+      first: { chain },
+      second: { chain },
+    })).toBeUndefined();
   });
 
   it('keeps explicit networkConfig authoritative over chain inference', () => {

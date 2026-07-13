@@ -25,7 +25,7 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, validateNetworkConfigReadiness,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, resolveNetworkConfigName, validateNetworkConfigReadiness,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo, classifyMonorepoInit, sharedHomeInitGate,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
@@ -104,11 +104,10 @@ import {
 
 /**
  * Decide whether `dkg init` is SWITCHING an existing node to a different
- * network (vs a fresh install or a same-network re-init). Only an EXPLICIT
- * prior `networkConfig` that differs from the selection counts as a switch:
+ * network (vs a fresh install or a same-network re-init). A known prior
+ * effective network that differs from the selection counts as a switch:
  *   - fresh node (no networkConfig)               → not a switch (no chain to lose)
- *   - legacy node (no networkConfig, custom chain) → not a switch (preserve the
- *     operator's chain/RPC override — its true network is unknown)
+ *   - legacy node with a known chain              → compare its inferred network
  *   - node with networkConfig === selected        → not a switch (preserve overrides)
  *   - node with networkConfig !== selected        → SWITCH (drop the stale chain)
  *
@@ -118,10 +117,10 @@ import {
  * Pure + exported so the decision is unit-testable.
  */
 export function isInitNetworkSwitch(
-  existingNetworkConfig: string | undefined,
+  existingNetwork: string | undefined,
   selectedNetwork: string,
 ): boolean {
-  const prior = existingNetworkConfig?.trim();
+  const prior = existingNetwork?.trim();
   return !!prior && selectedNetwork !== prior;
 }
 
@@ -294,8 +293,9 @@ program
     await ensureDkgDir();
     const existing = await loadConfig();
     // Distinguish a genuinely fresh install (→ default mainnet) from a
-    // legacy node whose config predates `networkConfig` (→ testnet,
-    // preserved). `loadConfig` merges over defaults, so it can't tell us —
+    // legacy node whose config predates `networkConfig` (→ infer from a
+    // known chain, else preserve the testnet fallback). `loadConfig` merges
+    // over defaults, so it can't tell us —
     // probe the home directly (both json + yaml, like the daemon does).
     const configExisted = existsSync(join(dkgDir(), 'config.json'))
       || existsSync(join(dkgDir(), 'config.yaml'));
@@ -311,11 +311,14 @@ program
     // chosen network drives every downstream default (role, relay, context
     // graphs, auto-update, and the blockchain-config prompts below). Default:
     // mainnet-gnosis for a fresh node, the existing network on re-init, and
-    // testnet for a legacy config that never set one. `--network` (or `-y`)
-    // skips the prompt.
+    // the chain-inferred network (or testnet fallback) for a legacy config.
+    // `--network` (or `-y`) skips the prompt.
     const explicitNetwork = typeof opts.network === 'string' ? opts.network.trim() : '';
+    const existingNetwork = configExisted
+      ? resolveNetworkConfigName(existing)
+      : undefined;
     const networkDefault = resolveSetupNetworkName({
-      existingNetworkConfig: existing.networkConfig,
+      existingNetworkConfig: existingNetwork,
       configExisted,
     });
     let selectedNetwork: string;
@@ -467,14 +470,14 @@ program
     // network defaults so an operator who's only customised RPC keeps that
     // override even after `dkg init` re-prompts.
     //
-    // EXCEPT on a network SWITCH (an existing node with an explicit
-    // networkConfig that differs from the selection): the existing `chain`
+    // EXCEPT on a network SWITCH (an existing node whose effective explicit
+    // or chain-inferred network differs from the selection): the existing `chain`
     // block belongs to the OLD network (e.g. Base-mainnet hub/RPC/chainId) and
     // must NOT pre-fill or persist — otherwise the node would run the new
     // network's relays/genesis against the old chain (the Frankenstein config).
-    // See isInitNetworkSwitch — a fresh/legacy node is NOT a switch, so its
-    // chain field-merge (incl. operator RPC overrides) is preserved.
-    const isNetworkSwitch = isInitNetworkSwitch(existing.networkConfig, selectedNetwork);
+    // See isInitNetworkSwitch — a same-network legacy node preserves its
+    // chain field-merge (including operator RPC overrides).
+    const isNetworkSwitch = isInitNetworkSwitch(existingNetwork, selectedNetwork);
     const chainDefaults = resolveChainConfig(isNetworkSwitch ? undefined : existing, network);
     const defaultRpcUrl = chainDefaults?.rpcUrl;
     const defaultRpcUrls = chainDefaults?.rpcUrls?.join(', ') ?? '';

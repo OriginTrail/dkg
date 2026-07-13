@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { join, dirname, basename } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
@@ -1105,10 +1105,12 @@ export function parseWeiFloor(
 
 let _networkConfig: NetworkConfig | null = null;
 let _networkConfigName: string | null = null;
+let _bundledNetworkRegistry: Readonly<Record<string, NetworkConfig>> | null = null;
 
 export function _resetNetworkConfigCache(): void {
   _networkConfig = null;
   _networkConfigName = null;
+  _bundledNetworkRegistry = null;
 }
 
 export interface ProjectConfig {
@@ -1485,12 +1487,53 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-const LEGACY_NETWORK_BY_CHAIN_ID: Readonly<Record<string, string>> = {
-  'base:84532': 'testnet',
-  'base:8453': 'mainnet-base',
-  'gnosis:100': 'mainnet-gnosis',
-  'neuroweb:2043': 'mainnet-neuroweb',
-};
+function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+  if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
+
+  for (const root of candidateRoots()) {
+    const networkDir = join(root, 'network');
+    try {
+      const registry: Record<string, NetworkConfig> = {};
+      for (const entry of readdirSync(networkDir, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const name = entry.name.slice(0, -'.json'.length);
+        registry[name] = JSON.parse(
+          readFileSync(join(networkDir, entry.name), 'utf-8'),
+        ) as NetworkConfig;
+      }
+      if (Object.keys(registry).length > 0) {
+        _bundledNetworkRegistry = registry;
+        return registry;
+      }
+    } catch { /* try the next monorepo/package root */ }
+  }
+
+  _bundledNetworkRegistry = {};
+  return _bundledNetworkRegistry;
+}
+
+/**
+ * Infer an overlay from its canonical bundled network config's chain ID.
+ * Production reads network/*.json, so adding a network needs no second table.
+ * Tests and embedders may supply a registry explicitly.
+ */
+export function inferNetworkConfigNameFromChainId(
+  chainId: string | null | undefined,
+  registry: Readonly<Record<string, Pick<NetworkConfig, 'chain'>>> = loadBundledNetworkRegistry(),
+): string | undefined {
+  const normalized = chainId?.trim().toLowerCase();
+  if (!normalized) return undefined;
+
+  let matchedName: string | undefined;
+  for (const [name, network] of Object.entries(registry)) {
+    if (network.chain?.chainId?.trim().toLowerCase() !== normalized) continue;
+    // Ambiguous chain ownership is not safe to infer. Require an explicit
+    // networkConfig until the bundled registry is unique again.
+    if (matchedName && matchedName !== name) return undefined;
+    matchedName = name;
+  }
+  return matchedName;
+}
 
 /**
  * Resolve the bundled network overlay for both current and legacy configs.
@@ -1508,7 +1551,7 @@ export function resolveNetworkConfigName(
 
   const chainId = config?.chain?.chainId?.trim().toLowerCase();
   if (chainId) {
-    const inferredNetwork = LEGACY_NETWORK_BY_CHAIN_ID[chainId];
+    const inferredNetwork = inferNetworkConfigNameFromChainId(chainId);
     if (inferredNetwork) return inferredNetwork;
   }
 
