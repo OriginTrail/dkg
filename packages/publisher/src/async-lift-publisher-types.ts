@@ -94,6 +94,8 @@ export interface AsyncLiftPublisherConfig {
   recoveryLookupTimeoutMs?: number;
   now?: () => number;
   idGenerator?: () => string;
+  /** Defaults to crypto.randomUUID(). Must be fresh for every wallet claim. */
+  claimTokenGenerator?: () => string;
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   knowledgeAssetVmPublishExecutor?: (input: AsyncKnowledgeAssetVmPublishExecutionInput) => Promise<PublishResult>;

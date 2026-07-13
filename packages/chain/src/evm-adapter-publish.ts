@@ -990,6 +990,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           `— the tx was likely replaced or dropped before confirmation`,
         );
       },
+      params.onBroadcastCancellation,
     );
 
     return {

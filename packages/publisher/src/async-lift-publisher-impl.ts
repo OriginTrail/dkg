@@ -1,5 +1,5 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore, tryUpdateWithTouchedGraphs } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, tryConditionalReplaceSubject } from '@origintrail-official/dkg-storage';
 import { invokePhaseCallback, type PhaseCallback, type PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
@@ -38,6 +38,7 @@ import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 import { isWriteAheadCompatibilityBreadcrumb } from './write-ahead-compat.js';
+import { withKeyedLocks } from './keyed-lock.js';
 import {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -96,6 +97,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly lockLeaseMs: number;
   private readonly now: () => number;
   private readonly idGenerator: () => string;
+  private readonly claimTokenGenerator: () => string;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
@@ -145,6 +147,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
+    this.claimTokenGenerator = config.claimTokenGenerator ?? (() => crypto.randomUUID());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
     this.knowledgeAssetVmPublishExecutor = config.knowledgeAssetVmPublishExecutor;
@@ -263,7 +266,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if (!next) return null;
 
       const now = this.now();
-      const claimToken = `${walletId}:${now}:${next.jobId}`;
+      const claimToken = `${walletId}:${next.jobId}:${this.claimTokenGenerator()}`;
       const lockExpiresAt = now + this.lockLeaseMs;
       const claimed = this.mergeJob(next, 'claimed', { claim: { walletId } });
       const claimedJob = this.buildClaimedJob(claimed, walletId, claimToken, now, lockExpiresAt);
@@ -453,11 +456,14 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
     } catch (error) {
+      const current = await this.getStatus(claimed.jobId);
+      if (current && !this.matchesActiveClaimGeneration(claimed, current)) return current;
       return await this.recordExecutionFailure(claimed.jobId, 'claimed', error);
     }
 
     let validated!: ReturnType<typeof validateLiftPublishPayload>;
     let prepared!: AsyncPreparedPublishPayload;
+    let validatedAttempt!: LiftJob;
     try {
       const resolved = await resolveLiftWorkspaceSlice({
         store: this.store,
@@ -473,9 +479,21 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           ...this.resolvedSliceOverrides,
         },
       });
-      await this.update(claimed.jobId, 'validated', {
-        validation: validated.validation,
+      await this.transitionJobIfActive({
+        current: claimed,
+        expectedStatus: 'claimed',
+        status: 'validated',
+        data: { validation: validated.validation },
       });
+      validatedAttempt = await this.getRequiredJob(claimed.jobId);
+      if (
+        validatedAttempt.status !== 'validated'
+        || !this.matchesActiveClaimGeneration(claimed, validatedAttempt)
+      ) {
+        throw new Error(
+          `LiftJob ${claimed.jobId} active claim changed before the knowledge asset VM publish executor started`,
+        );
+      }
       prepared = prepareAsyncPublishPayload({
         request: snapshot,
         metadata: snapshotMetadata,
@@ -483,6 +501,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         resolved: validated.resolved,
       });
     } catch (error) {
+      const current = await this.getStatus(claimed.jobId);
+      if (current && !this.matchesActiveClaimGeneration(claimed, current)) return current;
       return await this.recordExecutionFailure(claimed.jobId, 'claimed', error);
     }
 
@@ -497,6 +517,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         walletId,
         merkleRoot: request.sealMerkleRoot,
         publicByteSize,
+        expectedJob: validatedAttempt,
         delegate: prepared.publishOptions.onPhase,
       });
       const executionInput = {
@@ -518,6 +539,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       });
     } catch (error) {
       const current = await this.getStatus(claimed.jobId);
+      // A recovered/reclaimed attempt owns its own failure outcome. A delayed
+      // predecessor must not turn the newer claim into failed or broadcast.
+      if (current && !this.matchesActiveClaimGeneration(claimed, current)) {
+        return current;
+      }
       if (!executorReturned && current?.status === 'broadcast') {
         return current;
       }
@@ -846,60 +872,55 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   /**
    * Canonical job persistence boundary. Ordinary transitions retain the
-   * legacy delete/insert path. Supplying expectedStatus upgrades that same
-   * serializer to a server-side conditional replacement and reports whether
-   * the exact payload committed, conflicted, or lacks store support.
+   * legacy delete/insert path. Supplying expectedJob upgrades that same
+   * serializer to a server-side conditional replacement bound to the active
+   * claim generation and reports whether it committed, conflicted, or lacks
+   * store support.
    */
   private async writeJob(
     job: LiftJob,
-    options: { expectedStatus?: LiftJobState; signal?: AbortSignal } = {},
+    options: { expectedJob?: LiftJob; signal?: AbortSignal } = {},
   ): Promise<'written' | 'conflict' | 'unsupported'> {
     // The server-side conditional UPDATE is already atomic and must not hold
     // the process-local fallback lane while invoking the store: an adapter may
     // synchronously expose a concurrent writer from that boundary. Legacy
     // delete/insert writes still share the lane with the no-UPDATE fallback.
-    if (options.expectedStatus !== undefined) return this.writeJobUnlocked(job, options);
+    if (options.expectedJob !== undefined) return this.writeJobUnlocked(job, options);
     return this.withJobWriteLock(() => this.writeJobUnlocked(job, options));
   }
 
   private async writeJobUnlocked(
     job: LiftJob,
-    options: { expectedStatus?: LiftJobState; signal?: AbortSignal } = {},
+    options: { expectedJob?: LiftJob; signal?: AbortSignal } = {},
   ): Promise<'written' | 'conflict' | 'unsupported'> {
-    if (options.expectedStatus === undefined) {
+    if (options.expectedJob === undefined) {
       await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
       await this.store.insert(serializeJob(job, this.graphUri));
       return 'written';
     }
 
     const subject = jobSubject(job.jobId);
-    const replacement = serializeJob(job, this.graphUri)
-      .filter((quad) => quad.subject === subject)
-      .map((quad) => `<${quad.subject}> <${quad.predicate}> ${quad.object} .`)
-      .join('\n');
-    const update = `
-      DELETE { GRAPH <${this.graphUri}> { <${subject}> ?predicate ?object } }
-      INSERT { GRAPH <${this.graphUri}> { ${replacement} } }
-      WHERE {
-        GRAPH <${this.graphUri}> {
-          <${subject}> <${STATUS_PREDICATE}> ${literal(options.expectedStatus)} .
-          <${subject}> ?predicate ?object .
-        }
-      }
-    `;
-    const supported = await tryUpdateWithTouchedGraphs(
-      this.store,
-      update,
-      [this.graphUri],
-      { signal: options.signal },
-    );
-    if (!supported) return 'unsupported';
-
-    const persisted = await this.store.query(
-      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${subject}> <${PAYLOAD_PREDICATE}> ?payload } }`,
-    );
-    const payload = expectBindings(persisted)[0]?.['payload'];
-    return payload === literal(JSON.stringify(job)) ? 'written' : 'conflict';
+    const expectedClaimToken = options.expectedJob.claim?.claimToken;
+    const expected = [
+      { predicate: STATUS_PREDICATE, object: literal(options.expectedJob.status) },
+      ...(expectedClaimToken
+        ? [{ predicate: CONTROL_CLAIM_TOKEN, object: literal(expectedClaimToken) }]
+        : []),
+      // Match the complete validated snapshot as well as the ownership token.
+      // This rejects both ABA reclaims and same-claim concurrent mutations.
+      { predicate: PAYLOAD_PREDICATE, object: literal(JSON.stringify(options.expectedJob)) },
+    ];
+    const nextPayload = literal(JSON.stringify(job));
+    const result = await tryConditionalReplaceSubject(this.store, {
+      graph: this.graphUri,
+      subject,
+      expected,
+      replacement: serializeJob(job, this.graphUri).filter((quad) => quad.subject === subject),
+      verify: { predicate: PAYLOAD_PREDICATE, object: nextPayload },
+      signal: options.signal,
+    });
+    if (result === 'unsupported') return 'unsupported';
+    return result === 'replaced' ? 'written' : 'conflict';
   }
 
   private async deleteJob(jobId: string): Promise<void> {
@@ -1087,6 +1108,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     walletId: string;
     merkleRoot: LiftJobHex;
     publicByteSize?: number;
+    expectedJob: LiftJob;
     delegate?: PhaseCallback;
   }): PhaseCallback {
     let recordedTxHash: LiftJobHex | undefined;
@@ -1121,6 +1143,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         txHash,
         merkleRoot: params.merkleRoot,
         publicByteSize: params.publicByteSize,
+        expectedJob: params.expectedJob,
         signal: context?.signal,
       });
       if (recorded) recordedTxHash = txHash;
@@ -1133,15 +1156,36 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     txHash: LiftJobHex;
     merkleRoot: LiftJobHex;
     publicByteSize?: number;
+    expectedJob: LiftJob;
     signal?: AbortSignal;
   }): Promise<boolean> {
     if (params.signal?.aborted) return false;
     const current = await this.getRequiredJob(params.jobId);
     if (params.signal?.aborted) return false;
-    if (current.status === 'broadcast') return true;
+    if (!this.matchesActiveClaimGeneration(params.expectedJob, current)) {
+      throw new Error(
+        `Async-lift job ${params.jobId} active claim changed before the broadcast transition`,
+      );
+    }
+    if (current.status === 'broadcast') {
+      if (
+        current.broadcast.txHash === params.txHash
+        && current.broadcast.walletId === params.walletId
+        && current.broadcast.merkleRoot === params.merkleRoot
+        && current.broadcast.publicByteSize === params.publicByteSize
+      ) return true;
+      throw new Error(
+        `Async-lift job ${params.jobId} is already broadcast by a different transaction attempt`,
+      );
+    }
     if (current.status !== 'validated') {
       throw new Error(
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
+      );
+    }
+    if (!this.matchesExpectedJobSnapshot(params.expectedJob, current)) {
+      throw new Error(
+        `Async-lift job ${params.jobId} changed within its active claim before the broadcast transition`,
       );
     }
     return this.transitionJobIfActive({
@@ -1180,7 +1224,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.assertJobMatchesStatus(next);
     if (params.signal?.aborted) return false;
     const writeResult = await this.writeJob(next, {
-      expectedStatus: params.expectedStatus,
+      expectedJob: params.current,
       signal: params.signal,
     });
     if (writeResult === 'unsupported') return this.transitionJobWithoutStoreUpdate(params);
@@ -1218,6 +1262,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         if (current.status !== params.expectedStatus) {
           throw new Error(
             `Async-lift job ${current.jobId} changed from ${params.expectedStatus} before the ${params.status} transition`,
+          );
+        }
+        if (!this.matchesExpectedJobSnapshot(params.current, current)) {
+          throw new Error(
+            `Async-lift job ${current.jobId} changed before the ${params.status} transition`,
           );
         }
         await this.assertActiveClaimLock(current);
@@ -1361,22 +1410,28 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
    * atomic path when the backend supports it.
    */
   private async withJobWriteLock<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = TripleStoreAsyncLiftPublisher.jobWriteQueues.get(this.graphUri) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    TripleStoreAsyncLiftPublisher.jobWriteQueues.set(this.graphUri, next);
+    return withKeyedLocks(
+      TripleStoreAsyncLiftPublisher.jobWriteQueues,
+      [this.graphUri],
+      fn,
+    );
+  }
 
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (TripleStoreAsyncLiftPublisher.jobWriteQueues.get(this.graphUri) === next) {
-        TripleStoreAsyncLiftPublisher.jobWriteQueues.delete(this.graphUri);
-      }
+  private matchesActiveClaimGeneration(expected: LiftJob, current: LiftJob): boolean {
+    if (expected.jobId !== current.jobId) return false;
+    if (expected.claim?.walletId !== current.claim?.walletId) return false;
+    const expectedClaimToken = expected.claim?.claimToken;
+    const currentClaimToken = current.claim?.claimToken;
+    if (expectedClaimToken !== undefined || currentClaimToken !== undefined) {
+      return expectedClaimToken !== undefined && currentClaimToken === expectedClaimToken;
     }
+    // Conservative compatibility for legacy active jobs that predate tokens.
+    return expected.timestamps.claimedAt === current.timestamps.claimedAt;
+  }
+
+  private matchesExpectedJobSnapshot(expected: LiftJob, current: LiftJob): boolean {
+    return this.matchesActiveClaimGeneration(expected, current)
+      && JSON.stringify(current) === JSON.stringify(expected);
   }
 
   private mergeJob(current: LiftJob, status: LiftJobState, data: Partial<LiftJob>): LiftJob {

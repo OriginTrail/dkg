@@ -179,6 +179,73 @@ export async function tryUpdateWithTouchedGraphs(
   }
 }
 
+export type ConditionalSubjectReplaceResult =
+  | 'replaced'
+  | 'condition-not-met'
+  | 'unsupported';
+
+export interface ConditionalSubjectReplaceOptions {
+  graph: string;
+  subject: string;
+  expected: ReadonlyArray<Pick<Quad, 'predicate' | 'object'>>;
+  replacement: readonly Quad[];
+  verify: Pick<Quad, 'predicate' | 'object'>;
+  signal?: AbortSignal;
+}
+
+/**
+ * Atomically replace one RDF subject when all expected predicate/object pairs
+ * still match. The follow-up ASK distinguishes a committed replacement from a
+ * failed compare without exposing SPARQL construction or result probing to
+ * feature packages.
+ */
+export async function tryConditionalReplaceSubject(
+  store: TripleStore,
+  options: ConditionalSubjectReplaceOptions,
+): Promise<ConditionalSubjectReplaceResult> {
+  if (
+    options.replacement.some(
+      (quad) => quad.graph !== options.graph || quad.subject !== options.subject,
+    )
+  ) {
+    throw new Error('Conditional subject replacement quads must share the target graph and subject');
+  }
+
+  const expected = options.expected
+    .map(({ predicate, object }) => `<${options.subject}> <${predicate}> ${object} .`)
+    .join('\n');
+  const replacement = options.replacement
+    .map(({ predicate, object }) => `<${options.subject}> <${predicate}> ${object} .`)
+    .join('\n');
+  const update = `
+    DELETE { GRAPH <${options.graph}> { <${options.subject}> ?predicate ?object } }
+    INSERT { GRAPH <${options.graph}> { ${replacement} } }
+    WHERE {
+      GRAPH <${options.graph}> {
+        ${expected}
+        <${options.subject}> ?predicate ?object .
+      }
+    }
+  `;
+  const supported = await tryUpdateWithTouchedGraphs(
+    store,
+    update,
+    [options.graph],
+    { signal: options.signal },
+  );
+  if (!supported) return 'unsupported';
+
+  const result = await store.query(
+    `ASK { GRAPH <${options.graph}> { ` +
+      `<${options.subject}> <${options.verify.predicate}> ${options.verify.object} } }`,
+    { signal: options.signal },
+  );
+  if (result.type !== 'boolean') {
+    throw new Error('Conditional subject replacement verification expected an ASK result');
+  }
+  return result.value ? 'replaced' : 'condition-not-met';
+}
+
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
 
 // Backends that talk to a remote SPARQL endpoint over HTTP rather than

@@ -18,11 +18,11 @@ import {
   DEFAULT_APPROVAL_POLICY,
   V10_WRITE_AHEAD_HOOK_TIMEOUT_MS,
   buildEvmDeploymentId,
-  isV10AbortAwareCallback,
 } from './chain-adapter.js';
 import type {
   ApprovalPolicy,
   V10PublishParams,
+  V10WriteAheadCancellation,
   V10WriteAheadHookInfo,
   OnChainPublishResult,
 } from './chain-adapter.js';
@@ -96,6 +96,7 @@ async function runV10WriteAheadHook(
   label: 'publish' | 'update',
   hook: (info: V10WriteAheadHookInfo) => Promise<void> | void,
   txHash: string,
+  cancellation: V10WriteAheadCancellation | undefined,
 ): Promise<void> {
   const abortController = new AbortController();
   const hookPromise = Promise.resolve().then(() => hook({
@@ -106,7 +107,7 @@ async function runV10WriteAheadHook(
   // timeout. Await them to completion so a successful WAL write is always
   // followed by the matching broadcast. Only explicitly cooperative hooks
   // may be abandoned safely.
-  if (!isV10AbortAwareCallback(hook)) {
+  if (cancellation !== 'cooperative') {
     await hookPromise;
     return;
   }
@@ -1673,8 +1674,8 @@ export class EVMChainAdapterBase {
    * The lane only owns FIFO admission; the nonce-critical work remains direct
    * local control flow here so its ordering and failure boundaries are visible.
    * `onBroadcast` is the durable WAL checkpoint: it `await`s before broadcast
-   * and a throw fails closed. Explicitly abort-aware hooks also fail closed on
-   * timeout; unbranded compatibility hooks are awaited to completion so they
+   * and a throw fails closed. Explicitly cooperative hooks also fail closed on
+   * timeout; compatibility hooks are awaited to completion so they
    * cannot persist a late WAL record for an abandoned transaction.
    */
   protected async dispatchSerializedV10Write(
@@ -1683,6 +1684,7 @@ export class EVMChainAdapterBase {
     onBroadcast: ((info: V10WriteAheadHookInfo) => Promise<void> | void) | undefined,
     request: V10SignerWriteRequest,
     onNullReceipt: (preBroadcastTxHash: string) => never,
+    onBroadcastCancellation?: V10WriteAheadCancellation,
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(signer, `V10 ${label}`, async (ctx) => {
       await this.ensureV10ApproveTrac(
@@ -1705,7 +1707,7 @@ export class EVMChainAdapterBase {
       );
       if (onBroadcast) {
         try {
-          await runV10WriteAheadHook(label, onBroadcast, txHash);
+          await runV10WriteAheadHook(label, onBroadcast, txHash, onBroadcastCancellation);
         } catch (hookErr) {
           throw new Error(
             `chain:writeahead hook failed before ${label} broadcast: ` +
@@ -3661,6 +3663,7 @@ export class EVMChainAdapterBase {
       () => {
         throw new Error('Transaction receipt is null');
       },
+      params.onBroadcastCancellation,
     ).catch(async (err: unknown) => {
       // Turn an insufficient-funds failure (native gas OR a zero-TRAC
       // transferFrom revert) on the selected wallet into an actionable

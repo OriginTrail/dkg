@@ -4,6 +4,7 @@ import {
   createLiftJobFailureMetadata,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type LiftJob,
 } from '../src/index.js';
 import { DEFAULT_WALLET_LOCK_GRAPH_URI, walletLockSubject } from '../src/async-lift-control-plane.js';
 import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
@@ -235,6 +236,8 @@ describe('KA async VM publish broadcast progress', () => {
         transitionType: 'CREATE',
       },
     });
+    const expectedJob = await publisher.getStatus(jobId);
+    if (!expectedJob) throw new Error('expected validated job');
 
     const originalUpdate = store.update.bind(store);
     let injectedConcurrentChange = false;
@@ -259,6 +262,7 @@ describe('KA async VM publish broadcast progress', () => {
         walletId: string;
         txHash: `0x${string}`;
         merkleRoot: `0x${string}`;
+        expectedJob: LiftJob;
       }): Promise<boolean>;
     };
     await expect(internals.recordKnowledgeAssetVmPublishBroadcastProgress({
@@ -266,6 +270,7 @@ describe('KA async VM publish broadcast progress', () => {
       walletId: 'wallet-1',
       txHash,
       merkleRoot: `0x${'12'.repeat(32)}`,
+      expectedJob,
     })).rejects.toThrow(`changed from validated before the broadcast transition`);
 
     const committed = await publisher.getStatus(jobId);
@@ -273,6 +278,247 @@ describe('KA async VM publish broadcast progress', () => {
     expect(committed?.status).toBe('failed');
     expect(committed?.failure?.message).toBe('concurrent validation failure');
     expect(committed?.broadcast).toBeUndefined();
+  });
+
+  it('rejects an old executor callback after the job is recovered and revalidated', async () => {
+    const txHash = `0x${'d2'.repeat(32)}` as `0x${string}`;
+    let releaseExecutor!: () => void;
+    const executorGate = new Promise<void>((resolve) => { releaseExecutor = resolve; });
+    let markExecutorStarted!: () => void;
+    const executorStarted = new Promise<void>((resolve) => { markExecutorStarted = resolve; });
+    let claimTokens = 0;
+    const publisher = createPublisher({
+      claimTokenGenerator: () => `attempt-${++claimTokens}`,
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        markExecutorStarted();
+        await executorGate;
+        await input.publishOptions.onPhase?.('chain:writeahead', 'start', { txHash });
+        throw new Error('old executor must not advance the reclaimed job');
+      },
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    const oldAttempt = publisher.processNext('wallet-1');
+    await executorStarted;
+    const validatedA = await publisher.getStatus(jobId);
+    expect(validatedA?.status).toBe('validated');
+    expect(validatedA?.claim?.claimToken).toContain('attempt-1');
+
+    await expect(publisher.recover()).resolves.toBe(1);
+    const claimedB = await publisher.claimNext('wallet-2');
+    expect(claimedB?.jobId).toBe(jobId);
+    expect(claimedB?.claim?.claimToken).toContain('attempt-2');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'reclaimed-validation',
+        transitionType: 'CREATE',
+      },
+    });
+    const validatedB = await publisher.getStatus(jobId);
+    expect(validatedB?.status).toBe('validated');
+
+    releaseExecutor();
+    const staleResult = await oldAttempt;
+    const committed = await publisher.getStatus(jobId);
+    expect(staleResult?.status).toBe('validated');
+    expect(staleResult?.claim?.walletId).toBe('wallet-2');
+    expect(committed?.status).toBe('validated');
+    expect(committed?.claim?.walletId).toBe('wallet-2');
+    expect(committed?.claim?.claimToken).toBe(validatedB?.claim?.claimToken);
+    expect(committed?.validation?.authorityProofRef).toBe('reclaimed-validation');
+    expect(committed?.broadcast).toBeUndefined();
+
+    const internals = publisher as unknown as {
+      readWalletLock(walletId: string): Promise<{ claimToken?: string } | null>;
+    };
+    expect(await internals.readWalletLock('wallet-1')).toBeNull();
+    expect((await internals.readWalletLock('wallet-2'))?.claimToken).toBe(
+      validatedB?.claim?.claimToken,
+    );
+  });
+
+  it('does not let a stale claimed attempt validate a recovered and re-claimed job', async () => {
+    let claimTokens = 0;
+    let executorCalls = 0;
+    const publisher = createPublisher({
+      claimTokenGenerator: () => `attempt-${++claimTokens}`,
+      knowledgeAssetVmPublishExecutor: async () => {
+        executorCalls += 1;
+        throw new Error('stale attempt must not reach the executor');
+      },
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+    const originalUpdate = store.update.bind(store);
+    let validatedB: LiftJob | null = null;
+    store.update = async (sparql, options) => {
+      if (!validatedB) {
+        // Attempt A has been claimed and is about to commit validation. Run a
+        // complete recovery/reclaim cycle before its conditional write lands.
+        await expect(publisher.recover()).resolves.toBe(1);
+        const claimedB = await publisher.claimNext('wallet-2');
+        expect(claimedB?.claim?.claimToken).toContain('attempt-2');
+        await publisher.update(jobId, 'validated', {
+          validation: {
+            canonicalRoots: ['urn:album:one', 'urn:album:two'],
+            canonicalRootMap: {},
+            swmQuadCount: 2,
+            authorityProofRef: 'attempt-b',
+            transitionType: 'CREATE',
+          },
+        });
+        validatedB = await publisher.getStatus(jobId);
+      }
+      await originalUpdate(sparql, options);
+    };
+
+    const staleResult = await publisher.processNext('wallet-1');
+    const committed = await publisher.getStatus(jobId);
+    expect(executorCalls).toBe(0);
+    expect(staleResult?.status).toBe('validated');
+    expect(staleResult?.claim?.walletId).toBe('wallet-2');
+    expect(committed?.status).toBe('validated');
+    expect(committed?.claim?.claimToken).toBe(validatedB?.claim?.claimToken);
+    expect(committed?.validation?.authorityProofRef).toBe('attempt-b');
+    expect(committed?.broadcast).toBeUndefined();
+
+    const internals = publisher as unknown as {
+      readWalletLock(walletId: string): Promise<{ claimToken?: string } | null>;
+    };
+    expect(await internals.readWalletLock('wallet-1')).toBeNull();
+    expect((await internals.readWalletLock('wallet-2'))?.claimToken).toBe(
+      validatedB?.claim?.claimToken,
+    );
+  });
+
+  it('rejects an ABA reclaim that lands between the broadcast read and server CAS', async () => {
+    const txHash = `0x${'d3'.repeat(32)}` as `0x${string}`;
+    let claimTokens = 0;
+    const publisher = createPublisher({
+      claimTokenGenerator: () => `attempt-${++claimTokens}`,
+    });
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'attempt-a',
+        transitionType: 'CREATE',
+      },
+    });
+    const expectedJob = await publisher.getStatus(jobId);
+    if (!expectedJob) throw new Error('expected validated attempt A');
+
+    const originalUpdate = store.update.bind(store);
+    let validatedB: LiftJob | null = null;
+    store.update = async (sparql, options) => {
+      if (!validatedB) {
+        await expect(publisher.recover()).resolves.toBe(1);
+        const claimedB = await publisher.claimNext('wallet-2');
+        expect(claimedB?.claim?.claimToken).toContain('attempt-2');
+        await publisher.update(jobId, 'validated', {
+          validation: {
+            canonicalRoots: ['urn:album:one', 'urn:album:two'],
+            canonicalRootMap: {},
+            swmQuadCount: 2,
+            authorityProofRef: 'attempt-b',
+            transitionType: 'CREATE',
+          },
+        });
+        validatedB = await publisher.getStatus(jobId);
+      }
+      await originalUpdate(sparql, options);
+    };
+
+    const internals = publisher as unknown as {
+      recordKnowledgeAssetVmPublishBroadcastProgress(params: {
+        jobId: string;
+        walletId: string;
+        txHash: `0x${string}`;
+        merkleRoot: `0x${string}`;
+        expectedJob: LiftJob;
+      }): Promise<boolean>;
+      readWalletLock(walletId: string): Promise<{ claimToken?: string } | null>;
+    };
+    await expect(internals.recordKnowledgeAssetVmPublishBroadcastProgress({
+      jobId,
+      walletId: 'wallet-1',
+      txHash,
+      merkleRoot: `0x${'12'.repeat(32)}`,
+      expectedJob,
+    })).rejects.toThrow('changed from validated before the broadcast transition');
+
+    const committed = await publisher.getStatus(jobId);
+    expect(committed?.status).toBe('validated');
+    expect(committed?.claim?.walletId).toBe('wallet-2');
+    expect(committed?.claim?.claimToken).toBe(validatedB?.claim?.claimToken);
+    expect(committed?.validation?.authorityProofRef).toBe('attempt-b');
+    expect(committed?.broadcast).toBeUndefined();
+    expect(await internals.readWalletLock('wallet-1')).toBeNull();
+    expect((await internals.readWalletLock('wallet-2'))?.claimToken).toBe(
+      validatedB?.claim?.claimToken,
+    );
+  });
+
+  it('only treats the same tx and wallet as an idempotent broadcast callback', async () => {
+    const firstTxHash = `0x${'d5'.repeat(32)}` as `0x${string}`;
+    const secondTxHash = `0x${'d6'.repeat(32)}` as `0x${string}`;
+    const publisher = createPublisher();
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+    const expectedJob = await publisher.getStatus(jobId);
+    if (!expectedJob) throw new Error('expected validated job');
+    const internals = publisher as unknown as {
+      recordKnowledgeAssetVmPublishBroadcastProgress(params: {
+        jobId: string;
+        walletId: string;
+        txHash: `0x${string}`;
+        merkleRoot: `0x${string}`;
+        expectedJob: LiftJob;
+      }): Promise<boolean>;
+    };
+    const base = {
+      jobId,
+      walletId: 'wallet-1',
+      merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      expectedJob,
+    };
+
+    await expect(internals.recordKnowledgeAssetVmPublishBroadcastProgress({
+      ...base,
+      txHash: firstTxHash,
+    })).resolves.toBe(true);
+    await expect(internals.recordKnowledgeAssetVmPublishBroadcastProgress({
+      ...base,
+      txHash: firstTxHash,
+    })).resolves.toBe(true);
+    await expect(internals.recordKnowledgeAssetVmPublishBroadcastProgress({
+      ...base,
+      txHash: secondTxHash,
+    })).rejects.toThrow('already broadcast by a different transaction attempt');
+
+    const committed = await publisher.getStatus(jobId);
+    expect(committed?.status).toBe('broadcast');
+    expect(committed?.broadcast?.txHash).toBe(firstTxHash);
+    expect(committed?.broadcast?.walletId).toBe('wallet-1');
   });
 
   it('serializes the no-update fallback with an ordinary concurrent status writer', async () => {
@@ -297,6 +543,8 @@ describe('KA async VM publish broadcast progress', () => {
         transitionType: 'CREATE',
       },
     });
+    const expectedJob = await publisher.getStatus(jobId);
+    if (!expectedJob) throw new Error('expected validated job');
 
     let releaseWriteLane!: () => void;
     let writeLaneEntered!: () => void;
@@ -312,6 +560,7 @@ describe('KA async VM publish broadcast progress', () => {
         walletId: string;
         txHash: `0x${string}`;
         merkleRoot: `0x${string}`;
+        expectedJob: LiftJob;
       }): Promise<boolean>;
     };
     const originalWriteJob = internals.writeJob.bind(publisher);
@@ -339,6 +588,7 @@ describe('KA async VM publish broadcast progress', () => {
       walletId: 'wallet-1',
       txHash,
       merkleRoot: `0x${'12'.repeat(32)}`,
+      expectedJob,
     });
 
     releaseWriteLane();
@@ -351,6 +601,91 @@ describe('KA async VM publish broadcast progress', () => {
     expect(committed?.status).toBe('failed');
     expect(committed?.failure?.message).toBe('concurrent no-update failure');
     expect(committed?.broadcast).toBeUndefined();
+  });
+
+  it('rejects an ABA reclaim before the no-update fallback commit', async () => {
+    const txHash = `0x${'d4'.repeat(32)}` as `0x${string}`;
+    const storeWithoutUpdate = new Proxy(store, {
+      get(target, property) {
+        if (property === 'update') return undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let claimTokens = 0;
+    const publisher = createPublisher({
+      claimTokenGenerator: () => `attempt-${++claimTokens}`,
+    }, storeWithoutUpdate);
+    await stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'attempt-a',
+        transitionType: 'CREATE',
+      },
+    });
+    const expectedJob = await publisher.getStatus(jobId);
+    if (!expectedJob) throw new Error('expected validated attempt A');
+
+    const internals = publisher as unknown as {
+      writeJob(
+        job: LiftJob,
+        options?: { expectedJob?: LiftJob; signal?: AbortSignal },
+      ): Promise<'written' | 'conflict' | 'unsupported'>;
+      recordKnowledgeAssetVmPublishBroadcastProgress(params: {
+        jobId: string;
+        walletId: string;
+        txHash: `0x${string}`;
+        merkleRoot: `0x${string}`;
+        expectedJob: LiftJob;
+      }): Promise<boolean>;
+      readWalletLock(walletId: string): Promise<{ claimToken?: string } | null>;
+    };
+    const originalWriteJob = internals.writeJob.bind(publisher);
+    let validatedB: LiftJob | null = null;
+    internals.writeJob = async (job, options) => {
+      const result = await originalWriteJob(job, options);
+      if (!validatedB && options?.expectedJob) {
+        // The conditional path just reported unsupported. Move the persisted
+        // job through a complete ABA cycle before the fallback re-reads it.
+        await expect(publisher.recover()).resolves.toBe(1);
+        await publisher.claimNext('wallet-2');
+        await publisher.update(jobId, 'validated', {
+          validation: {
+            canonicalRoots: ['urn:album:one', 'urn:album:two'],
+            canonicalRootMap: {},
+            swmQuadCount: 2,
+            authorityProofRef: 'attempt-b',
+            transitionType: 'CREATE',
+          },
+        });
+        validatedB = await publisher.getStatus(jobId);
+      }
+      return result;
+    };
+
+    await expect(internals.recordKnowledgeAssetVmPublishBroadcastProgress({
+      jobId,
+      walletId: 'wallet-1',
+      txHash,
+      merkleRoot: `0x${'12'.repeat(32)}`,
+      expectedJob,
+    })).rejects.toThrow('changed before the broadcast transition');
+
+    const committed = await publisher.getStatus(jobId);
+    expect(committed?.status).toBe('validated');
+    expect(committed?.claim?.walletId).toBe('wallet-2');
+    expect(committed?.claim?.claimToken).toBe(validatedB?.claim?.claimToken);
+    expect(committed?.validation?.authorityProofRef).toBe('attempt-b');
+    expect(committed?.broadcast).toBeUndefined();
+    expect(await internals.readWalletLock('wallet-1')).toBeNull();
+    expect((await internals.readWalletLock('wallet-2'))?.claimToken).toBe(
+      validatedB?.claim?.claimToken,
+    );
   });
 
   it('does not persist staged tx progress when a later write-ahead listener times out', async () => {

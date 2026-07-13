@@ -16,7 +16,6 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   EVMChainAdapter,
-  isV10AbortAwareCallback,
 } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
@@ -309,6 +308,41 @@ describe('Phase-sequence contracts', () => {
     ]);
   });
 
+  it('update closes the parent chain phase when the submit start listener rejects', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const root = `${ENTITY}:submit-start-rejection`;
+    const published = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(root, 'http://schema.org/name', '"Before"')],
+    });
+    const listenerFailure = new Error('submit start listener failed');
+    const calls: [string, 'start' | 'end'][] = [];
+
+    await expect(publisher.update(published.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(root, 'http://schema.org/name', '"After"')],
+      onPhase: (phase, status) => {
+        calls.push([phase, status]);
+        if (phase === 'chain:submit' && status === 'start') throw listenerFailure;
+      },
+    })).rejects.toBe(listenerFailure);
+
+    expect(calls.filter(([phase, status]) => phase === 'chain' && status === 'start')).toHaveLength(1);
+    expect(calls.filter(([phase, status]) => phase === 'chain' && status === 'end')).toHaveLength(1);
+    expect(calls.filter(([phase, status]) => phase === 'chain:submit' && status === 'start')).toHaveLength(1);
+    expect(calls.filter(([phase, status]) => phase === 'chain:submit' && status === 'end')).toHaveLength(0);
+  });
+
   // -- Workspace handler -------------------------------------------------
 
   it('workspace handle: golden phase sequence', async () => {
@@ -435,11 +469,11 @@ describe('Phase-sequence contracts', () => {
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
 
-      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => Promise<void> | void }) => Promise<never> }).createKnowledgeAssets =
+      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => Promise<void> | void; onBroadcastCancellation?: 'cooperative' }) => Promise<never> }).createKnowledgeAssets =
         async (params) => {
           // The emitter awaits an arbitrary public onPhase listener, so it
           // must retain legacy await-to-completion semantics by default.
-          expect(isV10AbortAwareCallback(params.onBroadcast)).toBe(false);
+          expect(params.onBroadcastCancellation).toBeUndefined();
           await Promise.all([params.onBroadcast?.(), params.onBroadcast?.()]);
           throw new Error('simulated publish broadcast failure');
         };

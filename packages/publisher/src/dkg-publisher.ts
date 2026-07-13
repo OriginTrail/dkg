@@ -2209,89 +2209,84 @@ export class DKGPublisher implements Publisher {
     const manifestEntries: KAManifestEntry[] = [];
     const kaMetadata: KAMetadata[] = [];
 
-    await invokePhaseCallback(onPhase, 'prepare:manifest', 'start');
-    // OT-RFC-44 / Design B: one file/lifecycle = ONE Knowledge Asset, however
-    // many entities it contains. The on-chain KA count and ACK digest stay at
-    // one below, while these token IDs remain compatibility labels for
-    // per-root response/meta subjects (`<ual>/1`, `<ual>/2`, ...).
-    // GH #936 — mint the compatibility tokenIds over a CANONICAL (lexicographic
-    // by rootEntity) order, the SAME order the replica reconcile/gossip path
-    // uses in `FinalizationHandler.promoteSharedMemoryToCanonical`. Without this,
-    // the ORIGINATOR would label `<ual>/<tokenId>` by input-quad order while
-    // replicas label by sorted order, so a multi-root KC could resolve a
-    // different root for the same token label depending on which node a client
-    // queries. These tokenIds are non-on-chain compatibility labels (the
-    // on-chain KA count is 1), so a content-derived sort is safe.
-    const orderedEntries = [...canonical.manifestEntries].sort((a, b) =>
-      compareRootIris(a.rootEntity, b.rootEntity),
-    );
-    let compatibilityTokenId = 1n;
-    for (const entry of orderedEntries) {
-      const tokenId = compatibilityTokenId++;
-      manifestEntries.push({
-        tokenId,
-        rootEntity: entry.rootEntity,
-        privateMerkleRoot: entry.privateMerkleRoot,
-        privateTripleCount: entry.privateTripleCount,
-      });
+    await phases.scope('prepare:manifest', async () => {
+      // OT-RFC-44 / Design B: one file/lifecycle = ONE Knowledge Asset, however
+      // many entities it contains. The on-chain KA count and ACK digest stay at
+      // one below, while these token IDs remain compatibility labels for
+      // per-root response/meta subjects (`<ual>/1`, `<ual>/2`, ...).
+      // GH #936 — mint the compatibility tokenIds over a CANONICAL (lexicographic
+      // by rootEntity) order, the SAME order the replica reconcile/gossip path
+      // uses in `FinalizationHandler.promoteSharedMemoryToCanonical`.
+      const orderedEntries = [...canonical.manifestEntries].sort((a, b) =>
+        compareRootIris(a.rootEntity, b.rootEntity),
+      );
+      let compatibilityTokenId = 1n;
+      for (const entry of orderedEntries) {
+        const tokenId = compatibilityTokenId++;
+        manifestEntries.push({
+          tokenId,
+          rootEntity: entry.rootEntity,
+          privateMerkleRoot: entry.privateMerkleRoot,
+          privateTripleCount: entry.privateTripleCount,
+        });
 
-      kaMetadata.push({
-        rootEntity: entry.rootEntity,
-        kcUal: '',
-        tokenId,
-        publicTripleCount: entry.publicTripleCount,
-        privateTripleCount: entry.privateTripleCount,
-        privateMerkleRoot: entry.privateMerkleRoot,
-      });
-    }
+        kaMetadata.push({
+          rootEntity: entry.rootEntity,
+          kcUal: '',
+          tokenId,
+          publicTripleCount: entry.publicTripleCount,
+          privateTripleCount: entry.privateTripleCount,
+          privateMerkleRoot: entry.privateMerkleRoot,
+        });
+      }
+    });
 
     const allSkolemizedQuads = canonical.skolemizedPublicQuads;
-    await invokePhaseCallback(onPhase, 'prepare:manifest', 'end');
+    await phases.scope('prepare:validate', async () => {
+      const publishOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+      const existing = this.ownedEntities.get(publishOwnershipKey) ?? new Set();
+      const validation = validatePublishRequest(
+        allSkolemizedQuads,
+        manifestEntries,
+        contextGraphId,
+        existing,
+        {
+          trustedNonManifestCatalogTriples: options.trustedNonManifestCatalogTriples,
+        },
+      );
+      if (!validation.valid) {
+        throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
+      }
+    });
 
-    await invokePhaseCallback(onPhase, 'prepare:validate', 'start');
-    const publishOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-    const existing = this.ownedEntities.get(publishOwnershipKey) ?? new Set();
-    const validation = validatePublishRequest(
-      allSkolemizedQuads,
-      manifestEntries,
-      contextGraphId,
-      existing,
-      {
-        trustedNonManifestCatalogTriples: options.trustedNonManifestCatalogTriples,
-      },
-    );
-    if (!validation.valid) {
-      throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
-    }
-    await invokePhaseCallback(onPhase, 'prepare:validate', 'end');
+    const { privateRoots, kcMerkleRoot, kcMerkleLeafCount, entityCount, kaCount } =
+      await phases.scope('prepare:merkle', async () => {
+        const scopedPrivateRoots = canonical.privateRoots;
+        const scopedMerkleRoot = canonical.kcMerkleRoot;
+        const scopedLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, scopedPrivateRoots);
+        if (scopedLeafCount > 0xffffffff) {
+          throw new Error(`V10 merkleLeafCount exceeds uint32: ${scopedLeafCount}`);
+        }
+        this.log.info(ctx, `Computed kcMerkleRoot (structured: hashPair(publicRoot, privateDataHash)) over ${allSkolemizedQuads.length} public triple hashes + ${scopedPrivateRoots.length} private root(s), public leafCount=${scopedLeafCount}`);
+        const scopedEntityCount = manifestEntries.length;
+        if (scopedEntityCount < 1) {
+          throw new Error('V10 publish requires at least one entity');
+        }
+        this.log.info(ctx, `Design B: publishing 1 KA with ${scopedEntityCount} member entit${scopedEntityCount === 1 ? 'y' : 'ies'}`);
+        return {
+          privateRoots: scopedPrivateRoots,
+          kcMerkleRoot: scopedMerkleRoot,
+          kcMerkleLeafCount: scopedLeafCount,
+          entityCount: scopedEntityCount,
+          kaCount: 1,
+        };
+      });
 
-    await invokePhaseCallback(onPhase, 'prepare:merkle', 'start');
-    const privateRoots = canonical.privateRoots;
-    const kcMerkleRoot = canonical.kcMerkleRoot;
-    const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, privateRoots);
-    if (kcMerkleLeafCount > 0xffffffff) {
-      throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
-    }
-    this.log.info(ctx, `Computed kcMerkleRoot (structured: hashPair(publicRoot, privateDataHash)) over ${allSkolemizedQuads.length} public triple hashes + ${privateRoots.length} private root(s), public leafCount=${kcMerkleLeafCount}`);
-    // Design B: a publish mints exactly ONE KA regardless of entity count.
-    // `entityCount` is informational; `kaCount` is what goes on chain as
-    // `knowledgeAssetsAmount` (the contract requires == 1) and into the ACK
-    // digest. The old `kaCount = manifestEntries.length` + `kaCount !== 1`
-    // guard conflated entity count with KA count and blocked multi-entity
-    // files; that conflation is the bug OT-RFC-44 removes.
-    const entityCount = manifestEntries.length;
-    const kaCount = 1;
-    if (entityCount < 1) {
-      throw new Error('V10 publish requires at least one entity');
-    }
-    this.log.info(ctx, `Design B: publishing 1 KA with ${entityCount} member entit${entityCount === 1 ? 'y' : 'ies'}`);
-    await invokePhaseCallback(onPhase, 'prepare:merkle', 'end');
+    await phases.emit('prepare', 'end');
 
-    await invokePhaseCallback(onPhase, 'prepare', 'end');
-    await invokePhaseCallback(onPhase, 'store', 'start');
-
-    const dataGraph = options.targetGraphUri ?? this.graphManager.dataGraphUri(contextGraphId);
-    const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
+    const { normalizedQuads, persistFinalizedPrivateSlices } = await phases.scope('store', async () => {
+      const dataGraph = options.targetGraphUri ?? this.graphManager.dataGraphUri(contextGraphId);
+      const scopedNormalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
 
     // RC11 / PR2: defer the public-data insert into the root data graph
     // until AFTER on-chain confirmation (or until the publisher's chain
@@ -2323,23 +2318,24 @@ export class DKGPublisher implements Publisher {
     // private store consistent with the committed `privateMerkleRoot`, and
     // invoking it BEFORE the publish returns 'confirmed' preserves the
     // no-"confirmed-before-data" guarantee the pre-chain insert used to give.
-    const persistFinalizedPrivateSlices = async (): Promise<void> => {
-      for (const entry of canonical.manifestEntries) {
-        const entityPrivateQuads = privateQuads.filter(
-          (q) => q.subject === entry.rootEntity || q.subject.startsWith(entry.rootEntity + '/.well-known/genid/'),
-        );
-        if (entityPrivateQuads.length > 0) {
-          // Tag the stored slice with the commitment this root committed (its
-          // privateMerkleRoot) so a later re-publish supersedes the stale slice.
-          const commitmentId = entry.privateMerkleRoot
-            ? Buffer.from(entry.privateMerkleRoot).toString('hex')
-            : undefined;
-          await this.privateStore.storePrivateTriples(contextGraphId, entry.rootEntity, entityPrivateQuads, options.subGraphName, commitmentId);
+      const scopedPersistFinalizedPrivateSlices = async (): Promise<void> => {
+        for (const entry of canonical.manifestEntries) {
+          const entityPrivateQuads = privateQuads.filter(
+            (q) => q.subject === entry.rootEntity || q.subject.startsWith(entry.rootEntity + '/.well-known/genid/'),
+          );
+          if (entityPrivateQuads.length > 0) {
+            const commitmentId = entry.privateMerkleRoot
+              ? Buffer.from(entry.privateMerkleRoot).toString('hex')
+              : undefined;
+            await this.privateStore.storePrivateTriples(contextGraphId, entry.rootEntity, entityPrivateQuads, options.subGraphName, commitmentId);
+          }
         }
-      }
-    };
-
-    await invokePhaseCallback(onPhase, 'store', 'end');
+      };
+      return {
+        normalizedQuads: scopedNormalizedQuads,
+        persistFinalizedPrivateSlices: scopedPersistFinalizedPrivateSlices,
+      };
+    });
 
     // Compute publicByteSize early — needed for signature collection
     const nquadsStr = allSkolemizedQuads
@@ -3106,22 +3102,19 @@ export class DKGPublisher implements Publisher {
       }
       // ── End preflight ───────────────────────────────────────────
 
-      let signStarted = false;
-      let submitStarted = false;
       try {
-        await invokePhaseCallback(onPhase, 'chain:sign', 'start');
-        signStarted = true;
-        if (!publisherSigner) throw new PublisherWalletRequiredError('publish');
-        this.log.info(
-          ctx,
-          `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
-        );
+        const signedPublisher = await phases.scope('chain:sign', async () => {
+          if (!publisherSigner) throw new PublisherWalletRequiredError('publish');
+          this.log.info(
+            ctx,
+            `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
+          );
+          return publisherSigner;
+        });
 
-        await invokePhaseCallback(onPhase, 'chain:sign', 'end');
-        signStarted = false;
-        await invokePhaseCallback(onPhase, 'chain:submit', 'start');
-        submitStarted = true;
-        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, byteSize=${effectiveByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, tokenAmount=${tokenAmount})`);
+        const submitPhase = await phases.open('chain:submit');
+        try {
+          this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, byteSize=${effectiveByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, tokenAmount=${tokenAmount})`);
 
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
@@ -3269,7 +3262,7 @@ export class DKGPublisher implements Publisher {
           return this.chain.createKnowledgeAssets!({
             publishOperationId,
             contextGraphId: v10CgId,
-            publisherAddress: publisherSigner.address,
+            publisherAddress: signedPublisher.address,
             reservedKaId,
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
@@ -3431,14 +3424,11 @@ export class DKGPublisher implements Publisher {
           },
         });
 
-        status = 'confirmed';
-        await invokePhaseCallback(onPhase, 'chain:submit', 'end');
-        submitStarted = false;
-        await invokePhaseCallback(onPhase, 'chain:metadata', 'start');
-        this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
+          status = 'confirmed';
+        } finally {
+          await submitPhase.close();
+        }
       } catch (err) {
-        if (signStarted) await invokePhaseCallback(onPhase, 'chain:sign', 'end');
-        if (submitStarted) await invokePhaseCallback(onPhase, 'chain:submit', 'end');
         // RC11 / PR2: re-throw chain failures instead of silently
         // downgrading to a "tentative" result with a local data-graph
         // write. Pre-PR2 this branch swallowed the error and fell
@@ -3476,39 +3466,35 @@ export class DKGPublisher implements Publisher {
 
     // Track owned entities and batch→context graph binding on confirmed publishes
     if (status === 'confirmed' && onChainResult) {
-      const confirmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-      if (!this.ownedEntities.has(confirmOwnershipKey)) {
-        this.ownedEntities.set(confirmOwnershipKey, new Set());
-      }
-      for (const e of manifestEntries) {
-        this.ownedEntities.get(confirmOwnershipKey)!.add(e.rootEntity);
-      }
-      this.knownBatchContextGraphs.set(String(onChainResult.batchId), contextGraphId);
-      // RS prevention (GH #1264): self-promote the confirmed KC into the SCOPED
-      // context-graph graphs the Random Sampling prover reads. The one-shot
-      // `dkg publish --file` path otherwise leaves the KC only in the legacy
-      // label graphs, so every prover tick reports `kc-not-synced` and no proof
-      // ever lands. Best-effort — the KC is already on-chain, so a promote error
-      // must NOT fail the publish (the layer-3 heal backstop is the fallback).
-      // Skipped for sub-graph publishes (RS samples root CGs; sub-graph KCs use a
-      // different layout); remap is not applicable on this one-shot path.
-      if (!options.subGraphName) {
-        try {
-          await this.promoteConfirmedKCToScopedGraph(
-            contextGraphId,
-            onChainResult,
-            ual,
-            kcMerkleRoot,
-            manifestEntries,
-            allSkolemizedQuads,
-            publisherContextGraphId,
-            ctx,
-          );
-        } catch (err) {
-          this.log.warn(ctx, `RS scoped-promote failed for ${ual} (heal backstop will retry): ${err instanceof Error ? err.message : String(err)}`);
+      await phases.scope('chain:metadata', async () => {
+        this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
+        const confirmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+        if (!this.ownedEntities.has(confirmOwnershipKey)) {
+          this.ownedEntities.set(confirmOwnershipKey, new Set());
         }
-      }
-      await invokePhaseCallback(onPhase, 'chain:metadata', 'end');
+        for (const e of manifestEntries) {
+          this.ownedEntities.get(confirmOwnershipKey)!.add(e.rootEntity);
+        }
+        this.knownBatchContextGraphs.set(String(onChainResult.batchId), contextGraphId);
+        // RS prevention (GH #1264): self-promote the confirmed KC into the SCOPED
+        // context-graph graphs the Random Sampling prover reads.
+        if (!options.subGraphName) {
+          try {
+            await this.promoteConfirmedKCToScopedGraph(
+              contextGraphId,
+              onChainResult,
+              ual,
+              kcMerkleRoot,
+              manifestEntries,
+              allSkolemizedQuads,
+              publisherContextGraphId,
+              ctx,
+            );
+          } catch (err) {
+            this.log.warn(ctx, `RS scoped-promote failed for ${ual} (heal backstop will retry): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      });
     }
 
     await invokePhaseCallback(onPhase, 'chain', 'end');
@@ -3715,76 +3701,83 @@ export class DKGPublisher implements Publisher {
       options.subGraphName,
     );
 
-    await invokePhaseCallback(onPhase, 'prepare', 'start');
-    await invokePhaseCallback(onPhase, 'prepare:partition', 'start');
-    await this.assertTrustedCatalogTriplesAllowed({
-      contextGraphId,
-      trustedNonManifestCatalogTriples: options.trustedNonManifestCatalogTriples,
-      onChainContextGraphId: publisherContextGraphId,
-      internalCatalogOrigin: isTrustedCatalogInternalOrigin(options),
-    });
-    const kaMap = skolemizeByEntity(quads);
-    const {
-      contentRootMap,
-      generatedCatalogRootEntities,
-    } = splitTrustedGeneratedCatalogRootMap(
-      kaMap,
-      options.trustedNonManifestCatalogTriples,
-    );
-    for (const rootEntity of generatedCatalogRootEntities) {
-      const hiddenPrivateQuads = privateQuads.filter(
-        (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
+    await phases.emit('prepare', 'start');
+    const { kaMap, contentRootMap } = await phases.scope('prepare:partition', async () => {
+      await this.assertTrustedCatalogTriplesAllowed({
+        contextGraphId,
+        trustedNonManifestCatalogTriples: options.trustedNonManifestCatalogTriples,
+        onChainContextGraphId: publisherContextGraphId,
+        internalCatalogOrigin: isTrustedCatalogInternalOrigin(options),
+      });
+      const scopedKaMap = skolemizeByEntity(quads);
+      const {
+        contentRootMap: scopedContentRootMap,
+        generatedCatalogRootEntities,
+      } = splitTrustedGeneratedCatalogRootMap(
+        scopedKaMap,
+        options.trustedNonManifestCatalogTriples,
       );
-      if (hiddenPrivateQuads.length > 0) {
-        throw new Error(
-          `Generated catalog subject "${rootEntity}" has private triples; ` +
-          'refusing to exclude it from the KA manifest',
+      for (const rootEntity of generatedCatalogRootEntities) {
+        const hiddenPrivateQuads = privateQuads.filter(
+          (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
         );
+        if (hiddenPrivateQuads.length > 0) {
+          throw new Error(
+            `Generated catalog subject "${rootEntity}" has private triples; ` +
+            'refusing to exclude it from the KA manifest',
+          );
+        }
       }
-    }
-    await invokePhaseCallback(onPhase, 'prepare:partition', 'end');
+      return { kaMap: scopedKaMap, contentRootMap: scopedContentRootMap };
+    });
 
-    await invokePhaseCallback(onPhase, 'prepare:manifest', 'start');
     const manifestEntries: KAManifestEntry[] = [];
     const entityPrivateMap = new Map<string, Quad[]>();
+    await phases.scope('prepare:manifest', async () => {
+      let tokenCounter = 1n;
+      for (const [rootEntity] of contentRootMap) {
+        const entityPrivateQuads = privateQuads.filter(
+          (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
+        );
+        entityPrivateMap.set(rootEntity, entityPrivateQuads);
 
-    let tokenCounter = 1n;
-    for (const [rootEntity] of contentRootMap) {
-      const entityPrivateQuads = privateQuads.filter(
-        (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
-      );
-      entityPrivateMap.set(rootEntity, entityPrivateQuads);
+        manifestEntries.push({
+          tokenId: tokenCounter++,
+          rootEntity,
+          privateMerkleRoot: entityPrivateQuads.length > 0
+            ? computePrivateRoot(entityPrivateQuads) : undefined,
+          privateTripleCount: entityPrivateQuads.length,
+        });
+      }
+    });
 
-      manifestEntries.push({
-        tokenId: tokenCounter++,
-        rootEntity,
-        privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads) : undefined,
-        privateTripleCount: entityPrivateQuads.length,
+    const { allSkolemizedQuads, updatePrivateRoots, kcMerkleRoot, kcMerkleLeafCount } =
+      await phases.scope('prepare:merkle', async () => {
+        const scopedQuads = [...kaMap.values()].flat();
+        const updatePrivateRoots = manifestEntries
+          .map(m => m.privateMerkleRoot)
+          .filter((r): r is Uint8Array => r != null);
+        const scopedMerkleRoot = computeFlatKCRoot(scopedQuads, updatePrivateRoots);
+        const scopedLeafCount = computeFlatKCMerkleLeafCountV10(scopedQuads, updatePrivateRoots);
+        if (scopedLeafCount > 0xffffffff) {
+          throw new Error(`V10 merkleLeafCount exceeds uint32: ${scopedLeafCount}`);
+        }
+        return {
+          allSkolemizedQuads: scopedQuads,
+          updatePrivateRoots,
+          kcMerkleRoot: scopedMerkleRoot,
+          kcMerkleLeafCount: scopedLeafCount,
+        };
       });
-    }
-    await invokePhaseCallback(onPhase, 'prepare:manifest', 'end');
-
-    await invokePhaseCallback(onPhase, 'prepare:merkle', 'start');
-    const allSkolemizedQuads = [...kaMap.values()].flat();
-    const updatePrivateRoots = manifestEntries
-      .map(m => m.privateMerkleRoot)
-      .filter((r): r is Uint8Array => r != null);
-    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, updatePrivateRoots);
-    const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, updatePrivateRoots);
-    if (kcMerkleLeafCount > 0xffffffff) {
-      throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
-    }
-    await invokePhaseCallback(onPhase, 'prepare:merkle', 'end');
-    await invokePhaseCallback(onPhase, 'prepare', 'end');
+    await phases.emit('prepare', 'end');
 
     const updatePrivateRootByRoot = new Map<string, Uint8Array>();
     for (const m of manifestEntries) {
       if (m.privateMerkleRoot) updatePrivateRootByRoot.set(m.rootEntity, m.privateMerkleRoot);
     }
 
-    const storeUpdatedQuads = async (version?: MaterializedVersion): Promise<void> => {
-      await invokePhaseCallback(onPhase, 'store', 'start');
+    const storeUpdatedQuads = async (version?: MaterializedVersion): Promise<void> =>
+      phases.scope('store', async () => {
 
       // Discover the PRIOR root entities from `_meta` BEFORE the label
       // restatement wipes them (Codex review #2 on PR #845). When an update
@@ -3891,8 +3884,7 @@ export class DKGPublisher implements Publisher {
         privateRootByRoot: updatePrivateRootByRoot,
         version,
       });
-      await invokePhaseCallback(onPhase, 'store', 'end');
-    };
+      });
 
     if (localOnlyUpdate) {
       this.log.warn(ctx, 'No chain configured — applying update locally and returning tentative result');
@@ -3909,8 +3901,14 @@ export class DKGPublisher implements Publisher {
       return result;
     }
 
-    await invokePhaseCallback(onPhase, 'chain', 'start');
-    await invokePhaseCallback(onPhase, 'chain:submit', 'start');
+    const chainPhase = await phases.open('chain');
+    let submitPhase: PhaseScope | undefined;
+    const closeUpdateChainPhases = async (): Promise<void> => {
+      await submitPhase?.close();
+      await chainPhase.close();
+    };
+    try {
+    submitPhase = await phases.open('chain:submit');
 
     // Compute real serialized byte size — must match the publish path serializer.
     // Done BEFORE `chain:writeahead:start` so any error during serialization
@@ -4279,14 +4277,12 @@ export class DKGPublisher implements Publisher {
     }, writeAhead.close);
 
     if (earlyReturn) {
-      await invokePhaseCallback(onPhase, 'chain:submit', 'end');
-      await invokePhaseCallback(onPhase, 'chain', 'end');
+      await closeUpdateChainPhases();
       return earlyReturn;
     }
 
     if (!txResult.success) {
-      await invokePhaseCallback(onPhase, 'chain:submit', 'end');
-      await invokePhaseCallback(onPhase, 'chain', 'end');
+      await closeUpdateChainPhases();
       return {
         kaId,
         ual: await this.resolveKaUal(kaId),
@@ -4308,8 +4304,7 @@ export class DKGPublisher implements Publisher {
           // inventing a publisher address that did not come from chain state.
       }
     }
-    await invokePhaseCallback(onPhase, 'chain:submit', 'end');
-    await invokePhaseCallback(onPhase, 'chain', 'end');
+    await closeUpdateChainPhases();
     if (!effectivePublisherAddress) {
       this.log.warn(
         ctx,
@@ -4398,6 +4393,9 @@ export class DKGPublisher implements Publisher {
 
     this.eventBus.emit(DKGEvent.KA_UPDATED, result);
     return result;
+    } finally {
+      await closeUpdateChainPhases();
+    }
   }
 
   setIdentityId(id: bigint): void {

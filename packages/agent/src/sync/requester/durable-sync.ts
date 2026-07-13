@@ -2,7 +2,7 @@ import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { PhaseReporter, type PhaseCallback, type PhaseScope } from '@origintrail-official/dkg-publisher';
+import { PhaseReporter, type PhaseCallback } from '@origintrail-official/dkg-publisher';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -150,17 +150,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     return true;
   };
   for (const [index, pid] of contextGraphIds.entries()) {
-    let activePhase: PhaseScope | undefined;
     let peerRespondedForContextGraph = false;
-    const startPhase = async (phase: 'fetch' | 'verify' | 'store') => {
-      activePhase = await phases.open(phase);
-    };
-    const endPhase = async () => {
-      if (!activePhase) return;
-      const phase = activePhase;
-      activePhase = undefined;
-      await phase.close();
-    };
 
     try {
       const dataGraph = contextGraphDataGraphUri(pid);
@@ -169,39 +159,43 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
-      await startPhase('fetch');
       const fetchStartedAt = Date.now();
       const skipAgentsMeta = pid === SYSTEM_CONTEXT_GRAPHS.AGENTS && syncAgentsMeta === false;
-      if (skipAgentsMeta) {
-        logInfo(ctx, `Skipping agents meta sync from ${remotePeerId} (syncAgentsMeta=false)`);
-      }
-      const metaResult: SyncPageResult = skipAgentsMeta
-        ? {
-            quads: [],
-            bytesReceived: 0,
-            resumedFromOffset: 0,
-            nextOffset: 0,
-            checkpointKey: getSyncCheckpointKey(remotePeerId, pid, false, 'meta'),
-            completed: true,
-            timedOut: false,
-          }
-        : await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
-      if (!skipAgentsMeta) peerRespondedForContextGraph = true;
-      if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
-        recordPhaseOutcome(metaResult, { updateCheckpoint: false });
-        await endPhase();
-        break;
-      }
-      const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
-      peerRespondedForContextGraph = true;
-      await endPhase();
+      let metaResult!: SyncPageResult;
+      let dataResult!: SyncPageResult;
+      let stopAfterMetaTimeout = false;
+      await phases.scope('fetch', async () => {
+        if (skipAgentsMeta) {
+          logInfo(ctx, `Skipping agents meta sync from ${remotePeerId} (syncAgentsMeta=false)`);
+        }
+        metaResult = skipAgentsMeta
+          ? {
+              quads: [],
+              bytesReceived: 0,
+              resumedFromOffset: 0,
+              nextOffset: 0,
+              checkpointKey: getSyncCheckpointKey(remotePeerId, pid, false, 'meta'),
+              completed: true,
+              timedOut: false,
+            }
+          : await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
+        if (!skipAgentsMeta) peerRespondedForContextGraph = true;
+        if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
+          recordPhaseOutcome(metaResult, { updateCheckpoint: false });
+          stopAfterMetaTimeout = true;
+          return;
+        }
+        dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
+        peerRespondedForContextGraph = true;
+      });
+      if (stopAfterMetaTimeout) break;
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
 
-      await startPhase('verify');
       const verifyStartedAt = Date.now();
-      const processed = await processDurableBatchInWorker(dataResult.quads, metaResult.quads, ctx, isSystemContextGraph);
-      await endPhase();
+      const processed = await phases.scope('verify', () =>
+        processDurableBatchInWorker(dataResult.quads, metaResult.quads, ctx, isSystemContextGraph),
+      );
       const verifyDurationMs = Date.now() - verifyStartedAt;
 
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
@@ -232,21 +226,21 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         continue;
       }
 
-      await startPhase('store');
       const storeStartedAt = Date.now();
-      if (processed.verifiedData.length > 0) {
-        await storeInsert(processed.verifiedData);
-        summary.insertedTriples += processed.verifiedData.length;
-        summary.insertedDataTriples += processed.verifiedData.length;
-      }
-      if (processed.verifiedMeta.length > 0) {
-        await storeInsert(processed.verifiedMeta);
-        summary.insertedTriples += processed.verifiedMeta.length;
-        summary.insertedMetaTriples += processed.verifiedMeta.length;
-      }
-      recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-      recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
-      await endPhase();
+      await phases.scope('store', async () => {
+        if (processed.verifiedData.length > 0) {
+          await storeInsert(processed.verifiedData);
+          summary.insertedTriples += processed.verifiedData.length;
+          summary.insertedDataTriples += processed.verifiedData.length;
+        }
+        if (processed.verifiedMeta.length > 0) {
+          await storeInsert(processed.verifiedMeta);
+          summary.insertedTriples += processed.verifiedMeta.length;
+          summary.insertedMetaTriples += processed.verifiedMeta.length;
+        }
+        recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
+        recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
+      });
       if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
@@ -264,7 +258,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.rejectedKcs += processed.rejectedKcs;
       }
     } catch (pidErr) {
-      await endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       if (isSyncPermanentRejection(pidErr)) {
         // Missed-seam alarm (OT-RFC-56): the oversize guard should have

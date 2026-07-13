@@ -16,8 +16,7 @@ import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import {
   V10_WRITE_AHEAD_HOOK_TIMEOUT_MS,
-  isV10AbortAwareCallback,
-  markV10AbortAwareCallback,
+  type V10WriteAheadHook,
 } from '../src/chain-adapter.js';
 import { connectable } from './connectable.js';
 
@@ -530,9 +529,9 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     const signer = new ethers.Wallet(DEPLOYER_PK);
     const send = recorder(async () => fakeReceipt('0xsent'));
     (a as any).sendSignedTransactionAndWait = send;
-    const onBroadcast = markV10AbortAwareCallback(recorder(async () => {
+    const onBroadcast = recorder(async () => {
       throw new Error('WAL disk full');
-    }));
+    });
 
     await expect(
       (a as any).dispatchSerializedV10Write(
@@ -557,9 +556,10 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       const dispatched = (a as any).dispatchSerializedV10Write(
         signer,
         'publish',
-        markV10AbortAwareCallback(async () => neverSettles),
+        async () => neverSettles,
         preparedRequest(a, async () => ({ signedTx: 'tx', txHash: '0xpre' })),
         neverNull,
+        'cooperative',
       );
       const expectation = expect(dispatched).rejects.toThrow(
         `V10 publish write-ahead hook timed out after ${V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}ms`,
@@ -587,14 +587,13 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       let walWrites = 0;
       let settled = false;
       // This has the same ownership shape as DKGPublisher's wrapper: it awaits
-      // an arbitrary public listener, so it must remain unbranded by default.
-      const publisherStyleHook = async (info: { signal: AbortSignal }) => {
+      // an arbitrary public listener, so it keeps legacy completion semantics.
+      const publisherStyleHook = async (info: { signal?: AbortSignal }) => {
         hookSignal = info.signal;
         await hookGate;
         // Legacy callbacks may ignore AbortSignal and commit at this point.
         walWrites += 1;
       };
-      expect(isV10AbortAwareCallback(publisherStyleHook)).toBe(false);
       const dispatched = (a as any).dispatchSerializedV10Write(
         signer,
         'publish',
@@ -635,14 +634,15 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       const dispatched = (a as any).dispatchSerializedV10Write(
         signer,
         'publish',
-        markV10AbortAwareCallback(async (info: { signal: AbortSignal }) => {
+        async (info: { signal?: AbortSignal }) => {
           hookSignal = info.signal;
           await hookGate;
-          if (!info.signal.aborted) lateWalWrites += 1;
+          if (!info.signal?.aborted) lateWalWrites += 1;
           finishHook();
-        }),
+        },
         preparedRequest(a, async () => ({ signedTx: 'tx', txHash: '0xpre' })),
         neverNull,
+        'cooperative',
       );
       const expectation = expect(dispatched).rejects.toThrow(
         `V10 publish write-ahead hook timed out after ${V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}ms`,
@@ -662,6 +662,17 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('keeps legacy adapter emitters source-compatible with txHash-only hook info', async () => {
+    const calls: string[] = [];
+    const hook: V10WriteAheadHook = ({ txHash }) => { calls.push(txHash); };
+    const legacyEmitter = async (callback: V10WriteAheadHook) => {
+      await callback({ txHash: '0xlegacy' });
+    };
+
+    await legacyEmitter(hook);
+    expect(calls).toEqual(['0xlegacy']);
   });
 
   it('a failed write does not wedge the wallet — the next same-wallet write still runs', async () => {
