@@ -197,22 +197,16 @@ export interface ProtocolOutboxStore {
 
   /**
    * Whether an entry exists for `(peer, protocol, messageId)`. Used
-   * by the stale-snapshot guard in `Messenger.processOutboxOnConnect`
-   * — between `tryBeginAttempt` (inflight lock) and the wire send,
+   * by the scheduled drain's stale-snapshot guard — between
+   * `tryBeginAttempt` (inflight lock) and the wire send,
    * a sibling flush may have already delivered + removed the entry,
    * and we must not double-send. The rc9 #538 fix lifted into the
    * generic substrate.
    */
   hasEntry(peer: string, protocol: string, messageId: string): boolean;
 
-  /**
-   * All entries for a specific peer, regardless of `nextAttemptAt`.
-   * Used by `processOutboxOnConnect`: a reconnection is the signal
-   * we were waiting for, so attempt now even if backoff isn't due
-   * yet. Sorted by `firstFailureAt` ascending for FIFO per-peer
-   * drain.
-   */
-  pendingFor(peer: string): ProtocolOutboxEntry[];
+  /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
+  hasPendingFor(peer: string): boolean;
 
   /**
    * All entries whose `nextAttemptAt <= now`. Used by the periodic

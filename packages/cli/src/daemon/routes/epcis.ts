@@ -103,7 +103,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { createPublisherControlFromStore, resolveAsyncPublisherAvailability, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -490,16 +490,24 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
 
   // POST /api/epcis/capture  { contextGraphId?, subGraphName?, epcisDocument, publishOptions? }
   if (req.method === "POST" && path === "/api/epcis/capture") {
-    if (!config.publisher?.enabled) {
+    const publisherAvailability = resolveAsyncPublisherAvailability({
+      config,
+      runtime: publisherRuntime,
+      lifecycleAvailability: ctx.publisherAvailability,
+    });
+    if (!publisherAvailability.available && publisherAvailability.reason === 'publisher_disabled') {
       return jsonResponse(res, 503, {
         error: "PublisherDisabled",
         message: "Async EPCIS capture requires publisher.enabled=true",
       });
     }
-    if (!publisherRuntime || publisherRuntime.walletIds.length === 0) {
+    if (!publisherAvailability.available) {
       return jsonResponse(res, 503, {
         error: "PublisherUnavailable",
         message: "Async EPCIS capture requires the publisher runtime to be running with at least one configured publisher wallet",
+        reason: publisherAvailability.reason,
+        retryable: publisherAvailability.retryable,
+        operatorActionRequired: publisherAvailability.operatorActionRequired,
       });
     }
     const body = await readBody(req);

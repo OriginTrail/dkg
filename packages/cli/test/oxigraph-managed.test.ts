@@ -138,6 +138,41 @@ describe('planManagedOxigraph', () => {
     expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
   });
 
+  it('plans finite managed Oxigraph memory limits independently of the daemon service', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { memoryHighMiB: 2048, memoryMaxMiB: 3072 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.memoryLimits).toEqual({ highMiB: 2048, maxMiB: 3072 });
+  });
+
+  it('rejects unsafe or incomplete managed Oxigraph memory limits', () => {
+    expect(() => planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { memoryHighMiB: 2048 },
+        },
+      },
+      '/data',
+    )).toThrow(/memoryMaxMiB/);
+
+    expect(() => planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { memoryHighMiB: 4096, memoryMaxMiB: 3072 },
+        },
+      },
+      '/data',
+    )).toThrow(/no greater than memoryMaxMiB/);
+  });
+
   it('clamps an absurd queryTimeoutS to Node’s max timer instead of overflowing to an instant abort', () => {
     const plan = planManagedOxigraph(
       {

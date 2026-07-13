@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -334,6 +334,30 @@ describe('DKGPublisher', () => {
     expect(result.onChainResult!.publisherAddress).toBeTypeOf('string');
     expect(result.onChainResult!.startKAId).toBeDefined();
     expect(result.onChainResult!.endKAId).toBeDefined();
+  });
+
+  it('does NOT call chain.verify after a confirmed V10 SWM publish (#1575)', async () => {
+    const quad = q(ENTITY, 'http://schema.org/name', '"ImageBot"');
+    await publisher.share(CONTEXT_GRAPH, [quad], {
+      publisherPeerId: 'peer-no-legacy-verify',
+      localOnly: true,
+    });
+    await seedContextGraphRegistration(store, CONTEXT_GRAPH);
+
+    const verifySpy = vi.spyOn(chain, 'verify');
+    const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: CONTEXT_GRAPH,
+      precomputedAttestation: await buildSeal({
+        quads: [{ ...quad, graph: GRAPH }],
+        author: _author,
+        contextGraphId: CONTEXT_GRAPH,
+        ctx: { provider: _provider, kav10Address: _kav10Address },
+      }),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(verifySpy).not.toHaveBeenCalled();
   });
 
   it('generates address-based UAL format', async () => {
