@@ -188,7 +188,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async reservePublisherAddressForPublish(request: {
     contextGraphId: bigint;
     requiredTracWei: bigint;
-    publishEpochs: number;
+    publishEpochs?: number;
     publisherAddress?: string;
   }): Promise<string> {
     await this.init();
@@ -197,23 +197,31 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         request.contextGraphId,
         request.publisherAddress,
       );
-      return (await this.selectFundedSigner(
+      return (await this.selectFundedSignerOrThrow(
         [selected],
         {
           kind: 'native+trac',
           nativeFloorWei: this.minPublisherNativeWei,
           tracFloorWei: this.minPublisherTracWei,
           requiredTracWei: request.requiredTracWei,
-          consultPca: true,
-          pcaPublishEpochs: request.publishEpochs,
+          pca: request.publishEpochs === undefined
+            ? { kind: 'provisional-publish' }
+            : { kind: 'publish', epochs: request.publishEpochs },
         },
-        { preferIdle: false, unfundedPolicy: 'throw-diagnostic' },
+        { preferIdle: false },
       )).address;
     }
-    return (await this.nextAuthorizedSigner(
+    return (await this.requireFundedPublisherSigner(
       request.contextGraphId,
-      request.requiredTracWei,
-      { unfundedPolicy: 'throw-diagnostic', publishEpochs: request.publishEpochs },
+      {
+        kind: 'native+trac',
+        nativeFloorWei: this.minPublisherNativeWei,
+        tracFloorWei: this.minPublisherTracWei,
+        requiredTracWei: request.requiredTracWei,
+        pca: request.publishEpochs === undefined
+          ? { kind: 'provisional-publish' }
+          : { kind: 'publish', epochs: request.publishEpochs },
+      },
     )).address;
   }
 

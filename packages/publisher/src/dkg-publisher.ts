@@ -254,6 +254,13 @@ function coercePublisherAddress(value: unknown): string | undefined {
   return normalized === ethers.ZeroAddress ? undefined : normalized;
 }
 
+function isNoFundedPublisherReservationError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && (error as { code?: unknown }).code === 'NO_FUNDED_PUBLISHER_WALLET';
+}
+
 function publisherAddressFromUal(ual: string | undefined): string | undefined {
   const prefix = 'did:dkg:';
   if (!ual?.startsWith(prefix)) return undefined;
@@ -1067,75 +1074,102 @@ export class DKGPublisher implements Publisher {
       };
     }
 
-    const pinnedPublisherAddress = input.initialSigner.source === 'publisherPrivateKey'
+    // A configured publisherAddress is an explicit namespace/signing contract
+    // even when the adapter holds the key. Only adapter-inferred addresses may
+    // rotate across the operational pool during cost-aware reservation.
+    const pinnedPublisherAddress = this.publisherAddress !== undefined
       ? input.initialSigner.address
       : undefined;
-    const reservedAddress = coercePublisherAddress(
-      await this.chain.reservePublisherAddressForPublish({
-        contextGraphId: input.contextGraphId,
-        requiredTracWei: initialPricing.precomputedTokenAmount,
-        publishEpochs: initialPricing.publishEpochs,
-        publisherAddress: pinnedPublisherAddress,
-      }),
-    );
-    if (!reservedAddress) throw new PublisherWalletRequiredError('publish');
-    if (
-      pinnedPublisherAddress
-      && reservedAddress.toLowerCase() !== pinnedPublisherAddress.toLowerCase()
-    ) {
-      throw new Error(
-        `Publisher signer reservation mismatch: publisherPrivateKey pins ${pinnedPublisherAddress}, ` +
-        `but the chain adapter reserved ${reservedAddress}.`,
-      );
-    }
-    const reservedSigner = await this.getPublisherSigner(reservedAddress);
-    if (!reservedSigner || reservedSigner.address.toLowerCase() !== reservedAddress.toLowerCase()) {
-      throw new Error(
-        `Publisher signer reservation mismatch: no signer for reserved address ${reservedAddress}.`,
-      );
-    }
-    const finalPricing = reservedAddress.toLowerCase() === input.initialSigner.address.toLowerCase()
-      ? initialPricing
-      : await this.resolvePublishPricingForSigner({
-        signer: reservedSigner,
-        explicitPublishEpochs: input.explicitPublishEpochs,
-        effectiveByteSize: input.effectiveByteSize,
-        ctx: input.ctx,
-      });
-    if (
-      finalPricing.publishEpochs !== initialPricing.publishEpochs
-      || finalPricing.precomputedTokenAmount !== initialPricing.precomputedTokenAmount
-    ) {
-      // The first reservation necessarily uses provisional signer-dependent
-      // pricing. If selecting a different signer changes PCA lifetime/cost,
-      // validate that exact signer again against the values that will enter the
-      // ACK digest and transaction. Otherwise an adapter could approve a cheap
-      // provisional plan and the publisher could silently submit a different,
-      // unfundable final plan.
-      const finalReservedAddress = coercePublisherAddress(
+    const pinnedPublisherLabel = this.publisherWallet
+      ? 'publisherPrivateKey'
+      : 'configured publisherAddress';
+    const rejectedProvisionalSigners = new Map<string, unknown>();
+    for (;;) {
+      const reservedAddress = coercePublisherAddress(
         await this.chain.reservePublisherAddressForPublish({
           contextGraphId: input.contextGraphId,
-          requiredTracWei: finalPricing.precomputedTokenAmount,
-          publishEpochs: finalPricing.publishEpochs,
-          publisherAddress: reservedAddress,
+          requiredTracWei: initialPricing.precomputedTokenAmount,
+          // An omitted lifetime is deliberately provisional: a candidate PCA
+          // wallet may have a non-default lock that must drive the final quote.
+          // Explicit user lifetimes remain exact selection constraints.
+          publishEpochs: input.explicitPublishEpochs,
+          publisherAddress: pinnedPublisherAddress,
         }),
       );
+      if (!reservedAddress) throw new PublisherWalletRequiredError('publish');
+      const reservationKey = reservedAddress.toLowerCase();
+      const previousRejection = rejectedProvisionalSigners.get(reservationKey);
+      if (previousRejection !== undefined) throw previousRejection;
       if (
-        !finalReservedAddress
-        || finalReservedAddress.toLowerCase() !== reservedAddress.toLowerCase()
+        pinnedPublisherAddress
+        && reservationKey !== pinnedPublisherAddress.toLowerCase()
       ) {
         throw new Error(
-          `Publisher signer reservation mismatch: final publish plan pins ${reservedAddress}, ` +
-          `but the chain adapter reserved ${finalReservedAddress ?? 'no address'}.`,
+          `Publisher signer reservation mismatch: ${pinnedPublisherLabel} pins ${pinnedPublisherAddress}, ` +
+          `but the chain adapter reserved ${reservedAddress}.`,
         );
       }
+      const reservedSigner = await this.getPublisherSigner(reservedAddress);
+      if (!reservedSigner || reservedSigner.address.toLowerCase() !== reservationKey) {
+        throw new Error(
+          `Publisher signer reservation mismatch: no signer for reserved address ${reservedAddress}.`,
+        );
+      }
+      const finalPricing = reservationKey === input.initialSigner.address.toLowerCase()
+        ? initialPricing
+        : await this.resolvePublishPricingForSigner({
+          signer: reservedSigner,
+          explicitPublishEpochs: input.explicitPublishEpochs,
+          effectiveByteSize: input.effectiveByteSize,
+          ctx: input.ctx,
+        });
+      const provisionalLifetime = input.explicitPublishEpochs === undefined;
+      if (
+        provisionalLifetime
+        || finalPricing.publishEpochs !== initialPricing.publishEpochs
+        || finalPricing.precomputedTokenAmount !== initialPricing.precomputedTokenAmount
+      ) {
+        // An implicit lifetime makes the first reservation provisional even if
+        // its numeric quote happens to stay unchanged: a PCA candidate may
+        // cover the default quote but have a mismatched lock. Pin and validate
+        // every resolved tuple before any ACK-bound or remote side effect.
+        try {
+          const finalReservedAddress = coercePublisherAddress(
+            await this.chain.reservePublisherAddressForPublish({
+              contextGraphId: input.contextGraphId,
+              requiredTracWei: finalPricing.precomputedTokenAmount,
+              publishEpochs: finalPricing.publishEpochs,
+              publisherAddress: reservedAddress,
+            }),
+          );
+          if (
+            !finalReservedAddress
+            || finalReservedAddress.toLowerCase() !== reservationKey
+          ) {
+            throw new Error(
+              `Publisher signer reservation mismatch: final publish plan pins ${reservedAddress}, ` +
+              `but the chain adapter reserved ${finalReservedAddress ?? 'no address'}.`,
+            );
+          }
+        } catch (error) {
+          // Signer-pool adapters advance their cursor during the provisional
+          // reservation. If that candidate cannot fund its own exact PCA plan,
+          // try the next candidate; a repeated address proves the eligible pool
+          // has been exhausted and terminates the loop above.
+          if (!pinnedPublisherAddress && isNoFundedPublisherReservationError(error)) {
+            rejectedProvisionalSigners.set(reservationKey, error);
+            continue;
+          }
+          throw error;
+        }
+      }
+      return {
+        signer: reservedSigner,
+        publisherAddress: reservedAddress,
+        publishEpochs: finalPricing.publishEpochs,
+        tokenAmount: finalPricing.precomputedTokenAmount,
+      };
     }
-    return {
-      signer: reservedSigner,
-      publisherAddress: reservedAddress,
-      publishEpochs: finalPricing.publishEpochs,
-      tokenAmount: finalPricing.precomputedTokenAmount,
-    };
   }
 
   private isChainV10Ready(): boolean {

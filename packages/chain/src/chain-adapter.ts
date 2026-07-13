@@ -1174,7 +1174,13 @@ export interface ChainAdapter {
   reservePublisherAddressForPublish?(request: {
     contextGraphId: bigint;
     requiredTracWei: bigint;
-    publishEpochs: number;
+    /**
+     * Exact lifetime when the caller has fixed one. Omit while selecting for
+     * an implicit lifetime so a candidate PCA signer's lock can determine the
+     * final quote; callers must then re-reserve that signer with the resolved
+     * lifetime and cost before producing publish-bound signatures.
+     */
+    publishEpochs?: number;
     /** Exact signer pin for publishers backed by an explicit private key. */
     publisherAddress?: string;
   }): Promise<string>;

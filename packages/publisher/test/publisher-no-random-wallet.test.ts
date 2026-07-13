@@ -89,6 +89,7 @@ async function sealForWallet(
 
 const TEST_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
 const TEST_KEY_ALT = '0x5de4111a56f4c24611d9ed4d5318a7e03f9b9a9d73f3a5f3f6324a2a0e6fbb36';
+const TEST_KEY_THIRD = '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6';
 
 // rc.17 uniform per-KA layout: a confirmed publish (and any later update)
 // stores the KA's public quads in the PER-KA verifiable-memory graph
@@ -394,7 +395,7 @@ class CostAwareRepinChain extends MockChainAdapter {
   readonly reserveRequests: Array<{
     contextGraphId: bigint;
     requiredTracWei: bigint;
-    publishEpochs: number;
+    publishEpochs?: number;
     publisherAddress?: string;
   }> = [];
   capturedCreateParams?: V10PublishDirectParams;
@@ -402,10 +403,12 @@ class CostAwareRepinChain extends MockChainAdapter {
   constructor(
     private readonly initialWallet: ethers.Wallet,
     private readonly fundedPcaWallet: ethers.Wallet,
+    private readonly weakPcaWallet?: ethers.Wallet,
   ) {
     super('mock:31337', initialWallet.address);
     this.seedIdentity(initialWallet.address, 7n);
     this.seedIdentity(fundedPcaWallet.address, 7n);
+    if (weakPcaWallet) this.seedIdentity(weakPcaWallet.address, 7n);
     this.minimumRequiredSignatures = 1;
   }
 
@@ -416,10 +419,22 @@ class CostAwareRepinChain extends MockChainAdapter {
   async reservePublisherAddressForPublish(request: {
     contextGraphId: bigint;
     requiredTracWei: bigint;
-    publishEpochs: number;
+    publishEpochs?: number;
     publisherAddress?: string;
   }): Promise<string> {
     this.reserveRequests.push(request);
+    if (!request.publisherAddress && this.weakPcaWallet && this.reserveRequests.length === 1) {
+      return this.weakPcaWallet.address;
+    }
+    if (
+      request.publisherAddress
+      && this.weakPcaWallet
+      && request.publisherAddress.toLowerCase() === this.weakPcaWallet.address.toLowerCase()
+    ) {
+      const error = new Error('Provisional PCA signer cannot fund its exact plan') as Error & { code: string };
+      error.code = 'NO_FUNDED_PUBLISHER_WALLET';
+      throw error;
+    }
     return this.fundedPcaWallet.address;
   }
 
@@ -428,20 +443,23 @@ class CostAwareRepinChain extends MockChainAdapter {
   }
 
   async getConvictionAgentAccountId(address: string): Promise<bigint> {
-    return address.toLowerCase() === this.fundedPcaWallet.address.toLowerCase() ? 9n : 0n;
+    if (address.toLowerCase() === this.fundedPcaWallet.address.toLowerCase()) return 9n;
+    if (this.weakPcaWallet && address.toLowerCase() === this.weakPcaWallet.address.toLowerCase()) return 8n;
+    return 0n;
   }
 
   async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
-    return accountId === 9n ? 24 : 0;
+    return accountId === 8n || accountId === 9n ? 24 : 0;
   }
 
   async convictionAccountCanCover(accountId: bigint, required: bigint): Promise<boolean> {
+    if (accountId === 8n) return required <= 12n;
     return accountId === 9n && required <= 24n;
   }
 
   async signMessageAs(address: string, messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
-    const wallet = [this.initialWallet, this.fundedPcaWallet]
-      .find((candidate) => candidate.address.toLowerCase() === address.toLowerCase());
+    const wallet = [this.initialWallet, this.weakPcaWallet, this.fundedPcaWallet]
+      .find((candidate) => candidate?.address.toLowerCase() === address.toLowerCase());
     if (!wallet) throw new Error(`unexpected signer ${address}`);
     const sig = ethers.Signature.from(await wallet.signMessage(messageHash));
     return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
@@ -453,8 +471,8 @@ class CostAwareRepinChain extends MockChainAdapter {
     types: Record<string, Array<{ name: string; type: string }>>,
     value: Record<string, unknown>,
   ): Promise<string> {
-    const wallet = [this.initialWallet, this.fundedPcaWallet]
-      .find((candidate) => candidate.address.toLowerCase() === address.toLowerCase());
+    const wallet = [this.initialWallet, this.weakPcaWallet, this.fundedPcaWallet]
+      .find((candidate) => candidate?.address.toLowerCase() === address.toLowerCase());
     if (!wallet) throw new Error(`unexpected typed-data signer ${address}`);
     return wallet.signTypedData(domain, types, value);
   }
@@ -1070,7 +1088,7 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(result.status).toBe('confirmed');
     expect(chain.reserveRequests).toHaveLength(2);
     expect(chain.reserveRequests[0].contextGraphId).toBe(1n);
-    expect(chain.reserveRequests[0].publishEpochs).not.toBe(24);
+    expect(chain.reserveRequests[0].publishEpochs).toBeUndefined();
     expect(chain.reserveRequests[0].requiredTracWei).toBeGreaterThan(0n);
     expect(chain.reserveRequests[1]).toMatchObject({
       contextGraphId: 1n,
@@ -1084,6 +1102,57 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       epochs: 24,
       tokenAmount: 24n,
     });
+    expect(result.onChainResult?.publisherAddress.toLowerCase()).toBe(fundedPca.address.toLowerCase());
+  });
+
+  it('rejects a weak provisional PCA plan and continues to a later fundable signer before ACK collection', async () => {
+    const initial = new ethers.Wallet(TEST_KEY);
+    const weakPca = new ethers.Wallet(TEST_KEY_ALT);
+    const fundedPca = new ethers.Wallet(TEST_KEY_THIRD);
+    const chain = new CostAwareRepinChain(initial, fundedPca, weakPca);
+    const keypair = await generateEd25519Keypair();
+    const publisher = await sealForWallet(new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherNodeIdentityId: 7n,
+    }), fundedPca, chain);
+    const ack: AckEpochCapture = {};
+
+    const result = await publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('retry-weak-provisional-pca'),
+      v10ACKProvider: captureACKInputs(ack),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(chain.reserveRequests).toHaveLength(4);
+    expect(chain.reserveRequests[0]).toMatchObject({
+      requiredTracWei: 12n,
+      publishEpochs: undefined,
+    });
+    expect(chain.reserveRequests[1]).toMatchObject({
+      publisherAddress: weakPca.address,
+      requiredTracWei: 12n,
+      publishEpochs: 12,
+    });
+    expect(chain.reserveRequests[2]).toMatchObject({
+      requiredTracWei: 12n,
+      publishEpochs: undefined,
+    });
+    expect(chain.reserveRequests[3]).toMatchObject({
+      publisherAddress: fundedPca.address,
+      requiredTracWei: 24n,
+      publishEpochs: 24,
+    });
+    expect(ack).toMatchObject({ epochs: 24, tokenAmount: 24n });
+    expect(chain.capturedCreateParams).toMatchObject({
+      publisherAddress: fundedPca.address,
+      epochs: 24,
+      tokenAmount: 24n,
+    });
+    expect(result.onChainResult?.publisherAddress.toLowerCase()).toBe(fundedPca.address.toLowerCase());
   });
 
   it('rejects an adapter re-pin that disagrees with publisherPrivateKey before ACK collection', async () => {
@@ -1106,6 +1175,30 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       quads: epochTestQuads('private-key-reservation-mismatch'),
       v10ACKProvider: ackProvider,
     })).rejects.toThrow(/publisherPrivateKey pins.*chain adapter reserved/i);
+    expect(chain.reserveRequests[0].publisherAddress?.toLowerCase()).toBe(pinned.address.toLowerCase());
+    expect(ackProvider).not.toHaveBeenCalled();
+  });
+
+  it('treats a configured adapter-backed publisherAddress as a hard reservation pin', async () => {
+    const pinned = new ethers.Wallet(TEST_KEY);
+    const other = new ethers.Wallet(TEST_KEY_ALT);
+    const chain = new CostAwareRepinChain(pinned, other);
+    const keypair = await generateEd25519Keypair();
+    const publisher = await sealForWallet(new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherAddress: pinned.address,
+      publisherNodeIdentityId: 7n,
+    }), pinned, chain);
+    const ackProvider = vi.fn(mockChainStubACKProvider());
+
+    await expect(publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('configured-address-reservation-mismatch'),
+      v10ACKProvider: ackProvider,
+    })).rejects.toThrow(/configured publisherAddress pins.*chain adapter reserved/i);
     expect(chain.reserveRequests[0].publisherAddress?.toLowerCase()).toBe(pinned.address.toLowerCase());
     expect(ackProvider).not.toHaveBeenCalled();
   });

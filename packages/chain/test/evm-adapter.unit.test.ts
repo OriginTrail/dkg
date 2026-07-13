@@ -3933,6 +3933,21 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     })).resolves.toBe(walletA.address);
   });
 
+  it('rejects a funded but unauthorized explicitly pinned publisher', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 2_000n); tracByAddr.set(lc(walletB.address), 2_000n);
+    (a as any).contracts.contextGraphs.isAuthorizedPublisher = recorder(async (_cg: bigint, addr: string) =>
+      addr.toLowerCase() !== walletA.address.toLowerCase());
+
+    await expect(a.reservePublisherAddressForPublish({
+      contextGraphId: CG,
+      requiredTracWei: 1_000n,
+      publishEpochs: 2,
+      publisherAddress: walletA.address,
+    })).rejects.toThrow(/publisherAddress .* is not authorized.*context graph/i);
+  });
+
   it('expires the funding cache past the TTL: a newly funded wallet is re-read and selected', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     // walletA (head) unfunded (0 TRAC); walletB funded → B chosen first.
@@ -4070,6 +4085,39 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     })).resolves.toBe(walletB.address);
   });
 
+  it('lets an implicit publish lifetime select a covering PCA with a non-default lock, then validates the fixed plan', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletB.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
+    const coverCalls: bigint[] = [];
+    (a as any).convictionAccountCanCover = recorder(async (_id: bigint, cost: bigint) => {
+      coverCalls.push(cost);
+      return cost <= 24n;
+    });
+
+    // The provisional/default quote is for 12 epochs, but no lifetime is fixed
+    // yet. Wallet B's 24-epoch PCA is therefore eligible for provisional
+    // selection even though neither wallet owns enough TRAC directly.
+    await expect(a.reservePublisherAddressForPublish({
+      contextGraphId: CG,
+      requiredTracWei: 12n,
+    })).resolves.toBe(walletB.address);
+
+    // Once publisher pricing adopts B's PCA lock, the exact signer/lifetime/
+    // cost tuple is revalidated before ACK collection or remote staging.
+    await expect(a.reservePublisherAddressForPublish({
+      contextGraphId: CG,
+      requiredTracWei: 24n,
+      publishEpochs: 24,
+      publisherAddress: walletB.address,
+    })).resolves.toBe(walletB.address);
+    expect(coverCalls).toEqual([12n, 24n]);
+  });
+
   // ── dispatcher Phase 3: the generalized selectSigner seam (RS/relay/update
   // route through this later). Publish behaviour above is proven byte-identical
   // through the nextAuthorizedSigner wrapper; these cover the NEW capabilities.
@@ -4088,7 +4136,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       nativeFloorWei: 0n,
       tracFloorWei: 0n,
       requiredTracWei: 0n,
-      consultPca: true,
+      pca: { kind: 'provisional-publish' as const },
     };
 
     it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {

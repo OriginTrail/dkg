@@ -90,6 +90,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'nextSigner',
   'nextAuthorizedSigner',
   'findSignerByAddress',
+  'resolvePinnedPublisherSigner', // EVM signer-pool authorization/funding helper; mock has no wallet pool
+  'requireFundedPublisherSigner', // fail-closed EVM pool reservation; mock has one in-memory signer
+  'selectFundedSignerOrThrow', // strict funding diagnostic used only by EVM pool reservation
   // Dispatcher Phase 3/4 selector seam + RS send plumbing — TS-protected
   // internals (the generalized wallet selector, the funding predicate behind
   // it, the RS-specific selector wrapper, and the serialized RS send). Not
