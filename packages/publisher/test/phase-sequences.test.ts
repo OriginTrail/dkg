@@ -415,6 +415,45 @@ describe('Phase-sequence contracts', () => {
     },
   );
 
+  it('publish awaits an async chain:writeahead:end listener before settling', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    (chain as unknown as {
+      createKnowledgeAssets: (params: { onBroadcast?: () => Promise<void> | void }) => Promise<never>;
+    }).createKnowledgeAssets = async (params) => {
+      await params.onBroadcast?.();
+      throw new Error('simulated post-broadcast publish failure');
+    };
+
+    let markEndStarted!: () => void;
+    const endStarted = new Promise<void>((resolve) => { markEndStarted = resolve; });
+    let releaseEnd!: () => void;
+    const endGate = new Promise<void>((resolve) => { releaseEnd = resolve; });
+    let settled = false;
+    const operation = publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY, 'http://schema.org/name', '"Await close"')],
+      onPhase: async (phase, status) => {
+        if (phase === 'chain:writeahead' && status === 'end') {
+          markEndStarted();
+          await endGate;
+        }
+      },
+    }).finally(() => { settled = true; });
+
+    await endStarted;
+    expect(settled).toBe(false);
+    releaseEnd();
+    await expect(operation).rejects.toThrow('simulated post-broadcast publish failure');
+    expect(settled).toBe(true);
+  });
+
   it('publish: an aborted late hook emits no tx-bearing progress or WAL start', async () => {
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
@@ -462,6 +501,64 @@ describe('Phase-sequence contracts', () => {
     await expect(
       publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase }),
     ).rejects.toThrow('simulated write-ahead timeout');
+
+    expect(broadcasted).toBe(false);
+    expect(calls.some(([phase]) => phase.startsWith('chain:txsigned:'))).toBe(false);
+    expect(calls.some(([phase]) => phase === 'chain:writeahead')).toBe(false);
+  });
+
+  it('update: an aborted late hook emits no tx-bearing progress or WAL start', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const original = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY, 'http://schema.org/name', '"Before abort"')],
+    });
+
+    let releaseListener!: () => void;
+    const listenerGate = new Promise<void>((resolve) => { releaseListener = resolve; });
+    let markListenerStarted!: () => void;
+    const listenerStarted = new Promise<void>((resolve) => { markListenerStarted = resolve; });
+    let broadcasted = false;
+    (chain as unknown as {
+      updateKnowledgeCollectionV10: (params: {
+        onBroadcast?: (info: { txHash: string; signal: AbortSignal }) => Promise<void> | void;
+      }) => Promise<never>;
+    }).updateKnowledgeCollectionV10 = async (params) => {
+      const controller = new AbortController();
+      const lateHook = params.onBroadcast?.({
+        txHash: `0x${'cd'.repeat(32)}`,
+        signal: controller.signal,
+      });
+      await listenerStarted;
+      controller.abort();
+      releaseListener();
+      await expect(lateHook).rejects.toThrow('write-ahead hook was aborted before broadcast');
+      if (!controller.signal.aborted) broadcasted = true;
+      throw new Error('simulated update write-ahead timeout');
+    };
+
+    const calls: [string, 'start' | 'end'][] = [];
+    const onPhase: PhaseCallback = async (phase, status, context) => {
+      if (phase.startsWith('chain:txsigned:') && status === 'start') {
+        markListenerStarted();
+        await listenerGate;
+      }
+      if (context?.signal?.aborted) return;
+      calls.push([phase, status]);
+    };
+
+    await expect(publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY, 'http://schema.org/name', '"After abort"')],
+      onPhase,
+    })).rejects.toThrow('simulated update write-ahead timeout');
 
     expect(broadcasted).toBe(false);
     expect(calls.some(([phase]) => phase.startsWith('chain:txsigned:'))).toBe(false);
@@ -520,6 +617,38 @@ describe('Phase-sequence contracts', () => {
       expect(calls.filter(([p, s]) => p === 'chain:writeahead' && s === 'end').length).toBe(1);
     },
   );
+
+  it('update propagates an async chain:writeahead:end listener failure', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const original = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY, 'http://schema.org/name', '"Before close failure"')],
+    });
+    (chain as unknown as {
+      updateKnowledgeCollectionV10: (params: { onBroadcast?: () => Promise<void> | void }) => Promise<never>;
+    }).updateKnowledgeCollectionV10 = async (params) => {
+      await params.onBroadcast?.();
+      throw new Error('simulated post-broadcast update failure');
+    };
+
+    await expect(publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY, 'http://schema.org/name', '"After close failure"')],
+      onPhase: async (phase, status) => {
+        if (phase === 'chain:writeahead' && status === 'end') {
+          await Promise.resolve();
+          throw new Error('durable write-ahead close failed');
+        }
+      },
+    })).rejects.toThrow('durable write-ahead close failed');
+  });
 
   it(
     'publish: chain:txsigned:tx-<hash> breadcrumb fires exactly once BEFORE chain:writeahead:start ' +

@@ -76,13 +76,16 @@ describe('KA async VM publish broadcast progress', () => {
     });
   }
 
-  it('persists KA broadcast tx hash when executor write-ahead fires before completion', async () => {
+  it('persists KA broadcast tx hash only at the final write-ahead boundary', async () => {
     const txHash = `0x${'cd'.repeat(32)}` as `0x${string}`;
     let jobId = '';
     let statusDuringExecutor: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
     const publisher = createPublisher({
       knowledgeAssetVmPublishExecutor: async (input) => {
         await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'start');
+        expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'end');
+        await input.publishOptions.onPhase?.('chain:writeahead', 'start');
         statusDuringExecutor = await publisher.getStatus(jobId);
         throw new Error('process crashed after tx submit');
       },
@@ -105,7 +108,7 @@ describe('KA async VM publish broadcast progress', () => {
     expect(afterRecover?.broadcast?.txHash).toBe(txHash);
   });
 
-  it('does not persist late broadcast progress after the write-ahead generation is aborted', async () => {
+  it('does not persist staged tx progress when a later write-ahead listener times out', async () => {
     const txHash = `0x${'de'.repeat(32)}` as `0x${string}`;
     let jobId = '';
     let releaseDelegate!: () => void;
@@ -118,7 +121,7 @@ describe('KA async VM publish broadcast progress', () => {
     const publisher = createPublisher({
       resolvedSliceOverrides: {
         onPhase: async (phase, status, context) => {
-          if (phase.startsWith('chain:txsigned:') && status === 'start') {
+          if (phase === 'chain:writeahead' && status === 'start') {
             delegateStarted();
             await delegateGate;
           }
@@ -128,8 +131,18 @@ describe('KA async VM publish broadcast progress', () => {
       },
       knowledgeAssetVmPublishExecutor: async (input) => {
         const controller = new AbortController();
-        const lateHook = input.publishOptions.onPhase?.(
+        await input.publishOptions.onPhase?.(
           `chain:txsigned:tx-${txHash}`,
+          'start',
+          { signal: controller.signal },
+        );
+        await input.publishOptions.onPhase?.(
+          `chain:txsigned:tx-${txHash}`,
+          'end',
+          { signal: controller.signal },
+        );
+        const lateHook = input.publishOptions.onPhase?.(
+          'chain:writeahead',
           'start',
           { signal: controller.signal },
         );
@@ -151,8 +164,51 @@ describe('KA async VM publish broadcast progress', () => {
 
     expect(statusAfterLateHook?.status).toBe('validated');
     expect(statusAfterLateHook?.broadcast).toBeUndefined();
-    expect(durablePhases).not.toContain(`chain:txsigned:tx-${txHash}:start`);
+    expect(durablePhases).toContain(`chain:txsigned:tx-${txHash}:start`);
     expect(durablePhases.some((phase) => phase.startsWith('chain:writeahead:'))).toBe(false);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.broadcast).toBeUndefined();
+  });
+
+  it('rolls back broadcast progress when cancellation wins during the durable commit', async () => {
+    const txHash = `0x${'df'.repeat(32)}` as `0x${string}`;
+    let jobId = '';
+    const controller = new AbortController();
+    let statusAfterCommit: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        await input.publishOptions.onPhase?.(
+          `chain:txsigned:tx-${txHash}`,
+          'start',
+          { signal: controller.signal },
+        );
+        await input.publishOptions.onPhase?.(
+          `chain:txsigned:tx-${txHash}`,
+          'end',
+          { signal: controller.signal },
+        );
+        await input.publishOptions.onPhase?.(
+          'chain:writeahead',
+          'start',
+          { signal: controller.signal },
+        );
+        statusAfterCommit = await publisher.getStatus(jobId);
+        throw new Error('write-ahead hook timed out; transaction not broadcast');
+      },
+    });
+    const originalUpdate = publisher.update.bind(publisher);
+    publisher.update = async (id, status, data) => {
+      await originalUpdate(id, status, data);
+      if (status === 'broadcast') controller.abort();
+    };
+    await stageShareSnapshot();
+
+    jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(statusAfterCommit?.status).toBe('validated');
+    expect(statusAfterCommit?.broadcast).toBeUndefined();
     expect(processed?.status).toBe('failed');
     expect(processed?.broadcast).toBeUndefined();
   });

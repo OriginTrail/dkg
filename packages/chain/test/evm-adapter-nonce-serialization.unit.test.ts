@@ -52,13 +52,36 @@ const fakeReceipt = (hash: string) =>
   ({ hash, blockNumber: 1, index: 0, status: 1, logs: [] }) as unknown as ethers.TransactionReceipt;
 const V10_KA_ADDRESS = '0x' + 'aa'.repeat(20);
 
-function preparedOperation(
+function preparedRequest(
+  a: EVMChainAdapter,
   build: (ctx: any) => Promise<{ signedTx: string; txHash: string }>,
 ) {
-  return Object.freeze({
-    runAllowanceGate: async () => undefined,
-    populateAndSign: build,
-  });
+  const target = a as any;
+  const builds: Map<object, typeof build> = target.__testV10Builds ?? new Map();
+  if (!target.__testV10Builds) {
+    target.__testV10Builds = builds;
+    target.ensureV10ApproveTrac = async () => undefined;
+    target.populateAndSignV10WithAllowanceRecovery = async (
+      _signer: unknown,
+      _contract: unknown,
+      _method: unknown,
+      methodParams: object,
+      _kav10Address: unknown,
+      _tokenAmount: unknown,
+      _label: unknown,
+      approvalSender: unknown,
+    ) => builds.get(methodParams)!({ sendContractTransaction: approvalSender });
+  }
+  const methodParams = {};
+  builds.set(methodParams, build);
+  return {
+    kaContract: {},
+    methodParams,
+    kav10Address: V10_KA_ADDRESS,
+    tokenAmount: 1n,
+    approvalLabel: 'test V10 approve',
+    reapproveLabel: 'test V10 forced re-approve',
+  };
 }
 
 // Minimal V10 publish params that survive `createKnowledgeAssets`'s struct
@@ -93,38 +116,47 @@ function minimalPublishParams(): any {
 }
 
 describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)', () => {
-  it('assembles the complete immutable V10 operation before entering the signer lane', async () => {
+  it('runs the direct allowance → populate → WAL → broadcast sequence inside one labeled lane callback', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    const preparation = preparedOperation(async () => ({
-      signedTx: 'complete-operation',
-      txHash: '0xcomplete',
-    }));
-    expect(Object.isFrozen(preparation)).toBe(true);
-
+    const events: string[] = [];
     const lane = (a as any).signerWriteLane;
     const originalRun = lane.run.bind(lane);
-    let admittedPhaseLabels: readonly string[] = [];
-    lane.run = recorder((address: string, plan: { phaseLabels: readonly string[] }, fn: () => Promise<unknown>) => {
-      admittedPhaseLabels = plan.phaseLabels;
-      return originalRun(address, plan, fn);
+    let admitted: { admissionBudgetMs: number; label: string } | undefined;
+    lane.run = recorder((address: string, options: { admissionBudgetMs: number; label: string }, fn: () => Promise<unknown>) => {
+      admitted = options;
+      return originalRun(address, options, fn);
     });
-    (a as any).sendSignedTransactionAndWait = async () => fakeReceipt('complete-operation');
+    (a as any).ensureV10ApproveTrac = async () => { events.push('allowance'); };
+    (a as any).populateAndSignV10WithAllowanceRecovery = async () => {
+      events.push('populate');
+      return { signedTx: 'complete-operation', txHash: '0xcomplete' };
+    };
+    (a as any).sendSignedTransactionAndWait = async () => {
+      events.push('broadcast');
+      return fakeReceipt('complete-operation');
+    };
 
     await expect((a as any).dispatchSerializedV10Write(
       signer,
       'publish',
-      async () => undefined,
-      preparation,
+      async () => { events.push('wal'); },
+      {
+        kaContract: {},
+        methodParams: {},
+        kav10Address: V10_KA_ADDRESS,
+        tokenAmount: 1n,
+        approvalLabel: 'approve',
+        reapproveLabel: 're-approve',
+      },
       neverNull,
     )).resolves.toMatchObject({ hash: 'complete-operation' });
 
-    expect(admittedPhaseLabels).toEqual([
-      'initial V10 allowance gate and optional approval transaction',
-      'V10 publish populate/sign with bounded allowance recovery',
-      'V10 publish durable write-ahead hook',
-      'V10 publish broadcast and receipt',
-    ]);
+    expect(admitted).toEqual({
+      admissionBudgetMs: SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
+      label: 'V10 publish',
+    });
+    expect(events).toEqual(['allowance', 'populate', 'wal', 'broadcast']);
   });
 
   it('keeps a queued adapter write alive beyond the legacy fixed 60-second wait', async () => {
@@ -134,23 +166,20 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       const signer = new ethers.Wallet(DEPLOYER_PK);
       let release!: () => void;
       const blocked = new Promise<void>((resolve) => { release = resolve; });
-      const firstOperation = (a as any)
-        .createSingleTransactionSignerWriteOperation(async () => blocked);
-      const operationBudgetMs = firstOperation.plan.admissionBudgetMs as number;
-      expect(operationBudgetMs).toBe(SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS);
-
       const first = (a as any).withSerializedSignerWrite(
         signer,
-        firstOperation,
+        'first test write',
+        async () => blocked,
       );
       let secondStarted = false;
       let secondSettled = false;
       const second = (a as any).withSerializedSignerWrite(
         signer,
-        (a as any).createSingleTransactionSignerWriteOperation(async () => {
+        'second test write',
+        async () => {
           secondStarted = true;
           return 'second';
-        }),
+        },
       ).then(
         (value: string) => { secondSettled = true; return value; },
         (error: unknown) => { secondSettled = true; throw error; },
@@ -171,24 +200,29 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     }
   });
 
-  it('uses one coarse admission policy instead of mirroring the live RPC call graph', () => {
+  it('uses one coarse admission policy instead of mirroring the live RPC call graph', async () => {
     const a = new EVMChainAdapter(minimalConfig());
-    const oneEndpointOperation = (a as any)
-      .createSingleTransactionSignerWriteOperation(async () => undefined);
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const observed: Array<{ admissionBudgetMs: number; label: string }> = [];
+    const lane = (a as any).signerWriteLane;
+    const originalRun = lane.run.bind(lane);
+    lane.run = (address: string, options: { admissionBudgetMs: number; label: string }, fn: () => Promise<unknown>) => {
+      observed.push(options);
+      return originalRun(address, options, fn);
+    };
+    await (a as any).withSerializedSignerWrite(signer, 'one endpoint', async () => undefined);
 
     (a as any).providers = [(a as any).providers[0], (a as any).providers[0]];
     (a as any).rpcUrls = [
       'http://127.0.0.1:59998',
       'http://127.0.0.1:59997',
     ];
-    const twoEndpointOperation = (a as any)
-      .createSingleTransactionSignerWriteOperation(async () => undefined);
+    await (a as any).withSerializedSignerWrite(signer, 'two endpoints', async () => undefined);
 
-    expect(oneEndpointOperation.plan.admissionBudgetMs)
-      .toBe(SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS);
-    expect(twoEndpointOperation.plan.admissionBudgetMs)
-      .toBe(SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS);
-    expect(twoEndpointOperation.plan.phaseLabels).toEqual(['single contract transaction']);
+    expect(observed).toEqual([
+      { admissionBudgetMs: SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS, label: 'one endpoint' },
+      { admissionBudgetMs: SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS, label: 'two endpoints' },
+    ]);
   });
 
   it('keeps a queued write alive through bounded V10 recovery and a slow successful WAL hook', async () => {
@@ -244,29 +278,25 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         signer,
         'publish',
         slowWriteAhead,
-        (a as any).createV10SignerWritePreparation(
-          signer,
-          {} as any,
-          'publish',
-          {},
-          V10_KA_ADDRESS,
-          1n,
-          'initial V10 approve',
-          'forced V10 re-approve',
-        ),
+        {
+          kaContract: {},
+          methodParams: {},
+          kav10Address: V10_KA_ADDRESS,
+          tokenAmount: 1n,
+          approvalLabel: 'initial V10 approve',
+          reapproveLabel: 'forced V10 re-approve',
+        },
         neverNull,
       );
       let secondSettled = false;
       let secondError: unknown;
-      const second = (a as any).dispatchSerializedV10Write(
+      const second = (a as any).withSerializedSignerWrite(
         signer,
-        'publish',
-        undefined,
-        preparedOperation(async () => {
+        'queued successor',
+        async () => {
           secondBuilt = true;
-          return { signedTx: 'second', txHash: '0xsecond' };
-        }),
-        neverNull,
+          return fakeReceipt('second');
+        },
       ).then(
         (value: ethers.TransactionReceipt) => { secondSettled = true; return value; },
         (error: unknown) => {
@@ -312,10 +342,10 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
 
     await Promise.all([
       (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(build('a')), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, build('a')), neverNull,
       ),
       (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(build('b')), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, build('b')), neverNull,
       ),
     ]);
 
@@ -342,10 +372,10 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
 
     await Promise.all([
       (a as any).dispatchSerializedV10Write(
-        s1, 'publish', undefined, preparedOperation(build('a')), neverNull,
+        s1, 'publish', undefined, preparedRequest(a, build('a')), neverNull,
       ),
       (a as any).dispatchSerializedV10Write(
-        s2, 'publish', undefined, preparedOperation(build('b')), neverNull,
+        s2, 'publish', undefined, preparedRequest(a, build('b')), neverNull,
       ),
     ]);
 
@@ -382,13 +412,13 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
 
     const receipts = await Promise.all([
       (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(build()), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, build()), neverNull,
       ),
       (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(build()), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, build()), neverNull,
       ),
       (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(build()), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, build()), neverNull,
       ),
     ]);
 
@@ -433,10 +463,10 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
 
     const receipts = await Promise.all([
       (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(build()), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, build()), neverNull,
       ),
       (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(build()), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, build()), neverNull,
       ),
     ]);
 
@@ -514,7 +544,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         signer,
         'publish',
         onBroadcast,
-        preparedOperation(async () => ({ signedTx: 'tx', txHash: '0xpre' })),
+        preparedRequest(a, async () => ({ signedTx: 'tx', txHash: '0xpre' })),
         neverNull,
       ),
     ).rejects.toThrow('chain:writeahead hook failed before publish broadcast: WAL disk full');
@@ -533,7 +563,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         signer,
         'publish',
         async () => neverSettles,
-        preparedOperation(async () => ({ signedTx: 'tx', txHash: '0xpre' })),
+        preparedRequest(a, async () => ({ signedTx: 'tx', txHash: '0xpre' })),
         neverNull,
       );
       const expectation = expect(dispatched).rejects.toThrow(
@@ -571,7 +601,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
           if (!info.signal.aborted) lateWalWrites += 1;
           finishHook();
         },
-        preparedOperation(async () => ({ signedTx: 'tx', txHash: '0xpre' })),
+        preparedRequest(a, async () => ({ signedTx: 'tx', txHash: '0xpre' })),
         neverNull,
       );
       const expectation = expect(dispatched).rejects.toThrow(
@@ -607,7 +637,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         signer,
         'publish',
         undefined,
-        preparedOperation(async () => ({ signedTx: 'boom', txHash: '0x1' })),
+        preparedRequest(a, async () => ({ signedTx: 'boom', txHash: '0x1' })),
         neverNull,
       ),
     ).rejects.toThrow('broadcast failed');
@@ -616,7 +646,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       signer,
       'publish',
       undefined,
-      preparedOperation(async () => ({ signedTx: 'ok', txHash: '0x2' })),
+      preparedRequest(a, async () => ({ signedTx: 'ok', txHash: '0x2' })),
       neverNull,
     );
     expect(r.hash).toBe('ok');
@@ -632,7 +662,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         signer,
         'update',
         undefined,
-        preparedOperation(async () => ({ signedTx: 'tx', txHash: '0xPRE' })),
+        preparedRequest(a, async () => ({ signedTx: 'tx', txHash: '0xPRE' })),
         (pre: string): never => {
           throw new Error(`null receipt for ${pre}`);
         },
@@ -711,22 +741,23 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).sendContractTransaction = publicSend;
     (a as any).sendContractTransactionUnlocked = unlockedSend;
     (a as any).sendSignedTransactionAndWait = recorder(async (tx: string) => fakeReceipt(tx));
+    (a as any).populateAndSignV10WithAllowanceRecovery = async () => ({
+      signedTx: 'publish',
+      txHash: '0xpublish',
+    });
 
     await (a as any).dispatchSerializedV10Write(
       signer,
       'publish',
       undefined,
-      preparedOperation(async (ctx: any) => {
-        await (a as any).ensureV10ApproveTrac(
-          signer,
-          V10_KA_ADDRESS,
-          1n,
-          'approve V10 publish TRAC',
-          false,
-          ctx.sendContractTransaction,
-        );
-        return { signedTx: 'publish', txHash: '0xpublish' };
-      }),
+      {
+        kaContract: {},
+        methodParams: {},
+        kav10Address: V10_KA_ADDRESS,
+        tokenAmount: 1n,
+        approvalLabel: 'approve V10 publish TRAC',
+        reapproveLabel: 'forced V10 re-approve',
+      },
       neverNull,
     );
 
@@ -810,7 +841,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
 
     await Promise.all([
       (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(publishBuild), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, publishBuild), neverNull,
       ),
       (a as any).sendContractTransaction({}, 'submitProof', [], signer, 'submitProof'),
     ]);

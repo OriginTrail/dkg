@@ -9,7 +9,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, invokePhaseCallback, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
@@ -2119,17 +2119,17 @@ export class DKGPublisher implements Publisher {
       throw new PublisherWalletRequiredError('publish');
     }
 
-    onPhase?.('prepare', 'start');
-    onPhase?.('prepare:ensureContextGraph', 'start');
+    await invokePhaseCallback(onPhase, 'prepare', 'start');
+    await invokePhaseCallback(onPhase, 'prepare:ensureContextGraph', 'start');
     this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private`);
     if (options.skipContextGraphEnsure) {
       this.log.info(ctx, `Skipping context graph ensure for prevalidated direct publish: ${contextGraphId}`);
     } else {
       await this.graphManager.ensureContextGraph(contextGraphId);
     }
-    onPhase?.('prepare:ensureContextGraph', 'end');
+    await invokePhaseCallback(onPhase, 'prepare:ensureContextGraph', 'end');
 
-    onPhase?.('prepare:partition', 'start');
+    await invokePhaseCallback(onPhase, 'prepare:partition', 'start');
     await this.assertTrustedCatalogTriplesAllowed({
       contextGraphId,
       trustedNonManifestCatalogTriples: options.trustedNonManifestCatalogTriples,
@@ -2139,12 +2139,12 @@ export class DKGPublisher implements Publisher {
     const canonical = canonicalPublishPayload(quads, privateQuads, {
       trustedNonManifestCatalogTriples: options.trustedNonManifestCatalogTriples,
     });
-    onPhase?.('prepare:partition', 'end');
+    await invokePhaseCallback(onPhase, 'prepare:partition', 'end');
 
     const manifestEntries: KAManifestEntry[] = [];
     const kaMetadata: KAMetadata[] = [];
 
-    onPhase?.('prepare:manifest', 'start');
+    await invokePhaseCallback(onPhase, 'prepare:manifest', 'start');
     // OT-RFC-44 / Design B: one file/lifecycle = ONE Knowledge Asset, however
     // many entities it contains. The on-chain KA count and ACK digest stay at
     // one below, while these token IDs remain compatibility labels for
@@ -2181,9 +2181,9 @@ export class DKGPublisher implements Publisher {
     }
 
     const allSkolemizedQuads = canonical.skolemizedPublicQuads;
-    onPhase?.('prepare:manifest', 'end');
+    await invokePhaseCallback(onPhase, 'prepare:manifest', 'end');
 
-    onPhase?.('prepare:validate', 'start');
+    await invokePhaseCallback(onPhase, 'prepare:validate', 'start');
     const publishOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
     const existing = this.ownedEntities.get(publishOwnershipKey) ?? new Set();
     const validation = validatePublishRequest(
@@ -2198,9 +2198,9 @@ export class DKGPublisher implements Publisher {
     if (!validation.valid) {
       throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
     }
-    onPhase?.('prepare:validate', 'end');
+    await invokePhaseCallback(onPhase, 'prepare:validate', 'end');
 
-    onPhase?.('prepare:merkle', 'start');
+    await invokePhaseCallback(onPhase, 'prepare:merkle', 'start');
     const privateRoots = canonical.privateRoots;
     const kcMerkleRoot = canonical.kcMerkleRoot;
     const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, privateRoots);
@@ -2220,10 +2220,10 @@ export class DKGPublisher implements Publisher {
       throw new Error('V10 publish requires at least one entity');
     }
     this.log.info(ctx, `Design B: publishing 1 KA with ${entityCount} member entit${entityCount === 1 ? 'y' : 'ies'}`);
-    onPhase?.('prepare:merkle', 'end');
+    await invokePhaseCallback(onPhase, 'prepare:merkle', 'end');
 
-    onPhase?.('prepare', 'end');
-    onPhase?.('store', 'start');
+    await invokePhaseCallback(onPhase, 'prepare', 'end');
+    await invokePhaseCallback(onPhase, 'store', 'start');
 
     const dataGraph = options.targetGraphUri ?? this.graphManager.dataGraphUri(contextGraphId);
     const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
@@ -2274,7 +2274,7 @@ export class DKGPublisher implements Publisher {
       }
     };
 
-    onPhase?.('store', 'end');
+    await invokePhaseCallback(onPhase, 'store', 'end');
 
     // Compute publicByteSize early — needed for signature collection
     const nquadsStr = allSkolemizedQuads
@@ -2707,7 +2707,7 @@ export class DKGPublisher implements Publisher {
       canAttemptOnChainPublish;
     let v10ACKs: V10CoreNodeACK[] | undefined;
     if (shouldCollectV10ACKs) {
-      onPhase?.('collect_v10_acks', 'start');
+      await invokePhaseCallback(onPhase, 'collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
         const reservedAckKaId =
@@ -2875,7 +2875,7 @@ export class DKGPublisher implements Publisher {
         );
         throw err;
       } finally {
-        onPhase?.('collect_v10_acks', 'end');
+        await invokePhaseCallback(onPhase, 'collect_v10_acks', 'end');
       }
     }
 
@@ -2923,7 +2923,7 @@ export class DKGPublisher implements Publisher {
     // fails. See `packages/publisher/test/_helpers/acks.ts` for the
     // in-memory multi-signer fixture tests use instead.
 
-    onPhase?.('chain', 'start');
+    await invokePhaseCallback(onPhase, 'chain', 'start');
 
     let onChainResult: OnChainPublishResult | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
@@ -3141,7 +3141,7 @@ export class DKGPublisher implements Publisher {
       let signStarted = false;
       let submitStarted = false;
       try {
-        onPhase?.('chain:sign', 'start');
+        await invokePhaseCallback(onPhase, 'chain:sign', 'start');
         signStarted = true;
         if (!publisherSigner) throw new PublisherWalletRequiredError('publish');
         this.log.info(
@@ -3149,9 +3149,9 @@ export class DKGPublisher implements Publisher {
           `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
         );
 
-        onPhase?.('chain:sign', 'end');
+        await invokePhaseCallback(onPhase, 'chain:sign', 'end');
         signStarted = false;
-        onPhase?.('chain:submit', 'start');
+        await invokePhaseCallback(onPhase, 'chain:submit', 'start');
         submitStarted = true;
         this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, byteSize=${effectiveByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, tokenAmount=${tokenAmount})`);
 
@@ -3239,7 +3239,7 @@ export class DKGPublisher implements Publisher {
           signal?: AbortSignal,
         ) => {
           assertWriteAheadPhaseActive(signal);
-          await onPhase?.(phase, status, { signal });
+          await invokePhaseCallback(onPhase, phase, status, { signal });
           // A listener may resume after the adapter deadline. Re-check before
           // advancing to another durable phase.
           assertWriteAheadPhaseActive(signal);
@@ -3374,7 +3374,7 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
           });
         } finally {
-          if (wroteAhead) onPhase?.('chain:writeahead', 'end');
+          if (wroteAhead) await invokePhaseCallback(onPhase, 'chain:writeahead', 'end');
         }
 
         onChainResult.tokenAmount = tokenAmount;
@@ -3502,13 +3502,13 @@ export class DKGPublisher implements Publisher {
         });
 
         status = 'confirmed';
-        onPhase?.('chain:submit', 'end');
+        await invokePhaseCallback(onPhase, 'chain:submit', 'end');
         submitStarted = false;
-        onPhase?.('chain:metadata', 'start');
+        await invokePhaseCallback(onPhase, 'chain:metadata', 'start');
         this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
       } catch (err) {
-        if (signStarted) onPhase?.('chain:sign', 'end');
-        if (submitStarted) onPhase?.('chain:submit', 'end');
+        if (signStarted) await invokePhaseCallback(onPhase, 'chain:sign', 'end');
+        if (submitStarted) await invokePhaseCallback(onPhase, 'chain:submit', 'end');
         // RC11 / PR2: re-throw chain failures instead of silently
         // downgrading to a "tentative" result with a local data-graph
         // write. Pre-PR2 this branch swallowed the error and fell
@@ -3578,10 +3578,10 @@ export class DKGPublisher implements Publisher {
           this.log.warn(ctx, `RS scoped-promote failed for ${ual} (heal backstop will retry): ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      onPhase?.('chain:metadata', 'end');
+      await invokePhaseCallback(onPhase, 'chain:metadata', 'end');
     }
 
-    onPhase?.('chain', 'end');
+    await invokePhaseCallback(onPhase, 'chain', 'end');
 
     const result: PublishResult = {
       kaId: onChainResult?.batchId ?? 0n,
@@ -3784,8 +3784,8 @@ export class DKGPublisher implements Publisher {
       options.subGraphName,
     );
 
-    onPhase?.('prepare', 'start');
-    onPhase?.('prepare:partition', 'start');
+    await invokePhaseCallback(onPhase, 'prepare', 'start');
+    await invokePhaseCallback(onPhase, 'prepare:partition', 'start');
     await this.assertTrustedCatalogTriplesAllowed({
       contextGraphId,
       trustedNonManifestCatalogTriples: options.trustedNonManifestCatalogTriples,
@@ -3811,9 +3811,9 @@ export class DKGPublisher implements Publisher {
         );
       }
     }
-    onPhase?.('prepare:partition', 'end');
+    await invokePhaseCallback(onPhase, 'prepare:partition', 'end');
 
-    onPhase?.('prepare:manifest', 'start');
+    await invokePhaseCallback(onPhase, 'prepare:manifest', 'start');
     const manifestEntries: KAManifestEntry[] = [];
     const entityPrivateMap = new Map<string, Quad[]>();
 
@@ -3832,9 +3832,9 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: entityPrivateQuads.length,
       });
     }
-    onPhase?.('prepare:manifest', 'end');
+    await invokePhaseCallback(onPhase, 'prepare:manifest', 'end');
 
-    onPhase?.('prepare:merkle', 'start');
+    await invokePhaseCallback(onPhase, 'prepare:merkle', 'start');
     const allSkolemizedQuads = [...kaMap.values()].flat();
     const updatePrivateRoots = manifestEntries
       .map(m => m.privateMerkleRoot)
@@ -3844,8 +3844,8 @@ export class DKGPublisher implements Publisher {
     if (kcMerkleLeafCount > 0xffffffff) {
       throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
     }
-    onPhase?.('prepare:merkle', 'end');
-    onPhase?.('prepare', 'end');
+    await invokePhaseCallback(onPhase, 'prepare:merkle', 'end');
+    await invokePhaseCallback(onPhase, 'prepare', 'end');
 
     const updatePrivateRootByRoot = new Map<string, Uint8Array>();
     for (const m of manifestEntries) {
@@ -3853,7 +3853,7 @@ export class DKGPublisher implements Publisher {
     }
 
     const storeUpdatedQuads = async (version?: MaterializedVersion): Promise<void> => {
-      onPhase?.('store', 'start');
+      await invokePhaseCallback(onPhase, 'store', 'start');
 
       // Discover the PRIOR root entities from `_meta` BEFORE the label
       // restatement wipes them (Codex review #2 on PR #845). When an update
@@ -3960,7 +3960,7 @@ export class DKGPublisher implements Publisher {
         privateRootByRoot: updatePrivateRootByRoot,
         version,
       });
-      onPhase?.('store', 'end');
+      await invokePhaseCallback(onPhase, 'store', 'end');
     };
 
     if (localOnlyUpdate) {
@@ -3978,8 +3978,8 @@ export class DKGPublisher implements Publisher {
       return result;
     }
 
-    onPhase?.('chain', 'start');
-    onPhase?.('chain:submit', 'start');
+    await invokePhaseCallback(onPhase, 'chain', 'start');
+    await invokePhaseCallback(onPhase, 'chain:submit', 'start');
 
     // Compute real serialized byte size — must match the publish path serializer.
     // Done BEFORE `chain:writeahead:start` so any error during serialization
@@ -4190,7 +4190,7 @@ export class DKGPublisher implements Publisher {
       signal?: AbortSignal,
     ) => {
       assertWriteAheadPhaseActive(signal);
-      await onPhase?.(phase, status, { signal });
+      await invokePhaseCallback(onPhase, phase, status, { signal });
       assertWriteAheadPhaseActive(signal);
     };
     const emitWriteAheadStart = async (info?: V10WriteAheadHookInfo) => {
@@ -4221,7 +4221,7 @@ export class DKGPublisher implements Publisher {
     let boundUpdateTokenAmount: bigint | undefined;
     const v10UpdateACKProvider = options.v10UpdateACKProvider;
     if (v10UpdateACKProvider) {
-      onPhase?.('collect_v10_update_acks', 'start');
+      await invokePhaseCallback(onPhase, 'collect_v10_update_acks', 'start');
       try {
         const getFields = (this.chain as unknown as {
           getUpdateAckDigestFields?: (p: {
@@ -4297,7 +4297,7 @@ export class DKGPublisher implements Publisher {
           `V10: Collected ${v10UpdateACKs.length} core node update ACKs`,
         );
       } finally {
-        onPhase?.('collect_v10_update_acks', 'end');
+        await invokePhaseCallback(onPhase, 'collect_v10_update_acks', 'end');
       }
     }
 
@@ -4372,18 +4372,18 @@ export class DKGPublisher implements Publisher {
         throw new Error('Chain adapter does not support V10 updates (updateKnowledgeCollectionV10 missing)');
       }
     } finally {
-      if (wroteAhead) onPhase?.('chain:writeahead', 'end');
+      if (wroteAhead) await invokePhaseCallback(onPhase, 'chain:writeahead', 'end');
     }
 
     if (earlyReturn) {
-      onPhase?.('chain:submit', 'end');
-      onPhase?.('chain', 'end');
+      await invokePhaseCallback(onPhase, 'chain:submit', 'end');
+      await invokePhaseCallback(onPhase, 'chain', 'end');
       return earlyReturn;
     }
 
     if (!txResult.success) {
-      onPhase?.('chain:submit', 'end');
-      onPhase?.('chain', 'end');
+      await invokePhaseCallback(onPhase, 'chain:submit', 'end');
+      await invokePhaseCallback(onPhase, 'chain', 'end');
       return {
         kaId,
         ual: await this.resolveKaUal(kaId),
@@ -4405,8 +4405,8 @@ export class DKGPublisher implements Publisher {
           // inventing a publisher address that did not come from chain state.
       }
     }
-    onPhase?.('chain:submit', 'end');
-    onPhase?.('chain', 'end');
+    await invokePhaseCallback(onPhase, 'chain:submit', 'end');
+    await invokePhaseCallback(onPhase, 'chain', 'end');
     if (!effectivePublisherAddress) {
       this.log.warn(
         ctx,

@@ -2,7 +2,7 @@ import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
-import type { PhaseCallback } from './publisher.js';
+import { invokePhaseCallback, type PhaseCallback } from './publisher.js';
 import {
   decodeGossipEnvelope,
   decodeEncryptedWorkspacePayload,
@@ -920,7 +920,7 @@ export class SharedMemoryHandler {
     // block for details).
     let decoded: WorkspaceGossipDecodeResult;
     try {
-      onPhase?.('decode', 'start');
+      await invokePhaseCallback(onPhase, 'decode', 'start');
       decoded = this.decodeWorkspaceGossipMessage(data);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -1189,7 +1189,7 @@ export class SharedMemoryHandler {
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
       assertNoUserAuthoredTrustLevelQuads(quads);
-      onPhase?.('decode', 'end');
+      await invokePhaseCallback(onPhase, 'decode', 'end');
 
       const manifestForValidation: KAManifestEntry[] = (manifest ?? []).map((m) => ({
         tokenId: 0n,
@@ -1216,7 +1216,7 @@ export class SharedMemoryHandler {
       const subjects = [...new Set([...quads.map(q => q.subject), ...condSubjects])];
       const lockKeys = subjects.map(s => `${swmOwnershipKey}\0${s}`);
 
-      onPhase?.('store', 'start');
+      await invokePhaseCallback(onPhase, 'store', 'start');
       const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
         const swmOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey) ?? new Map<string, string>();
         const existing = new Set<string>([...swmOwned.keys()]);
@@ -1228,7 +1228,7 @@ export class SharedMemoryHandler {
           }
         }
 
-        onPhase?.('validate', 'start');
+        await invokePhaseCallback(onPhase, 'validate', 'start');
         const validation = validatePublishRequest(
           quads, manifestForValidation, contextGraphId, existing,
           { allowUpsert: true, upsertableEntities: upsertable },
@@ -1253,7 +1253,7 @@ export class SharedMemoryHandler {
           statementCount: quads.length,
           outcome: 'accepted',
         });
-        onPhase?.('validate', 'end');
+        await invokePhaseCallback(onPhase, 'validate', 'end');
 
         if (casConditions && casConditions.length > 0) {
           const passed = await this.enforceCASConditions(casConditions, swmGraph, ctx);
@@ -1354,7 +1354,7 @@ export class SharedMemoryHandler {
         return true;
       });
 
-      onPhase?.('store', 'end');
+      await invokePhaseCallback(onPhase, 'store', 'end');
       if (applied) {
         // PR-A R1: only record the observation after the apply actually
         // succeeded — passing allowlist + sub-graph validation + CAS +

@@ -1,6 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
-import type { PhaseCallback, PublishResult } from './publisher.js';
+import { invokePhaseCallback, type PhaseCallback, type PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
@@ -1035,24 +1035,33 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     delegate?: PhaseCallback;
   }): PhaseCallback {
     let recordedTxHash: LiftJobHex | undefined;
+    let stagedTxHash: LiftJobHex | undefined;
     return async (phase, status, context) => {
-      await params.delegate?.(phase, status, context);
+      await invokePhaseCallback(params.delegate, phase, status, context);
       // The EVM adapter invalidates this pre-broadcast attempt before it
       // rejects a timed-out hook. A delayed delegate must not turn the job into
       // `broadcast` after the associated transaction was explicitly abandoned.
       if (context?.signal?.aborted) return;
       if (status !== 'start') return;
       const txHash = txHashFromSignedPhase(phase);
-      if (!txHash || recordedTxHash) return;
+      if (txHash) {
+        if (!recordedTxHash) stagedTxHash = txHash;
+        return;
+      }
+      // The tx-bearing phase only stages the identity in memory. Persist at
+      // the final awaited write-ahead boundary, after every earlier listener
+      // has completed successfully. A timeout in any earlier phase therefore
+      // leaves no durable broadcast recovery state for an unbroadcast tx.
+      if (phase !== 'chain:writeahead' || recordedTxHash || !stagedTxHash) return;
       const recorded = await this.recordKnowledgeAssetVmPublishBroadcastProgress({
         jobId: params.jobId,
         walletId: params.walletId,
-        txHash,
+        txHash: stagedTxHash,
         merkleRoot: params.merkleRoot,
         publicByteSize: params.publicByteSize,
         signal: context?.signal,
       });
-      if (recorded) recordedTxHash = txHash;
+      if (recorded) recordedTxHash = stagedTxHash;
     };
   }
 
@@ -1074,15 +1083,30 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       );
     }
     if (params.signal?.aborted) return false;
-    await this.update(params.jobId, 'broadcast', {
-      broadcast: {
-        txHash: params.txHash,
-        walletId: params.walletId,
-        merkleRoot: params.merkleRoot,
-        publicByteSize: params.publicByteSize,
-      },
-    });
+    try {
+      await this.update(params.jobId, 'broadcast', {
+        broadcast: {
+          txHash: params.txHash,
+          walletId: params.walletId,
+          merkleRoot: params.merkleRoot,
+          publicByteSize: params.publicByteSize,
+        },
+      });
+    } catch (error) {
+      if (!params.signal?.aborted) throw error;
+      await this.restoreAbortedWriteAheadJob(current);
+      return false;
+    }
+    if (params.signal?.aborted) {
+      await this.restoreAbortedWriteAheadJob(current);
+      return false;
+    }
     return true;
+  }
+
+  private async restoreAbortedWriteAheadJob(job: LiftJob): Promise<void> {
+    await this.writeJob(job);
+    await this.syncWalletLockForJob(job);
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {

@@ -810,7 +810,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     // still satisfy the contract's `transferFrom(..., 1n)` minimum.
     // #953: the approve runs INSIDE the per-wallet serialized window below
     // (it sends its own tx on `signer`), not here — it is an executable
-    // step of `createV10SignerWritePreparation`.
+    // first step of the direct serialized V10 write sequence.
 
     // P-1 review (Codex iter-5): same pattern as the publish path —
     // break the single contract call into populate / sign / hook /
@@ -834,16 +834,14 @@ export class PublishMethods extends EVMChainAdapterBase {
       signer,
       'update',
       params.onBroadcast,
-      this.createV10SignerWritePreparation(
-        signer,
-        ka as Contract,
-        'update',
-        updateParams,
+      {
+        kaContract: ka as Contract,
+        methodParams: updateParams,
         kav10Address,
-        newTokenAmount,
-        'approve V10 update TRAC',
-        'approve V10 update TRAC (forced re-approve, #888)',
-      ),
+        tokenAmount: newTokenAmount,
+        approvalLabel: 'approve V10 update TRAC',
+        reapproveLabel: 'approve V10 update TRAC (forced re-approve, #888)',
+      },
       (preBroadcastTxHash) => {
         throw new Error(
           `update broadcast succeeded (txHash=${preBroadcastTxHash}) but receipt was null ` +

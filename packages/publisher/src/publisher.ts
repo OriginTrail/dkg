@@ -29,6 +29,20 @@ export type PhaseCallback = (
   context?: PhaseCallbackContext,
 ) => Promise<void> | void;
 
+/**
+ * The single phase-callback execution boundary. Every publisher emitter awaits
+ * this helper, so async listeners preserve phase ordering and a rejection is
+ * observed by the operation instead of becoming an unhandled background task.
+ */
+export async function invokePhaseCallback(
+  callback: PhaseCallback | undefined,
+  phase: string,
+  status: 'start' | 'end',
+  context?: PhaseCallbackContext,
+): Promise<void> {
+  await callback?.(phase, status, context);
+}
+
 export type ReceiverSignature = { identityId: bigint; r: Uint8Array; vs: Uint8Array };
 
 /**

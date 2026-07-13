@@ -67,13 +67,32 @@ const fakeReceipt = (status: number) =>
 const retryable429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
 const neverNull = (pre: string): never => { throw new Error(`unexpected null receipt for ${pre}`); };
 
-function preparedOperation(
+function preparedRequest(
+  a: EVMChainAdapter,
   buildSignedTx: () => Promise<{ signedTx: string; txHash: string }>,
 ) {
-  return Object.freeze({
-    runAllowanceGate: async () => undefined,
-    populateAndSign: buildSignedTx,
-  });
+  const target = a as any;
+  const builds: Map<object, typeof buildSignedTx> = target.__testV10Builds ?? new Map();
+  if (!target.__testV10Builds) {
+    target.__testV10Builds = builds;
+    target.ensureV10ApproveTrac = async () => undefined;
+    target.populateAndSignV10WithAllowanceRecovery = async (
+      _signer: unknown,
+      _contract: unknown,
+      _method: unknown,
+      methodParams: object,
+    ) => builds.get(methodParams)!();
+  }
+  const methodParams = {};
+  builds.set(methodParams, buildSignedTx);
+  return {
+    kaContract: {},
+    methodParams,
+    kav10Address: '0x0000000000000000000000000000000000000001',
+    tokenAmount: 1n,
+    approvalLabel: 'test approve',
+    reapproveLabel: 'test re-approve',
+  };
 }
 
 // Drive the REAL dispatch → send → broadcast/receipt path. `buildSignedTx` and
@@ -88,7 +107,7 @@ async function runDispatch(a: EVMChainAdapter, opts: {
     signer,
     'publish',
     opts.onBroadcast,
-    preparedOperation(buildSignedTx),
+    preparedRequest(a, buildSignedTx),
     neverNull,
   );
 }
@@ -300,10 +319,10 @@ describe('write-path tx-safety invariants — set-retry MULTI-PASS (S2)', () => 
       const w2build = recorder(async () => { events.push('w2:build'); return { signedTx: '0xW2', txHash: '0x' + '22'.repeat(32) }; });
 
       const w1 = (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(w1build), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, w1build), neverNull,
       );
       const w2 = (a as any).dispatchSerializedV10Write(
-        signer, 'publish', undefined, preparedOperation(w2build), neverNull,
+        signer, 'publish', undefined, preparedRequest(a, w2build), neverNull,
       );
 
       // Park write-1 mid-backoff: it has built + 429'd + is sleeping. Write-2 must

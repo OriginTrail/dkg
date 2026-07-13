@@ -26,7 +26,6 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import {
   SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
   SignerWriteLane,
-  SignerWriteOperation,
 } from './signer-write-lane.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
@@ -61,18 +60,14 @@ type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
 };
 
-type V10SignerWriteState = {
-  signedTx?: string;
-  txHash?: string;
-  receipt?: ethers.TransactionReceipt;
-};
-
-/** Immutable inputs used by the one owner that assembles the full V10 write. */
-type V10SignerWritePreparation = Readonly<{
-  runAllowanceGate: (context: SerializedSignerWriteContext) => Promise<void>;
-  populateAndSign: (
-    context: SerializedSignerWriteContext,
-  ) => Promise<{ signedTx: string; txHash: string }>;
+/** Concrete inputs consumed by the direct V10 signer-lane sequence. */
+type V10SignerWriteRequest = Readonly<{
+  kaContract: Contract;
+  methodParams: unknown;
+  kav10Address: string;
+  tokenAmount: bigint;
+  approvalLabel: string;
+  reapproveLabel: string;
 }>;
 
 /** Domain behavior: a stale V10 allowance can trigger exactly one recovery. */
@@ -1613,9 +1608,9 @@ export class EVMChainAdapterBase {
    * the nonce monotonic; cross-wallet writes are unaffected (different keys
    * run concurrently).
    *
-   * This method is the single owner of the complete signer-write operation:
-   * preparation, bounded WAL, and broadcast/receipt phases are all assembled
-   * before the operation crosses into the signer lane.
+   * This method is the single owner of the complete signer-write sequence.
+   * The lane only owns FIFO admission; the nonce-critical work remains direct
+   * local control flow here so its ordering and failure boundaries are visible.
    * `onBroadcast` is the durable WAL checkpoint: it `await`s before broadcast
    * and a throw/timeout fails closed (the signed tx is still local, never sent,
    * so the caller can retry with no on-chain effect).
@@ -1624,109 +1619,46 @@ export class EVMChainAdapterBase {
     signer: Wallet,
     label: 'publish' | 'update',
     onBroadcast: ((info: V10WriteAheadHookInfo) => Promise<void> | void) | undefined,
-    preparation: V10SignerWritePreparation,
+    request: V10SignerWriteRequest,
     onNullReceipt: (preBroadcastTxHash: string) => never,
   ): Promise<ethers.TransactionReceipt> {
-    const operation = new SignerWriteOperation<
-      SerializedSignerWriteContext,
-      V10SignerWriteState,
-      ethers.TransactionReceipt
-    >(
-      SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
-      () => ({}),
-      (state) => {
-        if (!state.receipt) throw new Error(`V10 ${label} operation completed without a receipt`);
-        return state.receipt;
-      },
-    )
-      .phase(
-        'initial V10 allowance gate and optional approval transaction',
-        async (ctx) => preparation.runAllowanceGate(ctx),
-      )
-      .phase(
-        `V10 ${label} populate/sign with bounded allowance recovery`,
-        async (ctx, state) => {
-          const prepared = await preparation.populateAndSign(ctx);
-          state.signedTx = prepared.signedTx;
-          state.txHash = prepared.txHash;
-        },
+    return this.withSerializedSignerWrite(signer, `V10 ${label}`, async (ctx) => {
+      await this.ensureV10ApproveTrac(
+        signer,
+        request.kav10Address,
+        request.tokenAmount,
+        request.approvalLabel,
+        false,
+        ctx.sendContractTransaction,
       );
-    if (onBroadcast) {
-      operation.phase(
-        `V10 ${label} durable write-ahead hook`,
-        async (_ctx, state) => {
-          const preBroadcastTxHash = state.txHash;
-          if (!preBroadcastTxHash) {
-            throw new Error(`V10 ${label} operation reached write-ahead without a signed tx hash`);
-          }
-          try {
-            await runV10WriteAheadHook(label, onBroadcast, preBroadcastTxHash);
-          } catch (hookErr) {
-            throw new Error(
-              `chain:writeahead hook failed before ${label} broadcast: ` +
-              `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
-              { cause: hookErr },
-            );
-          }
-        },
+      const { signedTx, txHash } = await this.populateAndSignV10WithAllowanceRecovery(
+        signer,
+        request.kaContract,
+        label,
+        request.methodParams,
+        request.kav10Address,
+        request.tokenAmount,
+        request.reapproveLabel,
+        ctx.sendContractTransaction,
       );
-    }
-    operation.phase(
-      `V10 ${label} broadcast and receipt`,
-      async (_ctx, state) => {
-        if (!state.signedTx || !state.txHash) {
-          throw new Error(`V10 ${label} operation reached broadcast without a signed transaction`);
+      if (onBroadcast) {
+        try {
+          await runV10WriteAheadHook(label, onBroadcast, txHash);
+        } catch (hookErr) {
+          throw new Error(
+            `chain:writeahead hook failed before ${label} broadcast: ` +
+            `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+            { cause: hookErr },
+          );
         }
-        const receipt = await this.sendSignedTransactionAndWait(
-          state.signedTx,
-          state.txHash,
-          `V10 ${label}`,
-        );
-        if (!receipt) onNullReceipt(state.txHash);
-        state.receipt = receipt;
-      },
-    );
-
-    return this.withSerializedSignerWrite(signer, operation);
-  }
-
-  /**
-   * Bind the two concrete preparation steps without exposing a partially built
-   * signer-write operation. `dispatchSerializedV10Write` consumes this frozen
-   * descriptor and assembles the complete operation in one place.
-   */
-  protected createV10SignerWritePreparation(
-    signer: Wallet,
-    kaContract: Contract,
-    method: 'publish' | 'update',
-    methodParams: unknown,
-    kav10Address: string,
-    tokenAmount: bigint,
-    approvalLabel: string,
-    reapproveLabel: string,
-  ): V10SignerWritePreparation {
-    return Object.freeze({
-      runAllowanceGate: async (ctx: SerializedSignerWriteContext) => {
-        await this.ensureV10ApproveTrac(
-          signer,
-          kav10Address,
-          tokenAmount,
-          approvalLabel,
-          false,
-          ctx.sendContractTransaction,
-        );
-      },
-      populateAndSign: async (ctx: SerializedSignerWriteContext) =>
-        this.populateAndSignV10WithAllowanceRecovery(
-          signer,
-          kaContract,
-          method,
-          methodParams,
-          kav10Address,
-          tokenAmount,
-          reapproveLabel,
-          ctx.sendContractTransaction,
-        ),
+      }
+      const receipt = await this.sendSignedTransactionAndWait(
+        signedTx,
+        txHash,
+        `V10 ${label}`,
+      );
+      if (!receipt) onNullReceipt(txHash);
+      return receipt;
     });
   }
 
@@ -1774,7 +1706,8 @@ export class EVMChainAdapterBase {
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(
       signer,
-      this.createSingleTransactionSignerWriteOperation(async (ctx) =>
+      label,
+      async (ctx) =>
         ctx.sendContractTransaction(
           contract,
           method,
@@ -1783,26 +1716,6 @@ export class EVMChainAdapterBase {
           label,
           opts,
         ),
-      ),
-    );
-  }
-
-  protected createSingleTransactionSignerWriteOperation<TResult>(
-    execute: (ctx: SerializedSignerWriteContext) => Promise<TResult>,
-  ): SignerWriteOperation<SerializedSignerWriteContext, { result?: TResult }, TResult> {
-    return new SignerWriteOperation<
-      SerializedSignerWriteContext,
-      { result?: TResult },
-      TResult
-    >(
-      SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
-      () => ({}),
-      (state) => state.result as TResult,
-    ).phase(
-      'single contract transaction',
-      async (ctx, state) => {
-        state.result = await execute(ctx);
-      },
     );
   }
 
@@ -1810,12 +1723,18 @@ export class EVMChainAdapterBase {
    * Owns the per-wallet signer-write lane and exposes the unlocked primitive
    * only to code already running inside that nonce-critical window.
    */
-  protected async withSerializedSignerWrite<TState, TResult>(
+  protected async withSerializedSignerWrite<TResult>(
     signer: Wallet,
-    operation: SignerWriteOperation<SerializedSignerWriteContext, TState, TResult>,
+    label: string,
+    execute: (context: SerializedSignerWriteContext) => Promise<TResult>,
   ): Promise<TResult> {
-    return this.signerWriteLane.run(signer.address, operation.plan, () =>
-      operation.execute({
+    return this.signerWriteLane.run(
+      signer.address,
+      {
+        admissionBudgetMs: SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
+        label,
+      },
+      () => execute({
         sendContractTransaction: (contract, method, args, innerSigner, label, opts) => {
           if (ethers.getAddress(innerSigner.address) !== ethers.getAddress(signer.address)) {
             throw new Error(
@@ -3469,7 +3388,7 @@ export class EVMChainAdapterBase {
     // `this.contracts.token === undefined` no-op for read-only adapters.
     // #953: the approve runs INSIDE the per-wallet serialized window below
     // (it sends its own tx on `txSigner`), not here — it is an executable
-    // step of `createV10SignerWritePreparation`.
+    // first step of the direct serialized V10 write sequence.
 
     // Build the on-chain PublishParams struct matching the field order +
     // types in `KnowledgeAssetsLifecycle.sol` (RFC-001 author-attestation
@@ -3592,16 +3511,14 @@ export class EVMChainAdapterBase {
       txSigner,
       'publish',
       params.onBroadcast,
-      this.createV10SignerWritePreparation(
-        txSigner,
-        ka as Contract,
-        'publish',
-        publishParamsStruct,
-        kaAddress,
-        params.tokenAmount,
-        'approve V10 publish TRAC',
-        'approve V10 publish TRAC (forced re-approve, #888)',
-      ),
+      {
+        kaContract: ka as Contract,
+        methodParams: publishParamsStruct,
+        kav10Address: kaAddress,
+        tokenAmount: params.tokenAmount,
+        approvalLabel: 'approve V10 publish TRAC',
+        reapproveLabel: 'approve V10 publish TRAC (forced re-approve, #888)',
+      },
       () => {
         throw new Error('Transaction receipt is null');
       },

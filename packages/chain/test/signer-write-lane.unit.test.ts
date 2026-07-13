@@ -2,38 +2,22 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   SignerWriteLane,
   SignerWriteLaneAdmissionTimeoutError,
-  SignerWriteOperation,
-  SignerWritePlan,
 } from '../src/signer-write-lane.js';
 
-const plan = (admissionBudgetMs: number) =>
-  new SignerWritePlan(admissionBudgetMs).describePhase('test signer-write phase');
+const operation = (admissionBudgetMs: number, label = 'test signer write') => ({
+  admissionBudgetMs,
+  label,
+});
 
 describe('SignerWriteLane', () => {
-  it('covers every executable operation phase with one coarse admission budget', async () => {
-    const events: string[] = [];
-    const operation = new SignerWriteOperation<{ prefix: string }, { value: string }, string>(
-      50,
-      () => ({ value: '' }),
-      (state) => state.value,
-    )
-      .phase('prepare', async (context, state) => {
-        events.push('prepare');
-        state.value = context.prefix;
-      })
-      .phase('submit', async (_context, state) => {
-        events.push('submit');
-        state.value += '-sent';
-      });
-
-    expect(operation.plan.admissionBudgetMs).toBe(50);
-    expect(operation.plan.phaseLabels).toEqual(['prepare', 'submit']);
-    await expect(operation.execute({ prefix: 'tx' })).resolves.toBe('tx-sent');
-    expect(events).toEqual(['prepare', 'submit']);
-    expect(() => operation.phase('unplanned late work', async () => undefined))
-      .toThrow('Cannot add a signer write phase after execution has started');
-    await expect(operation.execute({ prefix: 'again' }))
-      .rejects.toThrow('Signer write operation can only execute once');
+  it('accepts one coarse budget and diagnostic label around a direct callback', async () => {
+    const lane = new SignerWriteLane();
+    await expect(lane.run(
+      '0xwallet',
+      operation(50, 'publish direct sequence'),
+      async () => 'sent',
+    )).resolves.toBe('sent');
+    expect(lane.isActive('0xwallet')).toBe(false);
   });
 
   it('keeps the lane held after an admission timeout, skips that write, then runs later work', async () => {
@@ -42,11 +26,11 @@ describe('SignerWriteLane', () => {
       const lane = new SignerWriteLane();
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      const first = lane.run('0xwallet', plan(15), async () => gate);
+      const first = lane.run('0xwallet', operation(15), async () => gate);
       let timedOutWriteRan = false;
       const second = lane.run(
         '0xwallet',
-        plan(15),
+        operation(15),
         async () => { timedOutWriteRan = true; },
       );
       const secondExpectation = expect(second).rejects.toMatchObject({
@@ -54,6 +38,7 @@ describe('SignerWriteLane', () => {
         code: 'SIGNER_WRITE_LANE_ADMISSION_TIMEOUT',
         signerAddress: '0xwallet',
         queueDepth: 2,
+        label: 'test signer write',
       } satisfies Partial<SignerWriteLaneAdmissionTimeoutError>);
       await vi.advanceTimersByTimeAsync(15);
       await secondExpectation;
@@ -61,7 +46,7 @@ describe('SignerWriteLane', () => {
       let laterWriteStarted = false;
       const third = lane.run(
         '0xwallet',
-        plan(15),
+        operation(15),
         async () => { laterWriteStarted = true; return 'third'; },
       );
       expect(lane.isActive('0xwallet')).toBe(true);
@@ -78,26 +63,19 @@ describe('SignerWriteLane', () => {
     }
   });
 
-  it('uses the predecessor operation-wide admission budget while retaining phase labels', async () => {
+  it('uses the predecessor operation-wide admission budget', async () => {
     vi.useFakeTimers();
     try {
       const lane = new SignerWriteLane();
-      const predecessorPlan = new SignerWritePlan(30_000)
-        .describePhase('populate and sign')
-        .describePhase('broadcast and receipt');
-      expect(predecessorPlan.admissionBudgetMs).toBe(30_000);
-      expect(predecessorPlan.phaseLabels).toEqual([
-        'populate and sign',
-        'broadcast and receipt',
-      ]);
+      const predecessor = operation(30_000, 'publish direct sequence');
 
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      const first = lane.run('slow-wallet', predecessorPlan, async () => gate);
+      const first = lane.run('slow-wallet', predecessor, async () => gate);
       let ran = false;
       const second = lane.run(
         'slow-wallet',
-        plan(10_000),
+        operation(10_000),
         async () => { ran = true; return 'sent'; },
       );
 
@@ -118,10 +96,10 @@ describe('SignerWriteLane', () => {
       const lane = new SignerWriteLane();
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      const first = lane.run('abandoned-budget-wallet', plan(15), async () => gate);
+      const first = lane.run('abandoned-budget-wallet', operation(15), async () => gate);
       const second = lane.run(
         'abandoned-budget-wallet',
-        plan(100),
+        operation(100),
         async () => 'must not run',
       );
       const secondExpectation = expect(second).rejects.toMatchObject({
@@ -137,7 +115,7 @@ describe('SignerWriteLane', () => {
       // both properties: the barrier remains, while the stale budget is gone.
       const third = lane.run(
         'abandoned-budget-wallet',
-        plan(10),
+        operation(10),
         async () => 'third',
       );
       const thirdExpectation = expect(third).rejects.toMatchObject({
@@ -161,12 +139,12 @@ describe('SignerWriteLane', () => {
     try {
       const lane = new SignerWriteLane();
       const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-      const first = lane.run('mixed-wallet', plan(30_000), async () => delay(29_999));
-      const second = lane.run('mixed-wallet', plan(20_000), async () => delay(19_999));
+      const first = lane.run('mixed-wallet', operation(30_000), async () => delay(29_999));
+      const second = lane.run('mixed-wallet', operation(20_000), async () => delay(19_999));
       let thirdStarted = false;
       let thirdSettled = false;
       let thirdError: unknown;
-      const third = lane.run('mixed-wallet', plan(5_000), async () => {
+      const third = lane.run('mixed-wallet', operation(5_000), async () => {
         thirdStarted = true;
         return 'third';
       }).then(

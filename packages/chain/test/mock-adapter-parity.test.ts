@@ -153,7 +153,6 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // this scope to expose an unlocked sender only while the per-wallet signer lane
   // is held; the mock has no nonce-sign-broadcast window to mirror.
   'withSerializedSignerWrite',
-  'createSingleTransactionSignerWriteOperation',
   'sendContractTransactionUnlocked',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
@@ -169,7 +168,6 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // (#888) backing both V10 write paths (publish + update); the mock has no
   // populate/gas-estimation surface to mirror.
   'populateAndSignV10WithAllowanceRecovery',
-  'createV10SignerWritePreparation',
   // TS-private shared dispatch for the two V10 write paths (#953). Serializes
   // the populate→sign→broadcast→confirm nonce window per operational wallet
   // via SignerWriteLane. The mock has no nonce/broadcast surface to mirror —
