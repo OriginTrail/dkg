@@ -1,9 +1,9 @@
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, loadSelectedSharedMemoryQuads } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -1771,9 +1771,19 @@ export class DKGPublisher implements Publisher {
        * the existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
+      /** Explicit graph-family boundary; named lifecycles exclude bucket and siblings. */
+      sharedMemoryScope?: SharedMemoryGraphScope;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
+    const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
+      ?? { kind: 'complete-family' };
+    if (sharedMemoryScope.kind === 'named-lifecycle' && options?.clearSharedMemoryAfter === true) {
+      throw new Error(
+        'clearSharedMemoryAfter cannot be combined with a named-lifecycle shared-memory scope; ' +
+        'use complete-family scope for an explicit family-wide clear',
+      );
+    }
 
     // Guard: VM publishing requires an on-chain registered context graph.
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
@@ -1816,14 +1826,21 @@ export class DKGPublisher implements Publisher {
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
 
-    const quads = await loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
-      quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
-      rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
+    const loadOptions = {
+      quadFilter: (q: Quad) => !isSwmMerkleExcludedQuad(q),
+      rootEntitiesErrorMessage: ({ inputCount, hadInput }: { inputCount: number; hadInput: boolean }) => (
         hadInput
           ? `No valid rootEntities provided (all ${inputCount} entries failed IRI validation)`
           : `No rootEntities provided for context graph ${contextGraphId}`
       ),
-    });
+    };
+    const quads = await loadSharedMemoryQuadsForScope(
+      this.store,
+      swmGraph,
+      selection,
+      sharedMemoryScope,
+      loadOptions,
+    );
 
     if (quads.length === 0) {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
@@ -2064,7 +2081,13 @@ export class DKGPublisher implements Publisher {
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
       const kaMap = skolemizeByEntity(quads);
-      await this.clearPublishedSwmRoots(contextGraphId, [...kaMap.keys()], options?.subGraphName, ctx);
+      await this.clearPublishedSwmRoots(
+        contextGraphId,
+        [...kaMap.keys()],
+        options?.subGraphName,
+        ctx,
+        sharedMemoryScope,
+      );
       // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
       // Default is false: unpublished entities stay in SWM for future publishes.
       if (options?.clearSharedMemoryAfter === true) {
@@ -5588,12 +5611,31 @@ export class DKGPublisher implements Publisher {
     rootEntities: string[],
     subGraphName: string | undefined,
     ctx: OperationContext,
+    scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<void> {
     if (rootEntities.length === 0) return;
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+    await this.clearPublishedSwmRootsInGraphs(
+      contextGraphId,
+      rootEntities,
+      subGraphName,
+      ctx,
+      await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope),
+      scope.kind === 'complete-family' ? 'always' : 'when-no-share-remains',
+    );
+  }
+
+  private async clearPublishedSwmRootsInGraphs(
+    contextGraphId: string,
+    rootEntities: string[],
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+    swmGraphsForClear: string[],
+    metadataPolicy: 'always' | 'when-no-share-remains',
+  ): Promise<void> {
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
     const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-    const swmGraphsForClear = await this.swmGraphsUnder(swmGraph);
     let ownerDeletedTotal = 0;
     for (const rootEntity of rootEntities) {
       for (const g of swmGraphsForClear) {
@@ -5603,12 +5645,40 @@ export class DKGPublisher implements Publisher {
           graph: g, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
         });
       }
-      const ownerDeleted = await this.store.deleteByPattern({
-        graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
-      });
-      ownerDeletedTotal += ownerDeleted;
-      await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
-      this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
+    }
+    // A root-keyed owner row can only remain live while some SWM family graph
+    // still contains that root. Reconcile the complete selected root set with
+    // one family-wide read rather than one independent scan per root.
+    const rootsWithRemainingShares = new Set<string>();
+    if (metadataPolicy === 'when-no-share-remains') {
+      const remaining = await loadSelectedSharedMemoryQuads(
+        this.store,
+        swmGraph,
+        { rootEntities },
+        { querySource: 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership' },
+      );
+      for (const quad of remaining) {
+        for (const rootEntity of rootEntities) {
+          if (
+            quad.subject === rootEntity
+            || quad.subject.startsWith(`${rootEntity}/.well-known/genid/`)
+          ) {
+            rootsWithRemainingShares.add(rootEntity);
+          }
+        }
+      }
+    }
+    for (const rootEntity of rootEntities) {
+      const shouldClearRootMetadata = metadataPolicy === 'always'
+        || !rootsWithRemainingShares.has(rootEntity);
+      if (shouldClearRootMetadata) {
+        const ownerDeleted = await this.store.deleteByPattern({
+          graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
+        });
+        ownerDeletedTotal += ownerDeleted;
+        await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
+        this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
+      }
     }
     if (ownerDeletedTotal > 0) {
       this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);

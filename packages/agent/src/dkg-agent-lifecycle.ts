@@ -228,7 +228,8 @@ import {
   resolveSyncResponderSnapshotBudgetOptions,
 } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
-import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
+import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,

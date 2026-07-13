@@ -47,6 +47,17 @@ export interface SwmKaGraphBound {
   endNumber: bigint;
 }
 
+/** Exact identity of one named KA lifecycle's shared-memory graph. */
+export interface NamedKnowledgeAssetGraphIdentity {
+  agentAddress: string;
+  kaNumber: bigint;
+}
+
+/** Semantic SWM read boundary: either the complete family or one named lifecycle. */
+export type SharedMemoryGraphScope =
+  | { kind: 'complete-family' }
+  | { kind: 'named-lifecycle'; identity: NamedKnowledgeAssetGraphIdentity };
+
 const SWM_CHILD_AGENT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SWM_CHILD_KA_NUMBER = /^\d+$/;
 
@@ -146,9 +157,10 @@ async function listGraphsByPrefix(
  * paths (recompute mismatch → reject/retry, never accept-with-wrong-data).
  *
  * This resolver is COMPLETE and therefore safe everywhere, including the
- * merkle-defining publish reads and the StorageACK decline lanes. Pruning lives in
- * `resolveKaBoundedSharedMemoryReadGraphs`, which is not part of the package's
- * public surface — read its contract before reaching for it.
+ * merkle-defining publish reads and the StorageACK decline lanes. Generic pruning
+ * lives in `resolveKaBoundedSharedMemoryReadGraphs`, which is not part of the
+ * package's public surface. The public exact-named-lifecycle API below is a
+ * separate semantic boundary, not a range-pruning escape hatch.
  */
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
@@ -230,13 +242,22 @@ export async function loadSelectedSharedMemoryQuads(
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, undefined);
+  return loadSharedMemoryQuadsForScope(
+    store,
+    bucketGraph,
+    selection,
+    { kind: 'complete-family' },
+    options,
+  );
 }
 
 /**
  * Load the SWM quad slice pruned to ONE author's per-KA under-graphs (#1549).
  *
- * UNSAFE ON ITS OWN, and deliberately NOT re-exported from `src/index.ts`. The
+ * UNSAFE as a generic merkle accelerator. It is module-exported for direct
+ * tests and internal imports, but is not re-exported from the package entrypoint.
+ * Exact lifecycle callers use the scoped public loader below. Generic merkle
+ * callers must use the widening wrapper below. The
  * pruned graph set is a strict subset of the set `loadSelectedSharedMemoryQuads`
  * reads, and INV-1 — "a root's quads live only under its own KA number" — is
  * REFUTED under root recurrence, so this read can legitimately miss quads the
@@ -252,7 +273,97 @@ export async function loadKaBoundedSharedMemoryQuads(
   kaGraphBound: SwmKaGraphBound,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, kaGraphBound);
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
+    kind: 'bounded',
+    bound: kaGraphBound,
+  });
+}
+
+/**
+ * Load shared memory through one explicit semantic scope.
+ *
+ * Higher layers do not translate scope into concrete graph policy: complete
+ * family and exact named-lifecycle dispatch both stay owned by storage.
+ */
+export async function loadSharedMemoryQuadsForScope(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  scope: SharedMemoryGraphScope,
+  options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, scope);
+}
+
+interface NamedLifecycleGraphResolution {
+  canonicalGraph: string;
+  matchingGraphs: string[];
+}
+
+async function resolveNamedLifecycleGraphPolicy(
+  store: TripleStore,
+  bucketGraph: string,
+  identity: NamedKnowledgeAssetGraphIdentity,
+  options?: QueryOptions,
+): Promise<NamedLifecycleGraphResolution> {
+  assertSafeIri(bucketGraph);
+  const { agentAddress, kaNumber } = identity;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
+    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
+  }
+  const canonicalGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
+  assertSafeIri(canonicalGraph);
+  const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
+    .filter((graph) => {
+      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
+      return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
+        && child.kaNumber === kaNumber;
+    });
+  return { canonicalGraph, matchingGraphs };
+}
+
+/** Resolve the concrete graph set for an explicit semantic SWM scope. */
+export async function resolveSharedMemoryScopeGraphs(
+  store: TripleStore,
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+  options?: QueryOptions,
+): Promise<NonEmptyGraphList> {
+  if (scope.kind === 'complete-family') {
+    return resolveSharedMemoryReadGraphs(store, bucketGraph, options);
+  }
+  const { canonicalGraph, matchingGraphs } = await resolveNamedLifecycleGraphPolicy(
+    store,
+    bucketGraph,
+    scope.identity,
+    options,
+  );
+  // Preserve the writer's checksum casing while matching EVM identity
+  // case-insensitively. An absent lifecycle still resolves to its canonical
+  // candidate so the caller gets a safe empty result.
+  return matchingGraphs.length > 0
+    ? matchingGraphs as NonEmptyGraphList
+    : [canonicalGraph];
+}
+
+/** Resolve the single graph to WRITE for a semantic scope. */
+export async function resolveSharedMemoryScopeWriteGraph(
+  store: TripleStore,
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+  options?: QueryOptions,
+): Promise<string> {
+  assertSafeIri(bucketGraph);
+  if (scope.kind === 'complete-family') return bucketGraph;
+  const { canonicalGraph, matchingGraphs } = await resolveNamedLifecycleGraphPolicy(
+    store,
+    bucketGraph,
+    scope.identity,
+    options,
+  );
+  return matchingGraphs.find((graph) => graph === canonicalGraph)
+    ?? matchingGraphs.slice().sort()[0]
+    ?? canonicalGraph;
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */
@@ -320,7 +431,9 @@ async function loadSharedMemoryQuadsInternal(
   bucketGraph: string,
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions,
-  kaGraphBound: SwmKaGraphBound | undefined,
+  graphScope:
+    | { kind: 'bounded'; bound: SwmKaGraphBound }
+    | SharedMemoryGraphScope,
 ): Promise<Quad[]> {
   let innerGraphPattern: string;
   if (selection === 'all') {
@@ -353,9 +466,22 @@ async function loadSharedMemoryQuadsInternal(
   }
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const swmGraphs = kaGraphBound
-    ? await resolveKaBoundedSharedMemoryReadGraphs(store, bucketGraph, kaGraphBound, queryOptions)
-    : await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  let swmGraphs: NonEmptyGraphList;
+  if (graphScope?.kind === 'bounded') {
+    swmGraphs = await resolveKaBoundedSharedMemoryReadGraphs(
+      store,
+      bucketGraph,
+      graphScope.bound,
+      queryOptions,
+    );
+  } else {
+    swmGraphs = await resolveSharedMemoryScopeGraphs(
+      store,
+      bucketGraph,
+      graphScope,
+      queryOptions,
+    );
+  }
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }
