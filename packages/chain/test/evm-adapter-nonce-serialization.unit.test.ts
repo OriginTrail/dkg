@@ -15,6 +15,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import {
+  rpcBoundedPointReadExecutionBudgetMs,
   rpcBroadcastPassExecutionBudgetMs,
   rpcPopulateAndSignExecutionBudgetMs,
   rpcReceiptLookupPassExecutionBudgetMs,
@@ -99,7 +100,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       }));
       const signer = new ethers.Wallet(DEPLOYER_PK);
       const operationBudgetMs = (a as any)
-        .signerTxExecutionBudgetMs['single-transaction'] as number;
+        .signerWriteExecutionBudgetMs('single-transaction') as number;
       const endpointCount = 2;
       const expectedOperationBudgetMs =
         rpcPopulateAndSignExecutionBudgetMs(endpointCount)
@@ -140,28 +141,88 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     }
   });
 
-  it('keeps a queued write alive through V10 stale-allowance recovery beyond three transaction budgets', async () => {
+  it('derives queued signer-lane budgets from the live RPC endpoint set', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signer = new ethers.Wallet(DEPLOYER_PK);
+      const oneEndpointBudgetMs = (a as any)
+        .signerWriteExecutionBudgetMs('single-transaction') as number;
+
+      // RpcFailoverClient intentionally reads this pair through a live thunk.
+      // Rebind to two endpoints after construction and prove admission uses the
+      // same current width instead of the old constructor-time snapshot.
+      (a as any).providers = [(a as any).providers[0], (a as any).providers[0]];
+      (a as any).rpcUrls = [
+        'http://127.0.0.1:59998',
+        'http://127.0.0.1:59997',
+      ];
+      const twoEndpointBudgetMs = (a as any)
+        .signerWriteExecutionBudgetMs('single-transaction') as number;
+      expect(twoEndpointBudgetMs).toBeGreaterThan(oneEndpointBudgetMs);
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const first = (a as any).withSerializedSignerWrite(signer, async () => gate);
+      let secondStarted = false;
+      let secondSettled = false;
+      const second = (a as any).withSerializedSignerWrite(signer, async () => {
+        secondStarted = true;
+        return 'second';
+      }).then(
+        (value: string) => { secondSettled = true; return value; },
+        (error: unknown) => { secondSettled = true; throw error; },
+      );
+
+      await vi.advanceTimersByTimeAsync(oneEndpointBudgetMs + 1);
+      expect(secondStarted).toBe(false);
+      expect(secondSettled).toBe(false);
+
+      release();
+      await expect(first).resolves.toBeUndefined();
+      await expect(second).resolves.toBe('second');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a queued write alive through all bounded V10 allowance-recovery phases', async () => {
     vi.useFakeTimers();
     try {
       const a = new EVMChainAdapter(minimalConfig());
       const signer = new ethers.Wallet(DEPLOYER_PK);
       const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-      const budgets = (a as any).signerTxExecutionBudgetMs as Record<string, number>;
-      const transactionBudgetMs = budgets['single-transaction'];
-      const v10BudgetMs = budgets['v10-allowance-recovery'];
+      const transactionBudgetMs = (a as any)
+        .signerWriteExecutionBudgetMs('single-transaction') as number;
+      const v10BudgetMs = (a as any)
+        .signerWriteExecutionBudgetMs('v10-allowance-recovery') as number;
       const failedPopulateBudgetMs = rpcPopulateAndSignExecutionBudgetMs(1);
-      const oldThreeTransactionBudgetMs = 3 * transactionBudgetMs;
-      expect(v10BudgetMs).toBe(oldThreeTransactionBudgetMs + failedPopulateBudgetMs);
+      const allowanceReadBudgetMs = rpcBoundedPointReadExecutionBudgetMs(1);
+      const allowanceVisibilityBudgetMs = 6 * allowanceReadBudgetMs
+        + [250, 500, 750, 1000, 1250].reduce((total, value) => total + value, 0);
+      const oldBudgetWithoutAllowancePhases = 3 * transactionBudgetMs + failedPopulateBudgetMs;
+      expect(v10BudgetMs).toBe(
+        oldBudgetWithoutAllowancePhases
+        + 2 * allowanceReadBudgetMs
+        + allowanceVisibilityBudgetMs,
+      );
 
       const tokenWithSigner = connectable({});
       (a as any).contracts.token = { connect: recorder(() => tokenWithSigner) };
-      (a as any).readContract = recorder(async () => 0n);
-      (a as any).confirmAllowanceVisible = recorder(async () => undefined);
+      const allowanceReads = recorder(async () => {
+        await delay(allowanceReadBudgetMs);
+        return 0n;
+      });
+      (a as any).readContractWith = allowanceReads;
+      const confirmAllowanceVisible = recorder(async () => {
+        await delay(allowanceVisibilityBudgetMs - 1);
+      });
+      (a as any).confirmAllowanceVisible = confirmAllowanceVisible;
 
-      // Initial approve and forced re-approve each legitimately consume almost
-      // one full transaction envelope while the serializer lane is held.
+      // Initial approve and forced re-approve each legitimately consume one
+      // complete transaction envelope while the serializer lane is held.
       const approvalSends = recorder(async () => {
-        await delay(transactionBudgetMs - 1);
+        await delay(transactionBudgetMs);
         return fakeReceipt('approve');
       });
       (a as any).sendContractTransactionUnlocked = approvalSends;
@@ -170,7 +231,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       (a as any).populateAndSignAcrossProviders = recorder(async () => {
         populateCalls += 1;
         if (populateCalls === 1) {
-          await delay(failedPopulateBudgetMs - 1);
+          await delay(failedPopulateBudgetMs);
           throw Object.assign(new Error('execution reverted'), {
             revert: { name: 'TooLowAllowance' },
           });
@@ -180,7 +241,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
 
       let secondBuilt = false;
       (a as any).sendSignedTransactionAndWait = async (signedTx: string) => {
-        if (signedTx === 'first') await delay(transactionBudgetMs - 1);
+        if (signedTx === 'first') await delay(transactionBudgetMs);
         return fakeReceipt(signedTx);
       };
 
@@ -189,7 +250,14 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         'publish',
         undefined,
         async (ctx: any) => {
-          await ctx.sendContractTransaction({}, 'approve', [], signer, 'initial V10 approve');
+          await (a as any).ensureV10ApproveTrac(
+            signer,
+            V10_KA_ADDRESS,
+            1n,
+            'initial V10 approve',
+            false,
+            ctx.sendContractTransaction,
+          );
           return (a as any).populateAndSignV10WithAllowanceRecovery(
             signer,
             {} as any,
@@ -223,20 +291,22 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         },
       );
 
-      // This is just beyond the old 3x-transaction budget. The predecessor is
-      // still validly completing its final publish, so the queued write must
-      // remain admitted rather than being rejected and skipped.
-      await vi.advanceTimersByTimeAsync(oldThreeTransactionBudgetMs + 1);
+      // One millisecond before the complete bound, the predecessor is still
+      // validly finishing its final publish after two allowance reads and the
+      // forced visibility poll. The queued write must remain admitted.
+      await vi.advanceTimersByTimeAsync(v10BudgetMs - 2);
       expect(secondBuilt).toBe(false);
       expect(secondSettled).toBe(false);
 
-      await vi.advanceTimersByTimeAsync(failedPopulateBudgetMs);
+      await vi.advanceTimersByTimeAsync(1);
       await expect(first).resolves.toMatchObject({ hash: 'first' });
       await second;
       expect(secondError).toBeUndefined();
       expect(secondBuilt).toBe(true);
       expect(populateCalls).toBe(2);
       expect(approvalSends.calls).toHaveLength(2);
+      expect(allowanceReads.calls).toHaveLength(2);
+      expect(confirmAllowanceVisible.calls).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -560,7 +630,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).contracts.token = {
       connect: recorder(() => tokenWithSigner),
     };
-    (a as any).readContract = recorder(async () => 0n);
+    (a as any).readContractWith = recorder(async () => 0n);
     const publicSend = recorder(async () => {
       throw new Error('public serializer re-entered');
     });
@@ -608,7 +678,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).contracts.token = { connect: recorder(() => tokenWithSigner) };
     // Stale-zero allowance read triggers the approve; the #888 post-approve
     // confirmation poll sees the target immediately (separate read path).
-    (a as any).readContract = recorder(async () => 0n);
+    (a as any).readContractWith = recorder(async () => 0n);
     (a as any).confirmAllowanceVisible = recorder(async () => undefined);
     const publicSend = recorder(async () => {
       throw new Error('public serializer re-entered');

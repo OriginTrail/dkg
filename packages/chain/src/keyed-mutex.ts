@@ -6,28 +6,66 @@
  * rejecting operation does not wedge its key's queue — the next operation
  * still runs.
  *
- * Callers own the timeout and diagnostic policy for their domain. This class
- * only provides keyed, bounded acquisition and queue cleanup.
+ * This primitive deliberately owns ordering only. It never times out or skips
+ * queued work; callers that need bounded acquisition must opt into the
+ * explicitly named `BoundedKeyedSerializer` below.
  */
-const DEFAULT_KEYED_SERIALIZER_EXECUTION_BUDGET_MS = 60_000;
+export class KeyedSerializer {
+  private readonly tails = new Map<string, Promise<void>>();
 
-export interface KeyedSerializerOptions {
-  defaultExecutionBudgetMs?: number;
+  /**
+   * Run `fn` after every previously-submitted operation for `key` has
+   * settled. Returns `fn`'s result (or rejection) verbatim.
+   */
+  run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.tails.get(key) ?? Promise.resolve();
+    const result = prev.then(fn, fn);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.tails.set(key, tail);
+    void tail.then(() => {
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    });
+    return result;
+  }
+
+  /** True while `key` has an in-flight or queued operation. */
+  isActive(key: string): boolean {
+    return this.tails.has(key);
+  }
+
+  /** Number of keys with an in-flight or queued operation. */
+  get activeKeyCount(): number {
+    return this.tails.size;
+  }
+}
+
+export interface BoundedKeyedSerializerOptions {
   laneLabel?: string;
 }
 
-export interface KeyedSerializerRunOptions {
+export interface BoundedKeyedSerializerRunOptions {
   /** Maximum legitimate time this operation may occupy the lane for successors. */
-  executionBudgetMs?: number;
+  executionBudgetMs: number;
 }
 
-interface SerializerLane {
+interface BoundedSerializerLane {
   tail: Promise<void>;
   depth: number;
   pendingExecutionBudgetMs: number;
 }
 
-export class KeyedSerializerAcquireTimeoutError extends Error {
+/**
+ * Explicit bounded-acquisition serializer for side-effecting work.
+ *
+ * A caller whose cumulative predecessor budget expires is rejected and its
+ * abandoned callback is skipped when it reaches the front. The lane itself
+ * remains owned until every real predecessor settles, preserving same-key
+ * exclusion even after a queued caller times out.
+ */
+export class BoundedKeyedSerializerAcquireTimeoutError extends Error {
   readonly code = 'KEYED_SERIALIZER_ACQUIRE_TIMEOUT';
 
   constructor(
@@ -37,28 +75,24 @@ export class KeyedSerializerAcquireTimeoutError extends Error {
     laneLabel: string,
   ) {
     super(`Timed out after ${waitMs}ms waiting for ${laneLabel} ${key} (queue depth ${queueDepth})`);
-    this.name = 'KeyedSerializerAcquireTimeoutError';
+    this.name = 'BoundedKeyedSerializerAcquireTimeoutError';
   }
 }
 
-export class KeyedSerializer {
-  private readonly lanes = new Map<string, SerializerLane>();
-  private readonly defaultExecutionBudgetMs: number;
+export class BoundedKeyedSerializer {
+  private readonly lanes = new Map<string, BoundedSerializerLane>();
   private readonly laneLabel: string;
 
-  constructor(options: KeyedSerializerOptions = {}) {
-    this.defaultExecutionBudgetMs = options.defaultExecutionBudgetMs
-      ?? DEFAULT_KEYED_SERIALIZER_EXECUTION_BUDGET_MS;
-    this.laneLabel = options.laneLabel ?? 'serializer lane';
-    this.assertExecutionBudget(this.defaultExecutionBudgetMs);
+  constructor(options: BoundedKeyedSerializerOptions = {}) {
+    this.laneLabel = options.laneLabel ?? 'bounded serializer lane';
   }
 
-  /**
-   * Run `fn` after every previously-submitted operation for `key` has
-   * settled. Returns `fn`'s result (or rejection) verbatim.
-   */
-  run<T>(key: string, fn: () => Promise<T>, options: KeyedSerializerRunOptions = {}): Promise<T> {
-    const executionBudgetMs = options.executionBudgetMs ?? this.defaultExecutionBudgetMs;
+  run<T>(
+    key: string,
+    fn: () => Promise<T>,
+    options: BoundedKeyedSerializerRunOptions,
+  ): Promise<T> {
+    const { executionBudgetMs } = options;
     this.assertExecutionBudget(executionBudgetMs);
     const lane = this.lanes.get(key) ?? {
       tail: Promise.resolve(),
@@ -81,7 +115,6 @@ export class KeyedSerializer {
     return entry.result;
   }
 
-  /** Build one named queue entry: caller result plus the non-rejecting lane tail. */
   private createEntry<T>(
     key: string,
     queueDepth: number,
@@ -99,7 +132,7 @@ export class KeyedSerializer {
     const timeout = waitMs > 0
       ? setTimeout(() => {
         timedOut = true;
-        rejectResult(new KeyedSerializerAcquireTimeoutError(
+        rejectResult(new BoundedKeyedSerializerAcquireTimeoutError(
           key,
           waitMs,
           queueDepth,
@@ -109,8 +142,6 @@ export class KeyedSerializer {
       : undefined;
     timeout?.unref?.();
 
-    // `prev` is a non-rejecting queue tail. A caller that times out is skipped
-    // when it eventually reaches the front, so abandoned writes never execute.
     const execution = prev.then(async () => {
       if (timedOut) return;
       if (timeout) clearTimeout(timeout);
@@ -120,7 +151,6 @@ export class KeyedSerializer {
         rejectResult(error);
       }
     });
-    // The queue tail never rejects, so chaining the next op off it is safe.
     return {
       result,
       tail: execution.then(
@@ -130,19 +160,17 @@ export class KeyedSerializer {
     };
   }
 
-  /** True while `key` has an in-flight or queued operation. */
   isActive(key: string): boolean {
     return this.lanes.has(key);
   }
 
-  /** Number of keys with an in-flight or queued operation. */
   get activeKeyCount(): number {
     return this.lanes.size;
   }
 
   private assertExecutionBudget(value: number): void {
     if (!Number.isFinite(value) || value <= 0) {
-      throw new Error('KeyedSerializer execution budget must be positive');
+      throw new Error('BoundedKeyedSerializer execution budget must be positive');
     }
   }
 }

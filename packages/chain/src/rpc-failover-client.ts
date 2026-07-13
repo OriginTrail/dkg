@@ -102,6 +102,16 @@ export function rpcReceiptLookupPassExecutionBudgetMs(endpointCount: number): nu
     * phaseTimeoutTotalMs(RECEIPT_LOOKUP_PHASE_TIMEOUT_MS);
 }
 
+/** Worst-case bound for a write-phase point read across every live endpoint. */
+export function rpcBoundedPointReadExecutionBudgetMs(endpointCount: number): number {
+  const count = normalizedEndpointCount(endpointCount);
+  const perEndpointCapMs = resolveCapMs('boundedPointRead', count);
+  if (perEndpointCapMs == null) {
+    throw new Error('boundedPointRead must always define a per-endpoint timeout');
+  }
+  return count * perEndpointCapMs;
+}
+
 /**
  * One RPC endpoint as a SINGLE boundary: the bare per-endpoint provider paired
  * with its configured URL. Modeling the pair as one object (instead of two
@@ -124,6 +134,8 @@ export interface RpcEndpoint {
  *     one-RPC node.
  *   - `watchdogWideLogScan` — a background log scan that must not wedge a
  *     one-RPC node.
+ *   - `boundedPointRead`    — a foreground write-phase point read whose bound
+ *     is included in signer-lane admission budgets.
  *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
  *     stall selection (capped on EVERY attempt, including single-RPC).
  */
@@ -132,6 +144,7 @@ export type ReadPolicy =
   | 'wideLogScan'
   | 'watchdogPointRead'
   | 'watchdogWideLogScan'
+  | 'boundedPointRead'
   | 'failOpenFundingRead';
 
 /** Per-read options: timeout/failover behavior plus an explicit low-cardinality
@@ -247,6 +260,7 @@ export function isContractViewRetryable(err: unknown): boolean {
  *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
  *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
+ *   | boundedPointRead    | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *
  * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
@@ -255,7 +269,11 @@ export function isContractViewRetryable(err: unknown): boolean {
  * deadline over a multi-RPC failover sequence.
  */
 export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
-  if (policy === 'failOpenFundingRead' || policy === 'watchdogPointRead') {
+  if (
+    policy === 'boundedPointRead'
+    || policy === 'failOpenFundingRead'
+    || policy === 'watchdogPointRead'
+  ) {
     return RPC_READ_STALL_TIMEOUT_MS;
   }
   if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;

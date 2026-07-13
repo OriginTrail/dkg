@@ -22,7 +22,7 @@ import type {
   ConvictionReader,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { KeyedSerializer } from './keyed-mutex.js';
+import { BoundedKeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -31,6 +31,7 @@ import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import {
   RpcFailoverClient,
+  rpcBoundedPointReadExecutionBudgetMs,
   rpcBroadcastPassExecutionBudgetMs,
   rpcPopulateAndSignExecutionBudgetMs,
   rpcReceiptLookupPassExecutionBudgetMs,
@@ -66,6 +67,27 @@ interface SignerWriteProfile {
   maxTransactions: number;
   /** Failed prepare passes allowed in addition to each transaction's prepare. */
   maxAdditionalPopulateAndSignAttempts: number;
+  /** Bounded allowance reads outside populate/sign. */
+  maxAllowanceReadPasses: number;
+  /** Complete post-approve visibility-poll sequences. */
+  maxAllowanceVisibilityPollSequences: number;
+}
+
+/** Domain behavior: a stale V10 allowance can trigger exactly one recovery. */
+const V10_ALLOWANCE_RECOVERY_ATTEMPTS = 1;
+const V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS = 6;
+
+function allowanceVisibilityPollBackoffMs(attemptIndex: number): number {
+  return Math.min(250 * (attemptIndex + 1), 1500);
+}
+
+function allowanceVisibilityPollExecutionBudgetMs(endpointCount: number): number {
+  const readBudgetMs = rpcBoundedPointReadExecutionBudgetMs(endpointCount);
+  let backoffBudgetMs = 0;
+  for (let i = 0; i < V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS - 1; i += 1) {
+    backoffBudgetMs += allowanceVisibilityPollBackoffMs(i);
+  }
+  return V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS * readBudgetMs + backoffBudgetMs;
 }
 
 /**
@@ -77,10 +99,16 @@ const SIGNER_WRITE_PROFILES: Readonly<Record<SignerWriteProfileName, SignerWrite
   'single-transaction': {
     maxTransactions: 1,
     maxAdditionalPopulateAndSignAttempts: 0,
+    maxAllowanceReadPasses: 0,
+    maxAllowanceVisibilityPollSequences: 0,
   },
   'v10-allowance-recovery': {
-    maxTransactions: 3,
-    maxAdditionalPopulateAndSignAttempts: 1,
+    // Main write + possible initial approve + one forced re-approve.
+    maxTransactions: 2 + V10_ALLOWANCE_RECOVERY_ATTEMPTS,
+    maxAdditionalPopulateAndSignAttempts: V10_ALLOWANCE_RECOVERY_ATTEMPTS,
+    // Initial gate plus the gate repeated by each forced recovery.
+    maxAllowanceReadPasses: 1 + V10_ALLOWANCE_RECOVERY_ATTEMPTS,
+    maxAllowanceVisibilityPollSequences: V10_ALLOWANCE_RECOVERY_ATTEMPTS,
   },
 };
 
@@ -106,7 +134,10 @@ function signerTxExecutionBudgetMs(
     + rpcReceiptLookupPassExecutionBudgetMs(endpointCount)
     + RPC_RECEIPT_POLL_INTERVAL_MS;
   return profile.maxTransactions * transactionBudgetMs
-    + profile.maxAdditionalPopulateAndSignAttempts * populateAndSignBudgetMs;
+    + profile.maxAdditionalPopulateAndSignAttempts * populateAndSignBudgetMs
+    + profile.maxAllowanceReadPasses * rpcBoundedPointReadExecutionBudgetMs(endpointCount)
+    + profile.maxAllowanceVisibilityPollSequences
+      * allowanceVisibilityPollExecutionBudgetMs(endpointCount);
 }
 
 /**
@@ -711,8 +742,7 @@ export class EVMChainAdapterBase {
    * `Nonce too low` (OriginTrail/dkg#953). Cross-wallet concurrency is
    * preserved.
    */
-  protected readonly signerTxSerializer: KeyedSerializer;
-  protected readonly signerTxExecutionBudgetMs: Readonly<Record<SignerWriteProfileName, number>>;
+  protected readonly signerTxSerializer: BoundedKeyedSerializer;
 
   /**
    * Lowercased addresses of operational wallets CONFIRMED registered on-chain
@@ -1069,18 +1099,7 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
-    this.signerTxExecutionBudgetMs = {
-      'single-transaction': signerTxExecutionBudgetMs(
-        this.rpcUrls.length,
-        SIGNER_WRITE_PROFILES['single-transaction'],
-      ),
-      'v10-allowance-recovery': signerTxExecutionBudgetMs(
-        this.rpcUrls.length,
-        SIGNER_WRITE_PROFILES['v10-allowance-recovery'],
-      ),
-    };
-    this.signerTxSerializer = new KeyedSerializer({
-      defaultExecutionBudgetMs: this.signerTxExecutionBudgetMs['single-transaction'],
+    this.signerTxSerializer = new BoundedKeyedSerializer({
       laneLabel: 'transaction lane',
     });
     this.walletRpcUrls = Array.from(new Set(
@@ -1537,8 +1556,7 @@ export class EVMChainAdapterBase {
     // ONE forced approve fires per publish regardless of endpoints tried. Only the
     // one returned signed tx is broadcast; the whole thing runs inside the
     // per-wallet `KeyedSerializer` (#953), strictly pre-broadcast / pre-WAL.
-    let allowanceRecoveriesRemaining =
-      SIGNER_WRITE_PROFILES['v10-allowance-recovery'].maxAdditionalPopulateAndSignAttempts;
+    let allowanceRecoveriesRemaining = V10_ALLOWANCE_RECOVERY_ATTEMPTS;
     for (;;) {
       try {
         return await this.populateAndSignAcrossProviders(
@@ -1715,9 +1733,16 @@ export class EVMChainAdapterBase {
         },
       }),
       {
-        executionBudgetMs: this.signerTxExecutionBudgetMs[profile],
+        // Read the live endpoint width when the entry is queued. The failover
+        // client deliberately observes providers/rpcUrls reassignments through
+        // a thunk, so its lane budget must not snapshot constructor-time width.
+        executionBudgetMs: this.signerWriteExecutionBudgetMs(profile),
       },
     );
+  }
+
+  protected signerWriteExecutionBudgetMs(profile: SignerWriteProfileName): number {
+    return signerTxExecutionBudgetMs(this.providers.length, SIGNER_WRITE_PROFILES[profile]);
   }
 
   private async sendContractTransactionUnlocked(
@@ -1791,12 +1816,11 @@ export class EVMChainAdapterBase {
   ): Promise<void> {
     if (!this.contracts.token) return;
     const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
-    const currentAllowance: bigint = await this.readContract(
+    const currentAllowance: bigint = await this.readContractWith(
       tokenWithSigner,
       'token.allowance',
-      'allowance',
-      signer.address,
-      kav10Address,
+      (token) => token.allowance(signer.address, kav10Address),
+      { policy: 'boundedPointRead' },
     );
     const { needsApprove, targetAllowance } = computeApprovalAction(
       this.approvalPolicy,
@@ -1859,7 +1883,7 @@ export class EVMChainAdapterBase {
 
   /**
    * #888 — poll `allowance(owner, spender)` until it reflects `target`,
-   * bounded by `ALLOWANCE_VISIBILITY_POLL_ATTEMPTS`. Best-effort: if the
+   * bounded by `V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS`. Best-effort: if the
    * allowance still hasn't propagated after the budget, we return anyway
    * and let the caller's gas-estimation surface a definitive revert (the
    * `createKnowledgeAssets` retry then forces a fresh approve). Exits on
@@ -1872,8 +1896,7 @@ export class EVMChainAdapterBase {
     spender: string,
     target: bigint,
   ): Promise<void> {
-    const POLL_ATTEMPTS = 6;
-    for (let i = 0; i < POLL_ATTEMPTS; i += 1) {
+    for (let i = 0; i < V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS; i += 1) {
       let current = -1n;
       try {
         // Bound each read: a raw `token.allowance()` on a hung / read-stalled
@@ -1885,7 +1908,7 @@ export class EVMChainAdapterBase {
           token,
           'allowance visibility poll',
           (c) => c.allowance(owner, spender),
-          { policy: 'failOpenFundingRead' },
+          { policy: 'boundedPointRead' },
         )) as bigint;
       } catch {
         // Transient read failure / stall timeout — treat as not-yet-visible
@@ -1893,8 +1916,8 @@ export class EVMChainAdapterBase {
         current = -1n;
       }
       if (current >= target) return;
-      if (i < POLL_ATTEMPTS - 1) {
-        await sleep(Math.min(250 * (i + 1), 1500));
+      if (i < V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS - 1) {
+        await sleep(allowanceVisibilityPollBackoffMs(i));
       }
     }
   }

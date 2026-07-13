@@ -33,7 +33,11 @@
  * over REAL providers in multi-rpc-{read,write}-failover.test.ts.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { resolveCapMs, type SignPopulatedFn } from '../src/rpc-failover-client.js';
+import {
+  resolveCapMs,
+  rpcBoundedPointReadExecutionBudgetMs,
+  type SignPopulatedFn,
+} from '../src/rpc-failover-client.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
@@ -81,6 +85,13 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
   it('failOpenFundingRead: caps EVERY attempt incl. single-RPC at RPC_READ_STALL_TIMEOUT_MS', () => {
     expect(resolveCapMs('failOpenFundingRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('failOpenFundingRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+  });
+
+  it('boundedPointRead: caps write-phase reads and budgets every live endpoint', () => {
+    expect(resolveCapMs('boundedPointRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(resolveCapMs('boundedPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(rpcBoundedPointReadExecutionBudgetMs(1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+    expect(rpcBoundedPointReadExecutionBudgetMs(2)).toBe(2 * RPC_READ_STALL_TIMEOUT_MS);
   });
 });
 
@@ -169,6 +180,25 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     const outcome: any = await settled;
     expect(outcome.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
     expect(slowView.calls).toHaveLength(1);
+  });
+
+  it('readContract SINGLE-RPC boundedPointRead caps a write-phase allowance gate', async () => {
+    vi.useFakeTimers();
+    const hungAllowance = recorder(() => new Promise<bigint>(() => {}));
+    const contract = { connect: () => ({ allowance: hungAllowance }) } as any;
+    const client = makeClient([{}], ['https://only.example']);
+
+    const settled = client.readContract(
+      'token.allowance',
+      contract,
+      (c: any) => c.allowance('owner', 'spender'),
+      { policy: 'boundedPointRead' },
+    ).then((r: unknown) => r, (e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1);
+
+    const outcome: any = await settled;
+    expect(outcome.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(hungAllowance.calls).toHaveLength(1);
   });
 
   it('readContract MULTI-RPC wideLogScan: a 5s read COMPLETES (the 30s cap, not the 4s point cap)', async () => {

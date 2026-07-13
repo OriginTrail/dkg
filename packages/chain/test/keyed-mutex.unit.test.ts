@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { KeyedSerializer, KeyedSerializerAcquireTimeoutError } from '../src/keyed-mutex.js';
+import {
+  BoundedKeyedSerializer,
+  BoundedKeyedSerializerAcquireTimeoutError,
+  KeyedSerializer,
+} from '../src/keyed-mutex.js';
 
 const tick = (ms = 0) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -93,38 +97,83 @@ describe('KeyedSerializer', () => {
     expect(s.isActive('w')).toBe(false);
   });
 
-  it('times out queued callers with the key and depth, then skips their work', async () => {
-    const s = new KeyedSerializer({ defaultExecutionBudgetMs: 15, laneLabel: 'test lane' });
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const first = s.run('0xwallet', async () => gate);
-    let ran = false;
-    const second = s.run('0xwallet', async () => { ran = true; });
-    await expect(second).rejects.toMatchObject({
-      name: 'KeyedSerializerAcquireTimeoutError',
-      code: 'KEYED_SERIALIZER_ACQUIRE_TIMEOUT',
-      key: '0xwallet',
-      queueDepth: 2,
-    } satisfies Partial<KeyedSerializerAcquireTimeoutError>);
-    release();
-    await first;
-    await tick(0);
-    expect(ran).toBe(false);
-    expect(s.isActive('0xwallet')).toBe(false);
+  it('never times out or skips plain serialized work', async () => {
+    vi.useFakeTimers();
+    try {
+      const s = new KeyedSerializer();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const first = s.run('plain', async () => gate);
+      let secondStarted = false;
+      const second = s.run('plain', async () => { secondStarted = true; return 'second'; });
+
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(secondStarted).toBe(false);
+      release();
+      await expect(first).resolves.toBeUndefined();
+      await expect(second).resolves.toBe('second');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('BoundedKeyedSerializer', () => {
+  it('keeps the lane held after a queued timeout, skips that work, then runs later work', async () => {
+    vi.useFakeTimers();
+    try {
+      const s = new BoundedKeyedSerializer({ laneLabel: 'test lane' });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const first = s.run('0xwallet', async () => gate, { executionBudgetMs: 15 });
+      let timedOutWorkRan = false;
+      const second = s.run(
+        '0xwallet',
+        async () => { timedOutWorkRan = true; },
+        { executionBudgetMs: 15 },
+      );
+      const secondExpectation = expect(second).rejects.toMatchObject({
+        name: 'BoundedKeyedSerializerAcquireTimeoutError',
+        code: 'KEYED_SERIALIZER_ACQUIRE_TIMEOUT',
+        key: '0xwallet',
+        queueDepth: 2,
+      } satisfies Partial<BoundedKeyedSerializerAcquireTimeoutError>);
+      await vi.advanceTimersByTimeAsync(15);
+      await secondExpectation;
+
+      let laterWorkStarted = false;
+      const third = s.run(
+        '0xwallet',
+        async () => { laterWorkStarted = true; return 'third'; },
+        { executionBudgetMs: 15 },
+      );
+      expect(s.isActive('0xwallet')).toBe(true);
+      expect(laterWorkStarted).toBe(false);
+
+      release();
+      await expect(first).resolves.toBeUndefined();
+      await expect(third).resolves.toBe('third');
+      expect(timedOutWorkRan).toBe(false);
+      expect(laterWorkStarted).toBe(true);
+      expect(s.isActive('0xwallet')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('budgets acquisition from the actual predecessor operation types', async () => {
     vi.useFakeTimers();
     try {
-      const s = new KeyedSerializer({
-        defaultExecutionBudgetMs: 10_000,
-        laneLabel: 'test lane',
-      });
+      const s = new BoundedKeyedSerializer({ laneLabel: 'test lane' });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
       const first = s.run('slow-key', async () => gate, { executionBudgetMs: 30_000 });
       let ran = false;
-      const second = s.run('slow-key', async () => { ran = true; return 'sent'; });
+      const second = s.run(
+        'slow-key',
+        async () => { ran = true; return 'sent'; },
+        { executionBudgetMs: 10_000 },
+      );
 
       await vi.advanceTimersByTimeAsync(20_000);
       expect(ran).toBe(false);
@@ -140,10 +189,7 @@ describe('KeyedSerializer', () => {
   it('holds a later caller through the cumulative budgets of every queued predecessor', async () => {
     vi.useFakeTimers();
     try {
-      const s = new KeyedSerializer({
-        defaultExecutionBudgetMs: 5_000,
-        laneLabel: 'test lane',
-      });
+      const s = new BoundedKeyedSerializer({ laneLabel: 'test lane' });
       const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
       const first = s.run(
         'mixed-lane',
@@ -161,7 +207,7 @@ describe('KeyedSerializer', () => {
       const third = s.run('mixed-lane', async () => {
         thirdStarted = true;
         return 'third';
-      }).then(
+      }, { executionBudgetMs: 5_000 }).then(
         (value) => { thirdSettled = true; return value; },
         (error: unknown) => {
           thirdSettled = true;
@@ -186,7 +232,9 @@ describe('KeyedSerializer', () => {
       vi.useRealTimers();
     }
   });
+});
 
+describe('KeyedSerializer nonce regression', () => {
   it('prevents the publisher nonce race: same-wallet sends get distinct, monotonic nonces', async () => {
     // Model the real bug (OriginTrail/dkg#953): an op-wallet's `pending`
     // nonce only advances AFTER a tx is broadcast, and there's an async gap
