@@ -287,7 +287,9 @@ describe('provisionBlazegraphDocker', () => {
     expect(runCall).toBeDefined();
     expect(runCall).toContain('127.0.0.1:10001:8080');
     expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
-    expect(BLAZEGRAPH_IMAGE).toBe('islandora/blazegraph:6.4.3');
+    expect(BLAZEGRAPH_IMAGE).toBe(
+      'islandora/blazegraph:6.4.3@sha256:015e308ae0a296cdb87c83c10da976ed970d2bfa971290aa1147593df8cf445d',
+    );
   });
 
   it('throws when every port in the scan range is taken', async () => {

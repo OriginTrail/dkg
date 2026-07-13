@@ -477,6 +477,22 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Verify provisioned Blazegraph image platforms"
+        run: |
+          set -euo pipefail
+          image="$({
+            sed -n "s/^  '\([^']*\)';$/\1/p" packages/cli/src/daemon/blazegraph-docker.ts
+          } | head -1)"
+          if [[ -z "$image" ]]; then
+            echo "::error::Could not read BLAZEGRAPH_IMAGE from blazegraph-docker.ts"
+            exit 1
+          fi
+          manifest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}')"
+          printf '%s\n' "$manifest" | jq -e '
+            ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | index("amd64") != null)
+            and
+            ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | index("arm64") != null)
+          '
       - name: "CLI tests"
         run: pnpm --filter @origintrail-official/dkg test
 

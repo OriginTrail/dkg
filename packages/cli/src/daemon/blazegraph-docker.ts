@@ -52,11 +52,15 @@ export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="
 </properties>`;
 
 /**
- * Pinned multi-architecture image tag — matches the deployed mainnet fleet.
+ * Pinned multi-architecture image index — matches the deployed mainnet fleet.
  * `lyrasis/blazegraph:2.1.5` is amd64-only and fails with `exec format error`
  * when the provisioner runs on an arm64 Linux node.
+ *
+ * Keep the OCI-index digest immutable: CI inspects this exact reference and
+ * requires both linux/amd64 and linux/arm64 manifests.
  */
-export const BLAZEGRAPH_IMAGE = 'islandora/blazegraph:6.4.3';
+export const BLAZEGRAPH_IMAGE =
+  'islandora/blazegraph:6.4.3@sha256:015e308ae0a296cdb87c83c10da976ed970d2bfa971290aa1147593df8cf445d';
 
 /** Default container port that the Blazegraph image exposes. */
 const BLAZEGRAPH_CONTAINER_PORT = 8080;
