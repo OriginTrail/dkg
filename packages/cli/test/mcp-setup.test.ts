@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
 import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
-import { listBundledNetworkConfigNames } from '../src/config.js';
+import { listBundledNetworkConfigNames, resolveKnownNetworkConfigName } from '../src/config.js';
 
 /**
  * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
@@ -261,7 +261,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     );
     return {
       loadNetworkConfig,
-      networkConfigNames: listBundledNetworkConfigNames(),
+      resolveKnownNetworkConfigName,
       ensureDkgNodeConfig,
       startDaemon,
       loadOpWallets,
@@ -390,7 +390,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const deps = makeDeps();
     await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);
 
-    expect((deps.loadNetworkConfig as any).calls.map((call: any[]) => call[0])).toContain('mainnet-gnosis');
+    expect((deps.loadNetworkConfig as any).calls.map((call: any[]) => call[0])).toEqual(['mainnet-gnosis']);
     expect((deps.ensureDkgNodeConfig as any).calls).toHaveLength(1);
     const writeArgs = (deps.ensureDkgNodeConfig as any).calls[0][0];
     expect(writeArgs.networkConfigName).toBe('mainnet-gnosis');
@@ -431,7 +431,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     });
     const deps = makeDeps({
       loadNetworkConfig: injectedLoader as any,
-      networkConfigNames: ['fixture-mainnet'],
+      resolveKnownNetworkConfigName: (config) => resolveKnownNetworkConfigName(config, {
+        'fixture-mainnet': { chain: { chainId: 'fixture:42' } },
+      }),
     });
 
     await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);

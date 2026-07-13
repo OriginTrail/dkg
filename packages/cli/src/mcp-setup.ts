@@ -77,7 +77,6 @@ import {
   assertSelectableNetwork,
   resolveKnownNetworkConfigName,
   type DkgConfig,
-  type NetworkChainIdentity,
 } from './config.js';
 
 export interface McpSetupCliOptions {
@@ -159,8 +158,8 @@ export interface PlannedItem {
  */
 export interface McpSetupActionDeps {
   loadNetworkConfig: typeof import('@origintrail-official/dkg-adapter-openclaw').loadNetworkConfig;
-  /** All bundled candidate names, including networks omitted from setup UI. */
-  networkConfigNames: readonly string[];
+  /** Canonical persisted-config network resolver, injectable for tests. */
+  resolveKnownNetworkConfigName: typeof resolveKnownNetworkConfigName;
   /**
    * Codex Round-23 Fix 30: agent-agnostic config-write helper from
    * `dkg-core`. Pre-fix this dep was `adapter-openclaw`'s
@@ -223,25 +222,6 @@ export interface McpSetupActionDeps {
     planned: readonly PlannedItem[],
     opts: { yes: boolean },
   ) => Promise<PlannedItem[]>;
-}
-
-function resolveKnownNetworkConfigNameFromLoader(
-  config: Pick<DkgConfig, 'networkConfig' | 'chain'> | undefined,
-  networkConfigNames: readonly string[],
-  loadNetworkConfig: (
-    name: string,
-  ) => ReturnType<McpSetupActionDeps['loadNetworkConfig']>,
-): string | undefined {
-  const registry: Record<string, NetworkChainIdentity> = {};
-  for (const name of networkConfigNames) {
-    try {
-      const network = loadNetworkConfig(name);
-      registry[name] = { chain: network.chain };
-    } catch {
-      // One unavailable candidate must not prevent inference from the rest.
-    }
-  }
-  return resolveKnownNetworkConfigName(config, registry);
 }
 
 /**
@@ -1831,11 +1811,7 @@ export async function mcpSetupAction(
   const persistedNodeConfig = readPersistedConfig(dkgDirPath) as
     | Pick<DkgConfig, 'networkConfig' | 'chain'>
     | undefined;
-  const existingNetworkConfig = resolveKnownNetworkConfigNameFromLoader(
-    persistedNodeConfig,
-    deps.networkConfigNames,
-    loadSetupNetworkConfig,
-  );
+  const existingNetworkConfig = deps.resolveKnownNetworkConfigName(persistedNodeConfig);
   // `--network` is honored only for a FRESH node (existing nodes keep their
   // current network; switch via `dkg init --network`). Dropping it on an
   // existing node keeps the faucet decision aligned with the booted network

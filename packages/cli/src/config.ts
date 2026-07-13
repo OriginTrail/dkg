@@ -1103,9 +1103,13 @@ export function parseWeiFloor(
   return parsed;
 }
 
+let _networkConfig: NetworkConfig | null = null;
+let _networkConfigName: string | null = null;
 let _bundledNetworkRegistry: Readonly<Record<string, NetworkConfig>> | null = null;
 
 export function _resetNetworkConfigCache(): void {
+  _networkConfig = null;
+  _networkConfigName = null;
   _bundledNetworkRegistry = null;
 }
 
@@ -1486,7 +1490,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
 function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
   if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
 
-  _bundledNetworkRegistry = loadNetworkRegistryFromRoots(candidateRoots());
+  _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());
   return _bundledNetworkRegistry;
 }
 

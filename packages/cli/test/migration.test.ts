@@ -208,6 +208,38 @@ describe('migrateToBlueGreen', () => {
     expect(selectedNetwork).toBe('mainnet-base');
   });
 
+  it('uses inferred network update defaults for a legacy chain-only config', async () => {
+    let selectedNetwork: string | undefined;
+    _migrationIo.repoDir = () => null;
+    _migrationIo.loadConfig = async () => ({
+      chain: { type: 'evm', chainId: 'gnosis:100' },
+    });
+    _migrationIo.loadNetworkConfig = async (network?: string) => {
+      selectedNetwork = network;
+      if (network !== 'mainnet-gnosis') return undefined;
+      return {
+        autoUpdate: {
+          enabled: true,
+          repo: 'fixture/gnosis-runtime',
+          branch: 'gnosis-release',
+        },
+      };
+    };
+    execFileSyncCalls = [];
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn, { allowRemoteBootstrap: true });
+
+    expect(selectedNetwork).toBe('mainnet-gnosis');
+    const cloneCall = execFileSyncCalls.find(
+      c => c.binary === 'git' && c.args.includes('clone'),
+    );
+    expect(cloneCall).toBeTruthy();
+    expect(cloneCall?.args).toContain('--branch');
+    expect(cloneCall?.args).toContain('gnosis-release');
+    expect(cloneCall?.args).toContain('https://github.com/fixture/gnosis-runtime.git');
+  });
+
   it('logs migration progress', async () => {
     const log = makeLog();
     await migrateToBlueGreen(log.fn);
