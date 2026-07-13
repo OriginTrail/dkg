@@ -207,16 +207,32 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
   // a real subprocess. Other IO (readFile, writeFile, mkdir, …) we let
   // the real fs handle against the per-test DKG_HOME.
   const origIo = { ..._autoUpdateIo };
+  const restartCommand = {
+    nodeExecutable: '/usr/local/bin/node',
+    nodeExecArgv: ['--enable-source-maps'],
+    restartEntryPoint: '/npm-global/lib/node_modules/@origintrail-official/dkg/dist/cli.js',
+  } as const;
   let execCalls: { cmd: string; opts?: any }[] = [];
+  let execFileCalls: { file: string; args: string[]; opts?: any }[] = [];
+  let operations: string[] = [];
 
   beforeEach(() => {
     execCalls = [];
+    execFileCalls = [];
+    operations = [];
     _autoUpdateIo.exec = ((cmd: string, opts?: any): Promise<{ stdout: string; stderr: string }> => {
       execCalls.push({ cmd, opts });
-      return Promise.resolve({
-        stdout: cmd === 'dkg --version' ? 'dkg 10.0.0-rc.12' : '',
-        stderr: '',
-      });
+      operations.push(cmd);
+      return Promise.resolve({ stdout: '', stderr: '' });
+    }) as any;
+    _autoUpdateIo.execFile = ((
+      file: string,
+      args: string[],
+      opts?: any,
+    ): Promise<{ stdout: string; stderr: string }> => {
+      execFileCalls.push({ file, args, opts });
+      operations.push(`${file} ${args.join(' ')}`);
+      return Promise.resolve({ stdout: 'dkg 10.0.0-rc.12', stderr: '' });
     }) as any;
   });
 
@@ -226,20 +242,34 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
 
   it('records previous-version and runs npm install -g on success', async () => {
     const log = makeLog();
-    const result = await performNpmUpdateEdge('10.0.0-rc.12', '10.0.0-rc.11', log.fn);
+    const result = await performNpmUpdateEdge(
+      '10.0.0-rc.12',
+      '10.0.0-rc.11',
+      log.fn,
+      restartCommand,
+    );
 
     expect(result).toBe('updated');
     expect(readFileSync(join(dkgHome, 'previous-version'), 'utf-8')).toBe('10.0.0-rc.11');
-    expect(execCalls).toHaveLength(2);
+    expect(execCalls).toHaveLength(1);
     expect(execCalls[0].cmd).toBe('npm install -g @origintrail-official/dkg@10.0.0-rc.12');
-    expect(execCalls[1].cmd).toBe('dkg --version');
+    expect(execFileCalls).toEqual([{
+      file: restartCommand.nodeExecutable,
+      args: [
+        ...restartCommand.nodeExecArgv,
+        restartCommand.restartEntryPoint,
+        '--version',
+      ],
+      opts: { encoding: 'utf-8', timeout: 30_000 },
+    }]);
+    expect(execCalls.some(({ cmd }) => cmd === 'dkg --version')).toBe(false);
     expect(log.calls.some((m) => m.includes('10.0.0-rc.11 → ~/.dkg/previous-version'))).toBe(true);
     expect(log.calls.some((m) => m.includes('install completed'))).toBe(true);
   });
 
   it('warns when current version is unknown but still attempts the install', async () => {
     const log = makeLog();
-    const result = await performNpmUpdateEdge('10.0.0-rc.12', null, log.fn);
+    const result = await performNpmUpdateEdge('10.0.0-rc.12', null, log.fn, restartCommand);
 
     expect(result).toBe('updated');
     expect(existsSync(join(dkgHome, 'previous-version'))).toBe(false);
@@ -255,7 +285,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
     }) as any;
 
     const log = makeLog();
-    const result = await performNpmUpdateEdge('99.99.99', '10.0.0-rc.11', log.fn);
+    const result = await performNpmUpdateEdge('99.99.99', '10.0.0-rc.11', log.fn, restartCommand);
 
     expect(result).toBe('failed');
     expect(log.calls.some((m) => m.includes('npm install -g failed'))).toBe(true);
@@ -267,49 +297,57 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
 
   it('rolls back when the installed CLI cannot pass its self-check', async () => {
     let versionChecks = 0;
-    _autoUpdateIo.exec = (async (cmd: string, opts?: any) => {
-      execCalls.push({ cmd, opts });
-      if (cmd === 'dkg --version') {
-        versionChecks += 1;
-        if (versionChecks === 1) throw new Error('dkg: command not found');
-        return { stdout: 'dkg 10.0.0-rc.11', stderr: '' };
-      }
-      return { stdout: '', stderr: '' };
+    _autoUpdateIo.execFile = (async (file: string, args: string[], opts?: any) => {
+      execFileCalls.push({ file, args, opts });
+      operations.push(`${file} ${args.join(' ')}`);
+      versionChecks += 1;
+      if (versionChecks === 1) throw new Error('restart entry point cannot be executed');
+      return { stdout: 'dkg 10.0.0-rc.11', stderr: '' };
     }) as any;
 
     const log = makeLog();
-    const result = await performNpmUpdateEdge('10.0.0-rc.12', '10.0.0-rc.11', log.fn);
+    const result = await performNpmUpdateEdge(
+      '10.0.0-rc.12',
+      '10.0.0-rc.11',
+      log.fn,
+      restartCommand,
+    );
     expect(result).toBe('failed');
-    expect(execCalls.map((call) => call.cmd)).toEqual([
+    const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
+    expect(operations).toEqual([
       'npm install -g @origintrail-official/dkg@10.0.0-rc.12',
-      'dkg --version',
+      restartProbe,
       'npm install -g @origintrail-official/dkg@10.0.0-rc.11',
-      'dkg --version',
+      restartProbe,
     ]);
     expect(log.calls.some((message) => message.includes('rollback restored'))).toBe(true);
   });
 
   it('rolls back on an exact-version mismatch, including semver prefix collisions', async () => {
     let versionChecks = 0;
-    _autoUpdateIo.exec = (async (cmd: string, opts?: any) => {
-      execCalls.push({ cmd, opts });
-      if (cmd === 'dkg --version') {
-        versionChecks += 1;
-        return versionChecks === 1
-          ? { stdout: 'dkg 10.0.0-rc.12', stderr: '' }
-          : { stdout: 'dkg 10.0.0-rc.0', stderr: '' };
-      }
-      return { stdout: '', stderr: '' };
+    _autoUpdateIo.execFile = (async (file: string, args: string[], opts?: any) => {
+      execFileCalls.push({ file, args, opts });
+      operations.push(`${file} ${args.join(' ')}`);
+      versionChecks += 1;
+      return versionChecks === 1
+        ? { stdout: 'dkg 10.0.0-rc.12', stderr: '' }
+        : { stdout: 'dkg 10.0.0-rc.0', stderr: '' };
     }) as any;
 
     const log = makeLog();
-    const result = await performNpmUpdateEdge('10.0.0-rc.1', '10.0.0-rc.0', log.fn);
+    const result = await performNpmUpdateEdge(
+      '10.0.0-rc.1',
+      '10.0.0-rc.0',
+      log.fn,
+      restartCommand,
+    );
     expect(result).toBe('failed');
-    expect(execCalls.map((call) => call.cmd)).toEqual([
+    const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
+    expect(operations).toEqual([
       'npm install -g @origintrail-official/dkg@10.0.0-rc.1',
-      'dkg --version',
+      restartProbe,
       'npm install -g @origintrail-official/dkg@10.0.0-rc.0',
-      'dkg --version',
+      restartProbe,
     ]);
     expect(log.calls.some((message) => message.includes('expected 10.0.0-rc.1'))).toBe(true);
   });
@@ -322,7 +360,12 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
     }) as any;
 
     const log = makeLog();
-    const result = await performNpmUpdateEdge('10.0.0-rc.12', '10.0.0-rc.11', log.fn);
+    const result = await performNpmUpdateEdge(
+      '10.0.0-rc.12',
+      '10.0.0-rc.11',
+      log.fn,
+      restartCommand,
+    );
 
     expect(result).toBe('failed');
     expect(log.calls.some((m) => m.includes('EACCES'))).toBe(true);
