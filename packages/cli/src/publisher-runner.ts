@@ -4,7 +4,11 @@ import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapte
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { loadNetworkConfig, projectRuntimeEvmChainConfig, resolveReadyChainConfig, type DkgConfig, type RuntimeEvmChainConfig } from './config.js';
+import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
+import {
+  projectRuntimeEvmChainConfig,
+  type RuntimeEvmChainConfig,
+} from './runtime-chain-config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';

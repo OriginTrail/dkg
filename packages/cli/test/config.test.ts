@@ -886,6 +886,16 @@ describe('resolveChainConfig (field-level merge)', () => {
     }
   });
 
+  it('rejects an explicit null receipt timeout instead of using a fallback', () => {
+    const config = { chain: { receiptTimeoutMs: null as any } };
+
+    expect(() => resolveChainConfig(config, null))
+      .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+    expect(() => resolveChainConfig(config, {
+      chain: { ...fullNetworkChain, receiptTimeoutMs: 120_000 },
+    })).toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+  });
+
   it('threads the shipped network rpcUrls defaults through to the failover engine (real overlays)', async () => {
     const { _resetNetworkConfigCache } = await import('../src/config.js');
     const overlays = [

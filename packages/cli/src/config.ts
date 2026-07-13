@@ -22,7 +22,6 @@ import {
 import {
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
-  type EVMAdapterConfig,
 } from '@origintrail-official/dkg-chain';
 
 /**
@@ -341,33 +340,6 @@ export type ResolvedChainConfig = Partial<
   minPublisherNativeWei?: bigint;
   minPublisherTracWei?: bigint;
 };
-
-export type RuntimeEvmChainConfig = Pick<
-  EVMAdapterConfig,
-  | 'rpcUrl' | 'rpcUrls' | 'walletRpcUrls' | 'hubAddress' | 'tokenAddress'
-  | 'chainId' | 'receiptTimeoutMs' | 'approvalPolicy' | 'cgRegistryScanPageSize'
-  | 'minPublisherNativeWei' | 'minPublisherTracWei'
->;
-
-/** Neutral projection shared by the agent and every publisher adapter. */
-export function projectRuntimeEvmChainConfig(
-  chain: ResolvedChainConfig | undefined,
-): RuntimeEvmChainConfig | undefined {
-  if (!chain?.rpcUrl || !chain.hubAddress) return undefined;
-  return {
-    rpcUrl: chain.rpcUrl,
-    rpcUrls: chain.rpcUrls,
-    walletRpcUrls: chain.walletRpcUrls,
-    hubAddress: chain.hubAddress,
-    tokenAddress: chain.tokenAddress,
-    chainId: chain.chainId,
-    receiptTimeoutMs: chain.receiptTimeoutMs,
-    approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy),
-    cgRegistryScanPageSize: chain.cgRegistryScanPageSize,
-    minPublisherNativeWei: chain.minPublisherNativeWei,
-    minPublisherTracWei: chain.minPublisherTracWei,
-  };
-}
 
 export interface LargeLiteralStorageConfig {
   enabled?: boolean;
@@ -1491,8 +1463,14 @@ export function resolveChainConfig(
   if (approvalPolicy !== undefined) merged.approvalPolicy = approvalPolicy;
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
-  const receiptTimeoutMs = cfg?.receiptTimeoutMs ?? net?.receiptTimeoutMs;
-  if (receiptTimeoutMs !== undefined) {
+  // Presence matters here: persisted `null` is an explicit invalid operator
+  // value and must not silently fall through to the network/default timeout.
+  const operatorHasReceiptTimeout = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'receiptTimeoutMs');
+  const receiptTimeoutMs: unknown = operatorHasReceiptTimeout
+    ? cfg.receiptTimeoutMs
+    : net?.receiptTimeoutMs;
+  if (operatorHasReceiptTimeout || receiptTimeoutMs !== undefined) {
     merged.receiptTimeoutMs = resolveReceiptTimeoutMs(receiptTimeoutMs);
   }
   // Funding floors: local config wins, else the network overlay's per-chain
