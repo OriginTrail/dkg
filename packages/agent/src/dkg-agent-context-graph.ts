@@ -838,7 +838,9 @@ export class ContextGraphMethods extends DKGAgentBase {
   /**
    * Register an existing context graph on-chain. This is the explicit upgrade
    * step that unlocks Verifiable Memory, chain-based discovery, and economic
-   * participation. Requires a funded wallet with TRAC.
+   * participation. Requires native gas. Direct registration also requires the
+   * configured TRAC deposit; an eligible PCA-backed registration consumes one
+   * quota-backed waiver instead.
    */
   async registerContextGraph(this: DKGAgent, id: string, opts?: {
     /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
@@ -1226,27 +1228,60 @@ export class ContextGraphMethods extends DKGAgentBase {
       } else {
         publishAuthority = await this.getChainPublishAuthorityAddress(id);
       }
-      // Uniform strict check across EOA and PCA modes:
-      //  - EOA: publishAuthority is the chain signer; local curator
-      //    must equal the chain signer — UNLESS the EOA mismatch
-      //    auto-promotion below relaxes it.
-      //  - PCA: publishAuthority is ownerOf(pcaAccountId); local curator
-      //    must equal the PCA owner. Registered agents are publish-time
-      //    delegates only — publish-time authorization lives on chain in
-      //    `ContextGraphs.isAuthorizedPublisher`.
-      if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
-        if (isPcaCurated) {
-          // PCA mode stays strict: `ContextGraphs.createContextGraph`
-          // mints the governance NFT to msg.sender (= chain signer),
-          // and a mismatch would silently produce a CG whose
-          // on-chain owner is NOT the advertised PCA owner.
-          // Relaxing this would let users create CGs they cannot
-          // govern. The PCA owner must control the chain signer.
+      // PCA registration mirrors the post-#1366 on-chain authorization:
+      // either the PCA owner OR a wallet registered to this exact PCA may
+      // create the CG. Keep the local curator and registration-tx signer
+      // identical in both modes so the local owner and the Context Graph NFT
+      // owner cannot silently diverge:
+      //
+      //   owner mode: local curator == tx signer == PCA owner
+      //   agent mode: local curator == tx signer == registered PCA agent
+      //
+      // The advertised publishAuthority remains the live PCA owner in both
+      // modes, as required by ContextGraphs._validatePCACoherence. In agent
+      // mode the registered agent owns the newly minted CG NFT while the PCA
+      // owner and every registered PCA agent remain authorized publishers.
+      if (isPcaCurated && publishAuthority) {
+        const chainSigner = await this.getRegistrationTxSignerAddress();
+        if (!chainSigner) {
           throw new Error(
-            `Context graph "${id}" cannot be registered as curated by local curator ${ownerAddress} because ` +
-            `PCA account ${publishAuthorityAccountId} is owned by ${publishAuthority}; only the PCA owner can register, registered agents may only publish.`,
+            `Context graph "${id}" cannot be PCA-registered: the chain adapter does not expose its registration-tx signer, so PCA owner/agent authorization cannot be verified. PCA mode requires a chain adapter that surfaces its signer (e.g. via \`signerAddress\` / \`getSignerAddress()\` / \`getOperationalPrivateKey()\`).`,
           );
         }
+
+        const normalizedChainSigner = ethers.getAddress(chainSigner);
+        const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
+        if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase()) {
+          throw new Error(
+            `Context graph "${id}" cannot be PCA-registered: local curator ${ownerAddress} differs from registration chain signer ${normalizedChainSigner}. The local curator must control the wallet that will own the on-chain Context Graph NFT.`,
+          );
+        }
+
+        if (!signerIsOwner) {
+          if (typeof this.chain.getConvictionAgentAccountId !== 'function') {
+            throw new Error(
+              'PCA curated context graph registration by an agent requires chain adapter PCA agent lookup support.',
+            );
+          }
+          const signerAccountId = await this.chain.getConvictionAgentAccountId(
+            normalizedChainSigner,
+            { strict: true },
+          );
+          if (signerAccountId !== publishAuthorityAccountId) {
+            throw new Error(
+              `Context graph "${id}" cannot be PCA-registered: chain signer ${normalizedChainSigner} is not a registered agent of PCA account ${publishAuthorityAccountId} ` +
+              `(registered account: ${signerAccountId}). The signer must own the PCA or be registered to that exact account.`,
+            );
+          }
+          this.log.info(
+            ctx,
+            `PCA-curated CG "${id}": registered agent ${normalizedChainSigner} will own the Context Graph NFT; ` +
+            `PCA account ${publishAuthorityAccountId} owner ${publishAuthority} remains the live publish authority.`,
+          );
+        }
+      } else if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
+        // EOA mode: publishAuthority is the chain signer; local curator must
+        // equal it unless the explicit auto-promotion path below is allowed.
         if (opts?.strictEoaCuratorMatch) {
           // Opt-in strict mode for callers that explicitly want
           // the legacy "curator agent MUST equal chain signer"
@@ -1332,35 +1367,6 @@ export class ContextGraphMethods extends DKGAgentBase {
         // here on — downstream PCA/signer parity checks compare
         // against this value.
         ownerAddress = publishAuthority;
-      }
-      // PCA-only: the chain signer (= msg.sender for the registration
-      // tx) MUST equal the PCA owner. `ContextGraphs.createContextGraph`
-      // on-chain mints the governance NFT to msg.sender, so any
-      // divergence between the configured chain signer and the PCA
-      // owner would make the chain signer (not the advertised PCA owner)
-      // the actual on-chain context-graph owner — breaking later
-      // `onlyContextGraphOwner` operations (publish-policy/authority
-      // updates, etc.). Per Codex PR #502 round-4/5: keep "advertised
-      // curator == on-chain owner == chain signer == PCA owner" and
-      // FAIL CLOSED when the registration signer cannot be
-      // introspected — a custom adapter that exposes
-      // `getPublishingConvictionAccountOwner()` but not its tx signer
-      // would otherwise sneak past the invariant. Codex PR #502
-      // round-8: use the dedicated `getRegistrationTxSignerAddress`
-      // probe so future readers can't confuse it with a publish-time
-      // delegate principal.
-      if (isPcaCurated && publishAuthority) {
-        const chainSigner = await this.getRegistrationTxSignerAddress();
-        if (!chainSigner) {
-          throw new Error(
-            `Context graph "${id}" cannot be PCA-registered: the chain adapter does not expose its registration-tx signer, so the "chain signer == PCA owner" invariant cannot be verified. PCA mode requires a chain adapter that surfaces its signer (e.g. via \`signerAddress\` / \`getSignerAddress()\` / \`getOperationalPrivateKey()\`) so the on-chain governance NFT is guaranteed to mint to the advertised PCA owner.`,
-          );
-        }
-        if (chainSigner.toLowerCase() !== publishAuthority.toLowerCase()) {
-          throw new Error(
-            `Context graph "${id}" cannot be PCA-registered: chain signer ${chainSigner} differs from PCA owner ${publishAuthority}. The PCA owner must control the chain signer used to submit the registration tx; otherwise the on-chain governance NFT mints to ${chainSigner} rather than the advertised curator.`,
-          );
-        }
       }
       if (
         !publishAuthority

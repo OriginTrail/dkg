@@ -548,7 +548,12 @@ export class FakeClient {
       : { status: 'wm-sealed', sealed: true, publishReady: false };
   }
 
-  async registerContextGraph(args: { id: string }) {
+  async registerContextGraph(args: {
+    id: string;
+    accessPolicy?: number;
+    publishPolicy?: number;
+    pcaAccountId?: string | bigint;
+  }) {
     if (this.overrides.registerContextGraph) return this.overrides.registerContextGraph.call(this, args);
     return {
       registered: args.id,

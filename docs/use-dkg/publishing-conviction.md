@@ -70,7 +70,11 @@ Attach a PCA to curated Context Graph registration with `--pca-account-id`:
 dkg context-graph register <contextGraphId> --publish-policy 0 --pca-account-id <accountId>
 ```
 
-`pcaAccountId` is valid only for curated publish policy. The daemon checks that the local curator matches the PCA owner before registering the Context Graph with the PCA.
+`pcaAccountId` is valid only for curated publish policy. The registration transaction signer may be either the PCA owner or a wallet currently registered to that exact PCA. The daemon verifies the exact account binding and requires the local curator to match the signer, because that signer receives the Context Graph NFT. The PCA owner remains the live publish authority.
+
+When the PCA is active, meets the governance commitment floor, and still has quota, registration consumes one quota-backed waiver instead of pulling the separate liquid-TRAC registration deposit. The signer still needs native gas. Waiver quota is `committedTRAC / contextGraphRegistrationDeposit`; using a slot does not debit or unlock the PCA's committed TRAC.
+
+The same flow is available through `POST /api/context-graph/register` with `publishPolicy: 0` and `pcaAccountId`, and through MCP with `dkg_context_graph_register`.
 
 ## API Routes
 
