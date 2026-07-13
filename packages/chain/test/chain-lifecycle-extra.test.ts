@@ -490,6 +490,30 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       expect(ok).toBe(true);
     }, 60_000);
 
+    it('resolves a funded publish plan through the concrete EVM publish mixin', async () => {
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const { hubAddress } = getSharedContext();
+      await mintTokens(
+        createProvider(),
+        hubAddress,
+        HARDHAT_KEYS.DEPLOYER,
+        adapter.getSignerAddress(),
+        ethers.parseEther('1000'),
+      );
+      const contextGraphId = await createTestContextGraph(adapter, undefined, 0);
+
+      const plan = await adapter.resolvePublisherPublishPlan!({
+        contextGraphId,
+        effectiveByteSize: 256n,
+        explicitPublishEpochs: 2,
+        defaultPublishEpochs: 12,
+      });
+
+      expect(plan.publisherAddress.toLowerCase()).toBe(adapter.getSignerAddress().toLowerCase());
+      expect(plan.publishEpochs).toBe(2);
+      expect(plan.tokenAmount).toBeGreaterThanOrEqual(2n);
+    }, 60_000);
+
     it('seedContextGraphRegistration writes the expected metadata quad into the store', async () => {
       type Quad = { subject: string; predicate: string; object: string; graph: string };
       const quads: Quad[] = [];

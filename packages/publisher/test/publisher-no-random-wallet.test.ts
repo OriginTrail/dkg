@@ -148,10 +148,21 @@ class AdapterSigningChain extends MockChainAdapter {
   }
 }
 
-class EpochCapturingChain extends AdapterSigningChain {
+class LegacyEpochCapturingChain extends AdapterSigningChain {
   capturedCreateParams?: V10PublishDirectParams;
   pcaLockDurationEpochs?: number;
 
+  override async createKnowledgeAssets(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+    this.capturedCreateParams = params;
+    return super.createKnowledgeAssets(params);
+  }
+
+  override async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
+    return this.pcaLockDurationEpochs ?? super.getConvictionAccountLockDurationEpochs(accountId);
+  }
+}
+
+class EpochCapturingChain extends LegacyEpochCapturingChain {
   async resolvePublisherPublishPlan(request: PublisherPublishPlanRequest) {
     const publisherAddress = request.publisherAddress ?? this.signerAddress;
     let publishEpochs = request.explicitPublishEpochs ?? request.defaultPublishEpochs;
@@ -184,15 +195,6 @@ class EpochCapturingChain extends AdapterSigningChain {
     }
     return { publisherAddress, publishEpochs, tokenAmount };
   }
-
-  override async createKnowledgeAssets(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
-    this.capturedCreateParams = params;
-    return super.createKnowledgeAssets(params);
-  }
-
-  override async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
-    return this.pcaLockDurationEpochs ?? super.getConvictionAccountLockDurationEpochs(accountId);
-  }
 }
 
 class NoFundedReservationChain extends EpochCapturingChain {
@@ -217,7 +219,7 @@ function captureACKInputs(capture: AckEpochCapture): V10ACKProvider {
   };
 }
 
-async function makeEpochPublisher(chain: EpochCapturingChain, wallet: ethers.Wallet): Promise<DKGPublisher> {
+async function makeEpochPublisher(chain: LegacyEpochCapturingChain, wallet: ethers.Wallet): Promise<DKGPublisher> {
   const keypair = await generateEd25519Keypair();
   return sealForWallet(new DKGPublisher({
     store: new OxigraphStore(),
@@ -316,6 +318,84 @@ class ReservingPublishChain extends AsyncAddressSigningChain {
   async getAuthorizedPublisherAddress(): Promise<string> {
     this.reservations += 1;
     return this.authorizedAddress;
+  }
+}
+
+/**
+ * New planner surface with no pre-plan signer discovery helpers. The planner
+ * itself is the only source of the address; signMessageAs binds that returned
+ * address afterward.
+ */
+class PlanOnlySigningChain implements ChainAdapter {
+  readonly chainId = 'mock:31337';
+  readonly planRequests: PublisherPublishPlanRequest[] = [];
+  authorizedProbeCalls = 0;
+  capturedCreateParams?: V10PublishDirectParams;
+
+  constructor(private readonly wallet: ethers.Wallet) {}
+
+  isV10Ready(): boolean {
+    return true;
+  }
+
+  async getEvmChainId(): Promise<bigint> {
+    return 31337n;
+  }
+
+  async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
+    return '0x00000000000000000000000000000000000000A1';
+  }
+
+  async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    return this.getKnowledgeAssetsLifecycleAddress();
+  }
+
+  async getAuthorizedPublisherAddress(): Promise<string> {
+    this.authorizedProbeCalls += 1;
+    return this.wallet.address;
+  }
+
+  async resolvePublisherPublishPlan(request: PublisherPublishPlanRequest) {
+    this.planRequests.push(request);
+    const publishEpochs = request.explicitPublishEpochs ?? request.defaultPublishEpochs;
+    return {
+      publisherAddress: this.wallet.address,
+      publishEpochs,
+      tokenAmount: BigInt(publishEpochs),
+    };
+  }
+
+  async signMessageAs(
+    address: string,
+    messageHash: Uint8Array,
+  ): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    expect(address.toLowerCase()).toBe(this.wallet.address.toLowerCase());
+    const sig = ethers.Signature.from(await this.wallet.signMessage(messageHash));
+    return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+  }
+
+  async signTypedDataAs(
+    address: string,
+    domain: ethers.TypedDataDomain,
+    types: Record<string, Array<{ name: string; type: string }>>,
+    value: Record<string, unknown>,
+  ): Promise<string> {
+    expect(address.toLowerCase()).toBe(this.wallet.address.toLowerCase());
+    return this.wallet.signTypedData(domain, types, value);
+  }
+
+  async createKnowledgeAssets(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+    this.capturedCreateParams = params;
+    const kaId = params.reservedKaId ?? 1n;
+    return {
+      batchId: kaId,
+      startKAId: kaId,
+      endKAId: kaId,
+      txHash: `0x${'79'.repeat(32)}`,
+      blockNumber: 1,
+      blockTimestamp: Math.floor(Date.now() / 1000),
+      publisherAddress: this.wallet.address,
+    };
   }
 }
 
@@ -1166,6 +1246,30 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(chain.capturedCreateParams?.tokenAmount).toBe(24n);
   });
 
+  it('preserves PCA lock planning for a legacy adapter without resolvePublisherPublishPlan', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new LegacyEpochCapturingChain(wallet);
+    chain.pcaLockDurationEpochs = 24;
+    const { accountId } = await chain.createPublishingConvictionAccount(ethers.parseEther('10000'));
+    await chain.registerPublishingConvictionAgent(accountId, wallet.address);
+    const publisher = await makeEpochPublisher(chain, wallet);
+    const ack: AckEpochCapture = {};
+
+    const result = await publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('legacy-pca-default-publish-epochs'),
+      v10ACKProvider: captureACKInputs(ack),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(ack).toMatchObject({ epochs: 24, tokenAmount: 24n });
+    expect(chain.capturedCreateParams).toMatchObject({
+      publisherAddress: wallet.address,
+      epochs: 24,
+      tokenAmount: 24n,
+    });
+  });
+
   it('rebuilds PCA pricing and keeps ACK/tx identity coherent when strict reservation changes wallet', async () => {
     const initial = new ethers.Wallet(TEST_KEY);
     const fundedPca = new ethers.Wallet(TEST_KEY_ALT);
@@ -1271,6 +1375,31 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     ]);
     expect(chain.planRequests).toHaveLength(2);
     expect(chain.planRequests.every((request) => request.publisherAddress === undefined)).toBe(true);
+  });
+
+  it('invokes adapter-owned planning before signer discovery and binds the planned address', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY_ALT);
+    const chain = new PlanOnlySigningChain(wallet);
+    const keypair = await generateEd25519Keypair();
+    const publisher = await sealForWallet(new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherNodeIdentityId: 7n,
+    }), wallet, chain);
+
+    const result = await publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('plan-before-signer-discovery'),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(chain.authorizedProbeCalls).toBe(0);
+    expect(chain.planRequests).toHaveLength(1);
+    expect(chain.planRequests[0].publisherAddress).toBeUndefined();
+    expect(chain.capturedCreateParams?.publisherAddress.toLowerCase())
+      .toBe(wallet.address.toLowerCase());
   });
 
   it('uses the adapter-owned plan after it rejects a weak PCA candidate internally', async () => {

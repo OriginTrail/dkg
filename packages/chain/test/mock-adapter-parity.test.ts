@@ -94,6 +94,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'selectFundedSignerOrThrow', // strict funding diagnostic used by EVM publish planning
   'quoteRequiredPublishTokenAmount', // shared protected AskStorage quote behind EVM reads/planning
   'resolveFundedPublisherPublishPlan', // protected EVM pool/PCA planning state machine
+  'publisherConvictionPlanReader', // protected typed bridge from publish planning to the conviction mixin
   // Dispatcher Phase 3/4 selector seam + RS send plumbing — TS-protected
   // internals (the generalized wallet selector, the funding predicate behind
   // it, the RS-specific selector wrapper, and the serialized RS send). Not

@@ -1088,7 +1088,7 @@ export interface ChainAdapter {
    * squat, or any account short for this specific publish) keeps the
    * caller's requested lifetime instead of snapping to the PCA lock and
    * direct-spending at that lifetime/full price. Adapters that omit this
-   * method preserve the legacy unconditional coercion.
+   * method cannot prove coverage and therefore remain on direct spend.
    */
   convictionAccountCanCover?(accountId: bigint, baseCost: bigint): Promise<boolean>;
 

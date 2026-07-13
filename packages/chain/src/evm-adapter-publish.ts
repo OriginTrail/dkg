@@ -11,10 +11,17 @@
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
 import { ethers, Wallet, Contract } from 'ethers';
-import type { ReservedRange, BatchMintParams, BatchMintResult, KAUpdateVerification, OnChainPublishResult, V10UpdateKAParams, TxResult } from './chain-adapter.js';
+import type { ReservedRange, BatchMintParams, BatchMintResult, KAUpdateVerification, OnChainPublishResult, V10UpdateKAParams, TxResult, PublisherPublishPlan, PublisherPublishPlanRequest } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
 export class PublishMethods extends EVMChainAdapterBase {
+  async resolvePublisherPublishPlan(
+    request: PublisherPublishPlanRequest,
+  ): Promise<PublisherPublishPlan> {
+    await this.init();
+    return this.resolveFundedPublisherPublishPlan(request);
+  }
+
   // =====================================================================
   // V9: UAL Reservation
   // =====================================================================

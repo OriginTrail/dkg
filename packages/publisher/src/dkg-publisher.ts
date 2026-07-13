@@ -1,6 +1,6 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
-import { enrichEvmError } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, resolvePublisherCandidatePricing } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs } from '@origintrail-official/dkg-storage';
@@ -958,44 +958,74 @@ export class DKGPublisher implements Publisher {
     return address === ethers.ZeroAddress ? '0x0000000000000000000000000000000000000001' : address;
   }
 
-  /** Compatibility pricing for adapters without adapter-owned publish planning. */
+  /** Compatibility planning for adapters without adapter-owned publish planning. */
   private async resolveLegacyPublishPricing(input: {
+    publisherAddress: string;
     explicitPublishEpochs: number | undefined;
     effectiveByteSize: bigint;
     ctx: OperationContext;
   }): Promise<{ publishEpochs: number; precomputedTokenAmount: bigint }> {
-    const publishEpochs = input.explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
-
-    let precomputedTokenAmount = BigInt(publishEpochs);
-    if (typeof this.chain.getRequiredPublishTokenAmount === 'function') {
-      try {
-        precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(
-          input.effectiveByteSize,
-          publishEpochs,
-        );
-        const minimum = BigInt(publishEpochs);
-        if (precomputedTokenAmount < minimum) {
-          this.log.warn(
-            input.ctx,
-            `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${input.effectiveByteSize}, epochs=${publishEpochs} — using ${minimum} as minimum so per-epoch CG value stays non-zero`,
-          );
-          precomputedTokenAmount = minimum;
-        }
-      } catch (err) {
-        this.log.warn(
-          input.ctx,
-          `getRequiredPublishTokenAmount failed — publish will fall back to tentative if on-chain submit cannot proceed: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-        );
+    const quote = typeof this.chain.getRequiredPublishTokenAmount === 'function'
+      ? (epochs: number) => this.chain.getRequiredPublishTokenAmount!(input.effectiveByteSize, epochs)
+      : undefined;
+    const conviction = quote
+      && typeof this.chain.getConvictionAgentAccountId === 'function'
+      && typeof this.chain.getConvictionAccountLockDurationEpochs === 'function'
+      && typeof this.chain.convictionAccountCanCover === 'function'
+      ? {
+        getAccountId: (address: string) => this.chain.getConvictionAgentAccountId!(address),
+        getLockDurationEpochs: (accountId: bigint) =>
+          this.chain.getConvictionAccountLockDurationEpochs!(accountId),
+        canCover: (accountId: bigint, baseCost: bigint) =>
+          this.chain.convictionAccountCanCover!(accountId, baseCost),
       }
+      : undefined;
+    const pricing = await resolvePublisherCandidatePricing({
+      publisherAddress: input.publisherAddress,
+      explicitPublishEpochs: input.explicitPublishEpochs,
+      defaultPublishEpochs: DEFAULT_PUBLISH_EPOCHS,
+      quote,
+      conviction,
+    });
+
+    if (pricing.pcaApplied) {
+      this.log.info(
+        input.ctx,
+        `PCA-funded publish detected (signer=${input.publisherAddress}, accountId=${pricing.pcaAccountId}) — ` +
+        `coercing publishEpochs to lockDurationEpochs=${pricing.publishEpochs}`,
+      );
+    } else if (pricing.pcaAccountId !== undefined) {
+      this.log.info(
+        input.ctx,
+        `Signer ${input.publisherAddress} is a registered PCA agent (accountId=${pricing.pcaAccountId}) ` +
+        `but funding for this publish's discounted cost could not be confirmed — NOT coercing ` +
+        `publishEpochs; publishing at requested lifetime=${pricing.publishEpochs} via direct spend`,
+      );
     }
-    return { publishEpochs, precomputedTokenAmount };
+    if (pricing.pcaProbeError !== undefined) {
+      this.log.warn(
+        input.ctx,
+        `PCA epochs probe failed — falling back to publishEpochs=${pricing.publishEpochs}: ` +
+        `${pricing.pcaProbeError instanceof Error ? pricing.pcaProbeError.message : String(pricing.pcaProbeError)}`,
+      );
+    }
+    if (pricing.quoteError !== undefined) {
+      this.log.warn(
+        input.ctx,
+        `getRequiredPublishTokenAmount failed — using protocol minimum ${pricing.tokenAmount}: ` +
+        `${pricing.quoteError instanceof Error ? pricing.quoteError.message : String(pricing.quoteError)}`,
+      );
+    }
+    return {
+      publishEpochs: pricing.publishEpochs,
+      precomputedTokenAmount: pricing.tokenAmount,
+    };
   }
 
   /** Finalize signer, lifetime, and price before any ACK-bound identity is derived. */
   private async resolveOnChainPublishPlan(input: {
     contextGraphId: bigint;
-    initialSigner: PublisherSigner;
+    initialSigner?: PublisherSigner;
     explicitPublishEpochs: number | undefined;
     effectiveByteSize: bigint;
     ctx: OperationContext;
@@ -1006,7 +1036,9 @@ export class DKGPublisher implements Publisher {
     tokenAmount: bigint;
   }> {
     if (typeof this.chain.resolvePublisherPublishPlan !== 'function') {
+      if (!input.initialSigner) throw new PublisherWalletRequiredError('publish');
       const initialPricing = await this.resolveLegacyPublishPricing({
+        publisherAddress: input.initialSigner.address,
         explicitPublishEpochs: input.explicitPublishEpochs,
         effectiveByteSize: input.effectiveByteSize,
         ctx: input.ctx,
@@ -1023,7 +1055,7 @@ export class DKGPublisher implements Publisher {
     // funding validation, and cursor advancement as one operation. The
     // publisher only binds the returned final signer to ACK/transaction data.
     const pinnedPublisherAddress = this.publisherAddress !== undefined
-      ? input.initialSigner.address
+      ? (input.initialSigner?.address ?? this.publisherAddress)
       : undefined;
     const pinnedPublisherLabel = this.publisherWallet
       ? 'publisherPrivateKey'
@@ -2172,7 +2204,7 @@ export class DKGPublisher implements Publisher {
     let publisherAddress = resolvedPublisherAddress ?? this.localTentativePublisherAddress();
     const canAttemptOnChainPublish = willAttemptOnChainPublish &&
       chainV10Ready &&
-      publisherSigner !== undefined;
+      (adapterOwnedPublishPlanningAvailable || publisherSigner !== undefined);
 
     // RFC-001 §9.x — sign-at-creation. The publisher is a pure
     // transport layer for the AuthorAttestation: the seal is built at
@@ -2199,7 +2231,12 @@ export class DKGPublisher implements Publisher {
       throw new Error('Publish rejected: "allowedPeers" is only valid when accessPolicy is "allowList"');
     }
 
-    if (willAttemptOnChainPublish && chainV10Ready && !publisherSigner) {
+    if (
+      willAttemptOnChainPublish
+      && chainV10Ready
+      && !adapterOwnedPublishPlanningAvailable
+      && !publisherSigner
+    ) {
       throw new PublisherWalletRequiredError('publish');
     }
 
@@ -2512,7 +2549,7 @@ export class DKGPublisher implements Publisher {
       ? catalogByteSize
       : publicByteSize;
     const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
-    const publishPlan = canAttemptOnChainPublish && publisherSigner && publisherContextGraphId !== undefined
+    const publishPlan = canAttemptOnChainPublish && publisherContextGraphId !== undefined
       ? await this.resolveOnChainPublishPlan({
         contextGraphId: publisherContextGraphId,
         initialSigner: publisherSigner,

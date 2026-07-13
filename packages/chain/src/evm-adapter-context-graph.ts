@@ -18,7 +18,7 @@ import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult, type PublisherPublishPlan, type PublisherPublishPlanRequest } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
 type ContextGraphRegistryScanPlan =
@@ -179,13 +179,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getAuthorizedPublisherAddress(contextGraphId: bigint): Promise<string> {
     await this.init();
     return (await this.nextAuthorizedSigner(contextGraphId)).address;
-  }
-
-  async resolvePublisherPublishPlan(
-    request: PublisherPublishPlanRequest,
-  ): Promise<PublisherPublishPlan> {
-    await this.init();
-    return this.resolveFundedPublisherPublishPlan(request);
   }
 
   // =====================================================================

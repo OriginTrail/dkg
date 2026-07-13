@@ -19,10 +19,13 @@ import type {
   ApprovalPolicy,
   V10PublishParams,
   OnChainPublishResult,
-  ConvictionReader,
   PublisherPublishPlan,
   PublisherPublishPlanRequest,
 } from './chain-adapter.js';
+import {
+  resolvePublisherCandidatePricing,
+  type PublisherConvictionPlanReader,
+} from './publisher-plan.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -2172,78 +2175,48 @@ export class EVMChainAdapterBase {
     return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
   }
 
+  /**
+   * Optional typed PCA planning capability. The conviction mixin overrides
+   * this hook; adapter assemblies without that mixin safely stay direct-spend.
+   */
+  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
+    return undefined;
+  }
+
   private async _publisherCandidatePlan(
     signer: Wallet,
     request: PublisherPublishPlanRequest,
     quote: (epochs: number) => Promise<bigint>,
   ): Promise<PublisherCandidatePlan> {
-    let publishEpochs = request.explicitPublishEpochs ?? request.defaultPublishEpochs;
-    let tokenAmount: bigint | undefined;
-
-    // An implicit lifetime is signer-dependent: only a PCA that can cover this
-    // candidate's exact lock-priced publish is allowed to select its lock.
-    if (
-      request.explicitPublishEpochs === undefined
-      && this.contracts.dkgPublishingConvictionNFT
-    ) {
-      const conviction = this as unknown as ConvictionReader;
-      try {
-        const accountId = await withTimeout(
-          conviction.getConvictionAgentAccountId(signer.address),
-          RPC_READ_STALL_TIMEOUT_MS,
-          'pca publish-plan account lookup',
-        );
-        if (accountId > 0n) {
-          const lockEpochs = await withTimeout(
-            conviction.getConvictionAccountLockDurationEpochs(accountId),
-            RPC_READ_STALL_TIMEOUT_MS,
-            'pca publish-plan lock lookup',
-          );
-          if (lockEpochs > 0) {
-            const quoted = await quote(lockEpochs);
-            const lockTokenAmount = quoted > BigInt(lockEpochs)
-              ? quoted
-              : BigInt(lockEpochs);
-            const covers = await withTimeout(
-              conviction.convictionAccountCanCover(accountId, lockTokenAmount),
-              RPC_READ_STALL_TIMEOUT_MS,
-              'pca publish-plan coverage probe',
-            );
-            if (covers) {
-              publishEpochs = lockEpochs;
-              tokenAmount = lockTokenAmount;
-            }
-          }
-        }
-      } catch (error) {
-        console.warn(
-          `[chain] PCA publish-plan probe failed for signer=${signer.address}; ` +
-          `using direct-spend lifetime=${publishEpochs}: ${errorMessage(error)}`,
-        );
-      }
+    const pricing = await resolvePublisherCandidatePricing({
+      publisherAddress: signer.address,
+      explicitPublishEpochs: request.explicitPublishEpochs,
+      defaultPublishEpochs: request.defaultPublishEpochs,
+      quote,
+      conviction: this.contracts.dkgPublishingConvictionNFT
+        ? this.publisherConvictionPlanReader()
+        : undefined,
+    });
+    if (pricing.pcaProbeError !== undefined) {
+      console.warn(
+        `[chain] PCA publish-plan probe failed for signer=${signer.address}; ` +
+        `using direct-spend lifetime=${pricing.publishEpochs}: ${errorMessage(pricing.pcaProbeError)}`,
+      );
     }
-
-    if (tokenAmount === undefined) {
-      try {
-        const quoted = await quote(publishEpochs);
-        tokenAmount = quoted > BigInt(publishEpochs)
-          ? quoted
-          : BigInt(publishEpochs);
-      } catch (error) {
-        tokenAmount = BigInt(publishEpochs);
-        console.warn(
-          `[chain] Publish-plan quote failed for byteSize=${request.effectiveByteSize}, ` +
-          `epochs=${publishEpochs}; using protocol minimum ${tokenAmount}: ${errorMessage(error)}`,
-        );
-      }
+    if (pricing.quoteError !== undefined) {
+      console.warn(
+        `[chain] Publish-plan quote failed for byteSize=${request.effectiveByteSize}, ` +
+        `epochs=${pricing.publishEpochs}; using protocol minimum ${pricing.tokenAmount}: ` +
+        `${errorMessage(pricing.quoteError)}`,
+      );
     }
 
     return {
       signer,
       address: signer.address,
       publisherAddress: signer.address,
-      publishEpochs,
-      tokenAmount,
+      publishEpochs: pricing.publishEpochs,
+      tokenAmount: pricing.tokenAmount,
     };
   }
 
@@ -2419,40 +2392,16 @@ export class EVMChainAdapterBase {
    * allowance rounds up to ≥1 wei but cannot cover a real publish can still pass;
    * that is an attacker-induced edge that degrades to a single retry, not a fund
    * loss. When the real cost is threaded (the createKnowledgeAssets paths) the
-   * probe prices the actual publish and rejects such squats.
+   * probe prices the actual publish and rejects such squats. The conviction
+   * mixin supplies the concrete typed implementation; this base fallback keeps
+   * adapter assemblies without that capability safely on own-TRAC funding.
    */
   protected async isConvictionFundedAgent(
-    address: string,
-    requiredCostWei: bigint,
-    publishEpochs?: number,
+    _address: string,
+    _requiredCostWei: bigint,
+    _publishEpochs?: number,
   ): Promise<boolean> {
-    if (!this.contracts.dkgPublishingConvictionNFT) return false;
-    // Typed against the shared ConvictionReader interface that ConvictionMethods
-    // `implements`, so a rename/signature change in the mixin is a compile error.
-    const conv = this as unknown as ConvictionReader;
-    try {
-      const accountId = await withTimeout(
-        conv.getConvictionAgentAccountId(address),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'pca agent account lookup',
-      );
-      if (accountId <= 0n) return false;
-      if (publishEpochs !== undefined) {
-        const lockEpochs = await withTimeout(
-          conv.getConvictionAccountLockDurationEpochs(accountId),
-          RPC_READ_STALL_TIMEOUT_MS,
-          'pca account lock-duration probe',
-        );
-        if (lockEpochs !== publishEpochs) return false;
-      }
-      return await withTimeout(
-        conv.convictionAccountCanCover(accountId, requiredCostWei > 0n ? requiredCostWei : 1n),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'pca account coverage probe',
-      );
-    } catch {
-      return false;
-    }
+    return false;
   }
 
   /**

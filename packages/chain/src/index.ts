@@ -1,4 +1,10 @@
 export * from './chain-adapter.js';
+export {
+  resolvePublisherCandidatePricing,
+  type PublisherCandidatePricing,
+  type PublisherCandidatePricingRequest,
+  type PublisherConvictionPlanReader,
+} from './publisher-plan.js';
 // RPC-usage accounting: ONLY the typed window contract is public API (consumed
 // by the ChainAdapter.drainRpcUsage capability, the agent boundary, and the
 // daemon's rpc_usage log emission). The parsing/label-bounding helpers stay
