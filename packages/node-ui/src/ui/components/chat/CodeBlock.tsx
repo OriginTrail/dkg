@@ -1,23 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
+import { normalizeShikiLanguage } from './shikiLanguages.js';
 
 type Highlighter = {
   codeToHtml: (code: string, opts: { lang: string; theme: string }) => string;
 };
-
-// Curated allow-list mirrored by the fine-grained lazy bundle in
-// shikiHighlighter.ts. Includes languages this monorepo actually uses in
-// fenced blocks:
-// Solidity contracts, Rust/Go adapters, SPARQL, TOML configs, diffs in
-// review threads, and Dockerfiles for deployment notes.
-const SUPPORTED_LANGS = [
-  'ts', 'tsx', 'js', 'jsx', 'py', 'sh', 'bash', 'json', 'yaml',
-  'sql', 'sparql', 'md', 'html', 'css',
-  'solidity', 'rust', 'go', 'toml', 'diff', 'dockerfile', 'xml',
-] as const;
-
-type SupportedLang = typeof SUPPORTED_LANGS[number];
 
 let highlighterPromise: Promise<Highlighter> | null = null;
 
@@ -33,32 +21,13 @@ function loadHighlighter(): Promise<Highlighter> {
   return highlighterPromise;
 }
 
-function normalizeLang(raw: string | undefined): SupportedLang | null {
-  if (!raw) return null;
-  const lang = raw.toLowerCase().trim();
-  if ((SUPPORTED_LANGS as readonly string[]).includes(lang)) return lang as SupportedLang;
-  // Aliases for languages users commonly tag with shorthand or alternate names.
-  if (lang === 'typescript') return 'ts';
-  if (lang === 'javascript') return 'js';
-  if (lang === 'python') return 'py';
-  if (lang === 'shell' || lang === 'zsh') return 'sh';
-  if (lang === 'yml') return 'yaml';
-  if (lang === 'markdown') return 'md';
-  if (lang === 'sol') return 'solidity';
-  if (lang === 'rs') return 'rust';
-  if (lang === 'golang') return 'go';
-  if (lang === 'patch') return 'diff';
-  if (lang === 'docker') return 'dockerfile';
-  return null;
-}
-
 interface CodeBlockProps {
   code: string;
   lang?: string;
 }
 
 export function CodeBlock({ code, lang }: CodeBlockProps) {
-  const normalizedLang = normalizeLang(lang);
+  const normalizedLang = normalizeShikiLanguage(lang);
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Read theme from the layout store (the same source that drives `body.light`

@@ -536,6 +536,8 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - name: "node-ui production build (896 MB heap budget)"
+        run: pnpm --filter @origintrail-official/dkg-node-ui run build:ui
       - name: "node-ui tests"
         run: pnpm --filter @origintrail-official/dkg-node-ui test
 
