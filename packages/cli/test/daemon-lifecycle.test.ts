@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -120,6 +121,19 @@ async function runSupervisor(tempHome: string, tsconfigPath: string): Promise<vo
   expect(code).toBe(0);
 }
 
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolveListen, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Failed to reserve TCP port');
+  const port = address.port;
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  return port;
+}
+
 describe('daemon lifecycle control-plane files', () => {
   let tempRoot: string | undefined;
 
@@ -174,4 +188,95 @@ describe('daemon lifecycle control-plane files', () => {
     expect(existsSync(join(defaultHome, 'api.port'))).toBe(false);
     expect(existsSync(join(defaultHome, 'daemon.pid'))).toBe(false);
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'reaps a SIGKILLed worker descendant and releases the managed-store port before respawn',
+    async () => {
+      tempRoot = await mkdtemp(join(tmpdir(), 'dkg-supervised-reap-'));
+      const selectedHome = join(tempRoot, '.dkg-dev');
+      const tsconfigPath = join(tempRoot, 'tsx-tsconfig.json');
+      const slotDir = join(selectedHome, 'releases', 'a');
+      const fakeWorker = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
+      const listenerScript = join(tempRoot, 'listener.cjs');
+      const stateFile = join(tempRoot, 'first-worker-started');
+      const listenerReady = join(tempRoot, 'listener-ready');
+      const replacementBound = join(tempRoot, 'replacement-bound');
+      const managedPort = await freePort();
+
+      await mkdir(dirname(fakeWorker), { recursive: true });
+      await mkdir(join(selectedHome, 'releases'), { recursive: true });
+      await writeWorkspaceTsconfig(tsconfigPath);
+      await writeFile(
+        join(selectedHome, 'config.json'),
+        JSON.stringify({
+          name: 'supervisor-reap-regression',
+          apiPort: 25002,
+          listenPort: 0,
+          nodeRole: 'core',
+          store: {
+            backend: 'oxigraph-server',
+            options: { port: managedPort },
+          },
+        }),
+      );
+      await symlink('a', join(selectedHome, 'releases', 'current'));
+      await writeFile(
+        listenerScript,
+        [
+          "const fs = require('node:fs');",
+          "const net = require('node:net');",
+          `const port = ${managedPort};`,
+          `const ready = ${JSON.stringify(listenerReady)};`,
+          "const server = net.createServer(() => {});",
+          "server.listen(port, '127.0.0.1', () => fs.writeFileSync(ready, String(process.pid)));",
+          'setInterval(() => {}, 1000);',
+          '',
+        ].join('\n'),
+      );
+      await writeFile(
+        fakeWorker,
+        [
+          '#!/usr/bin/env node',
+          "const fs = require('node:fs');",
+          "const net = require('node:net');",
+          "const { spawn } = require('node:child_process');",
+          `const state = ${JSON.stringify(stateFile)};`,
+          `const ready = ${JSON.stringify(listenerReady)};`,
+          `const success = ${JSON.stringify(replacementBound)};`,
+          `const listener = ${JSON.stringify(listenerScript)};`,
+          `const port = ${managedPort};`,
+          "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
+          'if (!fs.existsSync(state)) {',
+          "  fs.writeFileSync(state, '1');",
+          "  spawn(process.execPath, [listener], { stdio: 'ignore' });",
+          '  const deadline = Date.now() + 5000;',
+          '  const timer = setInterval(() => {',
+          '    if (fs.existsSync(ready)) {',
+          '      clearInterval(timer);',
+          "      process.kill(process.pid, 'SIGKILL');",
+          '    } else if (Date.now() >= deadline) {',
+          '      clearInterval(timer);',
+          '      process.exit(3);',
+          '    }',
+          '  }, 10);',
+          '} else {',
+          "  const server = net.createServer(() => {});",
+          "  server.once('error', () => process.exit(4));",
+          "  server.listen(port, '127.0.0.1', () => {",
+          "    fs.writeFileSync(success, 'bound');",
+          '    server.close(() => process.exit(0));',
+          '  });',
+          '}',
+          '',
+        ].join('\n'),
+      );
+      await chmod(fakeWorker, 0o755);
+
+      await runSupervisor(tempRoot, tsconfigPath);
+
+      expect(readFileSync(replacementBound, 'utf8')).toBe('bound');
+      const orphanPid = Number(readFileSync(listenerReady, 'utf8'));
+      expect(() => process.kill(orphanPid, 0)).toThrow();
+    },
+  );
 });
