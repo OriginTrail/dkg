@@ -9,7 +9,11 @@ import {
   type ProtocolRouter,
   type StreamHandler,
 } from '@origintrail-official/dkg-core';
-import { Messenger, MessengerNotConfiguredError } from '../src/p2p/messenger.js';
+import {
+  DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+  Messenger,
+  MessengerNotConfiguredError,
+} from '../src/p2p/messenger.js';
 
 /**
  * Hand-rolled call recorder: records every call's args on `.calls`
@@ -384,7 +388,7 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
     // Backoff is 10ms (configured in makeSubstrate); advance the
     // injected clock and let router.send succeed this time.
     shouldFail = false;
-    const due = outboxStore.due(clock() + 100);
+    const due = outboxStore.duePage(clock() + 100);
     expect(due).toHaveLength(1);
 
     await messenger.processOutboxTick(clock() + 100);
@@ -451,6 +455,26 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
 
     expect(router.send.calls).toHaveLength(3);
     expect(outboxStore.size()).toBe(2);
+  });
+
+  it('caps a production-default tick at the default batch size', async () => {
+    const router = makeRouter(async () => new Uint8Array([0x42]));
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    const queued = DEFAULT_OUTBOX_DRAIN_BATCH_SIZE + 25;
+    for (let i = 0; i < queued; i += 1) {
+      outboxStore.enqueue(PEER_A, PROTO, `default-batch-${i}`, new Uint8Array([i]), 'offline', 0);
+    }
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+      backoffs: [10],
+    });
+
+    await messenger.processOutboxTick(100);
+
+    expect(router.send.calls).toHaveLength(DEFAULT_OUTBOX_DRAIN_BATCH_SIZE);
+    expect(outboxStore.size()).toBe(25);
   });
 
   it('moves terminal failures behind later due rows instead of starving the next page', async () => {

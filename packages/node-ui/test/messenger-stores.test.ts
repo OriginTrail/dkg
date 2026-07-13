@@ -184,7 +184,7 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(Array.from(pending[0].payload)).toEqual([1, 2, 3]);
 
     pending[0].payload[2] = 7;
-    expect(Array.from(store.due(6000)[0].payload)).toEqual([1, 2, 3]);
+    expect(Array.from(store.duePage(6000)[0].payload)).toEqual([1, 2, 3]);
   });
 
   it('enqueue bumps attempts and reschedules on repeat failure for the same key', () => {
@@ -220,16 +220,16 @@ describe('SqliteProtocolOutboxStore', () => {
   it('due returns entries with nextAttemptAt <= now', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000_000);
-    expect(store.due(1_004_999)).toHaveLength(0);
-    expect(store.due(1_005_000)).toHaveLength(1);
+    expect(store.duePage(1_004_999)).toHaveLength(0);
+    expect(store.duePage(1_005_000)).toHaveLength(1);
   });
 
   it('due applies a stable database-level batch limit', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
     store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2_000);
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
-    expect(store.due(10_000, 1).map((entry) => entry.messageId)).toEqual([MSG_1]);
-    expect(store.due(10_000, 0)).toEqual([]);
+    expect(store.duePage(10_000, 1).map((entry) => entry.messageId)).toEqual([MSG_1]);
+    expect(store.duePage(10_000, 0)).toEqual([]);
   });
 
   it('due deterministically breaks exact timestamp ties by peer/protocol/message id', () => {
@@ -238,7 +238,7 @@ describe('SqliteProtocolOutboxStore', () => {
     store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 1_000);
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
 
-    expect(store.due(6_000, 3).map((entry) => [entry.peer, entry.messageId])).toEqual([
+    expect(store.duePage(6_000, 3).map((entry) => [entry.peer, entry.messageId])).toEqual([
       [PEER_B, MSG_2],
       [PEER_A, MSG_1],
       [PEER_A, MSG_2],

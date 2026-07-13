@@ -209,15 +209,16 @@ export interface ProtocolOutboxStore {
   hasPendingFor(peer: string): boolean;
 
   /**
-   * Efficient storage primitive for entries whose `nextAttemptAt <= now`.
-   * When supplied, `limit` has already been normalized to a non-negative
-   * integer by `ProtocolOutbox.duePage`. Implementations should apply it after
-   * ordering by `nextAttemptAt`, `firstFailureAt`, then
-   * `(peer, protocol, messageId)` ascending. The wrapper defensively reorders
-   * and caps the result so older stores that ignore this optional parameter
-   * remain safe.
+   * Canonical ordered due-page storage boundary.
+   *
+   * `ProtocolOutbox` normalizes the optional limit before delegation. The
+   * store owns both stable retry ordering and applying that bound, so an
+   * implementation can select the correct page efficiently (for example with
+   * one ordered SQL query) without duplicating policy in the wrapper. The
+   * canonical order is `nextAttemptAt`, `firstFailureAt`, then
+   * `(peer, protocol, messageId)`, all ascending.
    */
-  due(now: number, limit?: number): ProtocolOutboxEntry[];
+  duePage(now: number, limit?: number): ProtocolOutboxEntry[];
 
   /**
    * Drop entries whose `firstFailureAt` is older than the

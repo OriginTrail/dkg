@@ -198,22 +198,12 @@ export class ProtocolOutbox {
     return this.duePage(now);
   }
 
-  /**
-   * Canonical bounded due-page boundary. The wrapper owns input normalization,
-   * deterministic ordering, and the defensive cap; stores only optimize the
-   * already-normalized query when they support it.
-   */
+  /** Normalize caller input, then delegate ordered page selection to storage. */
   duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
     const normalizedLimit = limit === undefined || !Number.isFinite(limit)
       ? undefined
       : Math.max(0, Math.floor(limit));
-    const entries = this.store.due(now, normalizedLimit)
-      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt
-        || a.firstFailureAt - b.firstFailureAt
-        || a.peer.localeCompare(b.peer)
-        || a.protocol.localeCompare(b.protocol)
-        || a.messageId.localeCompare(b.messageId));
-    return normalizedLimit === undefined ? entries : entries.slice(0, normalizedLimit);
+    return this.store.duePage(now, normalizedLimit);
   }
 
   hasPendingFor(peer: string): boolean {
@@ -336,7 +326,7 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     return Array.from(this.entries.values()).some((entry) => entry.peer === peer);
   }
 
-  due(now: number, limit?: number): ProtocolOutboxEntry[] {
+  duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
     const entries = Array.from(this.entries.values())
       .filter((e) => e.nextAttemptAt <= now)
       .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt

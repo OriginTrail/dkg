@@ -2778,7 +2778,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     return this.db.prepare('SELECT 1 FROM protocol_outbox WHERE peer_id = ? LIMIT 1').get(peer) !== undefined;
   }
 
-  due(now: number, limit?: number): ProtocolOutboxEntry[] {
+  duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
     const boundedLimit = limit ?? -1;
     const rows = this.db
       .prepare(
