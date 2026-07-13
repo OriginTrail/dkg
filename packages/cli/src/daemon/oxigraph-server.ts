@@ -50,6 +50,8 @@ import {
 } from './oxigraph-memory.js';
 
 export interface OxigraphServerIo {
+  /** Internal launch-policy seam for platform/packaging tests. */
+  createLaunchStrategy: typeof createOxigraphLaunchStrategy;
   spawn: typeof spawn;
   fetch: typeof globalThis.fetch;
   /**
@@ -94,11 +96,6 @@ export interface StartOxigraphServerOptions {
   memoryLimits?: OxigraphMemoryLimits;
   /** Runtime platform. Injectable so command construction is portable in tests. */
   platform?: NodeJS.Platform;
-  /** Parent identity override for cross-platform systemd command tests. */
-  parentIdentity?: string;
-  /** Watchdog executable overrides used by packaging and subprocess tests. */
-  watchdogPath?: string;
-  nodeExecutable?: string;
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -142,24 +139,22 @@ function normalizePositiveInteger(value: number | undefined): number | undefined
 export async function startOxigraphServer(
   opts: StartOxigraphServerOptions,
 ): Promise<OxigraphServerHandle> {
-  const launchStrategy = createOxigraphLaunchStrategy({
-    memoryLimits: opts.memoryLimits,
-    platform: opts.platform ?? process.platform,
-    parentPid: process.pid,
-    uid: typeof process.getuid === 'function' ? process.getuid() : -1,
-    parentIdentity: opts.parentIdentity,
-    watchdogPath: opts.watchdogPath,
-    nodeExecutable: opts.nodeExecutable,
-    stopGraceMs: opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS,
-  });
   const ioOverrides = opts.io ?? {};
   const io: OxigraphServerIo = {
+    createLaunchStrategy: ioOverrides.createLaunchStrategy ?? createOxigraphLaunchStrategy,
     spawn: ioOverrides.spawn ?? spawn,
     fetch: ioOverrides.fetch ?? globalThis.fetch,
     findListenOwnerPid: ioOverrides.findListenOwnerPid ?? findListenOwnerPid,
     readCgroupOomSnapshot: ioOverrides.readCgroupOomSnapshot ?? readCgroupOomSnapshot,
     readCgroupOomKill: ioOverrides.readCgroupOomKill ?? readCgroupOomKill,
   };
+  const launchStrategy = io.createLaunchStrategy({
+    memoryLimits: opts.memoryLimits,
+    platform: opts.platform ?? process.platform,
+    parentPid: process.pid,
+    uid: typeof process.getuid === 'function' ? process.getuid() : -1,
+    stopGraceMs: opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS,
+  });
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
   };
@@ -345,7 +340,7 @@ export async function startOxigraphServer(
     // `oxigraph serve`, and they fight over the port (self-inflicted
     // EADDRINUSE). Its exit handler won't restart (ready is false).
     if (childAlive()) {
-      launchStrategy.forceStop(child!);
+      launchStrategy.shutdown(child!, 'force');
     }
     scheduleRevive(`respawned server did not become ready on ${bind}`);
   };
@@ -358,8 +353,8 @@ export async function startOxigraphServer(
     stopping = true;
     markStoreDown();
     try {
-      if (childAlive() && !launchStrategy.requestStop(child!)) {
-        launchStrategy.forceStop(child!);
+      if (childAlive() && !launchStrategy.shutdown(child!, 'graceful')) {
+        launchStrategy.shutdown(child!, 'force');
       }
     } catch {
       /* best-effort */
@@ -382,16 +377,16 @@ export async function startOxigraphServer(
         resolve();
       };
       c.once('exit', done);
-      if (!launchStrategy.requestStop(c)) {
+      if (!launchStrategy.shutdown(c, 'graceful')) {
         log('[oxigraph] graceful stop channel unavailable; forcing owned process cleanup');
-        launchStrategy.forceStop(c);
+        launchStrategy.shutdown(c, 'force');
       }
       const killTimer = setTimeout(() => {
         if (c.exitCode === null && c.signalCode === null) {
           log('[oxigraph] did not exit within the graceful window; forcing owned process cleanup');
-          launchStrategy.forceStop(c);
+          launchStrategy.shutdown(c, 'force');
         }
-      }, stopGraceMs + (launchStrategy.mode === 'parent-watchdog' ? 250 : 0));
+      }, launchStrategy.shutdownTimeoutMs(stopGraceMs));
       killTimer.unref?.();
     });
     log('[oxigraph] server stopped');

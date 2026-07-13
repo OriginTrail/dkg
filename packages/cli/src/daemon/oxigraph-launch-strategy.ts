@@ -42,10 +42,10 @@ export interface OxigraphLaunchStrategy {
     snapshot?: CgroupOomSnapshot;
     readOomKill: (dir: string) => number | null;
   }): boolean;
-  /** Ask the owned wrapper/server to stop without orphaning descendants. */
-  requestStop(child: ChildProcess): boolean;
-  /** Last-resort bounded cleanup after the graceful window expires. */
-  forceStop(child: ChildProcess): boolean;
+  /** Strategy-owned graceful or forced shutdown for the full owned process tree. */
+  shutdown(child: ChildProcess, phase: 'graceful' | 'force'): boolean;
+  /** Total outer wait before forced cleanup, including wrapper forwarding time. */
+  shutdownTimeoutMs(configuredGraceMs: number): number;
   logSummary(): string | null;
 }
 
@@ -57,14 +57,14 @@ function signalChild(child: ChildProcess, signal: NodeJS.Signals): boolean {
   }
 }
 
-function closeParentPipe(child: ChildProcess): boolean {
-  const pipe = child.stdio?.[3] as
-    | (NodeJS.WritableStream & { writableEnded?: boolean })
-    | null
-    | undefined;
-  if (!pipe || typeof pipe.end !== 'function') return false;
-  if (!pipe.writableEnded) pipe.end();
-  return true;
+function disconnectParentIpc(child: ChildProcess): boolean {
+  if (!child.connected || typeof child.disconnect !== 'function') return false;
+  try {
+    child.disconnect();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function forceKillWindowsProcessTree(pid: number): boolean {
@@ -128,28 +128,26 @@ export function createOxigraphLaunchStrategy(opts: {
           command: nodeExecutable,
           args: [
             watchdogPath,
-            'pipe',
+            'ipc',
             String(opts.parentPid),
-            // fd 3 is an inherited parent-owned pipe. EOF is authoritative
-            // worker death and is immune to PID reuse.
-            '3',
             binaryPath,
             ...binaryArgs,
           ],
           environment: {
             DKG_OXIGRAPH_WATCHDOG_STOP_GRACE_MS: String(opts.stopGraceMs ?? 5_000),
           },
-          stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
         }),
         resolveListenerPid: (child, port, host, resolver) =>
           resolver(child, port, host, 'process-tree'),
         observeStderr: () => {},
         classifyOomExit: cgroupEvidenceIncremented,
-        requestStop: closeParentPipe,
-        forceStop: (child) =>
-          forceKillWindowsProcessTree(child.pid ?? -1) || signalChild(child, 'SIGKILL'),
+        shutdown: (child, phase) => phase === 'graceful'
+          ? disconnectParentIpc(child)
+          : forceKillWindowsProcessTree(child.pid ?? -1) || signalChild(child, 'SIGKILL'),
+        shutdownTimeoutMs: (configuredGraceMs) => configuredGraceMs + 250,
         logSummary: () =>
-          'Starting Oxigraph behind a parent-pipe watchdog (Windows kill-on-parent-exit fallback).',
+          'Starting Oxigraph behind an IPC parent watchdog (Windows kill-on-parent-exit fallback).',
       };
     }
     return {
@@ -158,8 +156,8 @@ export function createOxigraphLaunchStrategy(opts: {
       resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'child-only'),
       observeStderr: () => {},
       classifyOomExit: cgroupEvidenceIncremented,
-      requestStop: (child) => signalChild(child, 'SIGTERM'),
-      forceStop: (child) => signalChild(child, 'SIGKILL'),
+      shutdown: (child, phase) => signalChild(child, phase === 'graceful' ? 'SIGTERM' : 'SIGKILL'),
+      shutdownTimeoutMs: (configuredGraceMs) => configuredGraceMs,
       logSummary: () => null,
     };
   }
@@ -213,8 +211,8 @@ export function createOxigraphLaunchStrategy(opts: {
     classifyOomExit(input) {
       return watchdogOomChildren.has(input.child) || cgroupEvidenceIncremented(input);
     },
-    requestStop: (child) => signalChild(child, 'SIGTERM'),
-    forceStop: (child) => signalChild(child, 'SIGKILL'),
+    shutdown: (child, phase) => signalChild(child, phase === 'graceful' ? 'SIGTERM' : 'SIGKILL'),
+    shutdownTimeoutMs: (configuredGraceMs) => configuredGraceMs,
     logSummary: () =>
       `Starting Oxigraph in an isolated systemd user scope ` +
       `(MemoryHigh=${limits.highMiB ?? 'unset'}MiB, MemoryMax=${limits.maxMiB}MiB).`,
