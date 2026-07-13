@@ -187,6 +187,7 @@ mcpCmd
     try {
       await mcpSetupAction(opts, {
         loadNetworkConfig: openclawSetupExports.loadNetworkConfig,
+        networkConfigNames: coreExports.SELECTABLE_SETUP_NETWORKS,
         ensureDkgNodeConfig: coreExports.ensureDkgNodeConfig,
         startDaemon: openclawSetupExports.startDaemon,
         // Lazy + best-effort (parity with openclaw/hermes): dkg-agent is

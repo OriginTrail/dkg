@@ -177,6 +177,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const ensureDkgNodeConfig = recorder((opts: {
       agentName: string;
       network: any;
+      networkConfigName: string;
       apiPort: number;
       existing: Record<string, any>;
       overrides?: { nameExplicit?: boolean; portExplicit?: boolean };
@@ -191,6 +192,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         ...opts.existing,
         name: opts.overrides?.nameExplicit ? opts.agentName : (opts.existing?.name ?? opts.agentName),
         apiPort: opts.overrides?.portExplicit ? opts.apiPort : (opts.existing?.apiPort ?? opts.apiPort),
+        networkConfig: opts.networkConfigName,
         nodeRole: opts.existing?.nodeRole ?? 'edge',
       };
       writeFileSync(
@@ -198,12 +200,20 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         JSON.stringify(merged, null, 2),
       );
     });
-    const loadNetworkConfig = recorder(() => ({
-      networkName: 'test-net',
+    const loadNetworkConfig = recorder((networkName = 'testnet') => ({
+      networkName,
       relays: [],
       defaultContextGraphs: ['agent-context'],
       defaultNodeRole: 'edge',
       faucet: { url: 'http://faucet.test', mode: 'testnet' },
+      chain: {
+        chainId: ({
+          testnet: 'base:84532',
+          'mainnet-base': 'base:8453',
+          'mainnet-gnosis': 'gnosis:100',
+          'mainnet-neuroweb': 'neuroweb:2043',
+        } as Record<string, string>)[networkName],
+      },
     }) as any);
     // Eager wallet creation (issue #1306). Idempotent generate-if-absent;
     // mcpSetupAction ignores the return value (the faucet re-reads from disk),
@@ -249,6 +259,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     );
     return {
       loadNetworkConfig,
+      networkConfigNames: ['testnet', 'mainnet-base', 'mainnet-gnosis', 'mainnet-neuroweb'],
       ensureDkgNodeConfig,
       startDaemon,
       loadOpWallets,
@@ -377,8 +388,61 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const deps = makeDeps();
     await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);
 
-    expect((deps.loadNetworkConfig as any).calls[0][0]).toBe('mainnet-gnosis');
+    expect((deps.loadNetworkConfig as any).calls.map((call: any[]) => call[0])).toContain('mainnet-gnosis');
     expect((deps.ensureDkgNodeConfig as any).calls).toHaveLength(1);
+    const writeArgs = (deps.ensureDkgNodeConfig as any).calls[0][0];
+    expect(writeArgs.networkConfigName).toBe('mainnet-gnosis');
+    const rewritten = JSON.parse(readFileSync(join(dkgDir, 'config.json'), 'utf-8'));
+    expect(rewritten).toMatchObject({
+      networkConfig: 'mainnet-gnosis',
+      chain: {
+        chainId: 'gnosis:100',
+        rpcUrl: 'https://operator-rpc.invalid',
+        hubAddress: '0x0000000000000000000000000000000000000042',
+      },
+    });
+  });
+
+  it('infers a legacy chain exclusively through injected network metadata', async () => {
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(join(dkgDir, 'config.json'), JSON.stringify({
+      name: 'fixture-legacy',
+      apiPort: 9200,
+      chain: {
+        type: 'evm',
+        chainId: 'fixture:42',
+        rpcUrl: 'https://fixture-rpc.invalid',
+        hubAddress: '0x0000000000000000000000000000000000000042',
+      },
+    }, null, 2));
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const injectedLoader = recorder((name: string) => {
+      if (name !== 'fixture-mainnet') throw new Error(`unexpected network ${name}`);
+      return {
+        networkName: 'Fixture Mainnet',
+        relays: [],
+        defaultContextGraphs: [],
+        defaultNodeRole: 'edge',
+        chain: { chainId: 'fixture:42' },
+      } as any;
+    });
+    const deps = makeDeps({
+      loadNetworkConfig: injectedLoader as any,
+      networkConfigNames: ['fixture-mainnet'],
+    });
+
+    await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);
+
+    const writeArgs = (deps.ensureDkgNodeConfig as any).calls[0][0];
+    expect(writeArgs.networkConfigName).toBe('fixture-mainnet');
+    expect(JSON.parse(readFileSync(join(dkgDir, 'config.json'), 'utf-8'))).toMatchObject({
+      networkConfig: 'fixture-mainnet',
+      chain: {
+        chainId: 'fixture:42',
+        rpcUrl: 'https://fixture-rpc.invalid',
+      },
+    });
   });
 
   it('funds wallets via the shared fundWalletsBestEffort orchestrator (network, seed, didStartDaemon)', async () => {

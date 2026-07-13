@@ -75,7 +75,6 @@ import TOML from '@iarna/toml';
 import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
 import {
   assertSelectableNetwork,
-  resolveKnownNetworkConfigName,
   type DkgConfig,
 } from './config.js';
 
@@ -158,6 +157,8 @@ export interface PlannedItem {
  */
 export interface McpSetupActionDeps {
   loadNetworkConfig: typeof import('@origintrail-official/dkg-adapter-openclaw').loadNetworkConfig;
+  /** Candidate names resolved through the same injected loader above. */
+  networkConfigNames: readonly string[];
   /**
    * Codex Round-23 Fix 30: agent-agnostic config-write helper from
    * `dkg-core`. Pre-fix this dep was `adapter-openclaw`'s
@@ -220,6 +221,33 @@ export interface McpSetupActionDeps {
     planned: readonly PlannedItem[],
     opts: { yes: boolean },
   ) => Promise<PlannedItem[]>;
+}
+
+function resolveKnownNetworkConfigNameFromLoader(
+  config: Pick<DkgConfig, 'networkConfig' | 'chain'> | undefined,
+  networkConfigNames: readonly string[],
+  loadNetworkConfig: (
+    name: string,
+  ) => ReturnType<McpSetupActionDeps['loadNetworkConfig']>,
+): string | undefined {
+  const explicit = config?.networkConfig?.trim();
+  if (explicit) return explicit;
+
+  const chainId = config?.chain?.chainId?.trim().toLowerCase();
+  if (!chainId) return undefined;
+
+  let matchedName: string | undefined;
+  for (const name of networkConfigNames) {
+    try {
+      const network = loadNetworkConfig(name);
+      if (network.chain?.chainId?.trim().toLowerCase() !== chainId) continue;
+      if (matchedName && matchedName !== name) return undefined;
+      matchedName = name;
+    } catch {
+      // One unavailable candidate must not prevent inference from the rest.
+    }
+  }
+  return matchedName;
 }
 
 /**
@@ -1796,10 +1824,24 @@ export async function mcpSetupAction(
   // and reuse it for both the config write and the faucet gate, so the
   // persisted selector, the loaded network slice, and the faucet decision
   // (mainnet has no faucet) all agree.
+  type LoadedNetworkConfig = ReturnType<McpSetupActionDeps['loadNetworkConfig']>;
+  const loadedNetworks = new Map<string, LoadedNetworkConfig>();
+  const loadSetupNetworkConfig = (name: string): LoadedNetworkConfig => {
+    const cached = loadedNetworks.get(name);
+    if (cached !== undefined) return cached;
+    const network = deps.loadNetworkConfig(name);
+    loadedNetworks.set(name, network);
+    return network;
+  };
+
   const persistedNodeConfig = readPersistedConfig(dkgDirPath) as
     | Pick<DkgConfig, 'networkConfig' | 'chain'>
     | undefined;
-  const existingNetworkConfig = resolveKnownNetworkConfigName(persistedNodeConfig);
+  const existingNetworkConfig = resolveKnownNetworkConfigNameFromLoader(
+    persistedNodeConfig,
+    deps.networkConfigNames,
+    loadSetupNetworkConfig,
+  );
   // `--network` is honored only for a FRESH node (existing nodes keep their
   // current network; switch via `dkg init --network`). Dropping it on an
   // existing node keeps the faucet decision aligned with the booted network
@@ -1878,7 +1920,7 @@ export async function mcpSetupAction(
     console.log(`[setup] [dry-run] Would write ${tildify(jsonPath)} (port ${effectivePort}, name "${effectiveAgentName}")`);
   } else {
     try {
-      const network = deps.loadNetworkConfig(setupNetworkConfigName);
+      const network = loadSetupNetworkConfig(setupNetworkConfigName);
       // Codex Round-23 Fix 30: call the agent-agnostic
       // ensureDkgNodeConfig directly. The caller-loads-existing
       // contract means we pre-read the persisted config (yaml or
@@ -1959,7 +2001,7 @@ export async function mcpSetupAction(
     console.log('[setup] [dry-run] Would attempt wallet funding');
   } else {
     try {
-      const network = deps.loadNetworkConfig(setupNetworkConfigName);
+      const network = loadSetupNetworkConfig(setupNetworkConfigName);
       await deps.fundWalletsBestEffort({
         network,
         idempotencySeed: effectiveAgentName,
