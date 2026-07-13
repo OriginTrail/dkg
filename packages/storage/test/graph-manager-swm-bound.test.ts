@@ -264,7 +264,7 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
       expect(canonicalNamedLifecycleSharedMemoryGraphUri(swm, scope.identity)).toBe(
         `${swm}/${AUTHOR_A}/7`,
       );
-      expect(await resolveSharedMemoryScopeWriteGraph(store, swm, scope)).toBe(
+      expect(resolveSharedMemoryScopeWriteGraph(swm, scope)).toBe(
         `${swm}/${AUTHOR_A}/7`,
       );
     } finally {
@@ -297,7 +297,7 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
       );
 
       expect(quads.map((quad) => quad.object).sort()).toEqual(['"mixed"', '"upper"']);
-      expect(await resolveSharedMemoryScopeWriteGraph(store, swm, scope)).toBe(canonical);
+      expect(resolveSharedMemoryScopeWriteGraph(swm, scope)).toBe(canonical);
     } finally {
       await store.close();
     }

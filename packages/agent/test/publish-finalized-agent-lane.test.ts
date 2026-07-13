@@ -90,15 +90,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     }> = [];
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
     const remainingClearCalls: any[][] = [];
-    const loadCalls: Array<{
-      contextGraphId: string;
-      selection: any;
-      subGraphName?: string;
-      scope?: { kind: 'complete-family' } | {
-        kind: 'named-lifecycle';
-        identity: { agentAddress: string; kaNumber: bigint };
-      };
-    }> = [];
+    const ensureCalls: any[] = [];
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -119,25 +111,21 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         markerCalls.push({ contextGraphId, name, agentAddress, subGraphName });
         return agentAddress === AGENT_B;
       },
+      ensureFinalizedLifecycleSwmRoots: async (descriptor: any) => {
+        ensureCalls.push(descriptor);
+        return {
+          quads: [{
+            subject: ROOT,
+            predicate: 'http://schema.org/name',
+            object: '"B lane"',
+            graph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
+          }],
+          migratedLegacyQuadCount: 0,
+          targetGraph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
+        };
+      },
       clearSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async (...args: any[]) => { remainingClearCalls.push(args); },
-    };
-    agent._loadSelectedSWMQuads = async (
-      contextGraphId: string,
-      selection: any,
-      subGraphName?: string,
-      scope?: { kind: 'complete-family' } | {
-        kind: 'named-lifecycle';
-        identity: { agentAddress: string; kaNumber: bigint };
-      },
-    ) => {
-      loadCalls.push({ contextGraphId, selection, subGraphName, scope });
-      return [{
-        subject: ROOT,
-        predicate: 'http://schema.org/name',
-        object: '"B lane"',
-        graph: '',
-      }];
     };
     agent.publishFromSharedMemory = async (contextGraphId: string, selection: any, opts: any) => {
       publishCalls.push({ contextGraphId, selection, opts });
@@ -165,22 +153,15 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       agentAddress: AGENT_B,
       subGraphName: undefined,
     }]);
-    expect(loadCalls).toEqual([{
-      contextGraphId: CG,
-      selection: { rootEntities: [ROOT] },
-      subGraphName: undefined,
-      scope: {
-        kind: 'named-lifecycle',
-        identity: { agentAddress: AGENT_B, kaNumber: 1n },
+    expect(ensureCalls).toEqual([{
+      lifecycle: {
+        contextGraphId: CG,
+        assertionName: NAME,
+        assertionLifecycleAgentAddress: AGENT_B,
+        subGraphName: undefined,
       },
-    }, {
-      contextGraphId: CG,
-      selection: { rootEntities: [ROOT] },
-      subGraphName: undefined,
-      scope: {
-        kind: 'named-lifecycle',
-        identity: { agentAddress: AGENT_B, kaNumber: 1n },
-      },
+      sealAuthorScope: { agentAddress: AGENT_B, kaNumber: 1n },
+      rootEntities: [ROOT],
     }]);
     expect(publishCalls).toHaveLength(1);
     expect(publishCalls[0]).toMatchObject({
@@ -235,8 +216,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       legacyQuad,
     ]);
 
-    const migrationCalls: any[][] = [];
-    const loadCounts: number[] = [];
+    const ensureCalls: any[] = [];
     const publishCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -246,19 +226,17 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.log = makeLog();
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      migrateLegacyBucketRootsToNamedLifecycle: async (...args: any[]) => {
-        migrationCalls.push(args);
+      ensureFinalizedLifecycleSwmRoots: async (descriptor: any) => {
+        ensureCalls.push(descriptor);
         await store.insert([{ ...legacyQuad, graph: namedGraph }]);
         await store.deleteByPattern({ graph: swmGraph, subject: ROOT });
-        return 1;
+        return {
+          quads: [{ ...legacyQuad, graph: namedGraph }],
+          migratedLegacyQuadCount: 1,
+          targetGraph: namedGraph,
+        };
       },
       clearSwmShareComplete: async () => {},
-    };
-    const realLoad = agent._loadSelectedSWMQuads.bind(agent);
-    agent._loadSelectedSWMQuads = async (...args: any[]) => {
-      const quads = await realLoad(...args);
-      loadCounts.push(quads.length);
-      return quads;
     };
     agent.publishFromSharedMemory = async (...args: any[]) => {
       publishCalls.push(args);
@@ -275,19 +253,16 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
 
     expect(result.status).toBe('confirmed');
-    expect(loadCounts).toEqual([0, 1]);
-    expect(migrationCalls).toHaveLength(1);
-    expect(migrationCalls[0].slice(0, 6)).toEqual([
-      CG,
-      NAME,
-      AGENT_B,
-      [ROOT],
-      undefined,
-      {
-        kind: 'named-lifecycle',
-        identity: { agentAddress: AGENT_B, kaNumber: 1n },
+    expect(ensureCalls).toEqual([{
+      lifecycle: {
+        contextGraphId: CG,
+        assertionName: NAME,
+        assertionLifecycleAgentAddress: AGENT_B,
+        subGraphName: undefined,
       },
-    ]);
+      sealAuthorScope: { agentAddress: AGENT_B, kaNumber: 1n },
+      rootEntities: [ROOT],
+    }]);
     expect(publishCalls).toHaveLength(1);
     expect(publishCalls[0][1]).toEqual({ rootEntities: [ROOT] });
     expect(publishCalls[0][2].sharedMemoryScope).toEqual({
@@ -305,6 +280,14 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
     const metaGraph = contextGraphMetaUri(CG);
     const lifecycleUri = assertionLifecycleUri(CG, AGENT_B, NAME);
+    const swmGraph = contextGraphSharedMemoryUri(CG);
+    const namedGraph = `${swmGraph}/${AGENT_B}/1`;
+    const legacyQuad: Quad = {
+      subject: ROOT,
+      predicate: 'http://schema.org/name',
+      object: '"updated"',
+      graph: swmGraph,
+    };
     await store.insert([
       ...buildAssertionSealQuads({
         assertionUri,
@@ -322,10 +305,12 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       }) as Quad[],
       { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, object: '"prior"', graph: metaGraph },
       { subject: lifecycleUri, predicate: KA_ID_PRED, object: '"1"', graph: metaGraph },
+      legacyQuad,
     ]);
 
     const cleanupCalls: any[][] = [];
-    const loadCalls: any[][] = [];
+    const ensureCalls: any[] = [];
+    const updateCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
     agent.chain = {};
@@ -334,17 +319,19 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.log = makeLog();
     agent.publisher = {
       hasSwmShareComplete: async () => true,
+      ensureFinalizedLifecycleSwmRoots: async (descriptor: any) => {
+        ensureCalls.push(descriptor);
+        const canonicalQuad = { ...legacyQuad, graph: namedGraph };
+        await store.insert([canonicalQuad]);
+        await store.delete([legacyQuad]);
+        return {
+          quads: [canonicalQuad],
+          migratedLegacyQuadCount: 1,
+          targetGraph: namedGraph,
+        };
+      },
       clearSwmShareComplete: async () => {},
       clearPublishedSwmRoots: async (...args: any[]) => { cleanupCalls.push(args); },
-    };
-    agent._loadSelectedSWMQuads = async (...args: any[]) => {
-      loadCalls.push(args);
-      return [{
-        subject: ROOT,
-        predicate: 'http://schema.org/name',
-        object: '"updated"',
-        graph: '',
-      }];
     };
     agent._buildPrecomputedUpdateAttestationForSeal = async () => ({
       expectedNewMerkleRoot: MERKLE,
@@ -352,32 +339,49 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
       schemeVersion: 1,
     });
-    agent.update = async () => ({
-      kaId: RESERVED_KA_ID,
-      ual: 'did:dkg:test/update/1',
-      merkleRoot: MERKLE,
-      kaManifest: [],
-      status: 'confirmed',
-      publicQuads: [],
-    });
+    agent.update = async (...args: any[]) => {
+      updateCalls.push(args);
+      return {
+        kaId: RESERVED_KA_ID,
+        ual: 'did:dkg:test/update/1',
+        merkleRoot: MERKLE,
+        kaManifest: [],
+        status: 'confirmed',
+        publicQuads: [],
+      };
+    };
 
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
 
     expect(result.status).toBe('confirmed');
-    expect(loadCalls).toHaveLength(2);
-    for (const loadCall of loadCalls) {
-      expect(loadCall.slice(0, 3)).toEqual([CG, { rootEntities: [ROOT] }, undefined]);
-      expect(loadCall[3]).toEqual({
-        kind: 'named-lifecycle',
-        identity: { agentAddress: AGENT_B, kaNumber: 1n },
-      });
-    }
+    expect(ensureCalls).toEqual([{
+      lifecycle: {
+        contextGraphId: CG,
+        assertionName: NAME,
+        assertionLifecycleAgentAddress: AGENT_B,
+        subGraphName: undefined,
+      },
+      sealAuthorScope: { agentAddress: AGENT_B, kaNumber: 1n },
+      rootEntities: [ROOT],
+    }]);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].slice(0, 2)).toEqual([RESERVED_KA_ID, CG]);
+    expect(updateCalls[0][2]).toEqual([{
+      subject: ROOT,
+      predicate: 'http://schema.org/name',
+      object: '"updated"',
+      graph: '',
+    }]);
     expect(cleanupCalls).toHaveLength(1);
     expect(cleanupCalls[0].slice(0, 3)).toEqual([CG, [ROOT], undefined]);
     expect(cleanupCalls[0][4]).toEqual({
       kind: 'named-lifecycle',
       identity: { agentAddress: AGENT_B, kaNumber: 1n },
     });
+    const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
+    const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
+    expect(legacy).toMatchObject({ type: 'boolean', value: false });
+    expect(canonical).toMatchObject({ type: 'boolean', value: true });
   });
 
   it('rejects a finalized seal whose packed KA id belongs to another author namespace', async () => {

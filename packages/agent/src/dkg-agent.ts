@@ -2539,13 +2539,17 @@ export class DKGAgent extends DKGAgentBase {
         if (finalizedScope.kind !== 'named-lifecycle') {
           throw new Error('seal-in-SWM finalized without a named lifecycle identity');
         }
-        await agent.publisher.migrateLegacyBucketRootsToNamedLifecycle(
-          contextGraphId,
-          name,
-          finalizeAgentAddress,
-          swmSeal.rootEntities,
-          opts?.subGraphName,
-          finalizedScope,
+        await agent.publisher.ensureFinalizedLifecycleSwmRoots(
+          {
+            lifecycle: {
+              contextGraphId,
+              assertionName: name,
+              assertionLifecycleAgentAddress: finalizeAgentAddress,
+              subGraphName: opts?.subGraphName,
+            },
+            sealAuthorScope: finalizedScope.identity,
+            rootEntities: swmSeal.rootEntities,
+          },
           createOperationContext('share'),
         );
         // #1116 FIX 2 — make the SWM-resident position observable. The original

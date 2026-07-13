@@ -255,26 +255,68 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
         graph: `${CONTEXT_GRAPH_URI}/_meta`,
       },
     ]);
-    const scope = {
-      kind: 'named-lifecycle',
-      identity: { agentAddress: checksummedAuthor, kaNumber: 7n },
-    } as const;
-
-    const moved = await publisher.migrateLegacyBucketRootsToNamedLifecycle(
-      CONTEXT_GRAPH,
-      'skip-seal',
-      checksummedAuthor,
-      [root],
-      undefined,
-      scope,
+    const ensured = await publisher.ensureFinalizedLifecycleSwmRoots(
+      {
+        lifecycle: {
+          contextGraphId: CONTEXT_GRAPH,
+          assertionName: 'skip-seal',
+          assertionLifecycleAgentAddress: checksummedAuthor,
+        },
+        sealAuthorScope: { agentAddress: checksummedAuthor, kaNumber: 7n },
+        rootEntities: [root],
+      },
       createOperationContext('test'),
     );
 
-    expect(moved).toBe(2);
+    expect(ensured.migratedLegacyQuadCount).toBe(2);
+    expect(ensured.targetGraph).toBe(canonicalGraph);
+    expect(ensured.quads).toHaveLength(2);
     expect(await store.deleteByPattern({ graph: SWM_GRAPH, subject: root })).toBe(0);
     expect(await store.deleteByPattern({ graph: SWM_GRAPH, subject: child })).toBe(0);
     expect(await store.deleteByPattern({ graph: canonicalGraph, subject: root })).toBe(1);
     expect(await store.deleteByPattern({ graph: canonicalGraph, subject: child })).toBe(1);
+    const pointer = await store.query(
+      `SELECT ?g WHERE { GRAPH <${CONTEXT_GRAPH_URI}/_meta> { ` +
+      `<${lifecycle}> <http://dkg.io/ontology/assertionGraph> ?g } }`,
+    );
+    expect(pointer.type).toBe('bindings');
+    expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(canonicalGraph);
+  });
+
+  it('repairs the lifecycle pointer when a retry finds only the canonical copy', async () => {
+    const { publisher, store } = await makeRealPublisher();
+    const root = 'urn:test:root:skip-seal-retry';
+    const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const canonicalGraph = `${SWM_GRAPH}/${checksummedAuthor.toLowerCase()}/8`;
+    const lifecycle = assertionLifecycleUri(CONTEXT_GRAPH, checksummedAuthor, 'skip-seal-retry');
+    await store.insert([
+      q(root, 'http://schema.org/name', '"canonical"', canonicalGraph),
+      {
+        subject: lifecycle,
+        predicate: 'http://dkg.io/ontology/assertionGraph',
+        object: SWM_GRAPH,
+        graph: `${CONTEXT_GRAPH_URI}/_meta`,
+      },
+    ]);
+
+    const ensured = await publisher.ensureFinalizedLifecycleSwmRoots(
+      {
+        lifecycle: {
+          contextGraphId: CONTEXT_GRAPH,
+          assertionName: 'skip-seal-retry',
+          assertionLifecycleAgentAddress: checksummedAuthor,
+        },
+        sealAuthorScope: { agentAddress: checksummedAuthor, kaNumber: 8n },
+        rootEntities: [root],
+      },
+      createOperationContext('test'),
+    );
+
+    expect(ensured.migratedLegacyQuadCount).toBe(0);
+    expect(ensured.targetGraph).toBe(canonicalGraph);
+    expect(ensured.quads.map((quad) => quad.object)).toEqual(['"canonical"']);
+    const canonical = await store.query(`ASK { GRAPH <${canonicalGraph}> { <${root}> ?p ?o } }`);
+    expect(canonical).toMatchObject({ type: 'boolean', value: true });
     const pointer = await store.query(
       `SELECT ?g WHERE { GRAPH <${CONTEXT_GRAPH_URI}/_meta> { ` +
       `<${lifecycle}> <http://dkg.io/ontology/assertionGraph> ?g } }`,

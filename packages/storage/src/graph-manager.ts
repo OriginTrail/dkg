@@ -368,12 +368,10 @@ export async function resolveSharedMemoryScopeGraphs(
 }
 
 /** Resolve the single graph to WRITE for a semantic scope. */
-export async function resolveSharedMemoryScopeWriteGraph(
-  _store: TripleStore,
+export function resolveSharedMemoryScopeWriteGraph(
   bucketGraph: string,
   scope: SharedMemoryGraphScope,
-  _options?: QueryOptions,
-): Promise<string> {
+): string {
   assertSafeIri(bucketGraph);
   if (scope.kind === 'complete-family') return bucketGraph;
   return canonicalNamedLifecycleSharedMemoryGraphUri(bucketGraph, scope.identity);

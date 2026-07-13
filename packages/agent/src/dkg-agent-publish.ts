@@ -4307,38 +4307,6 @@ export class PublishMethods extends DKGAgentBase {
       seal.reservedKaId ?? packedKaId,
     );
     const finalizedLifecycleSelection = { rootEntities: seal.rootEntities };
-    const loadFinalizedLifecycleSwmQuads = async (): Promise<Quad[]> => {
-      return this._loadSelectedSWMQuads(
-        contextGraphId,
-        finalizedLifecycleSelection,
-        opts?.subGraphName,
-        sharedMemoryScope,
-      );
-    };
-
-    const ensureFinalizedLifecycleSwmRoots = async (): Promise<void> => {
-      const existingQuads = await loadFinalizedLifecycleSwmQuads();
-      if (existingQuads.length > 0 || sharedMemoryScope.kind !== 'named-lifecycle') return;
-
-      // Compatibility for assets finalized from a full `skipSeal` share by an
-      // older process: their payload can still be in the legacy SWM bucket.
-      // This explicitly state-changing preflight moves it to the deterministic
-      // named graph before either publish branch performs its pure exact read.
-      // New finalize(layer:"swm") calls already migrate eagerly in dkg-agent.ts.
-      try {
-        await publisher.migrateLegacyBucketRootsToNamedLifecycle(
-          contextGraphId,
-          name,
-          agentAddress,
-          seal.rootEntities,
-          opts?.subGraphName,
-          sharedMemoryScope,
-          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-        );
-      } catch (err) {
-        if ((err as { code?: string })?.code !== 'SWM_MIGRATION_SOURCE_EMPTY') throw err;
-      }
-    };
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
@@ -4361,9 +4329,40 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // The compatibility mutation is explicit and occurs once before routing;
-    // the loaders inside the update and mint branches remain read-only.
-    await ensureFinalizedLifecycleSwmRoots();
+    // One publisher-owned operation owns exact selection, optional legacy
+    // migration, alias convergence, and lifecycle-pointer repair. Both finalize
+    // and publish call the same boundary, while routing below only consumes the
+    // returned quads.
+    let finalizedLifecycleSwmQuads: Quad[];
+    if (sharedMemoryScope.kind === 'named-lifecycle') {
+      try {
+        finalizedLifecycleSwmQuads = (
+          await publisher.ensureFinalizedLifecycleSwmRoots(
+            {
+              lifecycle: {
+                contextGraphId,
+                assertionName: name,
+                assertionLifecycleAgentAddress: agentAddress,
+                subGraphName: opts?.subGraphName,
+              },
+              sealAuthorScope: sharedMemoryScope.identity,
+              rootEntities: seal.rootEntities,
+            },
+            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          )
+        ).quads;
+      } catch (err) {
+        if ((err as { code?: string })?.code !== 'SWM_MIGRATION_SOURCE_EMPTY') throw err;
+        finalizedLifecycleSwmQuads = [];
+      }
+    } else {
+      finalizedLifecycleSwmQuads = await this._loadSelectedSWMQuads(
+        contextGraphId,
+        finalizedLifecycleSelection,
+        opts?.subGraphName,
+        sharedMemoryScope,
+      );
+    }
 
     let result: PublishResult;
     if (vmCurrent && packedKaId !== undefined) {
@@ -4373,7 +4372,7 @@ export class PublishMethods extends DKGAgentBase {
       // the merkle from the SWM-selected quads and requires a
       // precomputedUpdateAttestation over (kaId, newMerkleRoot, author); we
       // mint it here from the seal's merkle using the seal's author signer.
-      const updateQuads = await loadFinalizedLifecycleSwmQuads();
+      const updateQuads = finalizedLifecycleSwmQuads;
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
         seal,
@@ -4466,7 +4465,7 @@ export class PublishMethods extends DKGAgentBase {
       // it here so the no-data precondition fires for ALL callers regardless of
       // registration. Match the publisher's wording so the route's existing 409
       // mapping (/No quads in shared memory/) still applies.
-      const sealedSwmQuads = await loadFinalizedLifecycleSwmQuads();
+      const sealedSwmQuads = finalizedLifecycleSwmQuads;
       if (sealedSwmQuads.length === 0) {
         throw new Error(
           `No quads in shared memory for context graph ${contextGraphId} matching selection`,
@@ -4861,12 +4860,7 @@ export class PublishMethods extends DKGAgentBase {
     scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<'all' | { rootEntities: string[] }> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-    const catalogTargetGraph = await resolveSharedMemoryScopeWriteGraph(
-      this.store,
-      swmGraph,
-      scope,
-      { source: 'agent.ensureCuratedCatalogInSwm' },
-    );
+    const catalogTargetGraph = resolveSharedMemoryScopeWriteGraph(swmGraph, scope);
     const cgDid = contextGraphDataUri(contextGraphId);
     const catalogQuads = buildPublicProjection({
       ual: cgDid,
