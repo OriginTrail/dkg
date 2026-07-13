@@ -65,6 +65,7 @@
     "dist",
     "network",
     "project.json",
+    "blazegraph-image.json",
     "markitdown-build-info.json",
     "markitdown-targets.json",
     "build-info.json",

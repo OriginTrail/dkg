@@ -24,13 +24,14 @@
  * (PR 1) it's allowed to `DROP ALL` instead of running a scoped DELETE
  * — Docker-provisioned namespaces are owned end-to-end by this CLI.
  *
- * The provisioner does NOT modify `scripts/devnet.sh`. The devnet
- * loop orchestrates multiple containers across nodes 3-4 with
- * different concerns; the namespace XML body is the only shared
- * artifact and is exported as `BLAZEGRAPH_NAMESPACE_XML_TEMPLATE`.
+ * The image reference is shared with `scripts/devnet.sh` through the
+ * machine-readable repo-root `blazegraph-image.json` runtime asset.
  */
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import * as net from 'node:net';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Shared XML template for a Blazegraph namespace tuned for DKG V10
@@ -56,11 +57,29 @@ export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="
  * `lyrasis/blazegraph:2.1.5` is amd64-only and fails with `exec format error`
  * when the provisioner runs on an arm64 Linux node.
  *
- * Keep the OCI-index digest immutable: CI inspects this exact reference and
+ * Keep the OCI-index digest immutable: CI reads the same metadata file and
  * requires both linux/amd64 and linux/arm64 manifests.
  */
-export const BLAZEGRAPH_IMAGE =
-  'islandora/blazegraph:6.4.3@sha256:015e308ae0a296cdb87c83c10da976ed970d2bfa971290aa1147593df8cf445d';
+export const BLAZEGRAPH_IMAGE = loadBlazegraphImage();
+
+function loadBlazegraphImage(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  // Monorepo source of truth first, then the package-local copy shipped by
+  // prepack. Both src/daemon and dist/daemon have the same directory depth.
+  const candidates = [
+    join(moduleDir, '..', '..', '..', '..', 'blazegraph-image.json'),
+    join(moduleDir, '..', '..', 'blazegraph-image.json'),
+  ];
+  for (const path of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { image?: unknown };
+      if (typeof parsed.image === 'string' && parsed.image.trim()) {
+        return parsed.image.trim();
+      }
+    } catch { /* try the packaged runtime asset */ }
+  }
+  throw new Error('Could not load the pinned Blazegraph image from blazegraph-image.json');
+}
 
 /** Default container port that the Blazegraph image exposes. */
 const BLAZEGRAPH_CONTAINER_PORT = 8080;

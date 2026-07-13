@@ -480,11 +480,14 @@ jobs:
       - name: "Verify provisioned Blazegraph image platforms"
         run: |
           set -euo pipefail
-          image="$({
-            sed -n "s/^  '\([^']*\)';$/\1/p" packages/cli/src/daemon/blazegraph-docker.ts
-          } | head -1)"
+          image="$(node -e '
+            const fs = require("node:fs");
+            const metadata = JSON.parse(fs.readFileSync("blazegraph-image.json", "utf8"));
+            if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
+            process.stdout.write(metadata.image.trim());
+          ')"
           if [[ -z "$image" ]]; then
-            echo "::error::Could not read BLAZEGRAPH_IMAGE from blazegraph-docker.ts"
+            echo "::error::Could not read image from blazegraph-image.json"
             exit 1
           fi
           manifest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}')"

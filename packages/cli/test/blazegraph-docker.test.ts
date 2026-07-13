@@ -23,6 +23,9 @@
  * injectable; tests run in <50 ms.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   provisionBlazegraphDocker,
   normaliseBlazegraphNamespace,
@@ -32,6 +35,8 @@ import {
   type DockerRunner,
   type DockerCommandResult,
 } from '../src/daemon/blazegraph-docker.js';
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
 interface MockDockerScript {
   /**
@@ -287,9 +292,16 @@ describe('provisionBlazegraphDocker', () => {
     expect(runCall).toBeDefined();
     expect(runCall).toContain('127.0.0.1:10001:8080');
     expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
-    expect(BLAZEGRAPH_IMAGE).toBe(
-      'islandora/blazegraph:6.4.3@sha256:015e308ae0a296cdb87c83c10da976ed970d2bfa971290aa1147593df8cf445d',
-    );
+    const metadata = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, 'blazegraph-image.json'), 'utf-8'),
+    ) as { image: string };
+    expect(BLAZEGRAPH_IMAGE).toBe(metadata.image);
+  });
+
+  it('shares the pinned image metadata with the devnet Docker path', () => {
+    const devnet = readFileSync(resolve(REPO_ROOT, 'scripts/devnet.sh'), 'utf-8');
+    expect(devnet).toContain('BLAZEGRAPH_IMAGE_METADATA="$REPO_ROOT/blazegraph-image.json"');
+    expect(devnet).toContain('"$BLAZEGRAPH_IMAGE" > /dev/null 2>&1');
   });
 
   it('throws when every port in the scan range is taken', async () => {

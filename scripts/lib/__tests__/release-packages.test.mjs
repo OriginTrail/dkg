@@ -218,23 +218,25 @@ function writeCliPackFixture(root) {
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), '{"image":"example/blazegraph@sha256:test"}\n');
 }
 
-test('flags a cli tarball missing network overlays + project.json + build-info.json (the 10.0.4 drop)', () => withFixture((root) => {
+test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', () => withFixture((root) => {
   writeCliPackFixture(root);
   const packReport = () => JSON.stringify([{ files: [{ path: 'dist/cli.js' }, { path: 'package.json' }] }]);
   const missing = findMissingCliPackAssets(root, packReport);
   assert.deepEqual(
     [...missing].sort(),
-    ['build-info.json', 'network/mainnet-base.json', 'network/testnet.json', 'project.json'],
+    ['blazegraph-image.json', 'build-info.json', 'network/mainnet-base.json', 'network/testnet.json', 'project.json'],
   );
 }));
 
-test('passes when the cli tarball includes every network overlay + project.json + build-info.json', () => withFixture((root) => {
+test('passes when the cli tarball includes every required runtime asset', () => withFixture((root) => {
   writeCliPackFixture(root);
   // npm reports Windows paths with backslashes — the check must normalize them.
   const packReport = () => JSON.stringify([{ files: [
     { path: 'project.json' },
+    { path: 'blazegraph-image.json' },
     { path: 'build-info.json' },
     { path: 'network\\testnet.json' },
     { path: 'network/mainnet-base.json' },
@@ -248,6 +250,7 @@ test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops 
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{"a":1}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{"b":2}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{"name":"x"}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), '{"image":"example/blazegraph@sha256:test"}\n');
   // A stale overlay left in the package from an earlier build/branch.
   fs.mkdirSync(path.join(root, 'packages', 'cli', 'network'), { recursive: true });
   fs.writeFileSync(path.join(root, 'packages', 'cli', 'network', 'devnet.json'), '{"stale":true}\n');
@@ -259,6 +262,10 @@ test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops 
   assert.ok(fs.existsSync(path.join(cliNetwork, 'testnet.json')), 'testnet.json copied');
   assert.ok(fs.existsSync(path.join(cliNetwork, 'mainnet-base.json')), 'mainnet-base.json copied');
   assert.ok(fs.existsSync(path.join(root, 'packages', 'cli', 'project.json')), 'project.json copied');
+  assert.ok(
+    fs.existsSync(path.join(root, 'packages', 'cli', 'blazegraph-image.json')),
+    'blazegraph-image.json copied',
+  );
   assert.equal(fs.existsSync(path.join(cliNetwork, 'devnet.json')), false, 'stale overlay removed (mirror, not append)');
 }));
 
@@ -278,8 +285,13 @@ test('packages/cli lifecycle is wired to the copy script (build + prepack)', () 
 test('the copy and the verifier consume one shared asset manifest', () => withFixture((root) => {
   writeCliPackFixture(root);
   const { relPaths } = cliRuntimeAssetManifest({ rootDir: root });
-  // What the copy materializes (project.json + every network overlay)…
-  assert.deepEqual(relPaths, ['project.json', 'network/mainnet-base.json', 'network/testnet.json']);
+  // What the copy materializes (project/image metadata + every network overlay)…
+  assert.deepEqual(relPaths, [
+    'project.json',
+    'blazegraph-image.json',
+    'network/mainnet-base.json',
+    'network/testnet.json',
+  ]);
   // …is exactly what the verifier requires, plus the generated build-info.json.
   const spyReport = () => JSON.stringify([{ files: [...relPaths, 'build-info.json'].map((p) => ({ path: p })) }]);
   assert.deepEqual(findMissingCliPackAssets(root, spyReport), []);
@@ -294,6 +306,8 @@ test('the shared manifest is fail-closed — matches the copier, not best-effort
   // overlays present but project.json missing
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
   assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /project\.json not found/);
+  fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /blazegraph-image\.json not found/);
 }));
 
 test('findMissingCliPackAssets cannot silently build a required list without network overlays', () => withFixture((root) => {
@@ -308,7 +322,7 @@ test('packages/cli ships the runtime assets in its published files list', () => 
   // Guards the REAL package manifest contract — the integration test uses its
   // own fixture files, so this is what fails if production `files` drops one.
   const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
-  for (const entry of ['network', 'project.json', 'build-info.json']) {
+  for (const entry of ['network', 'project.json', 'blazegraph-image.json', 'build-info.json']) {
     assert.ok((cliPkg.files ?? []).includes(entry), `packages/cli#files must ship ${entry}`);
   }
 });
@@ -338,12 +352,13 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), '{"image":"example/blazegraph@sha256:test"}\n');
   const cliDir = path.join(root, 'packages', 'cli');
   fs.mkdirSync(cliDir, { recursive: true });
   fs.writeFileSync(path.join(cliDir, 'build-info.json'), '{}\n'); // generated by release:build-info
   fs.writeFileSync(path.join(cliDir, 'package.json'), `${JSON.stringify({
     name: '@origintrail-official/dkg', version: '0.0.0-fixture', private: true,
-    files: ['network', 'project.json', 'build-info.json'],
+    files: ['network', 'project.json', 'blazegraph-image.json', 'build-info.json'],
     scripts: { prepack: 'node ../../scripts/copy-cli-runtime-assets.mjs' },
   }, null, 2)}\n`);
 
@@ -358,7 +373,13 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
       .flatMap((entry) => entry.files ?? [])
       .map((file) => file.path.replace(/\\/g, '/')),
   );
-  for (const asset of ['project.json', 'build-info.json', 'network/testnet.json', 'network/mainnet-base.json']) {
+  for (const asset of [
+    'project.json',
+    'blazegraph-image.json',
+    'build-info.json',
+    'network/testnet.json',
+    'network/mainnet-base.json',
+  ]) {
     assert.ok(packed.has(asset), `real tarball missing ${asset}`);
   }
 }));

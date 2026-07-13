@@ -68,6 +68,13 @@ NUM_OP_WALLETS=3
 HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
 BLAZEGRAPH_PORT=9999
 BLAZEGRAPH_CONTAINER="devnet-blazegraph"
+BLAZEGRAPH_IMAGE_METADATA="$REPO_ROOT/blazegraph-image.json"
+BLAZEGRAPH_IMAGE="$(node -e '
+  const fs = require("node:fs");
+  const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
+  process.stdout.write(metadata.image.trim());
+' "$BLAZEGRAPH_IMAGE_METADATA")"
 # Webapp context path: the 2.1.5 Docker image serves under /bigdata; a native
 # 2.1.6 JAR (the Apple-silicon workaround) serves under /blazegraph. Override with
 # DEVNET_BLAZEGRAPH_CTX to match whichever Blazegraph is actually running.
@@ -386,7 +393,7 @@ start_blazegraph() {
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
     -p "127.0.0.1:$BLAZEGRAPH_PORT:8080" \
-    islandora/blazegraph:6.4.3 > /dev/null 2>&1; then
+    "$BLAZEGRAPH_IMAGE" > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
     return 0
   fi
