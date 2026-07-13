@@ -32,4 +32,85 @@ describe('durable sync worker result transport', () => {
       await worker.close();
     }
   });
+
+  it('reconstructs from the dispatched array order when callers resize or reorder inputs', async () => {
+    const worker = new SyncVerifyWorker();
+    const first: Quad = {
+      subject: 'urn:entity:first',
+      predicate: 'http://schema.org/name',
+      object: '"first"',
+      graph: 'did:dkg:context-graph:test/context/1',
+    };
+    const second: Quad = {
+      subject: 'urn:entity:second',
+      predicate: 'http://schema.org/name',
+      object: '"second"',
+      graph: 'did:dkg:context-graph:test/context/1',
+    };
+    const dataQuads = [first, second];
+
+    try {
+      const pending = worker.processDurableBatch(dataQuads, [], true);
+      dataQuads.reverse();
+      dataQuads.length = 0;
+
+      const result = await pending;
+      expect(result.verifiedData).toEqual([first, second]);
+      expect(result.verifiedData[0]).toBe(first);
+      expect(result.verifiedData[1]).toBe(second);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('returns the exact retained data and meta subsets as caller-owned references', async () => {
+    const worker = new SyncVerifyWorker();
+    const graph = 'did:dkg:context-graph:test/context/1';
+    const rejectedData: Quad = {
+      subject: 'urn:entity:rejected',
+      predicate: 'http://schema.org/name',
+      object: '"rejected"',
+      graph,
+    };
+    const retainedData: Quad = {
+      subject: 'urn:entity:retained',
+      predicate: 'http://schema.org/name',
+      object: '"retained"',
+      graph,
+    };
+    const rejectedMerkle: Quad = {
+      subject: 'urn:ual:rejected',
+      predicate: 'http://dkg.io/ontology/merkleRoot',
+      object: `"${'0'.repeat(64)}"`,
+      graph,
+    };
+    const rejectedRoot: Quad = {
+      subject: 'urn:ual:rejected',
+      predicate: 'http://dkg.io/ontology/rootEntity',
+      object: '"urn:entity:rejected"',
+      graph,
+    };
+    const retainedMeta: Quad = {
+      subject: 'urn:meta:retained',
+      predicate: 'http://schema.org/name',
+      object: '"retained"',
+      graph,
+    };
+
+    try {
+      const result = await worker.processDurableBatch(
+        [rejectedData, retainedData],
+        [rejectedMerkle, rejectedRoot, retainedMeta],
+        false,
+      );
+
+      expect(result.rejectedKcs).toBe(1);
+      expect(result.verifiedData).toEqual([retainedData]);
+      expect(result.verifiedMeta).toEqual([retainedMeta]);
+      expect(result.verifiedData[0]).toBe(retainedData);
+      expect(result.verifiedMeta[0]).toBe(retainedMeta);
+    } finally {
+      await worker.close();
+    }
+  });
 });

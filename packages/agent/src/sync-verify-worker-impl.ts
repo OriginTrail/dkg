@@ -61,8 +61,23 @@ export function verifySyncedData(
   metaQuads: Quad[],
   acceptUnverified = false,
 ): SyncVerifyResult {
+  return verifySyncedDataImpl(dataQuads, metaQuads, acceptUnverified);
+}
+
+type VerifiedSelectionIndexes = {
+  data: number[];
+  meta: number[];
+};
+
+function verifySyncedDataImpl(
+  dataQuads: Quad[],
+  metaQuads: Quad[],
+  acceptUnverified = false,
+  recordSelection?: (indexes: VerifiedSelectionIndexes) => void,
+): SyncVerifyResult {
   const logs: SyncVerifyLogEntry[] = [];
   if (metaQuads.length === 0) {
+    recordSelection?.({ data: allIndexes(dataQuads), meta: [] });
     return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
   }
 
@@ -115,6 +130,7 @@ export function verifySyncedData(
   }
 
   if (kcMerkleRoots.size === 0) {
+    recordSelection?.({ data: allIndexes(dataQuads), meta: allIndexes(metaQuads) });
     return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
   }
 
@@ -194,6 +210,7 @@ export function verifySyncedData(
 
   if (acceptUnverified && rejected > 0 && verifiedKcUals.size < kcMerkleRoots.size) {
     logs.push({ level: 'debug', message: `Accepting ${rejected} unverified KC(s) (system context graph)` });
+    recordSelection?.({ data: allIndexes(dataQuads), meta: allIndexes(metaQuads) });
     return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
   }
 
@@ -209,22 +226,47 @@ export function verifySyncedData(
     for (const rootEntity of entities) allKnownRootEntities.add(rootEntity);
   }
 
-  const verifiedData = dataQuads.filter((q) => {
+  const selectedData = selectQuads(dataQuads, (q) => {
     if (allKnownRootEntities.has(q.subject)) return verifiedRootEntities.has(q.subject);
     for (const rootEntity of verifiedRootEntities) {
       if (q.subject.startsWith(rootEntity)) return true;
     }
     return true;
-  });
+  }, recordSelection !== undefined);
 
-  const verifiedMeta = metaQuads.filter((q) => {
+  const selectedMeta = selectQuads(metaQuads, (q) => {
     if (kcMerkleRoots.has(q.subject)) return verifiedKcUals.has(q.subject);
     const kcUri = kaToKc.get(q.subject);
     if (kcUri) return verifiedKcUals.has(kcUri);
     return true;
+  }, recordSelection !== undefined);
+
+  recordSelection?.({
+    data: selectedData.indexes!,
+    meta: selectedMeta.indexes!,
   });
 
-  return { data: verifiedData, meta: verifiedMeta, rejected, logs };
+  return { data: selectedData.quads, meta: selectedMeta.quads, rejected, logs };
+}
+
+function allIndexes(source: readonly unknown[]): number[] {
+  return Array.from({ length: source.length }, (_, index) => index);
+}
+
+function selectQuads(
+  source: Quad[],
+  include: (quad: Quad) => boolean,
+  captureIndexes: boolean,
+): { quads: Quad[]; indexes?: number[] } {
+  const quads: Quad[] = [];
+  const indexes = captureIndexes ? [] as number[] : undefined;
+  for (let index = 0; index < source.length; index++) {
+    const quad = source[index];
+    if (!include(quad)) continue;
+    quads.push(quad);
+    indexes?.push(index);
+  }
+  return { quads, indexes };
 }
 
 function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
@@ -418,11 +460,16 @@ function combineRegisteredSubGraphNames(
   return [...out];
 }
 
+type DurableBatchSelectionResult = DurableBatchProcessResult & {
+  verifiedDataIndexes: number[];
+  verifiedMetaIndexes: number[];
+};
+
 function processDurableBatch(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
-): DurableBatchProcessResult {
+): DurableBatchSelectionResult {
   const logs: SyncVerifyLogEntry[] = [];
   const totalFetchedDataQuads = dataQuads.length;
   const totalFetchedMetaQuads = metaQuads.length;
@@ -431,6 +478,8 @@ function processDurableBatch(
     return {
       verifiedData: [],
       verifiedMeta: [],
+      verifiedDataIndexes: [],
+      verifiedMetaIndexes: [],
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -449,6 +498,8 @@ function processDurableBatch(
     return {
       verifiedData: [],
       verifiedMeta: [],
+      verifiedDataIndexes: [],
+      verifiedMetaIndexes: [],
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -467,10 +518,18 @@ function processDurableBatch(
     });
   }
 
-  const verified = verifySyncedData(dataQuads, metaQuads, acceptUnverified);
+  let verifiedIndexes: VerifiedSelectionIndexes = { data: [], meta: [] };
+  const verified = verifySyncedDataImpl(
+    dataQuads,
+    metaQuads,
+    acceptUnverified,
+    (indexes) => { verifiedIndexes = indexes; },
+  );
   return {
     verifiedData: verified.data,
     verifiedMeta: verified.meta,
+    verifiedDataIndexes: verifiedIndexes.data,
+    verifiedMetaIndexes: verifiedIndexes.meta,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs: verified.rejected,
@@ -488,28 +547,29 @@ function processDurableBatchForWire(
 ): DurableBatchProcessWireResult {
   const result = processDurableBatch(dataQuads, metaQuads, acceptUnverified);
   const {
-    verifiedData,
-    verifiedMeta,
-    ...summary
+    verifiedDataIndexes,
+    verifiedMetaIndexes,
+    totalFetchedDataQuads,
+    totalFetchedMetaQuads,
+    rejectedKcs,
+    emptyResponses,
+    metaOnlyResponses,
+    dataRejectedMissingMeta,
+    logs,
   } = result;
+  // Selection indexes are produced by the exact verification/filter pass,
+  // avoiding any hidden dependency on Quad object identity or source order.
   return {
-    ...summary,
-    // The selected arrays contain references from the worker-owned input
-    // arrays. Send their positions instead of cloning the complete Quad object
-    // graphs back into the requester isolate.
-    verifiedDataIndexes: selectedQuadIndexes(dataQuads, verifiedData),
-    verifiedMetaIndexes: selectedQuadIndexes(metaQuads, verifiedMeta),
+    verifiedDataIndexes,
+    verifiedMetaIndexes,
+    totalFetchedDataQuads,
+    totalFetchedMetaQuads,
+    rejectedKcs,
+    emptyResponses,
+    metaOnlyResponses,
+    dataRejectedMissingMeta,
+    logs,
   };
-}
-
-function selectedQuadIndexes(source: Quad[], selected: Quad[]): number[] {
-  if (selected.length === 0) return [];
-  const selectedSet = new Set(selected);
-  const indexes: number[] = [];
-  for (let i = 0; i < source.length; i++) {
-    if (selectedSet.has(source[i])) indexes.push(i);
-  }
-  return indexes;
 }
 
 function processSharedMemoryBatch(

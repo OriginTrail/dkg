@@ -203,15 +203,29 @@ export class SyncVerifyWorker {
     });
   }
 
+  /**
+   * Array membership and order are snapshotted before dispatch. Callers must
+   * keep the Quad objects themselves immutable until the returned promise
+   * settles so the caller-owned references still match the worker snapshot.
+   */
   processDurableBatch(
-    dataQuads: Quad[],
-    metaQuads: Quad[],
+    dataQuads: readonly Quad[],
+    metaQuads: readonly Quad[],
     acceptUnverified: boolean,
   ): Promise<DurableBatchProcessResult> {
+    // Preserve the array membership/order that the worker verifies without
+    // cloning the Quad object graph on the caller side. Callers may resize or
+    // reorder their arrays once this method returns.
+    const stableDataQuads = dataQuads.slice();
+    const stableMetaQuads = metaQuads.slice();
     const id = this.nextId++;
     return new Promise<DurableBatchProcessWireResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'processDurableBatch', args: [dataQuads, metaQuads, acceptUnverified] });
+      this.worker.postMessage({
+        id,
+        method: 'processDurableBatch',
+        args: [stableDataQuads, stableMetaQuads, acceptUnverified],
+      });
     }).then((wireResult) => {
       const {
         verifiedDataIndexes,
@@ -220,8 +234,8 @@ export class SyncVerifyWorker {
       } = wireResult;
       return {
         ...summary,
-        verifiedData: selectQuadReferences(dataQuads, verifiedDataIndexes, 'data'),
-        verifiedMeta: selectQuadReferences(metaQuads, verifiedMetaIndexes, 'meta'),
+        verifiedData: selectQuadReferences(stableDataQuads, verifiedDataIndexes, 'data'),
+        verifiedMeta: selectQuadReferences(stableMetaQuads, verifiedMetaIndexes, 'meta'),
       };
     });
   }
