@@ -77,7 +77,12 @@ export interface RandomSamplingStatus {
   enabled: boolean;
   role: AgentRole;
   identityId: string;
-  disabledReason: RandomSamplingDisabledReason | null;
+  /**
+   * Additive diagnostic field. Optional so consumers compiled against the
+   * earlier public status shape can keep constructing compatible mocks.
+   * Built-in agent handles always populate it.
+   */
+  disabledReason?: RandomSamplingDisabledReason | null;
   loop: ProverLoopStatus | null;
 }
 

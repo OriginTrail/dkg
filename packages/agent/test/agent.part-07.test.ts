@@ -120,6 +120,70 @@ describe('Random Sampling lifecycle gating', () => {
     }
   });
 
+  it('retries a temporary sharding-table lookup failure and starts after recovery', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 56n);
+    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(true);
+    const membership = vi.spyOn(chain, 'isShardingTableMember')
+      .mockRejectedValueOnce(new Error('temporary membership RPC outage'))
+      .mockResolvedValue(true);
+    const agent = await DKGAgent.create({
+      name: 'RsMembershipLookupRecovers',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+      randomSamplingTickIntervalMs: 60_000,
+    });
+    const realSetInterval = globalThis.setInterval;
+    const intervalCallbacks = new Map<
+      ReturnType<typeof setInterval>,
+      (...args: unknown[]) => void
+    >();
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((
+      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+        const handle = realSetInterval(callback, delay, ...args);
+        intervalCallbacks.set(handle, callback);
+        return handle;
+      }
+    ) as typeof setInterval);
+
+    try {
+      await expect(agent.start()).resolves.toBeUndefined();
+      intervalSpy.mockRestore();
+
+      expect(membership).toHaveBeenNthCalledWith(1, 56n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '56',
+        disabledReason: 'eligibility_lookup_failed',
+      });
+
+      const retryTimer = randomSamplingRetryTimer(agent);
+      expect(retryTimer).not.toBeNull();
+      const retryTick = retryTimer ? intervalCallbacks.get(retryTimer) : undefined;
+      expect(retryTick).toBeTypeOf('function');
+
+      retryTick?.();
+      await vi.waitFor(
+        () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
+        { timeout: 2_000, interval: 10 },
+      );
+      expect(membership).toHaveBeenNthCalledWith(2, 56n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: true,
+        identityId: '56',
+        disabledReason: null,
+      });
+      expect(randomSamplingRetryTimer(agent)).toBeNull();
+    } finally {
+      intervalSpy.mockRestore();
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('checks permanent Random Sampling deployment readiness before membership RPCs', async () => {
     const primary = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', primary.address);
