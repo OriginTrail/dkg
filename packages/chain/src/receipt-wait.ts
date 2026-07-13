@@ -28,7 +28,9 @@ export interface ReceiptLookupOptions {
 export interface ReceiptPassEndpoint<TReceipt> {
   /** Telemetry metadata only; absence must never remove an endpoint from flow. */
   rpcUrl?: string;
-  /** Raw endpoint work; the shared pass owns every timeout/deadline. */
+  /** Optional raw endpoint preflight; the shared pass budgets this stage. */
+  validate?: (attempt: number) => Promise<void>;
+  /** Raw receipt lookup; invoked only after validation finishes within budget. */
   lookup: (txHash: string, attempt: number) => Promise<TReceipt | null>;
   recordOutcome?: (outcome: 'success' | 'failure') => void;
 }
@@ -50,11 +52,29 @@ export interface ReceiptPassResult<TReceipt> {
 }
 
 /**
+ * Run one endpoint stage inside the attempt's remaining budget. The stage
+ * thunk is deliberately invoked only after the budget check, so a validation
+ * timeout can never start a detached receipt lookup.
+ */
+async function runReceiptAttemptStage<T>(
+  stage: () => Promise<T>,
+  attemptDeadlineMs: number,
+  label: string,
+): Promise<T> {
+  const remainingMs = attemptDeadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    throw createRpcTimeoutError(`${label} exceeded its receipt-attempt deadline`);
+  }
+  return withTimeout(stage(), remainingMs, label);
+}
+
+/**
  * One canonical receipt endpoint-pass state machine. Both the adapter transport
  * and direct CLI writes use this loop for retry classification, null-response
  * semantics, failover/exhaustion telemetry, and all deadline accounting.
- * Endpoint callbacks perform raw validation + lookup work and never receive an
- * absolute deadline or return control-flow sentinels.
+ * Endpoint callbacks provide separate raw validation and lookup stages. This
+ * helper alone computes the combined attempt budget and does not invoke lookup
+ * unless validation completed before that same budget expired.
  * @internal Shared only between chain-package receipt transports.
  */
 export async function getReceiptAcrossEndpoints<TReceipt>(
@@ -65,15 +85,28 @@ export async function getReceiptAcrossEndpoints<TReceipt>(
 
   for (let i = 0; i < options.endpoints.length; i += 1) {
     const endpoint = options.endpoints[i];
+    const attemptStartedAt = Date.now();
     const remainingMs = options.deadlineMs === undefined
       ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
-      : options.deadlineMs - Date.now();
+      : options.deadlineMs - attemptStartedAt;
     if (remainingMs <= 0) break;
+    const attemptDeadlineMs = attemptStartedAt + Math.min(
+      RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+      remainingMs,
+    );
 
     try {
-      const receipt = await withTimeout(
-        endpoint.lookup(options.txHash, i + 1),
-        Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingMs),
+      const validate = endpoint.validate;
+      if (validate) {
+        await runReceiptAttemptStage(
+          () => validate(i + 1),
+          attemptDeadlineMs,
+          `receipt endpoint validation via RPC #${i + 1}`,
+        );
+      }
+      const receipt = await runReceiptAttemptStage(
+        () => endpoint.lookup(options.txHash, i + 1),
+        attemptDeadlineMs,
         `receipt lookup via RPC #${i + 1}`,
       );
       sawNonErrorResponse = true;

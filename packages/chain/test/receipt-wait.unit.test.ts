@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import {
+  getReceiptAcrossEndpoints,
   waitForReceiptWithDeadline,
   waitForTransactionReceiptWithFailover,
 } from '../src/receipt-wait.js';
@@ -39,6 +40,37 @@ describe('receipt deadline orchestration', () => {
       status: 'rejected',
       reason: { code: 'CALL_EXCEPTION', message: 'mined transaction reverted' },
     });
+  });
+
+  it('owns the combined validation/lookup attempt budget in the shared endpoint pass', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const lookup = vi.fn(async () => null);
+    const validate = vi.fn(async () => {
+      await new Promise<void>(resolve => setTimeout(resolve, 1_100));
+    });
+
+    const outcome = getReceiptAcrossEndpoints({
+      endpoints: [{ validate, lookup }],
+      txHash: '0xshared-budget',
+      deadlineMs: 1_000,
+      logLabel: 'shared budget test',
+    }).then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason) => ({ status: 'rejected' as const, reason }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    await expect(outcome).resolves.toMatchObject({
+      status: 'rejected',
+      reason: { code: 'RPC_RECEIPT_LOOKUP_FAILED', txHash: '0xshared-budget' },
+    });
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect(lookup).not.toHaveBeenCalled();
+
+    // The timed-out validation can settle later, but lookup is a separate stage
+    // owned by the pass and therefore cannot resume in the background.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(lookup).not.toHaveBeenCalled();
   });
 
   it('does not continue into receipt lookup when validation resolves after the deadline', async () => {
