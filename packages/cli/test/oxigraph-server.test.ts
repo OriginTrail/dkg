@@ -24,6 +24,7 @@ import { createServer, type Server } from 'node:net';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
@@ -150,11 +151,15 @@ describe('buildOxigraphSpawnSpec', () => {
       command: 'C:\\node.exe',
       args: [
         'C:\\oxigraph-parent-watchdog.js',
+        'pipe',
         '42',
-        'pipe:3',
+        '3',
         'C:\\oxigraph.exe',
         'serve',
       ],
+      environment: {
+        DKG_OXIGRAPH_WATCHDOG_STOP_GRACE_MS: '5000',
+      },
       stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
     });
     let ownership: string | undefined;
@@ -194,8 +199,8 @@ describe('buildOxigraphSpawnSpec', () => {
       '--property=MemoryMax=3072M',
       '--property=MemorySwapMax=0',
     ]);
-    expect(spec.args.slice(-8)).toEqual([
-      '/opt/node', '/opt/oxigraph-watchdog.js', '42', '42:1234',
+    expect(spec.args.slice(-9)).toEqual([
+      '/opt/node', '/opt/oxigraph-watchdog.js', 'process-identity', '42', '42:1234',
       '/opt/oxigraph', 'serve', '--bind', '127.0.0.1:7878',
     ]);
   });
@@ -344,6 +349,47 @@ describe('startOxigraphServer (real child processes)', () => {
     await sleep(100);
     expect(await portAnswers(port)).toBe(false);
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'stop() closes the real fd3 watchdog channel and reaps wrapper plus listener',
+    async () => {
+      const port = await freePort();
+      const watchdogPath = fileURLToPath(new URL(
+        '../dist/daemon/oxigraph-parent-watchdog.js',
+        import.meta.url,
+      ));
+      let wrapper: import('node:child_process').ChildProcess | undefined;
+      const captureSpawn = ((
+        command: string,
+        args: readonly string[],
+        options: Parameters<typeof spawn>[2],
+      ) => {
+        wrapper = spawn(command, args, options);
+        return wrapper;
+      }) as typeof spawn;
+
+      const handle = await startOxigraphServer(startOpts(port, {
+        platform: 'win32',
+        watchdogPath,
+        nodeExecutable: process.execPath,
+        io: {
+          spawn: captureSpawn,
+          // Exercise the real watchdog lifecycle while keeping the ownership
+          // probe portable on the non-Windows CI host.
+          findListenOwnerPid: async () => await fetchPid(port),
+        },
+      }));
+      const listenerPid = await fetchPid(port);
+      const wrapperPid = wrapper!.pid!;
+      expect(listenerPid).not.toBe(wrapperPid);
+
+      await handle.stop();
+
+      expect(await portAnswers(port)).toBe(false);
+      expect(() => process.kill(listenerPid, 0)).toThrow();
+      expect(() => process.kill(wrapperPid, 0)).toThrow();
+    },
+  );
 
   it('restarts the child after an unexpected crash (real SIGKILL), with a new pid', async () => {
     const port = await freePort();

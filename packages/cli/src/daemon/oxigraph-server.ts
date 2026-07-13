@@ -96,6 +96,9 @@ export interface StartOxigraphServerOptions {
   platform?: NodeJS.Platform;
   /** Parent identity override for cross-platform systemd command tests. */
   parentIdentity?: string;
+  /** Watchdog executable overrides used by packaging and subprocess tests. */
+  watchdogPath?: string;
+  nodeExecutable?: string;
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -107,7 +110,7 @@ export interface OxigraphServerHandle {
   /** Stop the server and prevent further restarts. Idempotent. */
   stop(): Promise<void>;
   /**
-   * Synchronous best-effort SIGTERM for `process.on('exit')` handlers
+   * Synchronous best-effort owned shutdown for `process.on('exit')` handlers
    * (which cannot await). Prevents orphaning the server when boot hits a
    * fatal `process.exit()` after the server started. Idempotent.
    */
@@ -145,6 +148,9 @@ export async function startOxigraphServer(
     parentPid: process.pid,
     uid: typeof process.getuid === 'function' ? process.getuid() : -1,
     parentIdentity: opts.parentIdentity,
+    watchdogPath: opts.watchdogPath,
+    nodeExecutable: opts.nodeExecutable,
+    stopGraceMs: opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS,
   });
   const ioOverrides = opts.io ?? {};
   const io: OxigraphServerIo = {
@@ -339,23 +345,22 @@ export async function startOxigraphServer(
     // `oxigraph serve`, and they fight over the port (self-inflicted
     // EADDRINUSE). Its exit handler won't restart (ready is false).
     if (childAlive()) {
-      try {
-        child!.kill('SIGKILL');
-      } catch {
-        /* best-effort */
-      }
+      launchStrategy.forceStop(child!);
     }
     scheduleRevive(`respawned server did not become ready on ${bind}`);
   };
 
-  // Synchronous best-effort kill for process-exit handlers (which can't
-  // await): signals the child so a fatal `process.exit()` elsewhere in
-  // boot doesn't orphan the server. Safe to call alongside `stop()`.
+  // Synchronous best-effort shutdown for process-exit handlers (which can't
+  // await): requests cleanup through the launch strategy so a fatal
+  // `process.exit()` elsewhere in boot doesn't orphan the server. Safe to
+  // call alongside `stop()`.
   const killSync = (): void => {
     stopping = true;
     markStoreDown();
     try {
-      if (childAlive()) child!.kill('SIGTERM');
+      if (childAlive() && !launchStrategy.requestStop(child!)) {
+        launchStrategy.forceStop(child!);
+      }
     } catch {
       /* best-effort */
     }
@@ -377,13 +382,16 @@ export async function startOxigraphServer(
         resolve();
       };
       c.once('exit', done);
-      c.kill('SIGTERM');
+      if (!launchStrategy.requestStop(c)) {
+        log('[oxigraph] graceful stop channel unavailable; forcing owned process cleanup');
+        launchStrategy.forceStop(c);
+      }
       const killTimer = setTimeout(() => {
         if (c.exitCode === null && c.signalCode === null) {
-          log('[oxigraph] did not exit on SIGTERM; sending SIGKILL');
-          c.kill('SIGKILL');
+          log('[oxigraph] did not exit within the graceful window; forcing owned process cleanup');
+          launchStrategy.forceStop(c);
         }
-      }, stopGraceMs);
+      }, stopGraceMs + (launchStrategy.mode === 'parent-watchdog' ? 250 : 0));
       killTimer.unref?.();
     });
     log('[oxigraph] server stopped');

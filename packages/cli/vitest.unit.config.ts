@@ -85,6 +85,7 @@ export default defineConfig({
           'test/oxigraph-managed.test.ts',
           'test/oxigraph-parent-watchdog.test.ts',
           'test/worker-process-group.test.ts',
+          'test/worker-cleanup-policy.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
           // keeping it in the fast unit lane costs nothing.
