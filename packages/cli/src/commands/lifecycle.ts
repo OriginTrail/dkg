@@ -61,7 +61,6 @@ import {
   parseOptionalVerifyTimeoutOption,
   loadStructuredFile,
   loadQuadsFromInput,
-  resolveDaemonEntryPoint,
   probeHostForApiHost,
   selectedDkgHomeForEnv,
   withSelectedDkgHome,
@@ -86,14 +85,9 @@ import {
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
 } from '../cli-rpc.js';
 import {
   appendSupervisorLog,
@@ -102,6 +96,7 @@ import {
   runDaemonSupervisor,
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
+import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
 
 export function registerLifecycleCommands(program: Command): void {
 // ─── dkg start ───────────────────────────────────────────────────────
@@ -193,11 +188,12 @@ program
       return;
     }
 
-    // Spawn detached background supervisor via releases/current symlink
-    const entryPoint = resolveDaemonEntryPoint();
+    // Spawn the detached supervisor through the same canonical command
+    // boundary used for worker restarts and update verification.
+    const daemonCommand = resolveDaemonNodeCommand('daemon-supervisor');
     const child = spawn(
-      process.execPath,
-      [...process.execArgv, entryPoint, 'daemon-supervisor'],
+      daemonCommand.executable,
+      daemonCommand.args,
       {
         detached: true,
         stdio: ['ignore', 'ignore', 'ignore'],

@@ -55,5 +55,6 @@ export type { EVMAdapterConfig } from './evm-adapter-types.js';
  * Resolves contract addresses dynamically from the Hub.
  */
 export class EVMChainAdapter extends EVMChainAdapterBase implements ChainAdapter {}
-export interface EVMChainAdapter extends IdentityMethods, PublishMethods, ContextGraphMethods, ConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods {}
+type PublicConvictionMethods = Pick<ConvictionMethods, keyof ConvictionMethods>;
+export interface EVMChainAdapter extends IdentityMethods, PublishMethods, ContextGraphMethods, PublicConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods {}
 applyMixins(EVMChainAdapter, [IdentityMethods, PublishMethods, ContextGraphMethods, ConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods]);

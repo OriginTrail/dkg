@@ -21,9 +21,12 @@ import type {
   PcaContracts,
   PcaRpcMethod,
 } from './chain-adapter.js';
+import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 import type { PcaMutationInvalidation } from './pca-read-cache.js';
+import { withTimeout } from './evm-adapter-rpc.js';
+import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
 
 /** Latest-family `eth_getBlockByNumber` block tags that are TIP reads (must stay
  *  preference-transparent). A concrete hex block number or `earliest` is a fixed
@@ -101,6 +104,57 @@ export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNod
 }
 
 export class ConvictionMethods extends EVMChainAdapterBase implements ConvictionReader {
+  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader {
+    return {
+      getAccountId: (publisherAddress) => withTimeout(
+        this.getConvictionAgentAccountId(publisherAddress),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'pca publish-plan account lookup',
+      ),
+      getLockDurationEpochs: (accountId) => withTimeout(
+        this.getConvictionAccountLockDurationEpochs(accountId),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'pca publish-plan lock lookup',
+      ),
+      canCover: (accountId, baseCost) => withTimeout(
+        this.convictionAccountCanCover(accountId, baseCost),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'pca publish-plan coverage probe',
+      ),
+    };
+  }
+
+  protected override async isConvictionFundedAgent(
+    address: string,
+    requiredCostWei: bigint,
+    publishEpochs?: number,
+  ): Promise<boolean> {
+    if (!this.contracts.dkgPublishingConvictionNFT) return false;
+    try {
+      const accountId = await withTimeout(
+        this.getConvictionAgentAccountId(address),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'pca agent account lookup',
+      );
+      if (accountId <= 0n) return false;
+      if (publishEpochs !== undefined) {
+        const lockEpochs = await withTimeout(
+          this.getConvictionAccountLockDurationEpochs(accountId),
+          RPC_READ_STALL_TIMEOUT_MS,
+          'pca account lock-duration probe',
+        );
+        if (lockEpochs !== publishEpochs) return false;
+      }
+      return await withTimeout(
+        this.convictionAccountCanCover(accountId, requiredCostWei > 0n ? requiredCostWei : 1n),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'pca account coverage probe',
+      );
+    } catch {
+      return false;
+    }
+  }
+
   protected async pcaWriteAndInvalidate<T>(
     invalidation: PcaMutationInvalidation<T>,
     op: () => Promise<T>,
