@@ -447,7 +447,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         warnedPreDispatchCancellation = true;
         logWarn(
           createOperationContext('sync'),
-          'Sync responder is using a store backend whose query AbortSignal is pre-dispatch only; in-flight sync queries cannot release responder capacity until the synchronous store call returns. Use an HTTP SPARQL backend for interruptible long-query cancellation.',
+          'Sync responder is using a store backend whose query AbortSignal is pre-dispatch only; in-flight sync queries cannot release responder capacity until the synchronous store call returns. Use oxigraph-worker or an HTTP SPARQL backend for interruptible long-query cancellation.',
         );
       }
       if (isWorkspace) {

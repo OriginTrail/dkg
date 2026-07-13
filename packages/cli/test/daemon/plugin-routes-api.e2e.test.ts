@@ -62,7 +62,7 @@ async function writeDaemonConfig(
       relay: 'none',
       auth: { enabled: true },
       store: {
-        backend: 'oxigraph-persistent',
+        backend: 'oxigraph-worker',
         options: { path: join(home, 'store.nq') },
       },
       chain: {
