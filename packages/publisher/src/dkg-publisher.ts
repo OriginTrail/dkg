@@ -1102,6 +1102,34 @@ export class DKGPublisher implements Publisher {
         effectiveByteSize: input.effectiveByteSize,
         ctx: input.ctx,
       });
+    if (
+      finalPricing.publishEpochs !== initialPricing.publishEpochs
+      || finalPricing.precomputedTokenAmount !== initialPricing.precomputedTokenAmount
+    ) {
+      // The first reservation necessarily uses provisional signer-dependent
+      // pricing. If selecting a different signer changes PCA lifetime/cost,
+      // validate that exact signer again against the values that will enter the
+      // ACK digest and transaction. Otherwise an adapter could approve a cheap
+      // provisional plan and the publisher could silently submit a different,
+      // unfundable final plan.
+      const finalReservedAddress = coercePublisherAddress(
+        await this.chain.reservePublisherAddressForPublish({
+          contextGraphId: input.contextGraphId,
+          requiredTracWei: finalPricing.precomputedTokenAmount,
+          publishEpochs: finalPricing.publishEpochs,
+          publisherAddress: reservedAddress,
+        }),
+      );
+      if (
+        !finalReservedAddress
+        || finalReservedAddress.toLowerCase() !== reservedAddress.toLowerCase()
+      ) {
+        throw new Error(
+          `Publisher signer reservation mismatch: final publish plan pins ${reservedAddress}, ` +
+          `but the chain adapter reserved ${finalReservedAddress ?? 'no address'}.`,
+        );
+      }
+    }
     return {
       signer: reservedSigner,
       publisherAddress: reservedAddress,

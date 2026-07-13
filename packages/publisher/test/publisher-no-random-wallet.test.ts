@@ -1068,10 +1068,16 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     });
 
     expect(result.status).toBe('confirmed');
-    expect(chain.reserveRequests).toHaveLength(1);
+    expect(chain.reserveRequests).toHaveLength(2);
     expect(chain.reserveRequests[0].contextGraphId).toBe(1n);
     expect(chain.reserveRequests[0].publishEpochs).not.toBe(24);
     expect(chain.reserveRequests[0].requiredTracWei).toBeGreaterThan(0n);
+    expect(chain.reserveRequests[1]).toMatchObject({
+      contextGraphId: 1n,
+      publisherAddress: fundedPca.address,
+      publishEpochs: 24,
+      requiredTracWei: 24n,
+    });
     expect(ack).toMatchObject({ epochs: 24, tokenAmount: 24n });
     expect(chain.capturedCreateParams).toMatchObject({
       publisherAddress: fundedPca.address,
