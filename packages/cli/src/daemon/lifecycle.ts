@@ -1987,7 +1987,9 @@ export async function runDaemonInner(
           log,
         });
         publisherState = outcome;
-        if (outcome.status === 'failed') {
+        if (!outcome.availability.available
+          && outcome.availability.reason === 'publisher_startup_failed'
+          && 'error' in outcome) {
           const err = outcome.error as any;
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
         }

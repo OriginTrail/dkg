@@ -41,7 +41,6 @@ import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from '.
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
 const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
-  status: 'disabled',
   runtime: null,
   availability: {
     available: false,

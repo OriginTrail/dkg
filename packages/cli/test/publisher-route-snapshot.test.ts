@@ -92,7 +92,6 @@ function createContext(
     agent: {} as RequestContext['agent'],
     publisherControl,
     publisherState: {
-      status: 'disabled',
       runtime: null,
       availability: {
         available: false,

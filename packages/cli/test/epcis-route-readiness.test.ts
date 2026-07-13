@@ -81,13 +81,6 @@ function unavailablePublisherState(
   retryable = reason === 'publisher_starting',
 ): RequestContext['publisherState'] {
   return {
-    status: reason === 'publisher_disabled'
-      ? 'disabled'
-      : reason === 'publisher_starting'
-        ? 'starting'
-        : reason === 'no_publisher_wallets'
-          ? 'no_publisher_wallets'
-          : 'failed',
     runtime: null,
     availability: {
       available: false,
@@ -101,7 +94,6 @@ function unavailablePublisherState(
 
 function readyPublisherState(): RequestContext['publisherState'] {
   return {
-    status: 'started',
     runtime: {
       walletIds: ['0xpublisher'],
       runner: {},

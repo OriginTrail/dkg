@@ -99,7 +99,6 @@ describe('runDaemonInner StorageACK timing wiring', () => {
 
     mocks.createServer.mockImplementation(createFakeServer);
     mocks.startPublisherRuntimeWithOutcome.mockResolvedValue({
-      status: 'no_publisher_wallets',
       runtime: null,
       availability: {
         available: false,

@@ -176,22 +176,18 @@ export async function startPublisherRuntimeIfEnabled(args: {
 
 export type PublisherStartupOutcome =
   | {
-      status: 'started';
       runtime: PublisherRuntime;
       availability: Extract<AsyncPublisherAvailability, { available: true }>;
     }
   | {
-      status: 'disabled';
       runtime: null;
       availability: PublisherDisabledAvailability;
     }
   | {
-      status: 'no_publisher_wallets';
       runtime: null;
       availability: NoPublisherWalletsAvailability;
     }
   | {
-      status: 'failed';
       runtime: null;
       availability: PublisherStartupFailedAvailability;
       error: unknown;
@@ -200,7 +196,6 @@ export type PublisherStartupOutcome =
 export type PublisherState =
   | PublisherStartupOutcome
   | {
-      status: 'starting';
       runtime: null;
       availability: PublisherStartingAvailability;
     };
@@ -213,13 +208,11 @@ export type PublisherState =
 export function createInitialPublisherState(config: DkgConfig): PublisherState {
   if (!config.publisher?.enabled) {
     return {
-      status: 'disabled',
       runtime: null,
       availability: unavailablePublisherAvailability('publisher_disabled'),
     };
   }
   return {
-    status: 'starting',
     runtime: null,
     availability: unavailablePublisherAvailability('publisher_starting'),
   };
@@ -235,7 +228,6 @@ export async function startPublisherRuntimeWithOutcome(
 ): Promise<PublisherStartupOutcome> {
   if (!args.config.publisher?.enabled) {
     return {
-      status: 'disabled',
       runtime: null,
       availability: unavailablePublisherAvailability('publisher_disabled'),
     };
@@ -245,15 +237,13 @@ export async function startPublisherRuntimeWithOutcome(
     const runtime = await startPublisherRuntimeIfEnabled(args);
     if (!runtime) {
       return {
-        status: 'no_publisher_wallets',
         runtime: null,
         availability: unavailablePublisherAvailability('no_publisher_wallets'),
       };
     }
-    return { status: 'started', runtime, availability: { available: true } };
+    return { runtime, availability: { available: true } };
   } catch (error) {
     return {
-      status: 'failed',
       runtime: null,
       availability: unavailablePublisherAvailability('publisher_startup_failed'),
       error,

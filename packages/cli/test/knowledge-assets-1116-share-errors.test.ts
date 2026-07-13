@@ -71,18 +71,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
   ) {
     const publisherState = publisherAvailability.available
       ? {
-          status: 'started' as const,
           runtime: publisherRuntime,
           availability: publisherAvailability,
         }
       : {
-          status: publisherAvailability.reason === 'publisher_disabled'
-            ? 'disabled' as const
-            : publisherAvailability.reason === 'publisher_starting'
-              ? 'starting' as const
-              : publisherAvailability.reason === 'no_publisher_wallets'
-                ? 'no_publisher_wallets' as const
-                : 'failed' as const,
           runtime: null,
           availability: publisherAvailability,
           ...(publisherAvailability.reason === 'publisher_startup_failed'

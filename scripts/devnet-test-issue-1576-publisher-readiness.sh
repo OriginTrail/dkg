@@ -40,7 +40,12 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 [[ "$(code_of "$(api "$NODE" GET /api/status)")" == 200 ]] || fail "temporary node did not become ready"
-status_body="$(body_of "$(api "$NODE" GET /api/status)")"
+status_body=""
+for _ in $(seq 1 90); do
+  status_body="$(body_of "$(api "$NODE" GET /api/status)")"
+  [[ "$(field "$status_body" asyncPublisher.reason)" != publisher_starting ]] && break
+  sleep 1
+done
 [[ "$(field "$status_body" asyncPublisher.reason)" == no_publisher_wallets ]] \
   || fail "status did not expose no-wallet publisher readiness: $status_body"
 api "$NODE" POST /api/identity/ensure '{}' >/dev/null || true
