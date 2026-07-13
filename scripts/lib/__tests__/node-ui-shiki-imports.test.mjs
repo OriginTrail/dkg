@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const UI_SOURCE = path.join(REPO_ROOT, 'packages/node-ui/src/ui');
 const HIGHLIGHTER = path.join(UI_SOURCE, 'components/chat/shikiHighlighter.ts');
+const LANGUAGE_REGISTRY = path.join(UI_SOURCE, 'components/chat/shikiLanguages.ts');
 const UI_PACKAGE_JSON = path.join(REPO_ROOT, 'packages/node-ui/package.json');
 
 function sourceFiles(dir) {
@@ -28,10 +29,12 @@ test('Node UI uses a fine-grained Shiki bundle instead of the full registry', ()
   }
 
   const highlighter = fs.readFileSync(HIGHLIGHTER, 'utf8');
+  const registry = fs.readFileSync(LANGUAGE_REGISTRY, 'utf8');
   assert.match(highlighter, /from 'shiki\/core'/);
   assert.match(highlighter, /from 'shiki\/engine\/oniguruma'/);
-  assert.match(highlighter, /from 'shiki\/langs\//);
   assert.match(highlighter, /from 'shiki\/themes\//);
+  assert.match(highlighter, /loadShikiLanguageRegistrations/);
+  assert.match(registry, /import\('shiki\/langs\//);
 });
 
 test('Node UI build keeps its V8 heap below the node service memory budget', () => {

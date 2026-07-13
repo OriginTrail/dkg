@@ -32,6 +32,16 @@ const REQUIRED_RUNTIME_PACKAGES = [
   '@origintrail-official/kafka-plugin',
 ];
 
+test('public runtime build script delegates to the checked build plan', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+
+  assert.equal(
+    packageJson.scripts?.['build:runtime:packages'],
+    'node scripts/build-runtime-packages.mjs',
+    'pnpm run build:runtime:packages must use the entrypoint backed by runtimeBuildPnpmArgs',
+  );
+});
+
 test('release runtime build plan includes workspace dependencies but excludes Hardhat', () => {
   assert.ok(
     RUNTIME_BUILD_EXCLUSIONS.includes('@origintrail-official/dkg-evm-module'),
