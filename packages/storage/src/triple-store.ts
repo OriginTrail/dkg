@@ -17,6 +17,15 @@ import {
   ChangelogStore,
   type ChangelogStoreOptions,
 } from './changelog-store.js';
+import {
+  classifyTripleStoreBackend,
+  getStorageAdapterPolicy,
+  isExternalBackend,
+  type CustomTripleStoreBackend,
+  type StorageAdapterBackend,
+} from './store-backends.js';
+
+export { isExternalBackend } from './store-backends.js';
 
 export interface Quad {
   subject: string;
@@ -166,11 +175,19 @@ export async function tryUpdateWithTouchedGraphs(
   return true;
 }
 
-export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
+/**
+ * Backends the storage factory can construct: registered built-in adapters or
+ * an explicitly branded custom adapter name.
+ */
+export type TripleStoreBackend = StorageAdapterBackend | CustomTripleStoreBackend;
 
-// Backends that talk to a remote SPARQL endpoint over HTTP rather than
-// owning local files. The local/external split governs three pieces of
-// daemon behaviour:
+/** Explicitly cross from stringly daemon/user config into the factory model. */
+export function toTripleStoreBackend(backend: string): TripleStoreBackend {
+  const classification = classifyTripleStoreBackend(backend);
+  return classification.backend;
+}
+
+// The canonical backend taxonomy governs three pieces of daemon behaviour:
 //   1. Store-size metric — local backends report file bytes, external
 //      backends have no file to stat (`getStoreBytes` returns null).
 //   2. Chain-reset wipe — local backends `rm` files, external backends
@@ -181,12 +198,6 @@ export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-
 //   3. Boot health check — for external backends, an ASK probe runs at
 //      daemon start; an unreachable endpoint exits the daemon with an
 //      actionable message rather than booting half-broken.
-const EXTERNAL_BACKENDS: ReadonlySet<string> = new Set(['blazegraph', 'sparql-http']);
-
-export function isExternalBackend(backend: string | undefined | null): boolean {
-  return typeof backend === 'string' && EXTERNAL_BACKENDS.has(backend);
-}
-
 /**
  * Shape-normalised SPARQL endpoint extracted from a TripleStoreConfig.
  *
@@ -202,34 +213,39 @@ export interface SparqlEndpoint {
   headers: Record<string, string>;
 }
 
-export function getSparqlEndpoint(storeConfig: TripleStoreConfig): SparqlEndpoint {
+export interface SparqlEndpointStoreConfig {
+  backend: string;
+  options?: Record<string, unknown>;
+}
+
+export function getSparqlEndpoint(storeConfig: SparqlEndpointStoreConfig): SparqlEndpoint {
   if (!isExternalBackend(storeConfig.backend)) {
     throw new Error(
       `getSparqlEndpoint called for non-external backend "${storeConfig.backend}"`,
     );
   }
   const opts = (storeConfig.options ?? {}) as Record<string, unknown>;
-  if (storeConfig.backend === 'blazegraph') {
-    const url = typeof opts.url === 'string' ? opts.url : '';
-    if (!url) {
-      throw new Error('blazegraph storeConfig requires options.url');
-    }
-    return { queryUrl: url, updateUrl: url, headers: {} };
+  const policy = getStorageAdapterPolicy(storeConfig.backend);
+  if (!policy || policy.kind !== 'external') {
+    throw new Error(`No external-store policy found for "${storeConfig.backend}"`);
   }
-  // sparql-http
-  const queryEndpoint = typeof opts.queryEndpoint === 'string' ? opts.queryEndpoint : '';
-  if (!queryEndpoint) {
-    throw new Error('sparql-http storeConfig requires options.queryEndpoint');
+  const queryOption = policy.queryEndpointOption;
+  const queryUrl = typeof opts[queryOption] === 'string' ? opts[queryOption] as string : '';
+  if (!queryUrl) {
+    throw new Error(`${storeConfig.backend} storeConfig requires options.${queryOption}`);
   }
-  const updateEndpoint =
-    typeof opts.updateEndpoint === 'string' && opts.updateEndpoint
-      ? opts.updateEndpoint
-      : queryEndpoint;
+  const updateOption = policy.updateEndpointOption;
+  const updateUrl = typeof opts[updateOption] === 'string' && opts[updateOption]
+    ? opts[updateOption] as string
+    : queryUrl;
   const headers: Record<string, string> = {};
-  if (typeof opts.auth === 'string' && opts.auth) {
-    headers['Authorization'] = opts.auth;
+  if ('authOption' in policy) {
+    const auth = opts[policy.authOption];
+    if (typeof auth === 'string' && auth) {
+      headers.Authorization = auth;
+    }
   }
-  return { queryUrl: queryEndpoint, updateUrl: updateEndpoint, headers };
+  return { queryUrl, updateUrl, headers };
 }
 
 export interface LargeLiteralStorageConfig {
@@ -256,22 +272,40 @@ export interface TripleStoreConfig {
   changelog?: boolean | ChangelogStoreOptions;
 }
 
+export type TripleStoreFactoryConfig = TripleStoreConfig;
+
 type AdapterFactory = (
   options?: Record<string, unknown>,
 ) => Promise<TripleStore>;
 
 const adapterRegistry = new Map<string, AdapterFactory>();
 
-export function registerTripleStoreAdapter(
-  name: string,
+// Runtime compatibility guard for callers compiled before the worker adapter
+// was removed. This is intentionally not part of STORAGE_ADAPTERS: it provides
+// a migration error without making retired daemon/config policy constructible.
+const REMOVED_ADAPTER_GUIDANCE: Readonly<Record<string, string>> = {
+  'oxigraph-worker':
+    'Use "sparql-http" or "blazegraph" for an HTTP store, or ' +
+    '"oxigraph-persistent" for embedded persistence.',
+};
+
+export function registerTripleStoreAdapter<Backend extends string>(
+  name: Backend,
   factory: AdapterFactory,
-): void {
+): Backend extends StorageAdapterBackend ? Backend : CustomTripleStoreBackend {
   adapterRegistry.set(name, factory);
+  return name as Backend extends StorageAdapterBackend ? Backend : CustomTripleStoreBackend;
 }
 
 export async function createTripleStore(
-  config: TripleStoreConfig,
+  config: TripleStoreFactoryConfig,
 ): Promise<TripleStore> {
+  const removedGuidance = REMOVED_ADAPTER_GUIDANCE[config.backend];
+  if (removedGuidance) {
+    throw new Error(
+      `TripleStore backend "${config.backend}" is no longer supported. ${removedGuidance}`,
+    );
+  }
   const factory = adapterRegistry.get(config.backend);
   if (!factory) {
     throw new Error(
@@ -337,8 +371,7 @@ function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
 
 function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
   return backend === 'oxigraph'
-    || backend === 'oxigraph-persistent'
-    || backend === 'oxigraph-worker';
+    || backend === 'oxigraph-persistent';
 }
 
 function resolveLargeLiteralStorageOptions(

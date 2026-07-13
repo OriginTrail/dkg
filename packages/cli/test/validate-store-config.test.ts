@@ -8,8 +8,8 @@
  *     when paired with an external backend (no local store path to
  *     infer from).
  *
- * Local backends (default Oxigraph) are unaffected — the function is a
- * no-op for them.
+ * Supported local backends are unaffected. The retired `oxigraph-worker`
+ * backend is rejected before boot.
  *
  * Plan: `.cursor/plans/blazegraph_v10_support_178da670.plan.md` §PR 1 item 6.
  */
@@ -33,9 +33,12 @@ describe('validateStoreConfig', () => {
   });
 
   describe('local backends', () => {
-    it('no-op for oxigraph-worker', () => {
+    it('no-op for supported local backends', () => {
       expect(
-        validateStoreConfig(mk({ store: { backend: 'oxigraph-worker' } })),
+        validateStoreConfig(mk({ store: { backend: 'oxigraph' } })),
+      ).toEqual([]);
+      expect(
+        validateStoreConfig(mk({ store: { backend: 'oxigraph-persistent', options: { path: '/tmp/store.nq' } } })),
       ).toEqual([]);
     });
 
@@ -44,9 +47,18 @@ describe('validateStoreConfig', () => {
       // if the backend is local; the wipe + health check honour
       // isExternalBackend the same way.
       const errors = validateStoreConfig(
-        mk({ store: { backend: 'oxigraph-worker', options: { url: 'irrelevant' } } }),
+        mk({ store: { backend: 'oxigraph', options: { url: 'irrelevant' } } }),
       );
       expect(errors).toEqual([]);
+    });
+
+    it('rejects the retired oxigraph-worker backend', () => {
+      const errors = validateStoreConfig(
+        mk({ store: { backend: 'oxigraph-worker' } }),
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0].field).toBe('store.backend');
+      expect(errors[0].message).toMatch(/no longer supported/);
     });
   });
 
@@ -136,7 +148,7 @@ describe('validateStoreConfig', () => {
     it('does not enforce the directory requirement for local backends', () => {
       const errors = validateStoreConfig(
         mk({
-          store: { backend: 'oxigraph-worker' },
+          store: { backend: 'oxigraph-persistent', options: { path: '/tmp/store.nq' } },
           largeLiteralStorage: { enabled: true },
         }),
       );

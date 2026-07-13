@@ -148,6 +148,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
       nodeRole: 'core',
+      store: { backend: 'oxigraph' },
       chain: {
         type: 'evm',
         rpcUrl: 'https://private-rpc.example',
@@ -286,6 +287,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       listenPort: 0,
       nodeRole: 'edge',
       apiPort: 0,
+      store: { backend: 'oxigraph' },
       auth: { enabled: false },
       promoteQueue: { enabled: false },
       publisher: { enabled: true },

@@ -12,9 +12,9 @@
 //     `contextGraphActivePublicOnChainFromRegistry` / `contextGraphExists`
 //     methods (invoked via ContextGraphResolveMethods.prototype on a narrow
 //     harness carrying real state, the same shape the DKGAgent mixin sees), and
-//   • a REAL OxigraphWorkerStore that has been close()d — the honest
-//     "the store is closed" failure a crashed/closed worker produces live —
-//     alongside a healthy in-memory worker store for the no-change paths, and
+//   • a REAL SparqlHttpStore pointed at an unavailable loopback endpoint — the
+//     honest connection failure an unavailable external/managed store produces
+//     live — alongside a healthy embedded store for the no-change paths, and
 //   • the REAL `resolveRequiredWriteContextGraphId` resolver with a real
 //     captured ServerResponse sink (same conventions as
 //     context-graph-write-path-validation.test.ts).
@@ -38,7 +38,7 @@ import {
   WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS,
 } from '../src/daemon/http-utils.js';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
-import { OxigraphWorkerStore, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -104,8 +104,8 @@ function agentHarness(
 
 // The narrow data interface resolveRequiredWriteContextGraphId consumes.
 // `listContextGraphs` performs a real read against the harness store so a
-// closed store rejects with the genuine worker error (the same failure mode
-// the real list path hits), and a healthy store returns the given rows.
+// unavailable store rejects with a genuine adapter error (the same failure
+// mode the real list path hits), and a healthy store returns the given rows.
 function providerFor(harness: any, rows: Array<Record<string, unknown>> = []) {
   const listCalls: Array<unknown> = [];
   return {
@@ -153,25 +153,30 @@ function captureRes(): { res: ServerResponse; out: { status?: number; body?: any
 // The exact legacy 503 body the pre-resilience code produced when both legs
 // threw. Live callers and tests grep for this — the rescue must leave it
 // byte-compatible whenever it does NOT accept.
-const LEGACY_503_ERROR = /^Failed to validate contextGraphId against known context graphs: exact preflight failed: .*store is closed.*; list validation failed: .*store is closed/;
+const LEGACY_503_ERROR = /^Failed to validate contextGraphId against known context graphs: exact preflight failed: .*fetch failed.*; list validation failed: .*fetch failed/;
 
-let closedStore: OxigraphWorkerStore;
-let healthyStore: OxigraphWorkerStore;
+let closedStore: TripleStore;
+let healthyStore: TripleStore;
 
 beforeAll(async () => {
-  // A real worker-backed store that has been closed: every subsequent call
-  // rejects with the real `oxigraph-worker: cannot run "…" — the store is
-  // closed.` error — the exact live failure this track fixes.
-  closedStore = new OxigraphWorkerStore(undefined);
-  await closedStore.close();
-  healthyStore = new OxigraphWorkerStore(undefined);
+  // A real external-store adapter pointed at an unavailable endpoint: every
+  // query rejects through the same fetch path used by managed/external stores.
+  closedStore = await createTripleStore({
+    backend: 'sparql-http',
+    options: {
+      queryEndpoint: 'http://127.0.0.1:65535/query',
+      updateEndpoint: 'http://127.0.0.1:65535/update',
+    },
+  });
+  healthyStore = await createTripleStore({ backend: 'oxigraph' });
 });
 
 afterAll(async () => {
+  await closedStore.close();
   await healthyStore.close();
 });
 
-describe('probeContextGraphWritePreflight — store-failure resilience (real probe, real closed store)', () => {
+describe('probeContextGraphWritePreflight — store-failure resilience (real probe, unavailable store)', () => {
   it('detects local content from indexed graph names while ignoring bookkeeping-only graphs', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const listGraphsByPrefix = store.listGraphsByPrefix?.bind(store);
@@ -230,7 +235,7 @@ describe('probeContextGraphWritePreflight — store-failure resilience (real pro
     );
     const probe = await harness.probeContextGraphWritePreflight(CG);
     expect(probe.storeUnavailable).toBe(true);
-    expect(probe.storeErrorMessage).toMatch(/store is closed/);
+    expect(probe.storeErrorMessage).toMatch(/fetch failed/);
     // In-memory registry state needs zero store I/O and must survive.
     expect(probe.inMemorySubscription).toEqual({ subscribed: true, synced: true });
     // Store-derived facts are UNKNOWN — a store outage must never be
@@ -269,7 +274,7 @@ describe('probeContextGraphWritePreflight — store-failure resilience (real pro
   });
 });
 
-describe('resolveRequiredWriteContextGraphId — both-legs-failed rescue (real resolver, real closed store)', () => {
+describe('resolveRequiredWriteContextGraphId — both-legs-failed rescue (real resolver, unavailable store)', () => {
   it('(a) ACCEPTS on positive on-chain proof the CG is active AND PUBLIC', async () => {
     const isActive = recorder(async (id: bigint) => id === 7n);
     const getAccessPolicy = recorder(async (_id: bigint) => 0); // 0 = public

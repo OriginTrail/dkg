@@ -86,7 +86,7 @@ afterAll(async () => {
 
 describe('planManagedOxigraph', () => {
   it('returns null for non-oxigraph-server backends', () => {
-    expect(planManagedOxigraph({ store: { backend: 'oxigraph-worker' } }, '/data')).toBeNull();
+    expect(planManagedOxigraph({ store: { backend: 'oxigraph' } }, '/data')).toBeNull();
     expect(planManagedOxigraph({ store: { backend: 'sparql-http' } }, '/data')).toBeNull();
     expect(planManagedOxigraph({}, '/data')).toBeNull();
   });
@@ -327,7 +327,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
     // Contract: a non-managed backend is a no-op — null result, and nothing
     // observable happens (no cache dir is created, nothing binds a port).
     const result = await startManagedOxigraph({
-      config: { store: { backend: 'oxigraph-worker' } },
+      config: { store: { backend: 'oxigraph' } },
       dataDir: '/data',
     });
     expect(result).toBeNull();

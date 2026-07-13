@@ -10,9 +10,9 @@
  * node does not track is NEVER admitted; refusals are structured, side-effect
  * free, and leave the node healthy" — is exactly what this spec pins against
  * the healthy devnet. (The outage-only legs — 503 fail-closed, the on-chain
- * public rescue itself, oxigraph worker respawn — need a killed store and are
+ * public rescue itself and store restart recovery — need a killed store and are
  * pinned by #1408's real-component suites: write-preflight-resilience,
- * storage-ack-core-unavailable, oxigraph-worker-respawn.)
+ * storage-ack-core-unavailable and related store-outage scenarios.)
  */
 import { test, expect } from '../../fixtures/base.js';
 import { devnetApiFetch, requireDevnetNode, requireDevnetPrecondition, waitForDevnetStatus } from '../../helpers/devnet.js';

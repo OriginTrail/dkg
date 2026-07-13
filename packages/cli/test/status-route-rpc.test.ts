@@ -33,13 +33,35 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
-import { loadNetworkConfig } from '../src/config.js';
-import { handleStatusRoutes } from '../src/daemon/routes/status.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import { loadNetworkConfig, type DkgConfig } from '../src/config.js';
+import {
+  handleStatusRoutes,
+  invalidateExternalStoreQuadsCache,
+} from '../src/daemon/routes/status.js';
+import {
+  createRequestStoreContext,
+  type RequestContext,
+} from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
+const MANAGED_QUERY_ENDPOINT = 'http://127.0.0.1:7878/query';
+
+function managedStoreRuntime(operatorConfig: DkgConfig) {
+  return {
+    operatorConfig,
+    effectiveStore: { backend: 'oxigraph-server', options: {} },
+    runtimeStore: {
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: MANAGED_QUERY_ENDPOINT,
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+        managedByDkg: true,
+      },
+    },
+  };
+}
 
 describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => {
   let daemon: LiveDaemon;
@@ -118,9 +140,124 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
 });
 
 describe('/api/status selected overlay details', () => {
+  it('reports the effective managed store for a blockless config', async () => {
+    const config: DkgConfig = {
+      name: 'status-blockless-store-test',
+      nodeRole: 'edge',
+      chain: { type: 'mock' },
+    };
+    const query = vi.fn(async () => ({
+      type: 'bindings' as const,
+      bindings: [{ c: '42' }],
+    }));
+    invalidateExternalStoreQuadsCache();
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      await handleStatusRoutes({
+        req,
+        res,
+        path: url.pathname,
+        url,
+        network: null,
+        ...createRequestStoreContext(managedStoreRuntime(config)),
+        startedAt: Date.now(),
+        agent: {
+          peerId: 'peer-status-test',
+          multiaddrs: [],
+          node: {
+            libp2p: { getConnections: () => [] },
+            getRelayStats: () => null,
+          },
+          publisher: { getIdentityId: () => 0n },
+          store: { query },
+        },
+        nodeVersion: '0.0.0-test',
+        nodeCommit: '',
+        admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      } as unknown as RequestContext);
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address() as AddressInfo;
+      const res = await fetch(`http://127.0.0.1:${address.port}/api/status`);
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+
+      expect(body.storeBackend).toBe('oxigraph-server');
+      expect(body.storeUrl).toBe(MANAGED_QUERY_ENDPOINT);
+      expect(body.storeQuads).toBe(42);
+      expect(query).toHaveBeenCalledOnce();
+    } finally {
+      invalidateExternalStoreQuadsCache();
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
+  it('reports the effective managed store after an acknowledged worker cutover', async () => {
+    const config: DkgConfig = {
+      name: 'status-worker-cutover-test',
+      nodeRole: 'edge',
+      chain: { type: 'mock' },
+      store: { backend: 'oxigraph-worker', options: {} },
+    };
+    const query = vi.fn(async () => ({
+      type: 'bindings' as const,
+      bindings: [{ c: '17' }],
+    }));
+    invalidateExternalStoreQuadsCache();
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      await handleStatusRoutes({
+        req,
+        res,
+        path: url.pathname,
+        url,
+        network: null,
+        ...createRequestStoreContext(managedStoreRuntime(config)),
+        startedAt: Date.now(),
+        agent: {
+          peerId: 'peer-status-test',
+          multiaddrs: [],
+          node: {
+            libp2p: { getConnections: () => [] },
+            getRelayStats: () => null,
+          },
+          publisher: { getIdentityId: () => 0n },
+          store: { query },
+        },
+        nodeVersion: '0.0.0-test',
+        nodeCommit: '',
+        admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      } as unknown as RequestContext);
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address() as AddressInfo;
+      const res = await fetch(`http://127.0.0.1:${address.port}/api/status`);
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+
+      expect(body.storeBackend).toBe('oxigraph-server');
+      expect(body.storeUrl).toBe(MANAGED_QUERY_ENDPOINT);
+      expect(body.storeQuads).toBe(17);
+      expect(query).toHaveBeenCalledOnce();
+    } finally {
+      invalidateExternalStoreQuadsCache();
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
   it('returns the network id and name for the selected overlay genesis', async () => {
     const network = await loadNetworkConfig('mainnet-gnosis');
     expect(network).not.toBeNull();
+    const config: DkgConfig = {
+      name: 'status-selected-overlay-test',
+      networkConfig: 'mainnet-gnosis',
+      nodeRole: 'edge',
+      chain: { type: 'mock' },
+    };
 
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -130,12 +267,7 @@ describe('/api/status selected overlay details', () => {
         path: url.pathname,
         url,
         network,
-        config: {
-          name: 'status-selected-overlay-test',
-          networkConfig: 'mainnet-gnosis',
-          nodeRole: 'edge',
-          chain: { type: 'mock' },
-        },
+        ...createRequestStoreContext(managedStoreRuntime(config)),
         startedAt: Date.now(),
         agent: {
           peerId: 'peer-status-test',
@@ -175,6 +307,17 @@ describe('/api/status selected overlay details', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const network = await loadNetworkConfig('mainnet-gnosis');
+    const config: DkgConfig = {
+      name: 'status-failover-counter-test',
+      networkConfig: 'mainnet-gnosis',
+      nodeRole: 'edge',
+      chain: {
+        type: 'evm',
+        rpcUrl: 'http://127.0.0.1:9',
+        hubAddress: `0x${'ab'.repeat(20)}`,
+        chainId: 'evm:31337',
+      },
+    };
     try {
       // Seed the process-wide failover counters the status route reads, then
       // assert /api/status reflects the exact delta. This would FAIL if the
@@ -195,17 +338,7 @@ describe('/api/status selected overlay details', () => {
           path: url.pathname,
           url,
           network,
-          config: {
-            name: 'status-failover-counter-test',
-            networkConfig: 'mainnet-gnosis',
-            nodeRole: 'edge',
-            chain: {
-              type: 'evm',
-              rpcUrl: 'http://127.0.0.1:9',
-              hubAddress: `0x${'ab'.repeat(20)}`,
-              chainId: 'evm:31337',
-            },
-          },
+          ...createRequestStoreContext(managedStoreRuntime(config)),
           startedAt: Date.now(),
           agent: {
             peerId: 'peer-status-test',

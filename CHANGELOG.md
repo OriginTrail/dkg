@@ -4,6 +4,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Removed — `oxigraph-worker` backend support
+
+- **The embedded `oxigraph-worker` backend is retired.** The storage package no longer exports or registers the worker-thread adapter, `createTripleStore({ backend: "oxigraph-worker" })` fails with an actionable migration error, and CLI config validation refuses explicit `store.backend: "oxigraph-worker"` before daemon boot. Block-less configs now resolve to the daemon-managed `oxigraph-server` default; if a legacy `store.nq` file exists, daemon boot requires `DKG_ACCEPT_STORE_RESET=1` so operators acknowledge the fresh-store cutover.
+
 ## [10.0.6] - 2026-07-10
 
 Sync-, storage-, and admission-path hardening on top of 10.0.5, plus the StorageACK priority-lane follow-ups and a set of CLI/RPC fixes. Eliminates the perpetually-dirty graph-set-index full scan that was saturating managed Oxigraph cores, bounds sync-responder memory and coalesces duplicate sync fan-out, makes network admission probing back off and use canonical peer ids, and completes the StorageACK priority-lane hardening (ACK candidate selection, async promote-queue read serialization, and OT-RFC-49 host-mode ciphertext strip-by-curation). **No smart-contract changes — no deployment required** (no Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.5).

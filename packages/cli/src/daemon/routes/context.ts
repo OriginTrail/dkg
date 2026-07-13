@@ -23,6 +23,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
+import type { StoreRuntimeContext } from '../store-runtime.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -54,7 +55,29 @@ export interface NotificationSseEvent {
   type: string;
 }
 
-export interface RequestContext {
+/**
+ * Store views exposed to routes. The operator config is intentionally the only
+ * config object in this shape, so a direct route harness cannot provide a
+ * second, contradictory operator config through a nested store context.
+ */
+export interface RequestStoreContext {
+  /** Operator config exactly as loaded from disk / CLI. */
+  config: DkgConfig;
+  /** Daemon-facing backend after defaults and acknowledged migrations. */
+  effectiveStore: StoreRuntimeContext['effectiveStore'];
+  /** Constructible live adapter config after managed-store materialization. */
+  runtimeStore: StoreRuntimeContext['runtimeStore'];
+}
+
+export function createRequestStoreContext(storeRuntime: StoreRuntimeContext): RequestStoreContext {
+  return {
+    config: storeRuntime.operatorConfig,
+    effectiveStore: storeRuntime.effectiveStore,
+    runtimeStore: storeRuntime.runtimeStore,
+  };
+}
+
+export interface RequestContext extends RequestStoreContext {
   req: IncomingMessage;
   res: ServerResponse;
   agent: DKGAgent;
@@ -62,7 +85,6 @@ export interface RequestContext {
   publisherRuntime: PublisherRuntime | null;
   /** Lifecycle-owned publisher state; optional for direct route embeddings/tests. */
   publisherAvailability?: AsyncPublisherAvailability;
-  config: DkgConfig;
   startedAt: number;
   dashDb: DashboardDB;
   opWallets: OpWalletsConfig;

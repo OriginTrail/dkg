@@ -405,7 +405,7 @@ export class QueryHandler {
     // post-materialization `.slice()`, so a high-cardinality query is fully
     // materialized before being truncated. Genuinely enforcing either bound
     // requires threading an `AbortSignal` + result cap through
-    // `QueryEngine.query()` → storage → the oxigraph worker. Injecting a
+    // `QueryEngine.query()` → the selected storage adapter. Injecting a
     // `LIMIT` into the user query here is NOT a safe shortcut: for scoped
     // queries it would push the statement into the multi-graph
     // solution-set-modifier rejection path (see #789), so it is
