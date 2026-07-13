@@ -340,12 +340,12 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   list(): ProtocolOutboxEntry[] {
-    return Array.from(this.entries.values()).map((e) => ({ ...e }));
+    return Array.from(this.entries.values()).map(cloneOutboxEntry);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
     const entry = this.entries.get(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
-    return entry ? { ...entry } : undefined;
+    return entry ? cloneOutboxEntry(entry) : undefined;
   }
 }
 

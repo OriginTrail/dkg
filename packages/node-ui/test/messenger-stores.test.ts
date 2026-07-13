@@ -180,7 +180,7 @@ describe('SqliteProtocolOutboxStore', () => {
     payload[0] = 9;
     entry.payload[1] = 8;
 
-    const pending = store.snapshot().filter((entry) => entry.peer === PEER_A);
+    const pending = store.list().filter((entry) => entry.peer === PEER_A);
     expect(Array.from(pending[0].payload)).toEqual([1, 2, 3]);
 
     pending[0].payload[2] = 7;
@@ -260,7 +260,7 @@ describe('SqliteProtocolOutboxStore', () => {
     db.close();
     db = new DashboardDB({ dataDir: dir });
     const reopened = new SqliteProtocolOutboxStore(db);
-    const pending = reopened.snapshot().filter((entry) => entry.peer === PEER_A);
+    const pending = reopened.list().filter((entry) => entry.peer === PEER_A);
     expect(pending).toHaveLength(1);
     expect(pending[0].lastError).toBe('crash-before-delivery');
     expect(Array.from(pending[0].payload)).toEqual(Array.from(PAYLOAD));

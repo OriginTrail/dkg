@@ -71,7 +71,7 @@ describe('ProtocolOutbox.enqueueFailure', () => {
     payload[0] = 9;
     entry.payload[1] = 8;
 
-    const pending = outbox.snapshot().filter((entry) => entry.peer === PEER_A);
+    const pending = outbox.list().filter((entry) => entry.peer === PEER_A);
     expect(Array.from(pending[0].payload)).toEqual([1, 2, 3]);
 
     pending[0].payload[2] = 7;
