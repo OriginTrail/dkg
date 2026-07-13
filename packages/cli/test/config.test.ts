@@ -25,6 +25,7 @@ import {
   sharedHomeInitGate,
   repoDir,
   inferNetworkConfigNameFromChainId,
+  resolveKnownNetworkConfigName,
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
@@ -533,6 +534,14 @@ describe('localAgentIntegrations config round-trip', () => {
     })).toBe('fixture-network');
   });
 
+  it('uses the same bundled registry for load-by-name and chain inference', async () => {
+    for (const name of ['testnet', 'mainnet-base', 'mainnet-gnosis'] as const) {
+      const network = await loadNetworkConfig(name);
+      expect(network).not.toBeNull();
+      expect(inferNetworkConfigNameFromChainId(network?.chain?.chainId)).toBe(name);
+    }
+  });
+
   it('refuses to infer an ambiguous chain shared by two overlays', () => {
     const chain = {
       type: 'evm' as const,
@@ -564,6 +573,12 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveNetworkConfigName({})).toBe('testnet');
     expect(resolveNetworkConfigName({ networkConfig: '   ' })).toBe('testnet');
     expect(resolveNetworkConfigName({ chain: { chainId: 'evm:31337' } })).toBe('testnet');
+  });
+
+  it('keeps unknown legacy chains distinguishable from the project fallback', () => {
+    expect(resolveKnownNetworkConfigName({})).toBeUndefined();
+    expect(resolveKnownNetworkConfigName({ chain: { chainId: 'evm:31337' } })).toBeUndefined();
+    expect(resolveKnownNetworkConfigName({ chain: { chainId: 'gnosis:100' } })).toBe('mainnet-gnosis');
   });
 
   it('round-trips relayServerCapacity through saveConfig/loadConfig (operator override)', async () => {

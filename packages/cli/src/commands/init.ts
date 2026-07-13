@@ -25,7 +25,7 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, resolveNetworkConfigName, validateNetworkConfigReadiness,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, resolveKnownNetworkConfigName, resolveNetworkConfigName, validateNetworkConfigReadiness,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo, classifyMonorepoInit, sharedHomeInitGate,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
@@ -314,8 +314,16 @@ program
     // the chain-inferred network (or testnet fallback) for a legacy config.
     // `--network` (or `-y`) skips the prompt.
     const explicitNetwork = typeof opts.network === 'string' ? opts.network.trim() : '';
+    // Keep the setup default and switch evidence separate. An unknown legacy
+    // chain still defaults to the project network for the prompt, but that
+    // fallback is not proof that the existing node actually belonged to it.
+    // Only explicit or uniquely chain-inferred state may cause us to discard
+    // operator RPC/hub overrides as a real network switch.
+    const knownExistingNetwork = configExisted
+      ? resolveKnownNetworkConfigName(existing)
+      : undefined;
     const existingNetwork = configExisted
-      ? resolveNetworkConfigName(existing)
+      ? knownExistingNetwork ?? resolveNetworkConfigName(existing)
       : undefined;
     const networkDefault = resolveSetupNetworkName({
       existingNetworkConfig: existingNetwork,
@@ -477,7 +485,7 @@ program
     // network's relays/genesis against the old chain (the Frankenstein config).
     // See isInitNetworkSwitch — a same-network legacy node preserves its
     // chain field-merge (including operator RPC overrides).
-    const isNetworkSwitch = isInitNetworkSwitch(existingNetwork, selectedNetwork);
+    const isNetworkSwitch = isInitNetworkSwitch(knownExistingNetwork, selectedNetwork);
     const chainDefaults = resolveChainConfig(isNetworkSwitch ? undefined : existing, network);
     const defaultRpcUrl = chainDefaults?.rpcUrl;
     const defaultRpcUrls = chainDefaults?.rpcUrls?.join(', ') ?? '';

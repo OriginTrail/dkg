@@ -1103,13 +1103,9 @@ export function parseWeiFloor(
   return parsed;
 }
 
-let _networkConfig: NetworkConfig | null = null;
-let _networkConfigName: string | null = null;
 let _bundledNetworkRegistry: Readonly<Record<string, NetworkConfig>> | null = null;
 
 export function _resetNetworkConfigCache(): void {
-  _networkConfig = null;
-  _networkConfigName = null;
   _bundledNetworkRegistry = null;
 }
 
@@ -1536,6 +1532,20 @@ export function inferNetworkConfigNameFromChainId(
 }
 
 /**
+ * Resolve only network identities that are actually known from persisted
+ * state. Unlike {@link resolveNetworkConfigName}, this does not collapse an
+ * unknown legacy chain into the project default. Setup uses the distinction
+ * when deciding whether it is safe to discard operator chain overrides.
+ */
+export function resolveKnownNetworkConfigName(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+): string | undefined {
+  const explicitNetwork = config?.networkConfig?.trim();
+  if (explicitNetwork) return explicitNetwork;
+  return inferNetworkConfigNameFromChainId(config?.chain?.chainId);
+}
+
+/**
  * Resolve the bundled network overlay for both current and legacy configs.
  *
  * Older homes predate `networkConfig` and only persisted the selected chain.
@@ -1546,16 +1556,7 @@ export function inferNetworkConfigNameFromChainId(
 export function resolveNetworkConfigName(
   config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
 ): string {
-  const explicitNetwork = config?.networkConfig?.trim();
-  if (explicitNetwork) return explicitNetwork;
-
-  const chainId = config?.chain?.chainId?.trim().toLowerCase();
-  if (chainId) {
-    const inferredNetwork = inferNetworkConfigNameFromChainId(chainId);
-    if (inferredNetwork) return inferredNetwork;
-  }
-
-  return loadProjectConfig().defaultNetwork;
+  return resolveKnownNetworkConfigName(config) ?? loadProjectConfig().defaultNetwork;
 }
 
 /**

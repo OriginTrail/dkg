@@ -73,7 +73,11 @@ import { execSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import TOML from '@iarna/toml';
 import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
-import { assertSelectableNetwork } from './config.js';
+import {
+  assertSelectableNetwork,
+  resolveKnownNetworkConfigName,
+  type DkgConfig,
+} from './config.js';
 
 export interface McpSetupCliOptions {
   /** Refresh every detected client regardless of current registration state. */
@@ -1792,10 +1796,10 @@ export async function mcpSetupAction(
   // and reuse it for both the config write and the faucet gate, so the
   // persisted selector, the loaded network slice, and the faucet decision
   // (mainnet has no faucet) all agree.
-  const existingNetworkConfig = ((): string | undefined => {
-    const nc = readPersistedConfig(dkgDirPath)?.networkConfig;
-    return typeof nc === 'string' ? nc : undefined;
-  })();
+  const persistedNodeConfig = readPersistedConfig(dkgDirPath) as
+    | Pick<DkgConfig, 'networkConfig' | 'chain'>
+    | undefined;
+  const existingNetworkConfig = resolveKnownNetworkConfigName(persistedNodeConfig);
   // `--network` is honored only for a FRESH node (existing nodes keep their
   // current network; switch via `dkg init --network`). Dropping it on an
   // existing node keeps the faucet decision aligned with the booted network

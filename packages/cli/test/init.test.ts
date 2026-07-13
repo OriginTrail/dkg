@@ -4,6 +4,7 @@ import { buildInitAutoUpdate, isInitNetworkSwitch } from '../src/commands/init.j
 import {
   loadNetworkConfig,
   resolveChainConfig,
+  resolveKnownNetworkConfigName,
   resolveNetworkConfigName,
 } from '../src/config.js';
 
@@ -28,8 +29,26 @@ describe('isInitNetworkSwitch', () => {
     expect(isInitNetworkSwitch('testnet', 'mainnet-gnosis')).toBe(true);
   });
 
-  it('a legacy node with no recognizable chain remains on the testnet fallback', () => {
-    expect(isInitNetworkSwitch('testnet', 'testnet')).toBe(false);
+  it('does not treat the fallback as switch evidence for an unknown legacy chain', async () => {
+    const existing = {
+      chain: {
+        type: 'evm' as const,
+        chainId: 'evm:100',
+        rpcUrl: 'https://operator-rpc.invalid',
+        hubAddress: '0x0000000000000000000000000000000000000042',
+      },
+    };
+    const knownExistingNetwork = resolveKnownNetworkConfigName(existing);
+    const selectedNetwork = 'mainnet-gnosis';
+    const network = await loadNetworkConfig(selectedNetwork);
+    const switching = isInitNetworkSwitch(knownExistingNetwork, selectedNetwork);
+    const persistedChain = resolveChainConfig(switching ? undefined : existing, network);
+
+    expect(knownExistingNetwork).toBeUndefined();
+    expect(switching).toBe(false);
+    expect(persistedChain?.chainId).toBe('evm:100');
+    expect(persistedChain?.rpcUrl).toBe('https://operator-rpc.invalid');
+    expect(persistedChain?.hubAddress).toBe('0x0000000000000000000000000000000000000042');
   });
 
   it('keeps legacy Base/Gnosis setup defaults and persisted chain fields consistent', async () => {

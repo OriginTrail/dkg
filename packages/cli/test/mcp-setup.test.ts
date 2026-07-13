@@ -356,6 +356,31 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect((deps.startDaemon as any).calls).toEqual([]);
   });
 
+  it('keeps a legacy mainnet chain on its inferred overlay when an override rewrites config', async () => {
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(
+      join(dkgDir, 'config.json'),
+      JSON.stringify({
+        name: 'legacy-mainnet',
+        apiPort: 9200,
+        chain: {
+          type: 'evm',
+          chainId: 'gnosis:100',
+          rpcUrl: 'https://operator-rpc.invalid',
+          hubAddress: '0x0000000000000000000000000000000000000042',
+        },
+      }, null, 2),
+    );
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+
+    const deps = makeDeps();
+    await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);
+
+    expect((deps.loadNetworkConfig as any).calls[0][0]).toBe('mainnet-gnosis');
+    expect((deps.ensureDkgNodeConfig as any).calls).toHaveLength(1);
+  });
+
   it('funds wallets via the shared fundWalletsBestEffort orchestrator (network, seed, didStartDaemon)', async () => {
     // Wallet funding delegates to the SAME orchestrator openclaw/hermes use
     // (no bespoke /api/status probe). On a normal setup it fires with the
