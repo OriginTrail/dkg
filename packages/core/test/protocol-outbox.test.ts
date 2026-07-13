@@ -7,6 +7,7 @@ import {
 } from '../src/protocol-outbox.js';
 import {
   RESPONSE_CACHE_BYTES,
+  type LegacyProtocolOutboxStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxStore,
 } from '../src/messenger-types.js';
@@ -98,8 +99,8 @@ describe('ProtocolOutbox.markDelivered + hasEntry', () => {
   });
 
   it('hasEntry is the stale-snapshot guard required by the substrate contract', () => {
-    // Models the rc9 #538 race: two sibling flushes both got the same
-    // entry from `pendingFor`, one completed delivery + markDelivered,
+    // Models the rc9 #538 race: two overlapping scheduled drains both got the
+    // same entry from a due snapshot, one completed delivery + markDelivered,
     // the other races to retry. The second MUST check `hasEntry` after
     // `tryBeginAttempt` returns true, because tryBeginAttempt only
     // guards against TRULY concurrent attempts, not stale-snapshot-
@@ -160,7 +161,7 @@ describe('ProtocolOutbox.due / peer presence', () => {
     expect(outbox.duePage(now, Number.NaN).map((entry) => entry.messageId)).toEqual(['a-first', 'z-last']);
   });
 
-  it('keeps legacy due-only stores compatible and sorts before applying the cap', () => {
+  it('keeps legacy due/pendingFor stores compatible and sorts before applying the cap', () => {
     const backing = new InMemoryProtocolOutboxStore();
     const entry = (
       messageId: string,
@@ -178,11 +179,11 @@ describe('ProtocolOutbox.due / peer presence', () => {
     });
     const newer = entry('a-newer-failure', 20);
     const older = entry('z-older-failure', 10);
-    const legacyStore: ProtocolOutboxStore = {
+    const legacyStore: LegacyProtocolOutboxStore = {
       enqueue: backing.enqueue.bind(backing),
       markDelivered: backing.markDelivered.bind(backing),
       hasEntry: backing.hasEntry.bind(backing),
-      hasPendingFor: backing.hasPendingFor.bind(backing),
+      pendingFor: (peer) => peer === PEER_A ? [newer, older] : [],
       due: () => [newer, older],
       dropExpired: backing.dropExpired.bind(backing),
       size: backing.size.bind(backing),
@@ -195,6 +196,59 @@ describe('ProtocolOutbox.due / peer presence', () => {
       .toEqual(['z-older-failure']);
     expect(outbox.due(100).map((candidate) => candidate.messageId))
       .toEqual(['z-older-failure', 'a-newer-failure']);
+    expect(outbox.hasPendingFor(PEER_A)).toBe(true);
+    expect(outbox.hasPendingFor(PEER_B)).toBe(false);
+    expect(outbox.pendingFor(PEER_A).map((candidate) => candidate.messageId))
+      .toEqual(['z-older-failure', 'a-newer-failure']);
+  });
+
+  it('keeps current hasPendingFor-only stores compatible without requiring peer snapshots', () => {
+    const backing = new InMemoryProtocolOutboxStore();
+    const entry = (
+      peer: string,
+      messageId: string,
+      firstFailureAt: number,
+    ): ProtocolOutboxEntry => ({
+      peer,
+      protocol: PROTO,
+      messageId,
+      payload: PAYLOAD,
+      attempts: 1,
+      firstFailureAt,
+      lastAttemptAt: firstFailureAt,
+      nextAttemptAt: 100,
+      lastError: 'offline',
+    });
+    const newer = entry(PEER_A, 'a-newer-failure', 20);
+    const older = entry(PEER_A, 'z-older-failure', 10);
+    const otherPeer = entry(PEER_B, 'other-peer', 1);
+    let listCalls = 0;
+    const currentStore: ProtocolOutboxStore = {
+      enqueue: backing.enqueue.bind(backing),
+      markDelivered: backing.markDelivered.bind(backing),
+      hasEntry: backing.hasEntry.bind(backing),
+      hasPendingFor: (peer) => peer === PEER_A,
+      due: backing.due.bind(backing),
+      dropExpired: backing.dropExpired.bind(backing),
+      size: backing.size.bind(backing),
+      list: () => {
+        listCalls += 1;
+        return [newer, otherPeer, older];
+      },
+      getEntry: backing.getEntry.bind(backing),
+    };
+    const outbox = new ProtocolOutbox(currentStore);
+
+    expect(outbox.hasPendingFor(PEER_A)).toBe(true);
+    expect(outbox.hasPendingFor(PEER_B)).toBe(false);
+    expect(listCalls).toBe(0);
+
+    const pending = outbox.pendingFor(PEER_A);
+    expect(pending.map((candidate) => candidate.messageId))
+      .toEqual(['z-older-failure', 'a-newer-failure']);
+    expect(listCalls).toBe(1);
+    pending[0].payload[0] = 99;
+    expect(older.payload[0]).toBe(PAYLOAD[0]);
   });
 
   it('uses firstFailureAt before key ordering when nextAttemptAt ties', () => {
@@ -221,6 +275,11 @@ describe('ProtocolOutbox.due / peer presence', () => {
     expect(outbox.hasPendingFor(PEER_A)).toBe(true);
     expect(outbox.hasPendingFor(PEER_B)).toBe(true);
     expect(outbox.hasPendingFor('peer-c')).toBe(false);
+
+    const pending = outbox.pendingFor(PEER_A);
+    expect(pending.map((entry) => entry.messageId)).toEqual([MSG_1, MSG_2]);
+    pending[0].payload[0] = 99;
+    expect(outbox.pendingFor(PEER_A)[0].payload[0]).toBe(PAYLOAD[0]);
   });
 });
 

@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { DKGNode, nodeHasDirectPublicAddress, connectionsBusyAppProtocols } from '../src/node.js';
+import {
+  DKGNode,
+  abortWatchdogBusyStreams,
+  connectionsBusyAppProtocols,
+  nodeHasDirectPublicAddress,
+} from '../src/node.js';
 import { ProtocolRouter } from '../src/protocol-router.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { TypedEventBus } from '../src/event-bus.js';
@@ -1195,6 +1200,20 @@ describe('Relay watchdog: stream-aware deferral + forced-redial thrash cap (2026
     expect(connectionsBusyAppProtocols([conn([])])).toEqual([]);
   });
 
+  it('abortWatchdogBusyStreams defensively reaps each abortable busy stream once', () => {
+    const reason = new Error('cap reached');
+    const abort = recorder((_error: Error): void => {});
+    const busy = { protocol: '/dkg/10.0.1/storage-ack', abort };
+
+    expect(abortWatchdogBusyStreams([
+      { streams: [busy, {}, { protocol: undefined }, { protocol: '/dkg/10.0.2/sync' }] },
+      { streams: [busy, { protocol: '/meshsub/1.1.0', abort }] },
+      {},
+      { streams: 'opening' },
+    ], reason)).toBe(1);
+    expect(abort.calls).toEqual([[reason]]);
+  });
+
   it('defers the forced reservation-redial while a /dkg/ stream is in flight, and resumes after it drains', async () => {
     // "Relay" that runs NO relay server: the edge can connect but a
     // reservation can never form, so every tick enters the
@@ -1458,7 +1477,16 @@ describe('Relay watchdog: review-round-1 hardening', () => {
     await relay.start();
     const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
     const BUSY_PROTOCOL = '/dkg/test-decay/1.0.0';
-    await relay.libp2p.handle(BUSY_PROTOCOL, () => { /* hold open */ });
+    await relay.libp2p.handle(BUSY_PROTOCOL, async ({ stream }) => {
+      // Model a real request handler that owns the stream until the peer
+      // closes it. Returning immediately leaves libp2p's incoming-stream
+      // middleware to race a reset against connection teardown.
+      try {
+        for await (const _chunk of stream) { /* hold open */ }
+      } catch {
+        // Forced-redial teardown is the behavior under test.
+      }
+    });
 
     const edge = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -1497,7 +1525,15 @@ describe('Relay watchdog: review-round-1 hardening', () => {
     await relay.start();
     const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
     const BUSY_PROTOCOL = '/dkg/test-busy-cap/1.0.0';
-    await relay.libp2p.handle(BUSY_PROTOCOL, () => { /* hold the stream open */ });
+    await relay.libp2p.handle(BUSY_PROTOCOL, async ({ stream }) => {
+      // Keep ownership of the inbound stream through the forced close, as a
+      // production request handler does, and absorb the expected teardown.
+      try {
+        for await (const _chunk of stream) { /* hold open */ }
+      } catch {
+        // The deferral cap deliberately reaps this stream.
+      }
+    });
 
     const edge = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -1512,13 +1548,20 @@ describe('Relay watchdog: review-round-1 hardening', () => {
       relayReservationRedialAt: Map<string, number>;
       relayForcedRedialState: Map<string, { strikes: number; cooldownUntil: number; busyDeferralTicks: number }>;
     };
-    await edge.libp2p.dialProtocol(relay.libp2p.getMultiaddrs(), BUSY_PROTOCOL);
+    const busyStream = await edge.libp2p.dialProtocol(relay.libp2p.getMultiaddrs(), BUSY_PROTOCOL);
+    const observedStream = busyStream as unknown as {
+      abort: (reason: Error) => void;
+    };
+    const originalAbort = observedStream.abort.bind(observedStream);
+    const abortSpy = recorder((reason: Error): void => originalAbort(reason));
+    observedStream.abort = abortSpy;
     internals.relayReservationRedialAt.set(relayPid, Date.now() - 16_000);
     // One tick below the cap: still deferring.
     internals.relayForcedRedialState.set(relayPid, { strikes: 0, cooldownUntil: 0, busyDeferralTicks: 29 });
     const logSpy = spyConsole('log');
     try {
       await internals.watchdogTick.call(edge);
+      expect(abortSpy.calls.length, 'a below-cap deferral must leave the busy stream open').toBe(0);
       expect(
         logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('deferring forced redial')),
         'tick 30/30 still defers',
@@ -1528,6 +1571,7 @@ describe('Relay watchdog: review-round-1 hardening', () => {
       internals.relayForcedRedialState.set(relayPid, { strikes: 0, cooldownUntil: 0, busyDeferralTicks: 30 });
       logSpy.calls.length = 0;
       await internals.watchdogTick.call(edge);
+      expect(abortSpy.calls.length, 'the busy stream must be reset before connection teardown').toBe(1);
       expect(
         logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('busy-deferral cap reached')),
         `expected cap-reached log; got: ${JSON.stringify(logSpy.calls.map(c => c[0]))}`,

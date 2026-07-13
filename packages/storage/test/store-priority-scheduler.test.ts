@@ -1,9 +1,155 @@
-import { describe, expect, it } from 'vitest';
-import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  StorePriorityScheduler,
+  StoreSchedulerBusyError,
+} from '../src/store-priority-scheduler.js';
+import type { StoreWorkPriority } from '../src/triple-store.js';
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('StorePriorityScheduler', () => {
+  for (const priority of ['ack', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
+    it(`bounds the ${priority} queue and returns a typed retryable rejection`, async () => {
+      const scheduler = new StorePriorityScheduler(1, 0, undefined, 0, {
+        ack: 1,
+        normal: 1,
+        background: 1,
+      }, 1_000);
+      let release!: () => void;
+      let queuedStarted = false;
+      let rejectedStarted = false;
+      const blocker = scheduler.run(priority, `${priority}.blocker`, async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      });
+      const queued = scheduler.run(priority, `${priority}.queued`, async () => {
+        queuedStarted = true;
+      });
+
+      await expect(scheduler.run(priority, `${priority}.rejected`, async () => {
+        rejectedStarted = true;
+      })).rejects.toMatchObject({
+        name: 'StoreSchedulerBusyError',
+        code: 'STORE_SCHEDULER_BUSY',
+        retryable: true,
+        reason: 'queue_full',
+        priority,
+      });
+      expect(rejectedStarted).toBe(false);
+      expect(scheduler.snapshot[`${priority}Queued`]).toBe(1);
+
+      release();
+      await expect(Promise.all([blocker, queued])).resolves.toEqual([undefined, undefined]);
+      expect(queuedStarted).toBe(true);
+    });
+
+    it(`expires ${priority} work before dispatch and recovers after pressure clears`, async () => {
+      const scheduler = new StorePriorityScheduler(1, 0, undefined, 0, 2, 20);
+      let release!: () => void;
+      let expiredStarted = false;
+      const blocker = scheduler.run(priority, `${priority}.blocker`, async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      });
+      const expired = scheduler.run(priority, `${priority}.expired`, async () => {
+        expiredStarted = true;
+      });
+
+      await expect(expired).rejects.toMatchObject({
+        code: 'STORE_SCHEDULER_BUSY',
+        retryable: true,
+        reason: 'queue_wait_timeout',
+        priority,
+      });
+      expect(expiredStarted).toBe(false);
+      expect(scheduler.snapshot[`${priority}Queued`]).toBe(0);
+
+      release();
+      await blocker;
+      await expect(scheduler.run(priority, `${priority}.recovered`, async () => 'ok')).resolves.toBe('ok');
+    });
+  }
+
+  it('removes a cancelled queued entry and releases its abort listener and wait timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const scheduler = new StorePriorityScheduler(1, 0, undefined, 0, 1, 100);
+      let release!: () => void;
+      const blocker = scheduler.run('normal', 'normal.blocker', async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      });
+      const controller = new AbortController();
+      const addListener = vi.spyOn(controller.signal, 'addEventListener');
+      const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+      let cancelledStarted = false;
+      const cancelled = scheduler.run('normal', 'normal.cancelled', async () => {
+        cancelledStarted = true;
+      }, controller.signal);
+      const reason = new Error('caller cancelled');
+
+      controller.abort(reason);
+      await expect(cancelled).rejects.toBe(reason);
+      expect(cancelledStarted).toBe(false);
+      expect(scheduler.snapshot.normalQueued).toBe(0);
+      expect(addListener).toHaveBeenCalledTimes(1);
+      expect(removeListener).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(scheduler.snapshot.normalQueued).toBe(0);
+      release();
+      await blocker;
+      addListener.mockRestore();
+      removeListener.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cleans up admission state when queued work starts normally', async () => {
+    vi.useFakeTimers();
+    try {
+      const scheduler = new StorePriorityScheduler(1, 0, undefined, 0, 1, 100);
+      let release!: () => void;
+      const blocker = scheduler.run('normal', 'normal.blocker', async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      });
+      const controller = new AbortController();
+      const addListener = vi.spyOn(controller.signal, 'addEventListener');
+      const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+      const queued = scheduler.run('normal', 'normal.queued', async () => 'ok', controller.signal);
+
+      release();
+      await blocker;
+      await expect(queued).resolves.toBe('ok');
+      expect(addListener).toHaveBeenCalledTimes(1);
+      expect(removeListener).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(scheduler.snapshot).toMatchObject({ normalInflight: 0, normalQueued: 0 });
+      addListener.mockRestore();
+      removeListener.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exports a distinguishable busy error type for boundary mapping', () => {
+    const error = new StoreSchedulerBusyError('queue_full', 'ack', 'storage-ack.read');
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(StoreSchedulerBusyError);
+    expect(error).toMatchObject({
+      code: 'STORE_SCHEDULER_BUSY',
+      retryable: true,
+      reason: 'queue_full',
+    });
+  });
+
   it('lets ACK work jump ahead of queued background work', async () => {
     const scheduler = new StorePriorityScheduler(2, 1);
     const events: string[] = [];

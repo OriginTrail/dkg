@@ -32,11 +32,11 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
  * hitting the live store. Mirrors `storeWithFailingOps` in
  * storage-ack-core-unavailable.test.ts — the curated-catalog UPDATE store-
  * failure regression below drives the real persist path (parse → verify →
- * deleteByPattern → insert) up to the armed failure.
+ * targeted update → insert) up to the armed failure.
  */
 function storeWithFailingOps(
   base: OxigraphStore,
-  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern')[],
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'update')[],
 ): TripleStore {
   return new Proxy(base as unknown as TripleStore, {
     get(target, prop, receiver) {
@@ -245,13 +245,13 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
       expect(isStorageACKDecline(ack)).toBe(false);
     });
 
-    it('curated catalog persist / deleteByPattern throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+    it('curated catalog persist / targeted update throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
       // Dead-air regression (otReviewAgent #1408:650): a curated UPDATE with a
-      // VALID rotated catalog root whose `<cg>/_catalog` REPLACE (deleteByPattern)
+      // VALID rotated catalog root whose `<cg>/_catalog` targeted DELETE update
       // hits a closed store used to throw out of the handler → stream reset →
       // publisher no_response. It must instead reply with the transient decline.
       const onDecline = vi.fn();
-      const store = storeWithFailingOps(new OxigraphStore(), ['deleteByPattern']);
+      const store = storeWithFailingOps(new OxigraphStore(), ['update']);
       const handler = new StorageACKHandler(
         store as any,
         makeConfig(ethers.Wallet.createRandom(), 42n, { onDecline }),

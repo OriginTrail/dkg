@@ -552,6 +552,20 @@ export const _autoUpdateIo = {
   exec: execAsync as (...args: any[]) => Promise<any>,
   execFile: execFileAsync as (...args: any[]) => Promise<any>,
   execSync: execSync as (...args: any[]) => any,
+  // Match the supervisor's next worker command exactly. Keeping this resolver
+  // on the existing IO seam lets tests substitute a real fixture entry point
+  // without exposing process argv details through performNpmUpdateEdge.
+  edgeRestartCommand: () => {
+    const restartEntryPoint = process.argv[1];
+    if (!restartEntryPoint) {
+      throw new Error('Cannot verify Edge update: current CLI restart entry point is unavailable.');
+    }
+    return {
+      nodeExecutable: process.execPath,
+      nodeExecArgv: process.execArgv,
+      restartEntryPoint,
+    };
+  },
   dkgDir,
   releasesDir,
   activeSlot: activeSlot as () => Promise<'a' | 'b'>,

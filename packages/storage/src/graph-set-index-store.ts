@@ -1,8 +1,11 @@
 import { performance } from 'node:perf_hooks';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore, UpdateOptions } from './triple-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
+export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
+const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
 
 export type GraphSetMutationSource =
   | 'seed'
@@ -41,6 +44,16 @@ export interface GraphSetIndexStoreOptions {
   enabled?: boolean;
   /** Revalidate after this interval. Use 0 to revalidate on every read. */
   revalidateMs?: number;
+  /**
+   * Initial retry delay after a failed warm periodic revalidation.
+   * Ignored when revalidateMs is 0.
+   */
+  revalidateFailureBackoffMs?: number;
+  /**
+   * Maximum exponential retry delay after failed warm periodic revalidations.
+   * Ignored when revalidateMs is 0.
+   */
+  revalidateFailureMaxBackoffMs?: number;
   now?: () => number;
   onMutation?: (event: GraphSetMutationEvent) => void;
 }
@@ -63,11 +76,14 @@ export class GraphSetIndexStore implements TripleStore {
   private readonly inner: TripleStore;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
+  private readonly revalidateFailureBackoffMs: number;
+  private readonly revalidateFailureMaxBackoffMs: number;
   private readonly now: () => number;
   private readonly onMutation?: (event: GraphSetMutationEvent) => void;
 
   private graphs: Set<string> | null = null;
-  private validatedAt = 0;
+  private nextRevalidateAt = 0;
+  private revalidateFailureCount = 0;
   private mutationGeneration = 0;
   private refreshInFlight: Promise<Set<string>> | null = null;
   /**
@@ -81,6 +97,17 @@ export class GraphSetIndexStore implements TripleStore {
     this.inner = inner;
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
+    this.revalidateFailureBackoffMs = positiveFiniteMs(
+      options.revalidateFailureBackoffMs,
+      Math.max(MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS, this.revalidateMs),
+    );
+    this.revalidateFailureMaxBackoffMs = Math.max(
+      this.revalidateFailureBackoffMs,
+      positiveFiniteMs(
+        options.revalidateFailureMaxBackoffMs,
+        DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS,
+      ),
+    );
     this.now = options.now ?? (() => performance.now());
     this.onMutation = options.onMutation;
   }
@@ -145,7 +172,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
-      throw new Error('GraphSetIndexStore: inner store does not support update()');
+      throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
     }
     if (!this.enabled) {
       await this.inner.update(sparql, options);
@@ -258,7 +285,7 @@ export class GraphSetIndexStore implements TripleStore {
       this.graphs &&
       !this.pendingFullRefresh &&
       this.revalidateMs > 0 &&
-      this.now() - this.validatedAt < this.revalidateMs
+      this.now() < this.nextRevalidateAt
     ) {
       return this.graphs;
     }
@@ -270,7 +297,22 @@ export class GraphSetIndexStore implements TripleStore {
 
   private async refreshIndex(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
     if (this.refreshInFlight) return this.refreshInFlight;
-    const task = this.refreshIndexLoop(source, options);
+    let task = this.refreshIndexLoop(source, options);
+    if (source === 'revalidate') {
+      task = task.catch((error: unknown) => {
+        // Periodic discovery of out-of-contract writers is advisory once the
+        // write-through index is warm. Preserve that last known set and back
+        // off after a store failure instead of making every graph reader repeat
+        // the same expensive scan. Cold seeds and mutation-dirty rebuilds are
+        // correctness paths: if either condition applies by the time the scan
+        // fails, keep the original strict rejection behavior.
+        if (options?.signal?.aborted || !this.graphs || this.pendingFullRefresh) {
+          throw error;
+        }
+        this.noteRevalidationFailure();
+        return this.graphs;
+      });
+    }
     this.refreshInFlight = task;
     try {
       return await task;
@@ -339,7 +381,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   private clearIndex(): void {
     this.graphs = null;
-    this.validatedAt = 0;
+    this.resetRevalidationSchedule();
   }
 
   private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
@@ -347,10 +389,34 @@ export class GraphSetIndexStore implements TripleStore {
     const added = [...next].filter((graph) => !previous.has(graph)).sort();
     const removed = [...previous].filter((graph) => !next.has(graph)).sort();
     this.graphs = next;
-    this.validatedAt = this.now();
+    this.revalidateFailureCount = 0;
+    this.nextRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
       this.emit({ type: 'graph-set-revalidated', added, removed, source });
     }
+  }
+
+  private noteRevalidationFailure(): void {
+    // revalidateMs=0 is the strict-freshness opt-out from both cached reads and
+    // failure backoff: every read must attempt another scan, even after failure.
+    if (this.revalidateMs === 0) {
+      this.resetRevalidationSchedule();
+      return;
+    }
+    // Cap the exponent before multiplication as an additional overflow guard;
+    // the configured maximum is the externally visible bound.
+    const exponent = Math.min(this.revalidateFailureCount, 30);
+    const delay = Math.min(
+      this.revalidateFailureMaxBackoffMs,
+      this.revalidateFailureBackoffMs * (2 ** exponent),
+    );
+    this.revalidateFailureCount++;
+    this.nextRevalidateAt = this.now() + delay;
+  }
+
+  private resetRevalidationSchedule(): void {
+    this.revalidateFailureCount = 0;
+    this.nextRevalidateAt = 0;
   }
 
   private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
@@ -423,6 +489,10 @@ function normalizeGraphUris(graphs: readonly string[]): string[] {
 function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
   const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
   return readOptions;
+}
+
+function positiveFiniteMs(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && (value as number) > 0 ? value as number : fallback;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
