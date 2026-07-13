@@ -1548,6 +1548,14 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
     }
+    try {
+      await this.messenger.stopOutboxDrain();
+    } catch (error) {
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: outbox retry drain failed during shutdown: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     if (this.swmAckQuorumTimer) {
       clearInterval(this.swmAckQuorumTimer);
       this.swmAckQuorumTimer = null;
