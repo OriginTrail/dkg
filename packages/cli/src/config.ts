@@ -23,6 +23,7 @@ import {
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
+import { runtimeAssetRoots } from './runtime-assets.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -1120,60 +1121,6 @@ export interface ProjectConfig {
 let _projectConfig: ProjectConfig | null = null;
 
 /**
- * Return true when `dir` is the published DKG CLI package root, as
- * determined by an adjacent `package.json` whose `name` is
- * `@origintrail-official/dkg`. This is resilient to `projectName`
- * renames in `project.json` and cannot be spoofed by an unrelated app.
- */
-function isDkgPackageRoot(dir: string): boolean {
-  try {
-    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8'));
-    return pkg?.name === '@origintrail-official/dkg'
-      && existsSync(join(dir, 'project.json'));
-  } catch { return false; }
-}
-
-/**
- * Resolve candidate directories where repo-root files (project.json,
- * network/*.json) may live, in priority order.
- *
- * Ordering rationale:
- *   - In a monorepo checkout the DKG root is the single source of
- *     truth, so any detected monorepo ancestor MUST win. Otherwise,
- *     once `packages/cli/build` has copied `project.json` and
- *     `network/*.json` into `packages/cli/`, those stale artifacts
- *     would shadow edits made to the root files until the next
- *     rebuild — breaking the intended "edit root config, rerun" dev
- *     flow.
- *   - In a published npm install there is no monorepo ancestor, so
- *     we fall back to the package-local root (identified unambiguously
- *     by its `package.json.name`). This also guarantees we never
- *     accidentally read a consumer's own `project.json` from
- *     `node_modules/..`.
- */
-function candidateRoots(): string[] {
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-  const out: string[] = [];
-
-  // Monorepo ancestors first (dev / source checkout). `dist/` and
-  // `src/` live at different depths, so both paths are tried.
-  const monorepoCandidates = [
-    join(thisDir, '..', '..', '..'),        // from dist/
-    join(thisDir, '..', '..', '..', '..'),  // from src/ during dev
-  ];
-  for (const dir of monorepoCandidates) {
-    if (isDkgMonorepoRoot(dir)) out.push(dir);
-  }
-
-  // Package-local root as the fallback — the only location that ever
-  // wins in a published install, and unambiguous via its package.json.
-  const pkgRoot = join(thisDir, '..');
-  if (isDkgPackageRoot(pkgRoot)) out.push(pkgRoot);
-
-  return out;
-}
-
-/**
  * Load project.json — the single source of truth for repo name,
  * branch, GitHub URL, and default network. Values here drive the
  * startup banner, auto-update fallbacks, and network selection.
@@ -1183,7 +1130,7 @@ function candidateRoots(): string[] {
  */
 export function loadProjectConfig(): ProjectConfig {
   if (_projectConfig) return _projectConfig;
-  for (const root of candidateRoots()) {
+  for (const root of runtimeAssetRoots()) {
     try {
       const raw = readFileSync(join(root, 'project.json'), 'utf-8');
       _projectConfig = JSON.parse(raw) as ProjectConfig;
@@ -1521,7 +1468,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   if (_networkConfig && _networkConfigName === name) return _networkConfig;
   try {
     const file = `${name}.json`;
-    const candidates = candidateRoots().map(root => join(root, 'network', file));
+    const candidates = runtimeAssetRoots().map(root => join(root, 'network', file));
     for (const path of candidates) {
       try {
         const raw = await readFile(path, 'utf-8');

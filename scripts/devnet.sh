@@ -68,13 +68,6 @@ NUM_OP_WALLETS=3
 HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
 BLAZEGRAPH_PORT=9999
 BLAZEGRAPH_CONTAINER="devnet-blazegraph"
-BLAZEGRAPH_IMAGE_METADATA="$REPO_ROOT/blazegraph-image.json"
-BLAZEGRAPH_IMAGE="$(node -e '
-  const fs = require("node:fs");
-  const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
-  process.stdout.write(metadata.image.trim());
-' "$BLAZEGRAPH_IMAGE_METADATA")"
 # Webapp context path: the 2.1.5 Docker image serves under /bigdata; a native
 # 2.1.6 JAR (the Apple-silicon workaround) serves under /blazegraph. Override with
 # DEVNET_BLAZEGRAPH_CTX to match whichever Blazegraph is actually running.
@@ -368,6 +361,15 @@ deploy_contracts() {
 
 BLAZEGRAPH_AVAILABLE=false
 
+read_blazegraph_image() {
+  node -e '
+    const fs = require("node:fs");
+    const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
+    process.stdout.write(metadata.image.trim());
+  ' "$REPO_ROOT/blazegraph-image.json"
+}
+
 start_blazegraph() {
   # Use an EXTERNAL Blazegraph already serving on the port. Skips Docker entirely;
   # namespaces are the operator's job here.
@@ -390,10 +392,16 @@ start_blazegraph() {
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
   fi
 
+  local blazegraph_image
+  if ! blazegraph_image="$(read_blazegraph_image)"; then
+    log "ERROR: Could not read the pinned Blazegraph image metadata"
+    return 1
+  fi
+
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
     -p "127.0.0.1:$BLAZEGRAPH_PORT:8080" \
-    "$BLAZEGRAPH_IMAGE" > /dev/null 2>&1; then
+    "$blazegraph_image" > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
     return 0
   fi

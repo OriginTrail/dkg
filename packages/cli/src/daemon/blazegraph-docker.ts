@@ -30,8 +30,7 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import * as net from 'node:net';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { runtimeAssetPaths } from '../runtime-assets.js';
 
 /**
  * Shared XML template for a Blazegraph namespace tuned for DKG V10
@@ -63,14 +62,7 @@ export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="
 export const BLAZEGRAPH_IMAGE = loadBlazegraphImage();
 
 function loadBlazegraphImage(): string {
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  // Monorepo source of truth first, then the package-local copy shipped by
-  // prepack. Both src/daemon and dist/daemon have the same directory depth.
-  const candidates = [
-    join(moduleDir, '..', '..', '..', '..', 'blazegraph-image.json'),
-    join(moduleDir, '..', '..', 'blazegraph-image.json'),
-  ];
-  for (const path of candidates) {
+  for (const path of runtimeAssetPaths('blazegraph-image.json')) {
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { image?: unknown };
       if (typeof parsed.image === 'string' && parsed.image.trim()) {

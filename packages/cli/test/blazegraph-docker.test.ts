@@ -26,6 +26,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runtimeAssetPaths } from '../src/runtime-assets.js';
 import {
   provisionBlazegraphDocker,
   normaliseBlazegraphNamespace,
@@ -296,12 +297,19 @@ describe('provisionBlazegraphDocker', () => {
       readFileSync(resolve(REPO_ROOT, 'blazegraph-image.json'), 'utf-8'),
     ) as { image: string };
     expect(BLAZEGRAPH_IMAGE).toBe(metadata.image);
+    expect(runtimeAssetPaths('blazegraph-image.json')[0]).toBe(
+      resolve(REPO_ROOT, 'blazegraph-image.json'),
+    );
   });
 
   it('shares the pinned image metadata with the devnet Docker path', () => {
     const devnet = readFileSync(resolve(REPO_ROOT, 'scripts/devnet.sh'), 'utf-8');
-    expect(devnet).toContain('BLAZEGRAPH_IMAGE_METADATA="$REPO_ROOT/blazegraph-image.json"');
-    expect(devnet).toContain('"$BLAZEGRAPH_IMAGE" > /dev/null 2>&1');
+    const startIndex = devnet.indexOf('start_blazegraph()');
+    const dockerCheckIndex = devnet.indexOf('if ! docker_responsive 3', startIndex);
+    const imageReadIndex = devnet.indexOf('blazegraph_image="$(read_blazegraph_image)"', startIndex);
+    expect(devnet).toContain('read_blazegraph_image()');
+    expect(imageReadIndex).toBeGreaterThan(dockerCheckIndex);
+    expect(devnet).toContain('"$blazegraph_image" > /dev/null 2>&1');
   });
 
   it('throws when every port in the scan range is taken', async () => {
