@@ -4011,18 +4011,19 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     // walletB: own-TRAC covers the cost. createKnowledgeAssets must price the PCA
     // coverage check at floorPublishTokenAmount(tokenAmount) (NOT the 1-wei probe),
     // so walletA is rejected and walletB is chosen.
+    const params = makeV10PublishParams();
+    params.tokenAmount = 1000n;
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
     (a as any).contracts.dkgPublishingConvictionNFT = {};
     (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
       addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => params.epochs);
     const coverCalls: bigint[] = [];
     (a as any).convictionAccountCanCover = recorder(async (_id: bigint, cost: bigint) => {
       coverCalls.push(cost);
       return cost <= 1n; // covers the 1-wei liveness probe only, NOT a real publish cost
     });
-    const params = makeV10PublishParams();
-    params.tokenAmount = 1000n;
     let chosenSigner: any;
     (a as any).signPopulatedTransaction = recorder(async (signer: any) => { chosenSigner = signer; throw new Error('SENTINEL'); });
     await expect(a.createKnowledgeAssets(params)).rejects.toThrow('SENTINEL');
