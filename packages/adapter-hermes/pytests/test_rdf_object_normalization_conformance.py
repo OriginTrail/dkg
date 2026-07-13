@@ -47,6 +47,11 @@ OBJECT_CASES = [
     ("a\rb", '"a\\rb"'),
     ("a\fb", '"a\\fb"'),
     ("a\bb", '"a\\bb"'),
+    # remaining ASCII controls -> UCHAR escapes (#416)
+    ("nul\u0000x", '"nul\\u0000x"'),
+    ("vt\u000bx", '"vt\\u000Bx"'),
+    ("us\u001fx", '"us\\u001Fx"'),
+    ("del\u007fx", '"del\\u007Fx"'),
 ]
 
 
