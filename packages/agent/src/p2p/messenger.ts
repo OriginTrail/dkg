@@ -9,6 +9,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
 import {
@@ -983,7 +984,7 @@ export class Messenger {
     lastError: string;
   }> {
     if (!this.outbox) return [];
-    const dropped = this.outbox.dropExpired(now);
+    const dropped = this.outbox.dropExpiredMetadata(now);
     // rc.9 PR-12: clean firstAttemptAt for expired entries so the
     // SLO bookkeeping map doesn't grow unbounded on permanently
     // unreachable peers.
@@ -1009,13 +1010,13 @@ export class Messenger {
   }
 
   /**
-   * Snapshot of every entry currently in the outbox. Used by the
+   * Metadata-only snapshot of every entry currently in the outbox. Used by the
    * `/api/chat/outbox` route + the MCP `dkg_outbox_status` tool so
-   * operators can see what's pending after a long recipient outage.
-   * Empty array when no outbox is wired.
+   * operators can see what's pending after a long recipient outage without
+   * copying retry payloads into RAM. Empty array when no outbox is wired.
    */
-  listOutbox(): ProtocolOutboxEntry[] {
-    return this.outbox?.list() ?? [];
+  listOutbox(): ProtocolOutboxMetadata[] {
+    return this.outbox?.listMetadata() ?? [];
   }
 
   /**

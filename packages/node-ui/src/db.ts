@@ -7,6 +7,7 @@ import {
   type MessageDirection,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
 
@@ -2842,6 +2843,29 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     return rows.map(SqliteProtocolOutboxStore.rowToEntry);
   }
 
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    const cutoff = now - this.maxAgeMs;
+    const rows = this.db
+      .prepare(
+        `SELECT peer_id, protocol, message_id, attempts,
+                first_failure_at, last_attempt_at, next_attempt_at, last_error
+         FROM protocol_outbox
+         WHERE first_failure_at < ?`,
+      )
+      .all(cutoff) as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
+    return rows.map(SqliteProtocolOutboxStore.rowToMetadata);
+  }
+
   size(): number {
     const row = this.db.prepare(`SELECT COUNT(*) as c FROM protocol_outbox`).get() as {
       c: number;
@@ -2864,6 +2888,27 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       last_error: string | null;
     }>;
     return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  }
+
+  listMetadata(): ProtocolOutboxMetadata[] {
+    const rows = this.db
+      .prepare(
+        `SELECT peer_id, protocol, message_id, attempts,
+                first_failure_at, last_attempt_at, next_attempt_at, last_error
+         FROM protocol_outbox
+         ORDER BY first_failure_at ASC`,
+      )
+      .all() as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    return rows.map(SqliteProtocolOutboxStore.rowToMetadata);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
@@ -2900,10 +2945,25 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     last_error: string | null;
   }): ProtocolOutboxEntry {
     return {
+      ...SqliteProtocolOutboxStore.rowToMetadata(row),
+      payload: new Uint8Array(row.payload),
+    };
+  }
+
+  private static rowToMetadata(row: {
+    peer_id: string;
+    protocol: string;
+    message_id: string;
+    attempts: number;
+    first_failure_at: number;
+    last_attempt_at: number;
+    next_attempt_at: number;
+    last_error: string | null;
+  }): ProtocolOutboxMetadata {
+    return {
       peer: row.peer_id,
       protocol: row.protocol,
       messageId: row.message_id,
-      payload: new Uint8Array(row.payload),
       attempts: row.attempts,
       firstFailureAt: row.first_failure_at,
       lastAttemptAt: row.last_attempt_at,

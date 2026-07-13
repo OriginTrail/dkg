@@ -32,6 +32,7 @@ import type {
   MessageDirection,
   MessageIdempotencyStore,
   ProtocolOutboxEntry,
+  ProtocolOutboxMetadata,
   ProtocolOutboxStore,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
@@ -87,6 +88,29 @@ function cloneBytes(bytes: Uint8Array): Uint8Array {
 
 function cloneOutboxEntry(entry: ProtocolOutboxEntry): ProtocolOutboxEntry {
   return { ...entry, payload: cloneBytes(entry.payload) };
+}
+
+function cloneOutboxMetadata(entry: ProtocolOutboxMetadata): ProtocolOutboxMetadata {
+  const {
+    peer,
+    protocol,
+    messageId,
+    attempts,
+    firstFailureAt,
+    lastAttemptAt,
+    nextAttemptAt,
+    lastError,
+  } = entry;
+  return {
+    peer,
+    protocol,
+    messageId,
+    attempts,
+    firstFailureAt,
+    lastAttemptAt,
+    nextAttemptAt,
+    lastError,
+  };
 }
 
 function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
@@ -236,19 +260,30 @@ export class ProtocolOutbox {
     return this.store.dropExpired(now);
   }
 
+  /** Metadata-only expiration, with a compatibility fallback for legacy stores. */
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    if (this.store.dropExpiredMetadata) return this.store.dropExpiredMetadata(now);
+    return this.store.dropExpired(now).map(cloneOutboxMetadata);
+  }
+
   /** Total entries currently queued. */
   size(): number {
     return this.store.size();
   }
 
   /**
-   * Snapshot of every entry currently in the underlying store. Used
-   * by `Messenger.listOutbox` for the diagnostics surface. Returns
-   * entries in store order — callers that need per-peer FIFO should
-   * sort by `firstFailureAt`.
+   * Snapshot of every full entry currently in the underlying store.
+   * Returns entries in store order; callers that need per-peer FIFO
+   * should sort by `firstFailureAt`.
    */
   list(): ProtocolOutboxEntry[] {
     return this.store.list();
+  }
+
+  /** Metadata-only diagnostics snapshot, with a compatibility fallback. */
+  listMetadata(): ProtocolOutboxMetadata[] {
+    if (this.store.listMetadata) return this.store.listMetadata();
+    return this.store.list().map(cloneOutboxMetadata);
   }
 
   /**

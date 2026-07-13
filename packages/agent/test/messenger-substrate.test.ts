@@ -6,6 +6,7 @@ import {
   encodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
+  type ProtocolOutboxMetadata,
   type ProtocolRouter,
   type StreamHandler,
 } from '@origintrail-official/dkg-core';
@@ -263,6 +264,72 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
     });
     expect(second.queued).toBe(true);
     expect(second.attempts).toBe(2);
+  });
+});
+
+describe('Messenger outbox diagnostics', () => {
+  it('reads metadata without asking the store for payload-bearing entries', () => {
+    const outboxStore = new InMemoryProtocolOutboxStore();
+    const expected: ProtocolOutboxMetadata = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: FIXED_MSG_ID,
+      attempts: 2,
+      firstFailureAt: 1_000,
+      lastAttemptAt: 2_000,
+      nextAttemptAt: 7_000,
+      lastError: 'offline',
+    };
+    const listMetadata = recorder(() => [expected]);
+    Object.assign(outboxStore, {
+      listMetadata,
+      list: () => {
+        throw new Error('diagnostics materialized payloads');
+      },
+    });
+    const messenger = new Messenger({
+      router: makeRouter() as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+    });
+
+    expect(messenger.listOutbox()).toEqual([expected]);
+    expect(listMetadata.calls).toHaveLength(1);
+  });
+
+  it('expires entries through metadata without asking the store for payloads', () => {
+    const outboxStore = new InMemoryProtocolOutboxStore();
+    const expired: ProtocolOutboxMetadata = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: FIXED_MSG_ID,
+      attempts: 3,
+      firstFailureAt: 1_000,
+      lastAttemptAt: 2_000,
+      nextAttemptAt: 7_000,
+      lastError: 'offline',
+    };
+    const dropExpiredMetadata = recorder((_now: number) => [expired]);
+    Object.assign(outboxStore, {
+      dropExpiredMetadata,
+      dropExpired: () => {
+        throw new Error('expiration materialized payloads');
+      },
+    });
+    const messenger = new Messenger({
+      router: makeRouter() as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+    });
+
+    expect(messenger.dropExpiredOutbox(8_000)).toEqual([{
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: FIXED_MSG_ID,
+      attempts: 3,
+      lastError: 'offline',
+    }]);
+    expect(dropExpiredMetadata.calls).toEqual([[8_000]]);
   });
 });
 

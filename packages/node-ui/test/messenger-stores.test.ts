@@ -187,6 +187,17 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(Array.from(store.due(6000)[0].payload)).toEqual([1, 2, 3]);
   });
 
+  it('listMetadata preserves diagnostic order without returning payloads', () => {
+    const store = new SqliteProtocolOutboxStore(db);
+    store.enqueue(PEER_A, PROTO, MSG_2, new Uint8Array(1024), 'newer', 2_000);
+    store.enqueue(PEER_A, PROTO, MSG_1, new Uint8Array(1024), 'older', 1_000);
+
+    const pending = store.listMetadata();
+
+    expect(pending.map((entry) => entry.messageId)).toEqual([MSG_1, MSG_2]);
+    expect(pending.every((entry) => !Object.hasOwn(entry, 'payload'))).toBe(true);
+  });
+
   it('enqueue bumps attempts and reschedules on repeat failure for the same key', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: (n) => n * 1000 });
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'first', 1_000_000);
@@ -262,16 +273,27 @@ describe('SqliteProtocolOutboxStore', () => {
     });
   });
 
-  it('dropExpired removes entries older than maxAgeMs and returns them', () => {
+  it('dropExpiredMetadata removes entries without returning payloads', () => {
     const store = new SqliteProtocolOutboxStore(db, {
       maxAgeMs: 60_000,
     });
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'old', 0);
     store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'new', 100_000);
-    const dropped = store.dropExpired(100_001);
+    const dropped = store.dropExpiredMetadata(100_001);
     expect(dropped).toHaveLength(1);
     expect(dropped[0].messageId).toBe(MSG_1);
+    expect(dropped[0]).not.toHaveProperty('payload');
     expect(store.size()).toBe(1);
+  });
+
+  it('keeps the legacy dropExpired payload-bearing return contract', () => {
+    const store = new SqliteProtocolOutboxStore(db, { maxAgeMs: 60_000 });
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'old', 0);
+
+    const dropped = store.dropExpired(60_001);
+
+    expect(dropped).toHaveLength(1);
+    expect(Array.from(dropped[0].payload)).toEqual(Array.from(PAYLOAD));
   });
 
   it('size reflects the row count', () => {

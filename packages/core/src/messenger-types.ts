@@ -150,6 +150,18 @@ export interface MessageIdempotencyStore {
   pruneOlderThan(tsMs: number): number;
 }
 
+/** Metadata used by cleanup and operator diagnostics without message bytes. */
+export interface ProtocolOutboxMetadata {
+  peer: string;
+  protocol: string;
+  messageId: string;
+  attempts: number;
+  firstFailureAt: number;
+  lastAttemptAt: number;
+  nextAttemptAt: number;
+  lastError: string;
+}
+
 /**
  * A single durable outbox entry. The `payload` is the
  * envelope-wrapped bytes (i.e. the `ReliableEnvelope` proto output
@@ -157,16 +169,8 @@ export interface MessageIdempotencyStore {
  * this lets retries replay byte-identical wire frames without re-
  * encoding the envelope.
  */
-export interface ProtocolOutboxEntry {
-  peer: string;
-  protocol: string;
-  messageId: string;
+export interface ProtocolOutboxEntry extends ProtocolOutboxMetadata {
   payload: Uint8Array;
-  attempts: number;
-  firstFailureAt: number;
-  lastAttemptAt: number;
-  nextAttemptAt: number;
-  lastError: string;
 }
 
 export interface ProtocolOutboxStore {
@@ -230,22 +234,28 @@ export interface ProtocolOutboxStore {
 
   /**
    * Drop entries whose `firstFailureAt` is older than the
-   * configured max-age. Returns the dropped entries so the caller
-   * can log them ("we gave up on this after 24h" diagnostic).
+   * configured max-age. Returns the dropped entries for compatibility
+   * with existing stores and callers.
    */
   dropExpired(now: number): ProtocolOutboxEntry[];
+
+  /**
+   * Optional cleanup fast path that deletes the same rows as
+   * `dropExpired` but returns metadata without payload bytes.
+   */
+  dropExpiredMetadata?(now: number): ProtocolOutboxMetadata[];
 
   /** Total entries currently queued. For diagnostics + tests. */
   size(): number;
 
-  /**
-   * Snapshot of every entry in the store. Used by the diagnostics
-   * surface (`/api/chat/outbox`, `dkg_outbox_status` MCP tool) so
-   * operators can see what's pending after a long recipient outage.
-   * Order is implementation-defined; callers that need per-peer
-   * FIFO should sort by `firstFailureAt`.
-   */
+  /** Snapshot of every full entry, including payload bytes. */
   list(): ProtocolOutboxEntry[];
+
+  /**
+   * Optional storage-level diagnostics fast path that omits payload bytes.
+   * Implementations must preserve the same ordering as `list()`.
+   */
+  listMetadata?(): ProtocolOutboxMetadata[];
 
   /**
    * Look up a specific entry by `(peer, protocol, messageId)`.

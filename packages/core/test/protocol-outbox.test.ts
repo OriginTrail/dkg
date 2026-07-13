@@ -250,6 +250,28 @@ describe('ProtocolOutbox.dropExpired', () => {
     expect(outbox.dropExpired(60)).toHaveLength(0);
     expect(outbox.dropExpired(61)).toHaveLength(1);
   });
+
+  it('falls back to legacy stores while omitting payloads from expiration metadata', () => {
+    const { outbox } = fixture();
+    outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 0);
+
+    const dropped = outbox.dropExpiredMetadata(24 * 60 * 60 * 1000 + 1);
+
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).not.toHaveProperty('payload');
+  });
+});
+
+describe('ProtocolOutbox.listMetadata', () => {
+  it('falls back to legacy stores without exposing payloads', () => {
+    const { outbox } = fixture();
+    outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
+
+    const pending = outbox.listMetadata();
+
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).not.toHaveProperty('payload');
+  });
 });
 
 describe('ProtocolOutbox construction', () => {
