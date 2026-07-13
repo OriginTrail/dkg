@@ -76,16 +76,14 @@ describe('KA async VM publish broadcast progress', () => {
     });
   }
 
-  it('persists KA broadcast tx hash only at the final write-ahead boundary', async () => {
+  it('persists KA broadcast tx hash from structured write-ahead context', async () => {
     const txHash = `0x${'cd'.repeat(32)}` as `0x${string}`;
     let jobId = '';
     let statusDuringExecutor: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
     const publisher = createPublisher({
       knowledgeAssetVmPublishExecutor: async (input) => {
-        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'start');
         expect((await publisher.getStatus(jobId))?.status).toBe('validated');
-        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'end');
-        await input.publishOptions.onPhase?.('chain:writeahead', 'start');
+        await input.publishOptions.onPhase?.('chain:writeahead', 'start', { txHash });
         statusDuringExecutor = await publisher.getStatus(jobId);
         throw new Error('process crashed after tx submit');
       },
@@ -144,7 +142,7 @@ describe('KA async VM publish broadcast progress', () => {
         const lateHook = input.publishOptions.onPhase?.(
           'chain:writeahead',
           'start',
-          { signal: controller.signal },
+          { signal: controller.signal, txHash },
         );
         await delegateDidStart;
 
@@ -190,7 +188,7 @@ describe('KA async VM publish broadcast progress', () => {
         await input.publishOptions.onPhase?.(
           'chain:writeahead',
           'start',
-          { signal: controller.signal },
+          { signal: controller.signal, txHash },
         );
         statusAfterCommit = await publisher.getStatus(jobId);
         throw new Error('write-ahead hook timed out; transaction not broadcast');

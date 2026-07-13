@@ -15,9 +15,6 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { V10_WRITE_AHEAD_HOOK_TIMEOUT_MS } from '../src/chain-adapter.js';
-import {
-  SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
-} from '../src/signer-write-lane.js';
 import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -122,10 +119,10 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     const events: string[] = [];
     const lane = (a as any).signerWriteLane;
     const originalRun = lane.run.bind(lane);
-    let admitted: { admissionBudgetMs: number; label: string } | undefined;
-    lane.run = recorder((address: string, options: { admissionBudgetMs: number; label: string }, fn: () => Promise<unknown>) => {
-      admitted = options;
-      return originalRun(address, options, fn);
+    let admitted: string | undefined;
+    lane.run = recorder((address: string, label: string, fn: () => Promise<unknown>) => {
+      admitted = label;
+      return originalRun(address, label, fn);
     });
     (a as any).ensureV10ApproveTrac = async () => { events.push('allowance'); };
     (a as any).populateAndSignV10WithAllowanceRecovery = async () => {
@@ -152,10 +149,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       neverNull,
     )).resolves.toMatchObject({ hash: 'complete-operation' });
 
-    expect(admitted).toEqual({
-      admissionBudgetMs: SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
-      label: 'V10 publish',
-    });
+    expect(admitted).toBe('V10 publish');
     expect(events).toEqual(['allowance', 'populate', 'wal', 'broadcast']);
   });
 
@@ -203,12 +197,12 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
   it('uses one coarse admission policy instead of mirroring the live RPC call graph', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    const observed: Array<{ admissionBudgetMs: number; label: string }> = [];
+    const observed: string[] = [];
     const lane = (a as any).signerWriteLane;
     const originalRun = lane.run.bind(lane);
-    lane.run = (address: string, options: { admissionBudgetMs: number; label: string }, fn: () => Promise<unknown>) => {
-      observed.push(options);
-      return originalRun(address, options, fn);
+    lane.run = (address: string, label: string, fn: () => Promise<unknown>) => {
+      observed.push(label);
+      return originalRun(address, label, fn);
     };
     await (a as any).withSerializedSignerWrite(signer, 'one endpoint', async () => undefined);
 
@@ -219,10 +213,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     ];
     await (a as any).withSerializedSignerWrite(signer, 'two endpoints', async () => undefined);
 
-    expect(observed).toEqual([
-      { admissionBudgetMs: SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS, label: 'one endpoint' },
-      { admissionBudgetMs: SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS, label: 'two endpoints' },
-    ]);
+    expect(observed).toEqual(['one endpoint', 'two endpoints']);
   });
 
   it('keeps a queued write alive through bounded V10 recovery and a slow successful WAL hook', async () => {
@@ -675,7 +666,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
   it('serializes concurrent SAME-wallet standalone sends (RS/staking/PCA now hold the lock too)', async () => {
     // Before Phase 1 these calls hit `sendContractTransaction` raw — no lock —
     // so two same-wallet sends could read the same pending nonce. Now the
-    // public wrapper acquires `signerWriteLane.run(signer.address, plan, ...)`.
+    // public wrapper acquires `signerWriteLane.run(signer.address, label, ...)`.
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
     const events: string[] = [];

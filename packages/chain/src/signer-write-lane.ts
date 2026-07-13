@@ -14,12 +14,6 @@
  */
 export const SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS = 30 * 60 * 1000;
 
-/** Coarse queue-admission policy plus one human-readable diagnostic label. */
-export interface SignerWriteLaneOptions {
-  admissionBudgetMs: number;
-  label: string;
-}
-
 type SignerWriteLaneEntryState = 'queued' | 'running' | 'timed-out' | 'skipped' | 'settled';
 
 interface SignerWriteLaneEntry {
@@ -66,15 +60,17 @@ export class SignerWriteLaneAdmissionTimeoutError extends Error {
 export class SignerWriteLane {
   private readonly lanes = new Map<string, SignerWriteLaneState>();
 
+  constructor(private readonly admissionBudgetMs: number) {
+    if (!Number.isFinite(admissionBudgetMs) || admissionBudgetMs <= 0) {
+      throw new Error('Signer write lane must define a positive admission budget');
+    }
+  }
+
   run<T>(
     signerAddress: string,
-    options: SignerWriteLaneOptions,
+    label: string,
     fn: () => Promise<T>,
   ): Promise<T> {
-    const { admissionBudgetMs, label } = options;
-    if (!Number.isFinite(admissionBudgetMs) || admissionBudgetMs <= 0) {
-      throw new Error('Signer write lane operation must define a positive admission budget');
-    }
     if (!label.trim()) throw new Error('Signer write lane operation must define a label');
     const lane = this.lanes.get(signerAddress) ?? {
       tail: Promise.resolve(),
@@ -87,7 +83,7 @@ export class SignerWriteLane {
       .filter((predecessor) => predecessor.state === 'queued' || predecessor.state === 'running')
       .reduce((total, predecessor) => total + predecessor.admissionBudgetMs, 0);
     const laneEntry: SignerWriteLaneEntry = {
-      admissionBudgetMs,
+      admissionBudgetMs: this.admissionBudgetMs,
       label,
       state: 'queued',
     };

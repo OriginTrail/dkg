@@ -1035,7 +1035,6 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     delegate?: PhaseCallback;
   }): PhaseCallback {
     let recordedTxHash: LiftJobHex | undefined;
-    let stagedTxHash: LiftJobHex | undefined;
     return async (phase, status, context) => {
       await invokePhaseCallback(params.delegate, phase, status, context);
       // The EVM adapter invalidates this pre-broadcast attempt before it
@@ -1043,25 +1042,24 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       // `broadcast` after the associated transaction was explicitly abandoned.
       if (context?.signal?.aborted) return;
       if (status !== 'start') return;
-      const txHash = txHashFromSignedPhase(phase);
-      if (txHash) {
-        if (!recordedTxHash) stagedTxHash = txHash;
-        return;
-      }
-      // The tx-bearing phase only stages the identity in memory. Persist at
-      // the final awaited write-ahead boundary, after every earlier listener
-      // has completed successfully. A timeout in any earlier phase therefore
-      // leaves no durable broadcast recovery state for an unbroadcast tx.
-      if (phase !== 'chain:writeahead' || recordedTxHash || !stagedTxHash) return;
+      // Durable code consumes the typed write-ahead context. The hash-bearing
+      // phase-name breadcrumb remains compatibility-only.
+      if (
+        phase !== 'chain:writeahead'
+        || recordedTxHash
+        || !context?.txHash
+        || !/^0x[0-9a-fA-F]{64}$/.test(context.txHash)
+      ) return;
+      const txHash = context.txHash as LiftJobHex;
       const recorded = await this.recordKnowledgeAssetVmPublishBroadcastProgress({
         jobId: params.jobId,
         walletId: params.walletId,
-        txHash: stagedTxHash,
+        txHash,
         merkleRoot: params.merkleRoot,
         publicByteSize: params.publicByteSize,
         signal: context?.signal,
       });
-      if (recorded) recordedTxHash = stagedTxHash;
+      if (recorded) recordedTxHash = txHash;
     };
   }
 
@@ -1565,11 +1563,6 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
     }
   }
   return term;
-}
-
-function txHashFromSignedPhase(phase: string): LiftJobHex | null {
-  const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
-  return match ? (match[1] as LiftJobHex) : null;
 }
 
 function agentAddressScopeKey(agentAddress?: string): string {

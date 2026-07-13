@@ -30,10 +30,7 @@ import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
-const testSignerWriteOptions = () => ({
-  admissionBudgetMs: 60_000,
-  label: 'test busy signer lane',
-});
+const TEST_SIGNER_WRITE_LABEL = 'test busy signer lane';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
 // so a failover/exhaustion warning emitted by one test can't suppress (via the
@@ -4098,7 +4095,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const gate = new Promise<void>((r) => { release = r; });
       void (a as any).signerWriteLane.run(
         walletA.address,
-        testSignerWriteOptions(),
+        TEST_SIGNER_WRITE_LABEL,
         () => gate,
       );
       try {
@@ -4116,7 +4113,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const gate = new Promise<void>((r) => { release = r; });
       void (a as any).signerWriteLane.run(
         walletA.address,
-        testSignerWriteOptions(),
+        TEST_SIGNER_WRITE_LABEL,
         () => gate,
       );
       try {
@@ -4133,12 +4130,12 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const gB = new Promise<void>((r) => { releaseB = r; });
       void (a as any).signerWriteLane.run(
         walletA.address,
-        testSignerWriteOptions(),
+        TEST_SIGNER_WRITE_LABEL,
         () => gA,
       );
       void (a as any).signerWriteLane.run(
         walletB.address,
-        testSignerWriteOptions(),
+        TEST_SIGNER_WRITE_LABEL,
         () => gB,
       );
       try {
@@ -4241,7 +4238,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
         const gate = new Promise<void>((r) => { release = r; });
         void (a as any).signerWriteLane.run(
           walletA.address,
-          testSignerWriteOptions(),
+          TEST_SIGNER_WRITE_LABEL,
           () => gate,
         );
         try {

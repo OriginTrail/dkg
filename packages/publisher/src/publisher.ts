@@ -21,6 +21,8 @@ export interface PhaseCallbackContext {
    * listeners must check this after awaited work and suppress late writes.
    */
   signal?: AbortSignal;
+  /** Pre-broadcast transaction identity for durable write-ahead listeners. */
+  txHash?: string;
 }
 
 export type PhaseCallback = (

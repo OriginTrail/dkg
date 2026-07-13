@@ -1358,6 +1358,65 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     expect(outcome.reason).toMatch(/decode/i);
   });
 
+  it('does not classify an async decode phase failure as malformed protobuf', async () => {
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Valid bytes" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPhaseListener',
+      shareOperationId: 'op-phase-listener',
+      timestampMs: Date.now(),
+    });
+
+    await expect(handler.handle(
+      msg,
+      '12D3KooWPhaseListener',
+      async (phase, status) => {
+        if (phase === 'decode' && status === 'start') {
+          throw new Error('metrics journal unavailable');
+        }
+      },
+    )).rejects.toThrow('metrics journal unavailable');
+  });
+
+  it('awaits an async decode phase before decoding valid workspace bytes', async () => {
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Awaited decode" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPhaseGate',
+      shareOperationId: 'op-phase-gate',
+      timestampMs: Date.now(),
+    });
+    let releaseDecode!: () => void;
+    const decodeGate = new Promise<void>((resolve) => { releaseDecode = resolve; });
+    let markDecodeStarted!: () => void;
+    const decodeStarted = new Promise<void>((resolve) => { markDecodeStarted = resolve; });
+    const phases: string[] = [];
+
+    const apply = handler.handle(
+      msg,
+      '12D3KooWPhaseGate',
+      async (phase, status) => {
+        phases.push(`${phase}:${status}`);
+        if (phase === 'decode' && status === 'start') {
+          markDecodeStarted();
+          await decodeGate;
+        }
+      },
+    );
+
+    await decodeStarted;
+    await Promise.resolve();
+    expect(phases).toEqual(['decode:start']);
+
+    releaseDecode();
+    await expect(apply).resolves.toMatchObject({ applied: true });
+    expect(phases[1]).toBe('decode:end');
+  });
+
   it('retryable rejection (unexpected throw during apply) returns { applied: false, retryable: true }', async () => {
     // Dominant production case for `retryable: true`: the
     // sender key package for the current epoch hasn't arrived

@@ -919,8 +919,12 @@ export class SharedMemoryHandler {
     // key decryptor throws, store hiccups — see the catch
     // block for details).
     let decoded: WorkspaceGossipDecodeResult;
+    // Phase-listener failures are operational/instrumentation failures, not
+    // evidence that the immutable wire bytes are malformed. Keep this awaited
+    // callback outside the decode-only classifier so its rejection propagates
+    // to the caller's retry policy instead of being marked permanent.
+    await invokePhaseCallback(onPhase, 'decode', 'start');
     try {
-      await invokePhaseCallback(onPhase, 'decode', 'start');
       decoded = this.decodeWorkspaceGossipMessage(data);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);

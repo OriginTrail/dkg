@@ -4,17 +4,12 @@ import {
   SignerWriteLaneAdmissionTimeoutError,
 } from '../src/signer-write-lane.js';
 
-const operation = (admissionBudgetMs: number, label = 'test signer write') => ({
-  admissionBudgetMs,
-  label,
-});
-
 describe('SignerWriteLane', () => {
-  it('accepts one coarse budget and diagnostic label around a direct callback', async () => {
-    const lane = new SignerWriteLane();
+  it('accepts one lane-wide budget and a per-write diagnostic label', async () => {
+    const lane = new SignerWriteLane(50);
     await expect(lane.run(
       '0xwallet',
-      operation(50, 'publish direct sequence'),
+      'publish direct sequence',
       async () => 'sent',
     )).resolves.toBe('sent');
     expect(lane.isActive('0xwallet')).toBe(false);
@@ -23,14 +18,14 @@ describe('SignerWriteLane', () => {
   it('keeps the lane held after an admission timeout, skips that write, then runs later work', async () => {
     vi.useFakeTimers();
     try {
-      const lane = new SignerWriteLane();
+      const lane = new SignerWriteLane(15);
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      const first = lane.run('0xwallet', operation(15), async () => gate);
+      const first = lane.run('0xwallet', 'test signer write', async () => gate);
       let timedOutWriteRan = false;
       const second = lane.run(
         '0xwallet',
-        operation(15),
+        'test signer write',
         async () => { timedOutWriteRan = true; },
       );
       const secondExpectation = expect(second).rejects.toMatchObject({
@@ -46,7 +41,7 @@ describe('SignerWriteLane', () => {
       let laterWriteStarted = false;
       const third = lane.run(
         '0xwallet',
-        operation(15),
+        'test signer write',
         async () => { laterWriteStarted = true; return 'third'; },
       );
       expect(lane.isActive('0xwallet')).toBe(true);
@@ -66,16 +61,15 @@ describe('SignerWriteLane', () => {
   it('uses the predecessor operation-wide admission budget', async () => {
     vi.useFakeTimers();
     try {
-      const lane = new SignerWriteLane();
-      const predecessor = operation(30_000, 'publish direct sequence');
+      const lane = new SignerWriteLane(30_000);
 
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      const first = lane.run('slow-wallet', predecessor, async () => gate);
+      const first = lane.run('slow-wallet', 'publish direct sequence', async () => gate);
       let ran = false;
       const second = lane.run(
         'slow-wallet',
-        operation(10_000),
+        'publish direct sequence',
         async () => { ran = true; return 'sent'; },
       );
 
@@ -93,13 +87,13 @@ describe('SignerWriteLane', () => {
   it('immediately excludes a timed-out entry budget from later admission deadlines', async () => {
     vi.useFakeTimers();
     try {
-      const lane = new SignerWriteLane();
+      const lane = new SignerWriteLane(15);
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      const first = lane.run('abandoned-budget-wallet', operation(15), async () => gate);
+      const first = lane.run('abandoned-budget-wallet', 'first', async () => gate);
       const second = lane.run(
         'abandoned-budget-wallet',
-        operation(100),
+        'second',
         async () => 'must not run',
       );
       const secondExpectation = expect(second).rejects.toMatchObject({
@@ -111,11 +105,11 @@ describe('SignerWriteLane', () => {
 
       // Entry #2 has timed out but its FIFO tail still sits behind #1. A new
       // caller must wait for #1's advertised 15ms only, not the abandoned
-      // 100ms budget from #2. Keep #1 held so the diagnostic deadline proves
+      // lane budget from #2. Keep #1 held so the diagnostic deadline proves
       // both properties: the barrier remains, while the stale budget is gone.
       const third = lane.run(
         'abandoned-budget-wallet',
-        operation(10),
+        'third',
         async () => 'third',
       );
       const thirdExpectation = expect(third).rejects.toMatchObject({
@@ -137,14 +131,14 @@ describe('SignerWriteLane', () => {
   it('holds a later caller through the cumulative plans of every queued predecessor', async () => {
     vi.useFakeTimers();
     try {
-      const lane = new SignerWriteLane();
+      const lane = new SignerWriteLane(30_000);
       const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-      const first = lane.run('mixed-wallet', operation(30_000), async () => delay(29_999));
-      const second = lane.run('mixed-wallet', operation(20_000), async () => delay(19_999));
+      const first = lane.run('mixed-wallet', 'first', async () => delay(29_999));
+      const second = lane.run('mixed-wallet', 'second', async () => delay(29_999));
       let thirdStarted = false;
       let thirdSettled = false;
       let thirdError: unknown;
-      const third = lane.run('mixed-wallet', operation(5_000), async () => {
+      const third = lane.run('mixed-wallet', 'third', async () => {
         thirdStarted = true;
         return 'third';
       }).then(
@@ -157,13 +151,13 @@ describe('SignerWriteLane', () => {
       );
 
       // The second predecessor has started, but the total lane hold has passed
-      // either individual predecessor budget. Only the cumulative 30s + 20s
+      // either individual predecessor budget. Only the cumulative 30s + 30s
       // admission budget keeps the third entry alive here.
       await vi.advanceTimersByTimeAsync(35_000);
       expect(thirdStarted).toBe(false);
       expect(thirdSettled).toBe(false);
 
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(24_999);
       await Promise.all([first, second, third]);
       expect(thirdError).toBeUndefined();
       expect(thirdStarted).toBe(true);

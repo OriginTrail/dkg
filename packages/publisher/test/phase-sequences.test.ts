@@ -167,6 +167,45 @@ describe('Phase-sequence contracts', () => {
     ]);
   });
 
+  it('publish awaits an async ordinary phase before advancing', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    let releasePrepare!: () => void;
+    const prepareGate = new Promise<void>((resolve) => { releasePrepare = resolve; });
+    let markPrepareStarted!: () => void;
+    const prepareStarted = new Promise<void>((resolve) => { markPrepareStarted = resolve; });
+    const phases: string[] = [];
+
+    const publish = publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(`${ENTITY}:async-phase`, 'http://schema.org/name', '"Awaited"')],
+      onPhase: async (phase, status) => {
+        phases.push(`${phase}:${status}`);
+        if (phase === 'prepare' && status === 'start') {
+          markPrepareStarted();
+          await prepareGate;
+        }
+      },
+    });
+
+    await prepareStarted;
+    await Promise.resolve();
+    expect(phases).toEqual(['prepare:start']);
+
+    releasePrepare();
+    await expect(publish).resolves.toMatchObject({ status: 'confirmed' });
+    expect(phases[1]).toBe('prepare:ensureContextGraph:start');
+  });
+
   // -- Publish (adapter-backed signer, no identity, no ACK provider — throws after RC11 / PR1) ---
 
   it('publish: adapter-backed signer without node identity attempts on-chain and THROWS when no ACKs are collected (RC11 / PR1: no silent fallback)', async () => {
@@ -651,8 +690,7 @@ describe('Phase-sequence contracts', () => {
   });
 
   it(
-    'publish: chain:txsigned:tx-<hash> breadcrumb fires exactly once BEFORE chain:writeahead:start ' +
-      '(PR #241 Codex iter-5: the WAL checkpoint must carry the pre-broadcast tx hash per spec §06)',
+    'publish: structured write-ahead context carries the tx hash and the legacy breadcrumb stays ordered',
     async () => {
       const store = new OxigraphStore();
       const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
@@ -664,7 +702,14 @@ describe('Phase-sequence contracts', () => {
       });
 
       const quads = [q(ENTITY, 'http://schema.org/name', '"Hashed"')];
-      const { calls, fn } = recorder();
+      const calls: [string, 'start' | 'end'][] = [];
+      let writeAheadTxHash: string | undefined;
+      const fn: PhaseCallback = (phase, status, context) => {
+        calls.push([phase, status]);
+        if (phase === 'chain:writeahead' && status === 'start') {
+          writeAheadTxHash = context?.txHash;
+        }
+      };
       await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
 
       // Exactly one txsigned:start event, with a hex hash embedded.
@@ -674,10 +719,10 @@ describe('Phase-sequence contracts', () => {
       expect(txsignedStarts.length).toBe(1);
       const [txPhase] = txsignedStarts[0];
       expect(txPhase).toMatch(/^chain:txsigned:tx-0x[0-9a-fA-F]{64}$/);
+      expect(writeAheadTxHash).toBe(txPhase.slice('chain:txsigned:tx-'.length));
 
-      // txsigned must fire BEFORE chain:writeahead:start — the WAL
-      // checkpoint value (the hash) has to be observable at the moment
-      // the listener learns a broadcast is imminent.
+      // Keep the legacy breadcrumb before the typed durable boundary for
+      // compatibility, without requiring durable consumers to parse it.
       const txIdx = calls.findIndex(
         ([p, s]) => p === txPhase && s === 'start',
       );

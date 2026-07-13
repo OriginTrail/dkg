@@ -1076,7 +1076,7 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
-    this.signerWriteLane = new SignerWriteLane();
+    this.signerWriteLane = new SignerWriteLane(SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1730,10 +1730,7 @@ export class EVMChainAdapterBase {
   ): Promise<TResult> {
     return this.signerWriteLane.run(
       signer.address,
-      {
-        admissionBudgetMs: SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
-        label,
-      },
+      label,
       () => execute({
         sendContractTransaction: (contract, method, args, innerSigner, label, opts) => {
           if (ethers.getAddress(innerSigner.address) !== ethers.getAddress(signer.address)) {
