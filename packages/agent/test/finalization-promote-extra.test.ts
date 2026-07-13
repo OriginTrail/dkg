@@ -439,16 +439,15 @@ describe('A-4: e2e — agent.publish() data lands in canonical (data) view post-
     // GH #1264 promotion: a confirmed one-shot `publish()` now stores its public
     // data in BOTH the per-KA verifiable-memory graph (the publish write) AND the
     // scoped RS-prover graph `<cg>/context/<cgId>` (promoteConfirmedKCToScopedGraph).
-    // The verifiable-memory view unions both (dkg-query-engine.ts re-includes the
-    // per-cgId data graphs for #1098), so the SAME triple is observed once per
-    // source graph — two rows. The invariant is unchanged: the confirmed publish
-    // is immediately observable via VM with the correct value. Assert that the two
-    // rows are exactly the two known sources AND carry only the published value,
-    // so a third copy (count) or a wrong-member/garbage row (distinct set) still fails.
+    // The verifiable-memory read-both includes both (dkg-query-engine.ts
+    // re-includes the per-cgId data graphs for #1098), but collapses an identical
+    // full solution mapping already produced by an earlier mirror graph. The
+    // canonical triple is therefore observed once without applying DISTINCT to
+    // the caller projection (which would also erase legitimate bag multiplicity).
     expect(
       vmQr.bindings.length,
-      'VM view observes the confirmed publish in its two source graphs (per-KA VM graph + scoped #1264 promotion)',
-    ).toBe(2);
+      'VM view deduplicates the identical per-KA VM + scoped #1264 mirror',
+    ).toBe(1);
     expect(
       new Set(vmQr.bindings.map((b) => b['o'])),
       'every VM-view row must carry the published value (no wrong-member or stale row)',
