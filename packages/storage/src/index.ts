@@ -22,9 +22,14 @@ export {
 } from './triple-store.js';
 export {
   StorePriorityScheduler,
+  StoreSchedulerBusyError,
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
+  DEFAULT_STORE_QUEUE_LIMIT,
+  DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
   type StorePrioritySchedulerSnapshot,
+  type StorePriorityQueueLimits,
+  type StoreSchedulerBusyReason,
 } from './store-priority-scheduler.js';
 export {
   EXTERNAL_LITERAL_REF_DATATYPE,
@@ -61,7 +66,11 @@ export {
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
-export { BlazegraphStore } from './adapters/blazegraph.js';
+export {
+  BlazegraphStore,
+  DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS,
+  type BlazegraphStoreOptions,
+} from './adapters/blazegraph.js';
 export {
   SparqlHttpStore,
   type SparqlHttpStoreOptions,

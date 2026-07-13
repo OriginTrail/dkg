@@ -2,7 +2,7 @@
  * BlazegraphStore unit tests with mocked fetch (03 §16 — graph isolation via GRAPH IRIs;
  * no live Blazegraph required).
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { getExternalStorePrioritySchedulerSnapshot } from '../src/store-priority-scheduler.js';
 
@@ -37,6 +37,23 @@ function blazeListGraphsResponse(): Response {
     }),
     { status: 200, headers: { 'Content-Type': 'application/json' } },
   );
+}
+
+async function outcomeWithin(work: Promise<unknown>, timeoutMs: number): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+      new Promise<'still-pending'>((resolve) => {
+        timer = setTimeout(() => resolve('still-pending'), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 describe('BlazegraphStore (mocked HTTP)', () => {
@@ -213,6 +230,149 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).toMatch(/^CONSTRUCT /);
   });
 
+  it.each([
+    {
+      name: 'SELECT',
+      run: (store: BlazegraphStore) => store.query('SELECT ?s WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'CONSTRUCT',
+      run: (store: BlazegraphStore) => store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'UPDATE',
+      run: (store: BlazegraphStore) => store.update('DELETE WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'bulk insert',
+      run: (store: BlazegraphStore) => store.insert([
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
+      ]),
+    },
+  ])('applies its end-to-end timeout to an in-flight $name fetch', async ({ run }) => {
+    let seenSignal: AbortSignal | undefined;
+    setFetch(async (_url, init) => {
+      seenSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    const outcome = await outcomeWithin(run(s), 200);
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it('keeps the SELECT deadline active through response JSON decoding', async () => {
+    let rejectBody!: (reason?: unknown) => void;
+    const body = new Promise<unknown>((_resolve, reject) => {
+      rejectBody = reject;
+    });
+    setFetch(async () => ({
+      ok: true,
+      status: 200,
+      json: () => body,
+    }) as Response);
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    try {
+      const outcome = await outcomeWithin(
+        s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+        200,
+      );
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      rejectBody(new Error('late JSON failure'));
+    }
+  });
+
+  it('keeps the UPDATE deadline active while reading an error response body', async () => {
+    let rejectBody!: (reason?: unknown) => void;
+    const body = new Promise<string>((_resolve, reject) => {
+      rejectBody = reject;
+    });
+    setFetch(async () => ({
+      ok: false,
+      status: 500,
+      text: () => body,
+    }) as Response);
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    try {
+      const outcome = await outcomeWithin(
+        s.update('DELETE WHERE { ?s ?p ?o }'),
+        200,
+      );
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      rejectBody(new Error('late body failure'));
+    }
+  });
+
+  it('expires queued work before fetch and never dispatches it later', async () => {
+    const before = getExternalStorePrioritySchedulerSnapshot();
+    const normalSlots = before.maxConcurrent - before.ackReservedSlots;
+    const releases: Array<(response: Response) => void> = [];
+    const blockers: Array<Promise<unknown>> = [];
+    let fetchCount = 0;
+    setFetch(async (_url, init) => {
+      fetchCount++;
+      return new Promise<Response>((resolve, reject) => {
+        releases.push(resolve);
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+
+    try {
+      const blockingStore = new BlazegraphStore(baseUrl, { timeout: 30_000 });
+      for (let i = 0; i < normalSlots; i++) {
+        blockers.push(blockingStore.query(
+          `SELECT ?s WHERE { # queue-blocker-${i}\n?s ?p ?o }`,
+          { priority: 'normal' },
+        ));
+      }
+      await waitForCondition(
+        () => fetchCount === normalSlots,
+        `normal store lanes did not fill; fetchCount=${fetchCount}, slots=${normalSlots}`,
+      );
+
+      const deadlineStore = new BlazegraphStore(baseUrl, { timeout: 20 });
+      const queued = deadlineStore.query(
+        'SELECT ?s WHERE { # must-not-dispatch\n?s ?p ?o }',
+        { priority: 'normal' },
+      );
+      const outcome = await outcomeWithin(queued, 200);
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+      expect(fetchCount).toBe(normalSlots);
+
+      for (const release of releases.splice(0)) release(blazeSelectResponse());
+      await Promise.allSettled([...blockers, queued]);
+      expect(fetchCount).toBe(normalSlots);
+    } finally {
+      for (const release of releases.splice(0)) release(blazeSelectResponse());
+      await Promise.allSettled(blockers);
+    }
+  });
+
+  it('detaches the caller abort listener after a completed operation', async () => {
+    setFetch(async () => blazeSelectResponse());
+    const caller = new AbortController();
+    const addListener = vi.spyOn(caller.signal, 'addEventListener');
+    const removeListener = vi.spyOn(caller.signal, 'removeEventListener');
+    const s = new BlazegraphStore(baseUrl);
+
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: caller.signal });
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(removeListener).toHaveBeenCalledTimes(1);
+    addListener.mockRestore();
+    removeListener.mockRestore();
+  });
+
+  it('rejects invalid explicit operation timeouts', () => {
+    expect(() => new BlazegraphStore(baseUrl, { timeout: 0 })).toThrow(/positive integer/);
+  });
+
   it('routes ack-priority adapter queries ahead of queued background fetch work', async () => {
     const before = getExternalStorePrioritySchedulerSnapshot();
     expect(before.maxConcurrent).toBeGreaterThan(1);
@@ -353,7 +513,8 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     // charset=utf-8 keeps Jetty from ISO-8859-1-decoding non-ASCII literals.
     expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update; charset=utf-8');
     expect(String(init?.body)).toBe(sparql);
-    expect(init?.signal).toBe(controller.signal);
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.signal).not.toBe(controller.signal);
     expect(fetchCalls.some((c) => /\bCOUNT\b/i.test(String(c[1]?.body ?? '')))).toBe(false);
     expect(fetchCalls.some((c) => String(c[1]?.body ?? '').startsWith('SELECT'))).toBe(false);
   });
