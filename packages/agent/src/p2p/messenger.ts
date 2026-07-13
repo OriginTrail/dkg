@@ -250,6 +250,12 @@ export type ReliableSendResult =
       error: string;
     };
 
+/** The explicit throw policy can never produce a durable queued result. */
+export type ThrowingReliableSendResult = Exclude<
+  ReliableSendResult,
+  { delivered: false; queued: true }
+>;
+
 /** Handler signature for `Messenger.register`. */
 export type ReliableHandler = (
   payload: Uint8Array,
@@ -575,6 +581,26 @@ export class Messenger {
     payload: Uint8Array,
     opts: SendReliableOpts = {},
   ): Promise<ReliableSendResult> {
+    return this.sendFramed(peerId, protocolId, payload, opts, true);
+  }
+
+  /** Reliable framing/idempotency for bounded request-owned retries; never queues. */
+  async sendRequestOwned(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts: SendReliableOpts = {},
+  ): Promise<ThrowingReliableSendResult> {
+    return this.sendFramed(peerId, protocolId, payload, opts, false) as Promise<ThrowingReliableSendResult>;
+  }
+
+  private async sendFramed(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts: SendReliableOpts,
+    queueRecoverableFailure: boolean,
+  ): Promise<ReliableSendResult> {
     this.requireSubstrate('sendReliable');
 
     const messageId = opts.messageId ?? randomUUID();
@@ -667,6 +693,13 @@ export class Messenger {
       // the outbox stays out of it because retrying an encoding
       // bug / unhandled protocol won't help.
       if (!isRecoverableMessengerSendError(err, errMsg)) {
+        throw err;
+      }
+      if (!queueRecoverableFailure) {
+        // No durable row can later deliver or expire this request, so its SLO
+        // start marker has no future owner. Clear it before returning control
+        // to the request-scoped retry loop.
+        this.firstAttemptAt.delete(sloK);
         throw err;
       }
       const entry = outbox.enqueueFailure(
