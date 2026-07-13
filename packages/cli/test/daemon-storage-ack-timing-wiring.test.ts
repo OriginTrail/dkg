@@ -171,6 +171,11 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       handlerDeadlineMs: 15_000,
       sendTimeoutMs: 20_000,
     });
+    expect(createArg.chainConfig).toMatchObject({
+      rpcUrl: 'https://private-rpc.example',
+      hubAddress: '0x1234567890123456789012345678901234567890',
+      receiptTimeoutMs: 1_200_000,
+    });
   });
 
   it('passes configured StorageACK timing into DKGAgent.create', async () => {

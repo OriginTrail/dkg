@@ -50,7 +50,6 @@ import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
-  RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   STICKY_PREFERRED_TTL_MS,
 } from './evm-adapter-constants.js';
@@ -599,38 +598,22 @@ export class RpcFailoverClient {
         try {
           const canonical = this.getEndpoints();
           const attempts = this.stickiness.attempts(canonical, 'write');
-          const receipt = await getReceiptAcrossEndpoints({
+          const result = await getReceiptAcrossEndpoints({
             endpoints: attempts.map((attempt) => {
               const endpoint = attempt.endpoint;
               return {
                 rpcUrl: endpoint.rpcUrl,
-                recordSuccess: () => attempt.recordSuccess(),
-                recordFailure: () => attempt.recordFailure(),
-                lookup: async (hash, context) => {
-                  span.addEvent('receipt.attempt', { attempt: context.attempt });
-                  const remainingBeforeValidation = context.deadlineMs === undefined
-                    ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
-                    : context.deadlineMs - Date.now();
-                  if (remainingBeforeValidation <= 0) return { kind: 'deadline' as const };
-
+                recordOutcome: outcome => (
+                  outcome === 'success' ? attempt.recordSuccess() : attempt.recordFailure()
+                ),
+                lookup: async (hash, attemptNumber) => {
+                  span.addEvent('receipt.attempt', { attempt: attemptNumber });
                   await this.validateEndpointForAttempt(
                     endpoint,
-                    Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingBeforeValidation),
-                    `receipt lookup chainId validation via RPC #${context.attempt}`,
+                    undefined,
+                    `receipt lookup chainId validation via RPC #${attemptNumber}`,
                   );
-                  const remainingBeforeLookup = context.deadlineMs === undefined
-                    ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
-                    : context.deadlineMs - Date.now();
-                  if (remainingBeforeLookup <= 0) return { kind: 'deadline' as const };
-
-                  return {
-                    kind: 'response' as const,
-                    receipt: await withTimeout(
-                      endpoint.provider.getTransactionReceipt(hash),
-                      Math.min(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, remainingBeforeLookup),
-                      `receipt lookup via RPC #${context.attempt}`,
-                    ),
-                  };
+                  return endpoint.provider.getTransactionReceipt(hash);
                 },
               };
             }),
@@ -638,36 +621,38 @@ export class RpcFailoverClient {
             ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
             logLabel: 'receipt lookup',
             exhaustionRpcUrls: canonical.map(endpoint => endpoint.rpcUrl),
-            formatExhaustionMessage: lastError =>
-              `Receipt lookup for tx ${txHash} failed on all configured RPC endpoints: ${errorMessage(lastError)}`,
-            onReceipt: (endpoint) => {
-              span.setAttribute('dkg.tx_hash', txHash);
-              this.recordRpcOutcome('eth_getTransactionReceipt', 'ok');
-              if (endpoint.rpcUrl) {
-                noteRpcServed('receipt lookup', endpoint.rpcUrl, {
-                  mode: 'read',
-                  key: this.servedWriteKey('receipt-lookup'),
-                });
-              }
-            },
-            onNonRetryableError: (err) => {
-              this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(err), { retryable: false });
-            },
-            onExhausted: (lastError) => {
-              this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(lastError), {
-                retryable: true,
-                exhausted: true,
-              });
-            },
           });
 
-          if (receipt) return receipt;
+          if (result.receipt) {
+            span.setAttribute('dkg.tx_hash', txHash);
+            this.recordRpcOutcome('eth_getTransactionReceipt', 'ok');
+            if (result.endpoint?.rpcUrl) {
+              noteRpcServed('receipt lookup', result.endpoint.rpcUrl, {
+                mode: 'read',
+                key: this.servedWriteKey('receipt-lookup'),
+              });
+            }
+            return result.receipt;
+          }
           // At least one backend answered but the tx is not yet mined (null
           // receipt). This is a benign poll tick, not a terminal outcome, so we
           // intentionally do NOT emit an outcome metric here (the surrounding
           // poll loop calls this repeatedly until mined/timeout).
           span.setAttribute('dkg.receipt_pending', true);
           return null;
+        } catch (err) {
+          if (errorCode(err) === 'RPC_RECEIPT_LOOKUP_FAILED') {
+            const cause = (err as Error & { cause?: unknown }).cause ?? err;
+            this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(cause), {
+              retryable: true,
+              exhausted: true,
+            });
+          } else {
+            this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(err), {
+              retryable: false,
+            });
+          }
+          throw err;
         } finally {
           metrics.chainRpcDuration.record(Date.now() - startedAt, {
             rpc_method: 'eth_getTransactionReceipt', chain_id: chainId,
