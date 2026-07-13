@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   escapeRdfLiteral,
-  formatRdfLiteralBinding,
-  formatRdfLiteralTerm,
+  decodeRdfLiteralBody,
+  formatCanonicalRdfLiteralTerm,
   isRdfTerm,
   normalizeRdfObject,
+  parseRdfLiteralLexicalTerm,
   parseRdfLiteralTerm,
   type RdfLiteralTerm,
 } from '../src/index.js';
@@ -31,27 +32,15 @@ describe('RDF literal term codec', () => {
   const body = 'café 😀 \\"quote\\" \\\\ tab:\\t control:\\u0001 del:\\u007F slash-n:\\\\n';
 
   it('owns plain, language-tagged, and typed binding formatting', () => {
-    expect(formatRdfLiteralTerm({ kind: 'plain', value })).toBe(`"${body}"`);
-    expect(formatRdfLiteralTerm({ kind: 'language', value, language: 'en' })).toBe(`"${body}"@en`);
-    expect(formatRdfLiteralTerm({ kind: 'typed', value, datatype: 'urn:test:datatype' }))
+    expect(formatCanonicalRdfLiteralTerm({ kind: 'plain', value })).toBe(`"${body}"`);
+    expect(formatCanonicalRdfLiteralTerm({ kind: 'language', value, language: 'en' })).toBe(`"${body}"@en`);
+    expect(formatCanonicalRdfLiteralTerm({ kind: 'typed', value, datatype: 'urn:test:datatype' }))
       .toBe(`"${body}"^^<urn:test:datatype>`);
-    expect(formatRdfLiteralTerm({
+    expect(formatCanonicalRdfLiteralTerm({
       kind: 'typed',
       value,
       datatype: 'http://www.w3.org/2001/XMLSchema#string',
     })).toBe(`"${body}"`);
-  });
-
-  it('selects the canonical literal kind from SPARQL binding metadata', () => {
-    expect(formatRdfLiteralBinding({ value })).toBe(`"${body}"`);
-    expect(formatRdfLiteralBinding({ value, language: 'en' })).toBe(`"${body}"@en`);
-    expect(formatRdfLiteralBinding({ value, datatype: 'urn:test:datatype' }))
-      .toBe(`"${body}"^^<urn:test:datatype>`);
-    expect(formatRdfLiteralBinding({
-      value,
-      language: 'en',
-      datatype: 'urn:test:ignored-when-language-is-present',
-    })).toBe(`"${body}"@en`);
   });
 
   it.each<RdfLiteralTerm>([
@@ -59,16 +48,16 @@ describe('RDF literal term codec', () => {
     { kind: 'language', value, language: 'sr-Latn' },
     { kind: 'typed', value, datatype: 'urn:test:datatype' },
   ])('round-trips $kind literals through the canonical formatter and parser', (literal) => {
-    const formatted = formatRdfLiteralTerm(literal);
+    const formatted = formatCanonicalRdfLiteralTerm(literal);
     expect(parseRdfLiteralTerm(formatted)).toEqual(literal);
-    expect(formatRdfLiteralTerm(parseRdfLiteralTerm(formatted)!)).toBe(formatted);
+    expect(formatCanonicalRdfLiteralTerm(parseRdfLiteralTerm(formatted)!)).toBe(formatted);
   });
 
   it('round-trips the complete escaped C0 and DEL control range', () => {
     const controls = Array.from({ length: 0x20 }, (_, code) => String.fromCharCode(code)).join('')
       + '\u007F';
     const literal: RdfLiteralTerm = { kind: 'plain', value: controls };
-    expect(parseRdfLiteralTerm(formatRdfLiteralTerm(literal))).toEqual(literal);
+    expect(parseRdfLiteralTerm(formatCanonicalRdfLiteralTerm(literal))).toEqual(literal);
   });
 
   it('keeps XSD string elision in the typed formatting path', () => {
@@ -77,7 +66,7 @@ describe('RDF literal term codec', () => {
       value,
       datatype: 'http://www.w3.org/2001/XMLSchema#string',
     };
-    const formatted = formatRdfLiteralTerm(typed);
+    const formatted = formatCanonicalRdfLiteralTerm(typed);
     expect(formatted).toBe(`"${body}"`);
     expect(parseRdfLiteralTerm(formatted)).toEqual({ kind: 'plain', value });
   });
@@ -107,5 +96,30 @@ describe('RDF literal term codec', () => {
     expect(parseRdfLiteralTerm('"surrogate-short:\\uD800"')).toBeNull();
     expect(parseRdfLiteralTerm('"surrogate-long:\\U0000DFFF"')).toBeNull();
     expect(parseRdfLiteralTerm('"raw\nnewline"')).toBeNull();
+  });
+
+  it('shares the broad lexical boundary without weakening strict term parsing', () => {
+    expect(parseRdfLiteralLexicalTerm('"v"^^urn:test:bare')).toEqual({
+      body: 'v',
+      suffix: { kind: 'datatype', datatype: 'urn:test:bare', syntax: 'bare' },
+    });
+    expect(parseRdfLiteralTerm('"v"^^urn:test:bare')).toBeNull();
+    expect(parseRdfLiteralLexicalTerm('"unknown:\\q"')).toEqual({
+      body: 'unknown:\\q',
+      suffix: { kind: 'plain' },
+    });
+    expect(parseRdfLiteralTerm('"unknown:\\q"')).toBeNull();
+  });
+
+  it('makes strict and compatibility escape-decoding contracts explicit', () => {
+    expect(decodeRdfLiteralBody('valid:\\t\\u00E9')).toBe('valid:\té');
+    expect(decodeRdfLiteralBody('unknown:\\q')).toBeNull();
+    expect(decodeRdfLiteralBody('unknown:\\q', { invalidEscape: 'preserve' }))
+      .toBe('unknown:\\q');
+    expect(decodeRdfLiteralBody('surrogate:\\uD800')).toBeNull();
+    expect(decodeRdfLiteralBody('surrogate:\\uD800', {
+      invalidEscape: 'preserve',
+      allowSurrogateCodePoints: true,
+    })).toBe('surrogate:\uD800');
   });
 });
