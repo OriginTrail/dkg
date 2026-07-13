@@ -137,6 +137,71 @@ describe('agent broadcast phase callbacks', () => {
     expect(broadcastPublish).not.toHaveBeenCalled();
   });
 
+  it('awaits publish broadcast:end before completing', async () => {
+    const { agent, broadcastPublish } = makePublishHarness();
+    const entered = deferred();
+    const gate = deferred();
+    const onPhase: PhaseCallback = async (phase, status) => {
+      if (phase === 'broadcast' && status === 'end') {
+        entered.resolve();
+        await gate.promise;
+      }
+    };
+    let settled = false;
+    const pending = PublishMethods.prototype._publish.call(
+      agent as never,
+      CONTEXT_GRAPH_ID,
+      PUBLIC_QUADS,
+      undefined,
+      { onPhase },
+    ).finally(() => { settled = true; });
+
+    await entered.promise;
+    expect(broadcastPublish).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+    gate.resolve();
+    await pending;
+    expect(settled).toBe(true);
+  });
+
+  it('balances publish broadcast:end when peer broadcast fails', async () => {
+    const { agent, broadcastPublish } = makePublishHarness();
+    const broadcastFailure = new Error('gossip transport failed');
+    broadcastPublish.mockRejectedValueOnce(broadcastFailure);
+    const phases: string[] = [];
+    const onPhase: PhaseCallback = (phase, status) => {
+      if (phase === 'broadcast') phases.push(status);
+    };
+
+    await expect(PublishMethods.prototype._publish.call(
+      agent as never,
+      CONTEXT_GRAPH_ID,
+      PUBLIC_QUADS,
+      undefined,
+      { onPhase },
+    )).rejects.toBe(broadcastFailure);
+
+    expect(phases).toEqual(['start', 'end']);
+  });
+
+  it('propagates publish broadcast:end rejection after broadcasting', async () => {
+    const { agent, broadcastPublish } = makePublishHarness();
+    const rejection = new Error('publish end journal unavailable');
+    const onPhase: PhaseCallback = async (phase, status) => {
+      if (phase === 'broadcast' && status === 'end') throw rejection;
+    };
+
+    await expect(PublishMethods.prototype._publish.call(
+      agent as never,
+      CONTEXT_GRAPH_ID,
+      PUBLIC_QUADS,
+      undefined,
+      { onPhase },
+    )).rejects.toBe(rejection);
+
+    expect(broadcastPublish).toHaveBeenCalledOnce();
+  });
+
   it('awaits update broadcast:start before publishing update gossip', async () => {
     const { agent, gossipPublish } = makeUpdateHarness();
     const entered = deferred();

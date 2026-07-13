@@ -842,9 +842,50 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.graphEnsured = true;
   }
 
-  private async writeJob(job: LiftJob): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
-    await this.store.insert(serializeJob(job, this.graphUri));
+  /**
+   * Canonical job persistence boundary. Ordinary transitions retain the
+   * legacy delete/insert path. Supplying expectedStatus upgrades that same
+   * serializer to a server-side conditional replacement and reports whether
+   * the exact payload committed, conflicted, or lacks store support.
+   */
+  private async writeJob(
+    job: LiftJob,
+    options: { expectedStatus?: LiftJobState; signal?: AbortSignal } = {},
+  ): Promise<'written' | 'conflict' | 'unsupported'> {
+    if (options.expectedStatus === undefined) {
+      await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
+      await this.store.insert(serializeJob(job, this.graphUri));
+      return 'written';
+    }
+
+    const subject = jobSubject(job.jobId);
+    const replacement = serializeJob(job, this.graphUri)
+      .filter((quad) => quad.subject === subject)
+      .map((quad) => `<${quad.subject}> <${quad.predicate}> ${quad.object} .`)
+      .join('\n');
+    const update = `
+      DELETE { GRAPH <${this.graphUri}> { <${subject}> ?predicate ?object } }
+      INSERT { GRAPH <${this.graphUri}> { ${replacement} } }
+      WHERE {
+        GRAPH <${this.graphUri}> {
+          <${subject}> <${STATUS_PREDICATE}> ${literal(options.expectedStatus)} .
+          <${subject}> ?predicate ?object .
+        }
+      }
+    `;
+    const supported = await tryUpdateWithTouchedGraphs(
+      this.store,
+      update,
+      [this.graphUri],
+      { signal: options.signal },
+    );
+    if (!supported) return 'unsupported';
+
+    const persisted = await this.store.query(
+      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${subject}> <${PAYLOAD_PREDICATE}> ?payload } }`,
+    );
+    const payload = expectBindings(persisted)[0]?.['payload'];
+    return payload === literal(JSON.stringify(job)) ? 'written' : 'conflict';
   }
 
   private async deleteJob(jobId: string): Promise<void> {
@@ -1042,15 +1083,24 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       // `broadcast` after the associated transaction was explicitly abandoned.
       if (context?.signal?.aborted) return;
       if (status !== 'start') return;
-      // Durable code consumes the typed write-ahead context. The hash-bearing
-      // phase-name breadcrumb remains compatibility-only.
+      // Prefer the typed write-ahead context, while retaining the previously
+      // supported hash-bearing phase for custom executors that have not yet
+      // adopted it. Both paths pass through the same guarded transition.
+      const legacyMatch = /^chain:txsigned:tx-(0x[0-9a-fA-F]{64})$/.exec(phase);
+      const candidateTxHash = phase === 'chain:writeahead'
+        ? context?.txHash
+        // The built-in publisher explicitly marks its observability breadcrumb
+        // because a typed durability event follows. Unmarked breadcrumbs from
+        // custom legacy executors retain the original recovery fallback.
+        : context?.compatibilityBreadcrumb !== true
+          ? legacyMatch?.[1]
+          : undefined;
       if (
-        phase !== 'chain:writeahead'
-        || recordedTxHash
-        || !context?.txHash
-        || !/^0x[0-9a-fA-F]{64}$/.test(context.txHash)
+        recordedTxHash
+        || !candidateTxHash
+        || !/^0x[0-9a-fA-F]{64}$/.test(candidateTxHash)
       ) return;
-      const txHash = context.txHash as LiftJobHex;
+      const txHash = candidateTxHash as LiftJobHex;
       const recorded = await this.recordKnowledgeAssetVmPublishBroadcastProgress({
         jobId: params.jobId,
         walletId: params.walletId,
@@ -1114,35 +1164,15 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     const next = this.refreshActiveLease(this.mergeJob(params.current, params.status, params.data));
     this.assertJobMatchesStatus(next);
-    const subject = jobSubject(next.jobId);
-    const replacement = serializeJob(next, this.graphUri)
-      .filter((quad) => quad.subject === subject)
-      .map((quad) => `<${quad.subject}> <${quad.predicate}> ${quad.object} .`)
-      .join('\n');
-    const update = `
-      DELETE { GRAPH <${this.graphUri}> { <${subject}> ?predicate ?object } }
-      INSERT { GRAPH <${this.graphUri}> { ${replacement} } }
-      WHERE {
-        GRAPH <${this.graphUri}> {
-          <${subject}> <${STATUS_PREDICATE}> ${literal(params.expectedStatus)} .
-          <${subject}> ?predicate ?object .
-        }
-      }
-    `;
-
     if (params.signal?.aborted) return false;
-    const supported = await tryUpdateWithTouchedGraphs(
-      this.store,
-      update,
-      [this.graphUri],
-      { signal: params.signal },
-    );
-    if (!supported) {
-      throw new Error('Atomic async-lift job transitions require TripleStore.update support');
-    }
+    const writeResult = await this.writeJob(next, {
+      expectedStatus: params.expectedStatus,
+      signal: params.signal,
+    });
+    if (writeResult === 'unsupported') return this.transitionJobWithoutStoreUpdate(params);
 
     const committed = await this.getRequiredJob(next.jobId);
-    if (committed.status !== next.status) {
+    if (writeResult === 'conflict') {
       if (params.signal?.aborted) return false;
       throw new Error(
         `Async-lift job ${next.jobId} changed from ${params.expectedStatus} before the ${next.status} transition`,
@@ -1150,6 +1180,40 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     }
     await this.syncWalletLockForJob(committed);
     return true;
+  }
+
+  /**
+   * Compatibility path for TripleStore implementations that predate optional
+   * SPARQL UPDATE support. It serializes the compare/re-read/write sequence
+   * across publisher instances in this process and reuses the canonical job
+   * writer. Backends with update() continue to use the server-side atomic CAS
+   * above, including across processes.
+   */
+  private async transitionJobWithoutStoreUpdate(params: {
+    current: LiftJob;
+    expectedStatus: LiftJobState;
+    status: LiftJobState;
+    data: Partial<LiftJob>;
+    signal?: AbortSignal;
+  }): Promise<boolean> {
+    return this.withClaimLock(async () => {
+      if (params.signal?.aborted) return false;
+      const current = await this.getRequiredJob(params.current.jobId);
+      if (params.signal?.aborted) return false;
+      if (current.status !== params.expectedStatus) {
+        throw new Error(
+          `Async-lift job ${current.jobId} changed from ${params.expectedStatus} before the ${params.status} transition`,
+        );
+      }
+      await this.assertActiveClaimLock(current);
+      if (params.signal?.aborted) return false;
+
+      const next = this.refreshActiveLease(this.mergeJob(current, params.status, params.data));
+      this.assertJobMatchesStatus(next);
+      await this.writeJob(next);
+      await this.syncWalletLockForJob(next);
+      return true;
+    });
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {

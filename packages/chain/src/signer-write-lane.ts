@@ -16,16 +16,6 @@ import { KeyedSerializer } from './keyed-mutex.js';
  */
 export const SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS = 30 * 60 * 1000;
 
-type SignerWriteLaneEntryState = 'queued' | 'running' | 'timed-out' | 'skipped' | 'settled';
-
-interface SignerWriteLaneEntry {
-  admissionBudgetMs: number;
-  label: string;
-  state: SignerWriteLaneEntryState;
-}
-
-const SKIPPED_SIGNER_WRITE = Symbol('skipped-signer-write');
-
 /**
  * A queued signer write exceeded the cumulative advertised budgets of every
  * predecessor already occupying its wallet lane. Its callback is never run.
@@ -48,19 +38,14 @@ export class SignerWriteLaneAdmissionTimeoutError extends Error {
 }
 
 /**
- * Per-wallet admission queue for nonce-critical EVM writes.
+ * Domain facade for nonce-critical EVM writes.
  *
- * Entries under one signer address execute in FIFO order. A caller whose
- * cumulative predecessor budget expires is rejected and its abandoned
- * callback is skipped when it reaches the front. The lane itself remains held
- * until every real predecessor settles, so an admission timeout can never
- * permit overlapping nonce windows.
+ * KeyedSerializer is the sole queue and admission-state owner. This facade
+ * supplies the signer-specific budget and diagnostics without maintaining a
+ * second tail, entry set, timeout graph or active-state model.
  */
 export class SignerWriteLane {
   private readonly serializer = new KeyedSerializer();
-
-  /** Admission metadata only; KeyedSerializer remains the canonical queue. */
-  private readonly entries = new Map<string, Set<SignerWriteLaneEntry>>();
 
   constructor(private readonly admissionBudgetMs: number) {
     if (!Number.isFinite(admissionBudgetMs) || admissionBudgetMs <= 0) {
@@ -74,75 +59,19 @@ export class SignerWriteLane {
     fn: () => Promise<T>,
   ): Promise<T> {
     if (!label.trim()) throw new Error('Signer write lane operation must define a label');
-    const entries = this.entries.get(signerAddress) ?? new Set<SignerWriteLaneEntry>();
-    if (!this.entries.has(signerAddress)) this.entries.set(signerAddress, entries);
-    const queueDepth = entries.size + 1;
-    const waitMs = [...entries]
-      .filter((predecessor) => predecessor.state === 'queued' || predecessor.state === 'running')
-      .reduce((total, predecessor) => total + predecessor.admissionBudgetMs, 0);
-    const laneEntry: SignerWriteLaneEntry = {
-      admissionBudgetMs: this.admissionBudgetMs,
-      label,
-      state: 'queued',
-    };
-    entries.add(laneEntry);
-
-    let resolveResult!: (value: T | PromiseLike<T>) => void;
-    let rejectResult!: (reason?: unknown) => void;
-    const result = new Promise<T>((resolve, reject) => {
-      resolveResult = resolve;
-      rejectResult = reject;
-    });
-    const timeout = waitMs > 0
-      ? setTimeout(() => {
-        if (laneEntry.state !== 'queued') return;
-        // Stop charging this abandoned entry to callers admitted after its
-        // deadline. Its serializer entry remains queued, preserving the FIFO
-        // barrier until the real predecessor releases the lane.
-        laneEntry.state = 'timed-out';
-        rejectResult(new SignerWriteLaneAdmissionTimeoutError(
+    return this.serializer.runWithAdmission(
+      signerAddress,
+      {
+        operationBudgetMs: this.admissionBudgetMs,
+        timeoutError: (waitMs, queueDepth) => new SignerWriteLaneAdmissionTimeoutError(
           signerAddress,
           waitMs,
           queueDepth,
-          laneEntry.label,
-        ));
-      }, waitMs)
-      : undefined;
-    timeout?.unref?.();
-
-    const execution = this.serializer.run<T | typeof SKIPPED_SIGNER_WRITE>(
-      signerAddress,
-      async () => {
-        if (laneEntry.state === 'timed-out') {
-          laneEntry.state = 'skipped';
-          return SKIPPED_SIGNER_WRITE;
-        }
-        laneEntry.state = 'running';
-        if (timeout) clearTimeout(timeout);
-        try {
-          return await fn();
-        } finally {
-          laneEntry.state = 'settled';
-        }
+          label,
+        ),
       },
+      fn,
     );
-    const cleanup = () => {
-      entries.delete(laneEntry);
-      if (entries.size === 0 && this.entries.get(signerAddress) === entries) {
-        this.entries.delete(signerAddress);
-      }
-    };
-    void execution.then(
-      (value) => {
-        cleanup();
-        if (value !== SKIPPED_SIGNER_WRITE) resolveResult(value);
-      },
-      (error) => {
-        cleanup();
-        rejectResult(error);
-      },
-    );
-    return result;
   }
 
   isActive(signerAddress: string): boolean {

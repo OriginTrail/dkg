@@ -117,7 +117,7 @@ import {
   resolveLiftWorkspaceSlice,
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
-  invokePhaseCallback,
+  PhaseReporter,
   TripleStoreAsyncLiftPublisher,
   TripleStoreAsyncPromoteQueue,
   FileWorkspacePublicSnapshotStore,
@@ -1480,10 +1480,10 @@ export class PublishMethods extends DKGAgentBase {
       span.addEvent('publish_failed', { error: String(result.contextGraphError ?? '') });
     }
 
-    await invokePhaseCallback(onPhase, 'broadcast', 'start');
-    this.log.info(ctx, `Local publish complete, broadcasting to peers`);
-    await this.broadcastPublish(contextGraphId, result, ctx);
-    await invokePhaseCallback(onPhase, 'broadcast', 'end');
+    await new PhaseReporter(onPhase).scope('broadcast', async () => {
+      this.log.info(ctx, `Local publish complete, broadcasting to peers`);
+      await this.broadcastPublish(contextGraphId, result, ctx);
+    });
     this.log.info(ctx, `Publish complete — status=${result.status} kaId=${result.kaId}`);
 
     // refresh the private CG's public projection now the root
@@ -1726,39 +1726,39 @@ export class PublishMethods extends DKGAgentBase {
     });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
-    await invokePhaseCallback(onPhase, 'broadcast', 'start');
-    if (result.onChainResult && result.publicQuads) {
-      try {
-        const dataGraph = `did:dkg:context-graph:${contextGraphId}`;
-        const nquadsStr = result.publicQuads
-          .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`)
-          .join('\n');
-        const nquadsBytes = new TextEncoder().encode(nquadsStr);
-        const message = encodeKAUpdateRequest({
-          contextGraphId: contextGraphId,
-          batchId: kaId,
-          nquads: nquadsBytes,
-          manifest: result.kaManifest.map((m) => ({
-            rootEntity: m.rootEntity,
-            privateMerkleRoot: m.privateMerkleRoot,
-            privateTripleCount: m.privateTripleCount ?? 0,
-          })),
-          publisherPeerId: this.node.peerId.toString(),
-          publisherAddress: result.onChainResult.publisherAddress,
-          txHash: result.onChainResult.txHash,
-          blockNumber: result.onChainResult.blockNumber,
-          newMerkleRoot: result.merkleRoot,
-          timestampMs: Date.now(),
-          operationId: ctx.operationId,
-        });
-        const topic = contextGraphUpdateTopic(contextGraphId);
-        await this.gossip.publish(topic, message);
-        this.log.info(ctx, `Broadcast KA update for batchId=${kaId} on ${topic}`);
-      } catch (err) {
-        this.log.warn(ctx, `Failed to broadcast KA update: ${err instanceof Error ? err.message : String(err)}`);
+    await new PhaseReporter(onPhase).scope('broadcast', async () => {
+      if (result.onChainResult && result.publicQuads) {
+        try {
+          const dataGraph = `did:dkg:context-graph:${contextGraphId}`;
+          const nquadsStr = result.publicQuads
+            .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`)
+            .join('\n');
+          const nquadsBytes = new TextEncoder().encode(nquadsStr);
+          const message = encodeKAUpdateRequest({
+            contextGraphId: contextGraphId,
+            batchId: kaId,
+            nquads: nquadsBytes,
+            manifest: result.kaManifest.map((m) => ({
+              rootEntity: m.rootEntity,
+              privateMerkleRoot: m.privateMerkleRoot,
+              privateTripleCount: m.privateTripleCount ?? 0,
+            })),
+            publisherPeerId: this.node.peerId.toString(),
+            publisherAddress: result.onChainResult.publisherAddress,
+            txHash: result.onChainResult.txHash,
+            blockNumber: result.onChainResult.blockNumber,
+            newMerkleRoot: result.merkleRoot,
+            timestampMs: Date.now(),
+            operationId: ctx.operationId,
+          });
+          const topic = contextGraphUpdateTopic(contextGraphId);
+          await this.gossip.publish(topic, message);
+          this.log.info(ctx, `Broadcast KA update for batchId=${kaId} on ${topic}`);
+        } catch (err) {
+          this.log.warn(ctx, `Failed to broadcast KA update: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
-    }
-    await invokePhaseCallback(onPhase, 'broadcast', 'end');
+    });
 
     return result;
   }

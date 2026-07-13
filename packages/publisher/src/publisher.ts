@@ -23,6 +23,13 @@ export interface PhaseCallbackContext {
   signal?: AbortSignal;
   /** Pre-broadcast transaction identity for durable write-ahead listeners. */
   txHash?: string;
+  /**
+   * Marks the built-in hash-bearing legacy phase as an observability-only
+   * breadcrumb. Durable listeners ignore marked breadcrumbs and persist from
+   * the following typed `chain:writeahead` event. Unmarked legacy phases from
+   * older custom executors remain a compatibility recovery fallback.
+   */
+  compatibilityBreadcrumb?: true;
 }
 
 export type PhaseCallback = (
@@ -30,6 +37,77 @@ export type PhaseCallback = (
   status: 'start' | 'end',
   context?: PhaseCallbackContext,
 ) => Promise<void> | void;
+
+export interface PhaseScopeOptions {
+  startContext?: PhaseCallbackContext;
+  endContext?: PhaseCallbackContext;
+}
+
+export interface PhaseScope {
+  /** Emit the matching end exactly once, even when multiple cleanup paths call close(). */
+  close(): Promise<void>;
+}
+
+/**
+ * Awaited phase lifecycle boundary with closeable and scoped orchestration.
+ *
+ * `open()` never returns a scope when the start listener rejects, so an end is
+ * not fabricated for a phase that did not open. A returned scope caches its
+ * close promise, making cleanup idempotent even when the end listener rejects.
+ * `scope()` closes in `finally`, balancing successful and failed work.
+ */
+export class PhaseReporter {
+  constructor(private readonly callback?: PhaseCallback) {}
+
+  async emit(
+    phase: string,
+    status: 'start' | 'end',
+    context?: PhaseCallbackContext,
+  ): Promise<void> {
+    await this.callback?.(phase, status, context);
+  }
+
+  async open(phase: string, options: PhaseScopeOptions = {}): Promise<PhaseScope> {
+    await this.emit(phase, 'start', options.startContext);
+    let closePromise: Promise<void> | undefined;
+    return {
+      close: () => {
+        closePromise ??= this.emit(phase, 'end', options.endContext);
+        return closePromise;
+      },
+    };
+  }
+
+  async scope<T>(
+    phase: string,
+    work: () => Promise<T>,
+    options: PhaseScopeOptions = {},
+  ): Promise<T> {
+    const scope = await this.open(phase, options);
+    let value!: T;
+    let workFailed = false;
+    let workError: unknown;
+    try {
+      value = await work();
+    } catch (error) {
+      workFailed = true;
+      workError = error;
+    }
+    try {
+      await scope.close();
+    } catch (closeError) {
+      if (workFailed) {
+        throw new AggregateError(
+          [workError, closeError],
+          `Phase ${phase} work and end callback both failed`,
+        );
+      }
+      throw closeError;
+    }
+    if (workFailed) throw workError;
+    return value;
+  }
+}
 
 /**
  * The single phase-callback execution boundary. Every publisher emitter awaits
@@ -42,7 +120,7 @@ export async function invokePhaseCallback(
   status: 'start' | 'end',
   context?: PhaseCallbackContext,
 ): Promise<void> {
-  await callback?.(phase, status, context);
+  await new PhaseReporter(callback).emit(phase, status, context);
 }
 
 export type ReceiverSignature = { identityId: bigint; r: Uint8Array; vs: Uint8Array };

@@ -61,7 +61,6 @@ import {
   parseOptionalVerifyTimeoutOption,
   loadStructuredFile,
   loadQuadsFromInput,
-  resolveDaemonEntryPoint,
   probeHostForApiHost,
   selectedDkgHomeForEnv,
   withSelectedDkgHome,
@@ -102,6 +101,7 @@ import {
   runDaemonSupervisor,
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
+import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
 
 export function registerLifecycleCommands(program: Command): void {
 // ─── dkg start ───────────────────────────────────────────────────────
@@ -193,11 +193,12 @@ program
       return;
     }
 
-    // Spawn detached background supervisor via releases/current symlink
-    const entryPoint = resolveDaemonEntryPoint();
+    // Spawn the detached supervisor through the same canonical command
+    // boundary used for worker restarts and update verification.
+    const daemonCommand = resolveDaemonNodeCommand('daemon-supervisor');
     const child = spawn(
-      process.execPath,
-      [...process.execArgv, entryPoint, 'daemon-supervisor'],
+      daemonCommand.executable,
+      daemonCommand.args,
       {
         detached: true,
         stdio: ['ignore', 'ignore', 'ignore'],
@@ -287,12 +288,16 @@ program
       // bytes are graphed via /api/dashboard); external backends print
       // backend + endpoint + quad count, falling back to a clear
       // "unreachable" signal when the daemon couldn't talk to the
-      // remote store. Quad count = null is rare in practice (cached
-      // every 30 s on the daemon side) so when it shows up the
-      // operator should treat it as an alert, not a no-op.
+      // remote store. A new daemon marks the initial background count
+      // as pending so it renders as CHECKING; absent that marker, null
+      // retains its legacy unreachable meaning for older daemons.
       const backend = s.storeBackend ?? 'oxigraph-worker';
       if (s.storeUrl) {
-        const quads = s.storeQuads == null ? 'UNREACHABLE' : `${s.storeQuads.toLocaleString()} quads`;
+        const quads = s.storeQuadsStatus === 'pending'
+          ? 'CHECKING'
+          : s.storeQuads == null
+            ? 'UNREACHABLE'
+            : `${s.storeQuads.toLocaleString()} quads`;
         console.log(`  Store:     ${backend} (${s.storeUrl}) — ${quads}`);
       } else {
         console.log(`  Store:     ${backend}`);

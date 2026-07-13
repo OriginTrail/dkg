@@ -2,7 +2,7 @@ import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { invokePhaseCallback, type PhaseCallback } from '@origintrail-official/dkg-publisher';
+import { PhaseReporter, type PhaseCallback, type PhaseScope } from '@origintrail-official/dkg-publisher';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -143,23 +143,23 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   };
 
   let peerFailed = false;
+  const phases = new PhaseReporter(onPhase);
   const shouldStopAfterBackoffWorthyFailure = (contextGraphId: string, reason: string): boolean => {
     if (!stopOnBackoffWorthyFailure) return false;
     logInfo(ctx, `Stopping durable sync fanout for ${remotePeerId} after "${contextGraphId}" (${reason})`);
     return true;
   };
   for (const [index, pid] of contextGraphIds.entries()) {
-    let activePhase: 'fetch' | 'verify' | 'store' | undefined;
+    let activePhase: PhaseScope | undefined;
     let peerRespondedForContextGraph = false;
     const startPhase = async (phase: 'fetch' | 'verify' | 'store') => {
-      activePhase = phase;
-      await invokePhaseCallback(onPhase, phase, 'start');
+      activePhase = await phases.open(phase);
     };
     const endPhase = async () => {
       if (!activePhase) return;
       const phase = activePhase;
       activePhase = undefined;
-      await invokePhaseCallback(onPhase, phase, 'end');
+      await phase.close();
     };
 
     try {

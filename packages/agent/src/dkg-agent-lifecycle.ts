@@ -564,6 +564,16 @@ function asSyncFetchAbortError(reason: unknown): Error {
   return err;
 }
 
+function isMissingShardingTableContractError(error: unknown): boolean {
+  // The EVM adapter normalizes a missing Hub binding onto these markers.
+  // Keep every other membership failure retryable because it may be a
+  // transient RPC outage.
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('ShardingTableStorage') && (
+    message.includes('not found in Hub') || message.includes('not resolvable')
+  );
+}
+
 function waitForSyncPageFetch(
   entry: InFlightSyncPageFetch,
   signal: AbortSignal | undefined,
@@ -916,7 +926,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // through the full PeerResolver instead of raw DHT findPeer.
       // The dial fast-path (ProtocolRouter) already prefers
       // PeerResolver.resolve() on every attempt, but the outbox
-      // stall-walk (`messenger.maybeScheduleDhtWalk`) was hardcoded
+      // stall-walk (the Messenger peer-recovery scheduler) was hardcoded
       // to a DHT-only path — so an entry that timed out 5x because
       // its addresses were stale couldn't recover by consulting
       // agents-CG. Routing through PeerResolver picks up the
@@ -2608,12 +2618,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<RandomSamplingStartResult> {
     if (!this.started) return 'disabled';
     const rsRole: 'core' | 'edge' = (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge';
-    if (rsRole !== 'core' || this.chain.chainId === 'none') return 'disabled';
+    if (rsRole !== 'core') {
+      this.randomSamplingIdentityId = 0n;
+      this.randomSamplingDisabledReason = 'edge_node';
+      return 'disabled';
+    }
+    if (this.chain.chainId === 'none') {
+      this.randomSamplingDisabledReason = 'unsupported_chain';
+      return 'disabled';
+    }
 
     let rsIdentityId = 0n;
     try {
       rsIdentityId = await this.chain.getIdentityId();
     } catch (err) {
+      this.randomSamplingDisabledReason = 'identity_lookup_failed';
       this.log.warn(
         ctx,
         `V10 Random Sampling identity lookup failed; prover bind will retry: ${
@@ -2622,11 +2641,79 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       return 'retryable';
     }
+    this.randomSamplingIdentityId = rsIdentityId;
 
     if (rsIdentityId === 0n) {
+      this.randomSamplingDisabledReason = 'no_identity';
       if (logDisabled) {
         this.log.info(ctx, `V10 Random Sampling prover not started (identity=0, chain=${this.chain.chainId}); will retry`);
       }
+      return 'retryable';
+    }
+
+    const readiness = this.chain.isRandomSamplingReady;
+    if (typeof readiness === 'function') {
+      try {
+        if (!readiness.call(this.chain)) {
+          this.randomSamplingDisabledReason = 'contracts_not_deployed';
+          this.log.warn(
+            ctx,
+            'V10 Random Sampling contracts are unavailable on this chain; disabling prover',
+          );
+          return 'disabled';
+        }
+      } catch (err) {
+        this.randomSamplingDisabledReason = 'bind_failed';
+        this.log.warn(
+          ctx,
+          `V10 Random Sampling readiness probe failed; prover bind will retry: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return 'retryable';
+      }
+    }
+
+    const membershipProbe = this.chain.isShardingTableMember?.bind(this.chain);
+    if (!membershipProbe) {
+      this.randomSamplingDisabledReason = 'unsupported_chain';
+      this.log.warn(
+        ctx,
+        'V10 Random Sampling requires isShardingTableMember(); disabling for this adapter',
+      );
+      return 'disabled';
+    }
+
+    try {
+      if (!(await membershipProbe(rsIdentityId))) {
+        this.randomSamplingDisabledReason = 'awaiting_sharding_table';
+        if (logDisabled) {
+          this.log.info(
+            ctx,
+            `V10 Random Sampling prover waiting: identityId=${rsIdentityId} ` +
+              'is not in the active sharding table; will retry after staking/admission',
+          );
+        }
+        return 'retryable';
+      }
+    } catch (err) {
+      if (isMissingShardingTableContractError(err)) {
+        this.randomSamplingDisabledReason = 'contracts_not_deployed';
+        this.log.warn(
+          ctx,
+          `V10 Random Sampling sharding-table contract is unavailable; disabling prover: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return 'disabled';
+      }
+      this.randomSamplingDisabledReason = 'eligibility_lookup_failed';
+      this.log.warn(
+        ctx,
+        `V10 Random Sampling eligibility lookup failed; prover bind will retry: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
       return 'retryable';
     }
     if (!this.started) return 'disabled';
@@ -2651,16 +2738,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           try { await handle.stop(); } catch { /* swallow shutdown race cleanup */ }
           return 'disabled';
         }
+        this.randomSamplingDisabledReason = 'not_started';
         handle.start();
         this.clearRandomSamplingBindRetry();
         this.log.info(ctx, `V10 Random Sampling prover started (identityId=${rsIdentityId})`);
         return 'started';
       }
+      this.randomSamplingDisabledReason = handle.getStatus().disabledReason ?? 'bind_failed';
       if (logDisabled) {
         this.log.info(ctx, `V10 Random Sampling prover not started (identity=${rsIdentityId}, chain=${this.chain.chainId})`);
       }
       return 'disabled';
     } catch (err) {
+      this.randomSamplingDisabledReason = 'bind_failed';
       this.log.warn(ctx, `Failed to bind V10 Random Sampling prover: ${err instanceof Error ? err.message : String(err)}`);
       return 'retryable';
     }
