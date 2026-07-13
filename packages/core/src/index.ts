@@ -175,6 +175,8 @@ export {
   type MessageDirection,
   type IdempotencyCheckResult,
   type ProtocolOutboxStore,
+  type LegacyProtocolOutboxStore,
+  type CompatibleProtocolOutboxStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
   type KaNumberStore,

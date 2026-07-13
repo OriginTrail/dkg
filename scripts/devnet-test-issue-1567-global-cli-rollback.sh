@@ -6,6 +6,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/dkg-1567.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 mkdir -p "$tmp/bin" "$tmp/home"
@@ -19,15 +20,30 @@ printf '%s\n' '#!/bin/sh' \
   '  *) exit 2 ;;' \
   'esac' >"$tmp/bin/npm"
 printf '%s\n' '#!/bin/sh' \
-  'printf "dkg %s\n" "$(cat "$FAKE_DKG_VERSION_FILE")"' >"$tmp/bin/dkg"
+  'printf "%s\n" "dkg 10.0.0-rc.1"' >"$tmp/bin/dkg"
+printf '%s\n' \
+  'import { readFileSync } from "node:fs";' \
+  'const version = readFileSync(process.env.FAKE_DKG_VERSION_FILE, "utf8").trim();' \
+  'process.stdout.write(`dkg ${version}\n`);' >"$tmp/restart-entry.mjs"
 chmod +x "$tmp/bin/npm" "$tmp/bin/dkg"
 
 result="$(
   PATH="$tmp/bin:$PATH" DKG_HOME="$tmp/home" FAKE_DKG_VERSION_FILE="$version_file" \
+  FAKE_DKG_RESTART_ENTRY="$tmp/restart-entry.mjs" \
   node --input-type=module <<'NODE'
 import { performNpmUpdateEdge } from './packages/cli/dist/daemon/auto-update.js';
+import { _autoUpdateIo } from './packages/cli/dist/daemon/manifest.js';
+_autoUpdateIo.edgeRestartCommand = () => ({
+  nodeExecutable: process.execPath,
+  nodeExecArgv: [],
+  restartEntryPoint: process.env.FAKE_DKG_RESTART_ENTRY,
+});
 const logs = [];
-const result = await performNpmUpdateEdge('10.0.0-rc.1', '10.0.0-rc.0', (line) => logs.push(line));
+const result = await performNpmUpdateEdge(
+  '10.0.0-rc.1',
+  '10.0.0-rc.0',
+  (line) => logs.push(line),
+);
 process.stdout.write(JSON.stringify({ result, logs }));
 NODE
 )"

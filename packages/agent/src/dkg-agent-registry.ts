@@ -1751,8 +1751,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
           `(messageId=${messageId.slice(0, 8)}, ` +
           `next attempt at ${new Date(result.nextAttemptAtMs ?? Date.now()).toISOString()}, ` +
           `lastError=${result.error ?? 'unknown'}). ` +
-          `Will retry on the periodic tick (every ${MESSAGE_OUTBOX_TICK_MS / 1000}s) ` +
-          `or opportunistically on the next direct re-connect from the recipient's peer.`,
+          `Will retry only when its persisted backoff is due on the periodic tick ` +
+          `(every ${MESSAGE_OUTBOX_TICK_MS / 1000}s); reconnects do not wake the outbox.`,
       );
       return {
         delivered: false,

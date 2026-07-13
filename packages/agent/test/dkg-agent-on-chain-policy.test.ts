@@ -92,6 +92,121 @@ async function callPolicy(stub: AgentStub, contextGraphId: string) {
   return (DKGAgent.prototype as any).getContextGraphOnChainPolicy.call(stub, contextGraphId);
 }
 
+interface AckCurationStub {
+  onChainAccessPolicyCache: Map<string, number>;
+  isPrivateContextGraph: (id: string) => Promise<boolean>;
+  chain: ChainStub;
+  log: { warn: (ctx: unknown, msg: string) => void };
+}
+
+function makeAckCurationStub(overrides: Partial<AckCurationStub> = {}): AckCurationStub {
+  return {
+    onChainAccessPolicyCache: new Map(),
+    isPrivateContextGraph: recorder(async () => false),
+    chain: {},
+    log: { warn: recorder(() => undefined) },
+    ...overrides,
+  };
+}
+
+async function callAckCuration(stub: AckCurationStub, contextGraphId: string) {
+  return (DKGAgent.prototype as any).resolveCgCurationForAck.call(stub, contextGraphId);
+}
+
+describe('DKGAgent.resolveCgCurationForAck', () => {
+  it.each([
+    [1, true],
+    [0, false],
+  ] as const)('treats cached policy %i as authoritative before local or chain reads', async (policy, expected) => {
+    const localRead = recorder(async () => { throw new Error('local read must not run'); });
+    const chainRead = recorder(async () => 1);
+    const stub = makeAckCurationStub({
+      onChainAccessPolicyCache: new Map([['101', policy]]),
+      isPrivateContextGraph: localRead,
+      chain: { getContextGraphAccessPolicy: chainRead },
+    });
+
+    await expect(callAckCuration(stub, '101')).resolves.toBe(expected);
+    expect(localRead.calls).toEqual([]);
+    expect(chainRead.calls).toEqual([]);
+  });
+
+  it('uses a curated local projection as the cache-miss shortcut', async () => {
+    const localRead = recorder(async () => true);
+    const chainRead = recorder(async () => 0);
+    const stub = makeAckCurationStub({
+      isPrivateContextGraph: localRead,
+      chain: { getContextGraphAccessPolicy: chainRead },
+    });
+
+    await expect(callAckCuration(stub, '102')).resolves.toBe(true);
+    expect(localRead.calls).toEqual([['102']]);
+    expect(chainRead.calls).toEqual([]);
+    expect(stub.onChainAccessPolicyCache.has('102')).toBe(false);
+  });
+
+  it.each([
+    [0, false],
+    [1, true],
+  ] as const)('falls back to chain policy %i and caches it after a local miss', async (policy, expected) => {
+    const localRead = recorder(async () => false);
+    const chainRead = recorder(async () => policy);
+    const stub = makeAckCurationStub({
+      isPrivateContextGraph: localRead,
+      chain: { getContextGraphAccessPolicy: chainRead },
+    });
+
+    await expect(callAckCuration(stub, '103')).resolves.toBe(expected);
+    expect(localRead.calls).toEqual([['103']]);
+    expect(chainRead.calls).toEqual([[103n]]);
+    expect(stub.onChainAccessPolicyCache.get('103')).toBe(policy);
+  });
+
+  it('continues to the chain when the local projection read fails', async () => {
+    const localRead = recorder(async () => { throw new Error('store busy'); });
+    const chainRead = recorder(async () => 1);
+    const stub = makeAckCurationStub({
+      isPrivateContextGraph: localRead,
+      chain: { getContextGraphAccessPolicy: chainRead },
+    });
+
+    await expect(callAckCuration(stub, '104')).resolves.toBe(true);
+    expect(chainRead.calls).toEqual([[104n]]);
+  });
+
+  it('returns unknown for unsupported, malformed, non-positive, or invalid chain answers', async () => {
+    const unsupported = makeAckCurationStub();
+    await expect(callAckCuration(unsupported, '105')).resolves.toBeNull();
+
+    const parseGuardRead = recorder(async () => 1);
+    const malformed = makeAckCurationStub({ chain: { getContextGraphAccessPolicy: parseGuardRead } });
+    await expect(callAckCuration(malformed, 'not-a-number')).resolves.toBeNull();
+    await expect(callAckCuration(malformed, '0')).resolves.toBeNull();
+    expect(parseGuardRead.calls).toEqual([]);
+
+    const invalidRead = recorder(async () => 2);
+    const invalid = makeAckCurationStub({ chain: { getContextGraphAccessPolicy: invalidRead } });
+    await expect(callAckCuration(invalid, '106')).resolves.toBeNull();
+    expect(invalid.onChainAccessPolicyCache.has('106')).toBe(false);
+  });
+
+  it('returns unknown and preserves the ACK fail-closed warning when the chain read fails', async () => {
+    const chainRead = recorder(async () => { throw new Error('rpc unavailable'); });
+    const warn = recorder((_ctx: unknown, _message: string) => undefined);
+    const stub = makeAckCurationStub({
+      chain: { getContextGraphAccessPolicy: chainRead },
+      log: { warn },
+    });
+
+    await expect(callAckCuration(stub, '107')).resolves.toBeNull();
+    expect(warn.calls).toEqual([[
+      expect.objectContaining({ operationId: expect.any(String) }),
+      'isCgCurated: chain.getContextGraphAccessPolicy(107) failed — treating as UNKNOWN (fail-closed at handler): rpc unavailable',
+    ]]);
+    expect(stub.onChainAccessPolicyCache.has('107')).toBe(false);
+  });
+});
+
 describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // Cache-hit path: chain-event-populated entries answer immediately
   // without consulting registration status or local triples.

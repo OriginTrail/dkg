@@ -28,9 +28,11 @@
  */
 
 import type {
+  CompatibleProtocolOutboxStore,
   IdempotencyCheckResult,
   MessageDirection,
   MessageIdempotencyStore,
+  LegacyProtocolOutboxStore,
   ProtocolOutboxEntry,
   ProtocolOutboxMetadata,
   ProtocolOutboxStore,
@@ -121,6 +123,12 @@ function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): numb
     || a.messageId.localeCompare(b.messageId);
 }
 
+function comparePendingEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
+  return a.firstFailureAt - b.firstFailureAt
+    || a.protocol.localeCompare(b.protocol)
+    || a.messageId.localeCompare(b.messageId);
+}
+
 function normalizeDuePageLimit(limit: number | undefined): number | undefined {
   if (limit === undefined || !Number.isFinite(limit)) return undefined;
   return Math.max(0, Math.floor(limit));
@@ -130,9 +138,38 @@ interface ProtocolOutboxStorePolicy extends ProtocolOutboxOptions {
   backoffFor: (attempts: number) => number;
 }
 
-type PolicyAwareProtocolOutboxStore = ProtocolOutboxStore & {
+type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
   configurePolicy?: (policy: ProtocolOutboxStorePolicy) => void;
 };
+
+/**
+ * Keep compatibility at the constructor boundary. Internally the outbox only
+ * sees the current boolean peer-presence contract, while a legacy snapshot
+ * store is adapted once with all method receivers preserved.
+ */
+function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOutboxStore {
+  if (typeof store.hasPendingFor === 'function') return store as ProtocolOutboxStore;
+
+  const legacy = store as LegacyProtocolOutboxStore;
+  const normalized: ProtocolOutboxStore = {
+    enqueue: legacy.enqueue.bind(legacy),
+    markDelivered: legacy.markDelivered.bind(legacy),
+    hasEntry: legacy.hasEntry.bind(legacy),
+    due: legacy.due.bind(legacy),
+    dropExpired: legacy.dropExpired.bind(legacy),
+    size: legacy.size.bind(legacy),
+    list: legacy.list.bind(legacy),
+    getEntry: legacy.getEntry.bind(legacy),
+    hasPendingFor: (peer) => legacy.pendingFor(peer).length > 0,
+    pendingFor: legacy.pendingFor.bind(legacy),
+  };
+  if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
+  if (legacy.dropExpiredMetadata) {
+    normalized.dropExpiredMetadata = legacy.dropExpiredMetadata.bind(legacy);
+  }
+  if (legacy.listMetadata) normalized.listMetadata = legacy.listMetadata.bind(legacy);
+  return normalized;
+}
 
 export class ProtocolOutbox {
   private readonly store: ProtocolOutboxStore;
@@ -153,18 +190,18 @@ export class ProtocolOutbox {
    */
   private readonly inflight = new Set<string>();
 
-  constructor(store: ProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+  constructor(store: CompatibleProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
     const backoffs = options.backoffs ?? DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
     if (backoffs.length === 0) {
       throw new Error('ProtocolOutbox: backoffs must be non-empty');
     }
-    this.store = store;
     this.backoffs = backoffs;
-    (this.store as PolicyAwareProtocolOutboxStore).configurePolicy?.({
+    (store as PolicyAwareProtocolOutboxStore).configurePolicy?.({
       backoffs,
       maxAgeMs: options.maxAgeMs ?? DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
       backoffFor: (attempts) => this.backoffFor(attempts),
     });
+    this.store = normalizeOutboxStore(store);
   }
 
   /**
@@ -253,6 +290,18 @@ export class ProtocolOutbox {
 
   hasPendingFor(peer: string): boolean {
     return this.store.hasPendingFor(peer);
+  }
+
+  /**
+   * Compatibility/diagnostic snapshot for a peer. This does not participate in
+   * retry selection; scheduled drains remain exclusively `duePage`-driven.
+   */
+  pendingFor(peer: string): ProtocolOutboxEntry[] {
+    const pendingFor = this.store.pendingFor;
+    const snapshot = pendingFor
+      ? pendingFor.call(this.store, peer)
+      : this.store.list().filter((entry) => entry.peer === peer);
+    return [...snapshot].sort(comparePendingEntries).map(cloneOutboxEntry);
   }
 
   /** Drop entries older than the store's configured max-age. */
@@ -380,6 +429,13 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
 
   hasPendingFor(peer: string): boolean {
     return Array.from(this.entries.values()).some((entry) => entry.peer === peer);
+  }
+
+  pendingFor(peer: string): ProtocolOutboxEntry[] {
+    return Array.from(this.entries.values())
+      .filter((entry) => entry.peer === peer)
+      .sort((a, b) => a.firstFailureAt - b.firstFailureAt)
+      .map(cloneOutboxEntry);
   }
 
   due(now: number): ProtocolOutboxEntry[] {

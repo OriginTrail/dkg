@@ -30,23 +30,36 @@ peer2="$(field "$status2" peerId)"
 [[ -n "$peer2" ]] || fail "node2 peerId unavailable"
 
 DB="$DB" PEER="$peer2" MESSAGE_ID="$MESSAGE_ID" node --input-type=module <<'NODE'
-import Database from 'better-sqlite3';
-import { encodeReliableEnvelope, PROTOCOL_MESSAGE } from './packages/core/dist/index.js';
+import { dirname } from 'node:path';
+import {
+  encodeReliableEnvelope,
+  PROTOCOL_MESSAGE,
+  RELIABLE_ENVELOPE_VERSION,
+} from './packages/core/dist/index.js';
+import {
+  DashboardDB,
+  SqliteProtocolOutboxStore,
+} from './packages/node-ui/dist/index.js';
 const now = Date.now();
 const payload = encodeReliableEnvelope({
   messageId: process.env.MESSAGE_ID,
-  version: 1,
+  version: RELIABLE_ENVELOPE_VERSION,
   tsMs: now,
   payload: new TextEncoder().encode('{"type":"chat","text":"#1579 probe"}'),
 });
-const db = new Database(process.env.DB);
-db.prepare(`INSERT INTO protocol_outbox
-  (peer_id, protocol, message_id, payload, attempts, first_failure_at,
-   last_attempt_at, next_attempt_at, last_error)
-  VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`)
-  .run(process.env.PEER, PROTOCOL_MESSAGE, process.env.MESSAGE_ID,
-    Buffer.from(payload), now, now, now + 60 * 60 * 1000, 'devnet probe');
-db.close();
+const dashboard = new DashboardDB({ dataDir: dirname(process.env.DB) });
+const store = new SqliteProtocolOutboxStore(dashboard, {
+  backoffFor: () => 60 * 60 * 1000,
+});
+store.enqueue(
+  process.env.PEER,
+  PROTOCOL_MESSAGE,
+  process.env.MESSAGE_ID,
+  payload,
+  'devnet probe',
+  now,
+);
+dashboard.close();
 NODE
 
 "$ROOT/scripts/devnet.sh" restart-node 2 >/dev/null

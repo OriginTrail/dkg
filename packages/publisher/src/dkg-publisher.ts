@@ -1,9 +1,9 @@
-import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
+import type { NamedKnowledgeAssetGraphIdentity, Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -101,6 +101,25 @@ async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<s
   }
   return graphs;
 }
+
+type PublishedSwmCleanupPlan =
+  | { kind: 'complete-family'; dataGraphs: string[] }
+  | { kind: 'named-lifecycle'; dataGraphs: string[] };
+
+export interface FinalizedLifecycleSwmDescriptor {
+  /** Assertion metadata identity; may differ from the signing author. */
+  lifecycle: {
+    contextGraphId: string;
+    assertionName: string;
+    assertionLifecycleAgentAddress: string;
+    subGraphName?: string;
+  };
+  /** Canonical named-SWM identity derived from the validated finalized seal. */
+  sealAuthorScope: NamedKnowledgeAssetGraphIdentity;
+  rootEntities: readonly string[];
+}
+
+export type EnsuredFinalizedLifecycleSwmPlacement = NamedLifecycleSharedMemoryMigrationResult;
 
 /**
  * Minimal structural view of the OT-RFC-43 Option-1 KA-number allocator the
@@ -5434,14 +5453,27 @@ export class DKGPublisher implements Publisher {
   /** A promoted KA's SWM graph URI: per-KA `…/_shared_memory/{addr}/{number}` (resolved from the assertion), else the legacy bucket. */
   private async swmGraphUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): Promise<string> {
     const num = await this.resolveKaNumber(contextGraphId, agentAddress, name, subGraphName);
+    const bucketGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     return num !== null
-      ? contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, agentAddress, num, subGraphName)
-      : this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+      ? contextGraphLayerUri(
+          contextGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          agentAddress,
+          num,
+          subGraphName,
+        )
+      : bucketGraph;
   }
 
   /** SWM graph URI from an explicit `{author, number}` (receiver-side / freshly-allocated generic share). */
   private swmGraphUriFor(contextGraphId: string, agentAddress: string, kaNumber: bigint, subGraphName?: string): string {
-    return contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, agentAddress, kaNumber, subGraphName);
+    return contextGraphLayerUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      agentAddress,
+      kaNumber,
+      subGraphName,
+    );
   }
 
   /**
@@ -5452,6 +5484,89 @@ export class DKGPublisher implements Publisher {
    */
   private async swmGraphsUnder(bucketGraph: string): Promise<string[]> {
     return listGraphFamily(this.store, bucketGraph);
+  }
+
+  private async repairFinalizedLifecycleSwmPointer(
+    descriptor: FinalizedLifecycleSwmDescriptor,
+    targetGraph: string,
+  ): Promise<string> {
+    const { lifecycle } = descriptor;
+    const lifecycleUri = assertionLifecycleUri(
+      lifecycle.contextGraphId,
+      lifecycle.assertionLifecycleAgentAddress,
+      lifecycle.assertionName,
+      lifecycle.subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(lifecycle.contextGraphId);
+    const assertionGraphPredicate = 'http://dkg.io/ontology/assertionGraph';
+    await this.store.deleteByPattern({
+      graph: metaGraph,
+      subject: lifecycleUri,
+      predicate: assertionGraphPredicate,
+    });
+    await this.store.insert([{
+      graph: metaGraph,
+      subject: lifecycleUri,
+      predicate: assertionGraphPredicate,
+      object: targetGraph,
+    }]);
+    await this.store.flush?.();
+    return lifecycleUri;
+  }
+
+  /**
+   * Compatibility bridge for assets shared with `skipSeal` before a KA number
+   * existed. Those roots were written to the legacy SWM bucket; once
+   * `finalize(layer:"swm")` allocates a packed KA id, exact lifecycle reads
+   * must find the same payload under its canonical named graph.
+   *
+   * Insert-before-delete makes a failed migration retryable without losing the
+   * only copy. The lifecycle pointer is updated only after the data move, and a
+   * retry also repairs that pointer when the target already contains the data.
+   */
+  async ensureFinalizedLifecycleSwmPlacement(
+    descriptor: FinalizedLifecycleSwmDescriptor,
+    ctx: OperationContext,
+  ): Promise<EnsuredFinalizedLifecycleSwmPlacement> {
+    const { lifecycle, sealAuthorScope } = descriptor;
+    const { contextGraphId, subGraphName } = lifecycle;
+    const roots = [...new Set(descriptor.rootEntities)];
+    if (roots.length === 0 || roots.some((root) => !isSafeIri(root))) {
+      throw new Error('Named lifecycle SWM migration requires at least one safe root entity IRI');
+    }
+
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+    const migration = await migrateSharedMemoryRootClosureToNamedLifecycle(
+      this.store,
+      swmGraph,
+      { rootEntities: roots },
+      sealAuthorScope,
+      {
+        graphResolution: {
+          source: 'publisher.ensureFinalizedLifecycleSwmPlacement.graphs',
+        },
+        namedSource: {
+          source: 'publisher.ensureFinalizedLifecycleSwmPlacement.named-source',
+        },
+        legacyBucketSource: {
+          source: 'publisher.ensureFinalizedLifecycleSwmPlacement.legacy-source',
+        },
+      },
+    );
+    if (migration.sourceEmpty) return migration;
+
+    const lifecycleUri = await this.repairFinalizedLifecycleSwmPointer(
+      descriptor,
+      migration.targetGraph,
+    );
+    if (migration.migratedLegacyQuadCount > 0) {
+      this.log.info(
+        ctx,
+        `Copied ${migration.migratedLegacyQuadCount} legacy SWM triple(s) ` +
+        `for <${lifecycleUri}> to <${migration.targetGraph}> while retaining the compatibility source`,
+      );
+    }
+    return migration;
   }
 
   /**
@@ -5475,28 +5590,34 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     if (rootEntities.length === 0) return;
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
-    await this.clearPublishedSwmRootsInGraphs(
+    const plan = await this.resolvePublishedSwmCleanupPlan(swmGraph, scope);
+    await this.deletePublishedSwmRootData(rootEntities, plan.dataGraphs);
+
+    const rootsToClearMetadata = plan.kind === 'complete-family'
+      ? rootEntities
+      : await this.namedLifecycleRootsWithoutRemainingShares(swmGraph, rootEntities);
+    await this.clearPublishedSwmRootMetadata(
       contextGraphId,
-      rootEntities,
+      rootsToClearMetadata,
       subGraphName,
       ctx,
-      await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope),
-      scope.kind === 'complete-family' ? 'always' : 'when-no-share-remains',
     );
   }
 
-  private async clearPublishedSwmRootsInGraphs(
-    contextGraphId: string,
+  private async resolvePublishedSwmCleanupPlan(
+    swmGraph: string,
+    scope: SharedMemoryGraphScope,
+  ): Promise<PublishedSwmCleanupPlan> {
+    const dataGraphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
+    return scope.kind === 'complete-family'
+      ? { kind: 'complete-family', dataGraphs }
+      : { kind: 'named-lifecycle', dataGraphs };
+  }
+
+  private async deletePublishedSwmRootData(
     rootEntities: string[],
-    subGraphName: string | undefined,
-    ctx: OperationContext,
     swmGraphsForClear: string[],
-    metadataPolicy: 'always' | 'when-no-share-remains',
   ): Promise<void> {
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
-    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-    let ownerDeletedTotal = 0;
     for (const rootEntity of rootEntities) {
       for (const g of swmGraphsForClear) {
         await this.store.deleteByPattern({ graph: g, subject: rootEntity });
@@ -5506,39 +5627,52 @@ export class DKGPublisher implements Publisher {
         });
       }
     }
-    // A root-keyed owner row can only remain live while some SWM family graph
-    // still contains that root. Reconcile the complete selected root set with
-    // one family-wide read rather than one independent scan per root.
+  }
+
+  /**
+   * Root-keyed ownership metadata remains live only while another SWM family
+   * graph still contains the root. One family read reconciles the entire
+   * published set after the exact lifecycle's data has been deleted.
+   */
+  private async namedLifecycleRootsWithoutRemainingShares(
+    swmGraph: string,
+    rootEntities: string[],
+  ): Promise<string[]> {
     const rootsWithRemainingShares = new Set<string>();
-    if (metadataPolicy === 'when-no-share-remains') {
-      const remaining = await loadSelectedSharedMemoryQuads(
-        this.store,
-        swmGraph,
-        { rootEntities },
-        { querySource: 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership' },
-      );
-      for (const quad of remaining) {
-        for (const rootEntity of rootEntities) {
-          if (
-            quad.subject === rootEntity
-            || quad.subject.startsWith(`${rootEntity}/.well-known/genid/`)
-          ) {
-            rootsWithRemainingShares.add(rootEntity);
-          }
+    const remaining = await loadSelectedSharedMemoryQuads(
+      this.store,
+      swmGraph,
+      { rootEntities },
+      { querySource: 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership' },
+    );
+    for (const quad of remaining) {
+      for (const rootEntity of rootEntities) {
+        if (
+          quad.subject === rootEntity
+          || quad.subject.startsWith(`${rootEntity}/.well-known/genid/`)
+        ) {
+          rootsWithRemainingShares.add(rootEntity);
         }
       }
     }
+    return rootEntities.filter((rootEntity) => !rootsWithRemainingShares.has(rootEntity));
+  }
+
+  private async clearPublishedSwmRootMetadata(
+    contextGraphId: string,
+    rootEntities: string[],
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+  ): Promise<void> {
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+    let ownerDeletedTotal = 0;
     for (const rootEntity of rootEntities) {
-      const shouldClearRootMetadata = metadataPolicy === 'always'
-        || !rootsWithRemainingShares.has(rootEntity);
-      if (shouldClearRootMetadata) {
-        const ownerDeleted = await this.store.deleteByPattern({
-          graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
-        });
-        ownerDeletedTotal += ownerDeleted;
-        await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
-        this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
-      }
+      ownerDeletedTotal += await this.store.deleteByPattern({
+        graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
+      });
+      await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
+      this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
     }
     if (ownerDeletedTotal > 0) {
       this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);

@@ -6,6 +6,7 @@ import {
   encodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
+  type LegacyProtocolOutboxStore,
   type ProtocolOutboxMetadata,
   type ProtocolRouter,
   type StreamHandler,
@@ -98,6 +99,37 @@ function makeSubstrate(overrides: { router?: RouterDouble } = {}) {
 }
 
 describe('Messenger.sendReliable (happy path semantics)', () => {
+  it('accepts a legacy custom outbox store with pendingFor but no hasPendingFor', async () => {
+    const backing = new InMemoryProtocolOutboxStore({ backoffs: [10], maxAgeMs: 60_000 });
+    const legacyStore: LegacyProtocolOutboxStore = {
+      enqueue: backing.enqueue.bind(backing),
+      markDelivered: backing.markDelivered.bind(backing),
+      hasEntry: backing.hasEntry.bind(backing),
+      pendingFor: backing.pendingFor.bind(backing),
+      due: backing.due.bind(backing),
+      dropExpired: backing.dropExpired.bind(backing),
+      size: backing.size.bind(backing),
+      list: backing.list.bind(backing),
+      getEntry: backing.getEntry.bind(backing),
+    };
+    const router = makeRouter(async () => new Uint8Array([0x42]));
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore: legacyStore,
+      backoffs: [10],
+      maxAgeMs: 60_000,
+    });
+
+    const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID,
+    });
+
+    expect(result.delivered).toBe(true);
+    expect(router.send.calls).toHaveLength(1);
+    expect(legacyStore.pendingFor(PEER_A)).toEqual([]);
+  });
+
   it('envelope-wraps the payload before calling router.send', async () => {
     const { messenger, router } = makeSubstrate();
     const payload = new TextEncoder().encode('hello');

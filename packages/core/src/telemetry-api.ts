@@ -177,6 +177,8 @@ export interface DkgMetrics {
   storageAckInflight: Histogram;
   /** queue_depth sample for background/normal store work competing with ACK */
   syncBackgroundQueueDepth: Histogram;
+  /** priority={ack|normal|background}, reason={queue_full|queue_wait_timeout} */
+  storeSchedulerRejectionsTotal: Counter;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
   /** currently retained responder snapshots; phase is a bounded enum */
@@ -273,6 +275,9 @@ function buildMetrics(): DkgMetrics {
     }),
     syncBackgroundQueueDepth: meter.createHistogram('dkg.sync.background_queue_depth', {
       description: 'Sampled non-ACK store queue depth',
+    }),
+    storeSchedulerRejectionsTotal: meter.createCounter('dkg.store.scheduler_rejections_total', {
+      description: 'External-store work rejected before dispatch by bounded priority and reason',
     }),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
