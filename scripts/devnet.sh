@@ -362,9 +362,8 @@ deploy_contracts() {
 BLAZEGRAPH_AVAILABLE=false
 
 start_blazegraph() {
-  # Use an EXTERNAL Blazegraph already serving on the port (e.g. a native arm64 JAR
-  # started out-of-band because the amd64 Docker image only runs under glacial qemu
-  # on Apple silicon). Skips Docker entirely; namespaces are the operator's job here.
+  # Use an EXTERNAL Blazegraph already serving on the port. Skips Docker entirely;
+  # namespaces are the operator's job here.
   if curl -sf --max-time 4 "http://127.0.0.1:${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX}/status" >/dev/null 2>&1; then
     log "Blazegraph already serving on :${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX} (external) — using it (skip Docker)"
     BLAZEGRAPH_AVAILABLE=true
@@ -386,8 +385,8 @@ start_blazegraph() {
 
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
-    -p "$BLAZEGRAPH_PORT:8080" \
-    lyrasis/blazegraph:2.1.5 > /dev/null 2>&1; then
+    -p "127.0.0.1:$BLAZEGRAPH_PORT:8080" \
+    islandora/blazegraph:6.4.3 > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
     return 0
   fi

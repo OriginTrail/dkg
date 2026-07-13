@@ -27,6 +27,7 @@ import {
   provisionBlazegraphDocker,
   normaliseBlazegraphNamespace,
   isDockerAvailable,
+  BLAZEGRAPH_IMAGE,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   type DockerRunner,
   type DockerCommandResult,
@@ -261,7 +262,7 @@ describe('provisionBlazegraphDocker', () => {
     expect(calls.some((c) => c[0] === 'run')).toBe(true);
   });
 
-  it('auto-bumps to the next free port when 9999 is taken', async () => {
+  it('auto-bumps to the next free loopback port and uses the multi-architecture image', async () => {
     const takenPorts = new Set([9999, 10000]);
     const { runner, calls } = mockDocker({
       matchers: [
@@ -284,7 +285,9 @@ describe('provisionBlazegraphDocker', () => {
     expect(result.port).toBe(10001);
     const runCall = calls.find((c) => c[0] === 'run');
     expect(runCall).toBeDefined();
-    expect(runCall?.join(' ')).toContain('10001:8080');
+    expect(runCall).toContain('127.0.0.1:10001:8080');
+    expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
+    expect(BLAZEGRAPH_IMAGE).toBe('islandora/blazegraph:6.4.3');
   });
 
   it('throws when every port in the scan range is taken', async () => {

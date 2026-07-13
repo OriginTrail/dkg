@@ -51,10 +51,14 @@ export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="
   <entry key="com.bigdata.rdf.store.AbstractTripleStore.axiomsClass">com.bigdata.rdf.axioms.NoAxioms</entry>
 </properties>`;
 
-/** Pinned image tag — matches devnet.sh and Blazegraph mainnet. */
-export const BLAZEGRAPH_IMAGE = 'lyrasis/blazegraph:2.1.5';
+/**
+ * Pinned multi-architecture image tag — matches the deployed mainnet fleet.
+ * `lyrasis/blazegraph:2.1.5` is amd64-only and fails with `exec format error`
+ * when the provisioner runs on an arm64 Linux node.
+ */
+export const BLAZEGRAPH_IMAGE = 'islandora/blazegraph:6.4.3';
 
-/** Default container port that lyrasis/blazegraph exposes. */
+/** Default container port that the Blazegraph image exposes. */
 const BLAZEGRAPH_CONTAINER_PORT = 8080;
 
 /** Default starting host port, matches devnet.sh and Blazegraph defaults. */
@@ -431,7 +435,9 @@ export async function provisionBlazegraphDocker(
     '-d',
     '--restart', 'unless-stopped',
     '--name', containerName,
-    '-p', `${chosenPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
+    // Blazegraph is an implementation detail of the local node. Do not publish
+    // its unauthenticated SPARQL/update endpoint on every host interface.
+    '-p', `127.0.0.1:${chosenPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
     BLAZEGRAPH_IMAGE,
   ]);
   if (runResult.exitCode !== 0) {
