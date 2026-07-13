@@ -489,6 +489,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const mixedCaseGraph = `${SWM_GRAPH}/${mixedAuthor}/1`;
     await store.insert([
       q(root, 'http://schema.org/name', '"local"', mixedCaseGraph),
+      q(`${root}/.well-known/genid/local`, 'http://schema.org/name', '"child"', mixedCaseGraph),
       q(root, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
     ]);
 
@@ -503,6 +504,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     });
 
     expect(await store.deleteByPattern({ graph: mixedCaseGraph, subject: root })).toBe(0);
+    expect(await store.deleteBySubjectPrefix(mixedCaseGraph, `${root}/.well-known/genid/`)).toBe(0);
     expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(0);
     const owners = await (publisher as any).sharedMemoryOwnersForPromotion(
       CONTEXT_GRAPH, undefined, CONTEXT_GRAPH, [root],
@@ -515,8 +517,12 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const root = 'urn:test:root:one';
     await store.insert([
       q(root, 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q(`${root}/.well-known/genid/local`, 'http://schema.org/name', '"local-child"', PER_KA_SWM_GRAPH),
       q(root, 'http://schema.org/name', '"same-author-sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
+      q(`${root}/.well-known/genid/sibling`, 'http://schema.org/name', '"sibling-child"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
       q(root, 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
+      q(`${root}/.well-known/genid/foreign`, 'http://schema.org/name', '"foreign-child"', FOREIGN_PER_KA_SWM_GRAPH),
+      q(`${root}-nearby`, 'http://schema.org/name', '"not-a-child"', PER_KA_SWM_GRAPH),
       q(root, WORKSPACE_OWNER_PREDICATE, '"peer-foreign"', SWM_META_GRAPH),
     ]);
 
@@ -531,9 +537,209 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     });
 
     expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteBySubjectPrefix(PER_KA_SWM_GRAPH, `${root}/.well-known/genid/`)).toBe(0);
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: `${root}-nearby` })).toBe(1);
     expect(await store.deleteByPattern({ graph: SAME_AUTHOR_SIBLING_SWM_GRAPH, subject: root })).toBe(1);
+    expect(await store.deleteBySubjectPrefix(SAME_AUTHOR_SIBLING_SWM_GRAPH, `${root}/.well-known/genid/`)).toBe(1);
     expect(await store.deleteByPattern({ graph: FOREIGN_PER_KA_SWM_GRAPH, subject: root })).toBe(1);
+    expect(await store.deleteBySubjectPrefix(FOREIGN_PER_KA_SWM_GRAPH, `${root}/.well-known/genid/`)).toBe(1);
     expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(1);
+  });
+
+  it('clears 51 roots in two count-free updates while preserving an operation public subset', async () => {
+    const { publisher, store } = await makeRealPublisher();
+    const roots = Array.from({ length: 51 }, (_, index) => `urn:test:batch-root:${index}`);
+    const survivor = 'urn:test:batch-root:survivor';
+    const sharedOperation = 'urn:dkg:share:publish-boundary:large-shared-operation';
+    const consumedOnlyOperation = 'urn:dkg:share:publish-boundary:consumed-only-operation';
+    const operationLabel = 'http://schema.org/name';
+
+    await store.insert([
+      ...roots.flatMap((root) => [
+        q(root, 'http://schema.org/name', `"${root}"`, PER_KA_SWM_GRAPH),
+        q(`${root}/.well-known/genid/child`, 'http://schema.org/name', '"child"', PER_KA_SWM_GRAPH),
+        q(root, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
+        q(sharedOperation, DKG_ROOT_ENTITY_LEGACY, root, SWM_META_GRAPH),
+      ]),
+      q(survivor, 'http://schema.org/name', '"survivor"', PER_KA_SWM_GRAPH),
+      q(survivor, WORKSPACE_OWNER_PREDICATE, '"peer-b"', SWM_META_GRAPH),
+      q(sharedOperation, DKG_ROOT_ENTITY_LEGACY, survivor, SWM_META_GRAPH),
+      q(sharedOperation, operationLabel, '"shared-header"', SWM_META_GRAPH),
+      q(consumedOnlyOperation, DKG_ENTITY, roots[0], SWM_META_GRAPH),
+      q(consumedOnlyOperation, operationLabel, '"orphan-header"', SWM_META_GRAPH),
+    ]);
+
+    const updates: Array<{ sparql: string; options: any }> = [];
+    const helperCalls = {
+      countQuads: 0,
+      delete: 0,
+      deleteByPattern: 0,
+      deleteBySubjectPrefix: 0,
+    };
+    const originalUpdate = store.update.bind(store);
+    const originalDelete = store.delete.bind(store);
+    const originalDeleteByPattern = store.deleteByPattern.bind(store);
+    const originalDeleteBySubjectPrefix = store.deleteBySubjectPrefix.bind(store);
+    const originalCountQuads = store.countQuads.bind(store);
+    store.update = async (sparql, options) => {
+      updates.push({ sparql, options });
+      await originalUpdate(sparql, options);
+    };
+    store.delete = async (...args) => {
+      helperCalls.delete += 1;
+      return originalDelete(...args);
+    };
+    store.deleteByPattern = async (...args) => {
+      helperCalls.deleteByPattern += 1;
+      return originalDeleteByPattern(...args);
+    };
+    store.deleteBySubjectPrefix = async (...args) => {
+      helperCalls.deleteBySubjectPrefix += 1;
+      return originalDeleteBySubjectPrefix(...args);
+    };
+    store.countQuads = async (...args) => {
+      helperCalls.countQuads += 1;
+      return originalCountQuads(...args);
+    };
+
+    await publisher.clearPublishedSwmRoots(
+      CONTEXT_GRAPH,
+      roots,
+      undefined,
+      createOperationContext('test'),
+    );
+
+    expect(updates).toHaveLength(2);
+    expect(helperCalls).toEqual({
+      countQuads: 0,
+      delete: 0,
+      deleteByPattern: 0,
+      deleteBySubjectPrefix: 0,
+    });
+    expect(updates[0].options).toMatchObject({
+      source: 'publisher.clearPublishedSwmRoots.data',
+      touchedGraphs: expect.arrayContaining([SWM_GRAPH, PER_KA_SWM_GRAPH]),
+    });
+    expect(updates[0].sparql).toContain('VALUES ?targetGraph');
+    expect(updates[0].sparql).toContain('VALUES ?root');
+    expect(updates[0].sparql).toContain('?subject = ?root');
+    expect(updates[0].sparql).toContain('"/.well-known/genid/"');
+    for (const root of roots) expect(updates[0].sparql).toContain(`<${root}>`);
+    expect(updates[1].options).toMatchObject({
+      source: 'publisher.clearPublishedSwmRoots.metadata',
+      touchedGraphs: [SWM_META_GRAPH],
+    });
+    expect(updates[1].sparql.match(/DELETE/g)).toHaveLength(2);
+    expect(updates[1].sparql).toContain('FILTER NOT EXISTS');
+
+    const consumedData = await store.query(
+      `ASK { GRAPH <${PER_KA_SWM_GRAPH}> { VALUES ?root { ${roots.map((root) => `<${root}>`).join(' ')} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } }`,
+    );
+    expect(consumedData).toEqual({ type: 'boolean', value: false });
+    const survivorData = await store.query(
+      `ASK { GRAPH <${PER_KA_SWM_GRAPH}> { <${survivor}> ?p ?o } }`,
+    );
+    expect(survivorData).toEqual({ type: 'boolean', value: true });
+
+    const sharedOperationRows = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${SWM_META_GRAPH}> { <${sharedOperation}> ?p ?o } }`,
+    );
+    expect(sharedOperationRows.type).toBe('bindings');
+    if (sharedOperationRows.type === 'bindings') {
+      expect(sharedOperationRows.bindings).toEqual(expect.arrayContaining([
+        { p: DKG_ROOT_ENTITY_LEGACY, o: survivor },
+        { p: operationLabel, o: '"shared-header"' },
+      ]));
+      expect(sharedOperationRows.bindings).toHaveLength(2);
+    }
+    const consumedOnlyRows = await store.query(
+      `ASK { GRAPH <${SWM_META_GRAPH}> { <${consumedOnlyOperation}> ?p ?o } }`,
+    );
+    expect(consumedOnlyRows).toEqual({ type: 'boolean', value: false });
+    const selectedOwners = await store.query(
+      `ASK { GRAPH <${SWM_META_GRAPH}> { VALUES ?root { ${roots.map((root) => `<${root}>`).join(' ')} } ?root <${WORKSPACE_OWNER_PREDICATE}> ?owner } }`,
+    );
+    expect(selectedOwners).toEqual({ type: 'boolean', value: false });
+    const survivorOwner = await store.query(
+      `ASK { GRAPH <${SWM_META_GRAPH}> { <${survivor}> <${WORKSPACE_OWNER_PREDICATE}> ?owner } }`,
+    );
+    expect(survivorOwner).toEqual({ type: 'boolean', value: true });
+  });
+
+  it('keeps store admissions constant when cleaning 1,000 safe roots', async () => {
+    const { publisher, store } = await makeRealPublisher();
+    const roots = Array.from({ length: 1_000 }, (_, index) => `urn:test:volume-root:${index}`);
+    const updateSources: Array<string | undefined> = [];
+    const originalUpdate = store.update.bind(store);
+    store.update = async (sparql, options) => {
+      updateSources.push(options?.source);
+      await originalUpdate(sparql, options);
+    };
+
+    await publisher.clearPublishedSwmRoots(
+      CONTEXT_GRAPH,
+      roots,
+      undefined,
+      createOperationContext('test'),
+    );
+
+    expect(updateSources).toEqual([
+      'publisher.clearPublishedSwmRoots.data',
+      'publisher.clearPublishedSwmRoots.metadata',
+    ]);
+  });
+
+  it('rejects an unsafe cleanup IRI before dispatching any destructive update', async () => {
+    const { publisher, store } = await makeRealPublisher();
+    const root = 'urn:test:safe-root';
+    await store.insert([q(root, 'http://schema.org/name', '"keep"', PER_KA_SWM_GRAPH)]);
+    const updates: string[] = [];
+    const originalUpdate = store.update.bind(store);
+    store.update = async (sparql, options) => {
+      updates.push(sparql);
+      await originalUpdate(sparql, options);
+    };
+
+    await expect(publisher.clearPublishedSwmRoots(
+      CONTEXT_GRAPH,
+      [root, 'urn:test:unsafe>root'],
+      undefined,
+      createOperationContext('test'),
+    )).rejects.toThrow(/Unsafe or empty IRI/);
+
+    expect(updates).toHaveLength(0);
+    const stillPresent = await store.query(
+      `ASK { GRAPH <${PER_KA_SWM_GRAPH}> { <${root}> ?p ?o } }`,
+    );
+    expect(stillPresent).toEqual({ type: 'boolean', value: true });
+  });
+
+  it('keeps fully-awaited serial cleanup for TripleStore implementations without update()', async () => {
+    const { publisher, store } = await makeRealPublisher();
+    const root = 'urn:test:serial-fallback-root';
+    const operation = 'urn:dkg:share:publish-boundary:serial-fallback';
+    await store.insert([
+      q(root, 'http://schema.org/name', '"root"', PER_KA_SWM_GRAPH),
+      q(`${root}/.well-known/genid/child`, 'http://schema.org/name', '"child"', PER_KA_SWM_GRAPH),
+      q(root, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
+      q(operation, DKG_ROOT_ENTITY_LEGACY, root, SWM_META_GRAPH),
+      q(operation, 'http://schema.org/name', '"operation"', SWM_META_GRAPH),
+    ]);
+    // `update` is optional on the public TripleStore contract. Model a minimal
+    // third-party implementation without rebuilding every Oxigraph method.
+    (store as unknown as { update?: undefined }).update = undefined;
+
+    await publisher.clearPublishedSwmRoots(
+      CONTEXT_GRAPH,
+      [root],
+      undefined,
+      createOperationContext('test'),
+    );
+
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteBySubjectPrefix(PER_KA_SWM_GRAPH, `${root}/.well-known/genid/`)).toBe(0);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: operation })).toBe(0);
   });
 
   it('batches multi-root exact-cleanup metadata reconciliation into one family read', async () => {

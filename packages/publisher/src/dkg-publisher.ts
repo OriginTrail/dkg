@@ -3,7 +3,7 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, tryUpdateWithTouchedGraphs, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -5500,12 +5500,66 @@ export class DKGPublisher implements Publisher {
     rootEntities: string[],
     swmGraphsForClear: string[],
   ): Promise<void> {
-    for (const rootEntity of rootEntities) {
-      for (const g of swmGraphsForClear) {
-        await this.store.deleteByPattern({ graph: g, subject: rootEntity });
-        await this.store.deleteBySubjectPrefix(g, rootEntity + '/.well-known/genid/');
+    const roots = [...new Set(rootEntities)];
+    const targetGraphs = [...new Set(swmGraphsForClear)];
+    if (roots.length === 0 || targetGraphs.length === 0) return;
+
+    if (typeof this.store.update === 'function') {
+      // Validate the complete batch before the first destructive mutation. The
+      // serial compatibility path below delegates term handling to the store
+      // methods exactly as the public optional-update contract historically did;
+      // these checks protect only values interpolated into SPARQL structure.
+      for (const root of roots) assertSafeIri(root);
+      for (const graph of targetGraphs) assertSafeIri(graph);
+
+      const rootValues = roots.map((root) => `<${root}>`).join(' ');
+      const graphValues = targetGraphs.map((graph) => `<${graph}>`).join(' ');
+
+      // COUNT-FREE and bounded: Blazegraph's deleteByPattern and
+      // deleteBySubjectPrefix each bracket one mutation with two graph-wide
+      // COUNT scans. A 51-root KA in one graph therefore used to enqueue 153
+      // mutations and 306 counts here (including the redundant owner-pattern
+      // delete after the whole root subject was already deleted). One server-side
+      // UPDATE now clears the exact selected graph set and preserves the same
+      // subject boundary: the root itself plus only its `/.well-known/genid/`
+      // descendants. `touchedGraphs` keeps graph-set/changelog indexes on their
+      // incremental path when the last quad empties one of these graphs.
+      const dataCleanupApplied = await tryUpdateWithTouchedGraphs(
+        this.store,
+        `DELETE { GRAPH ?targetGraph { ?subject ?predicate ?object } }
+WHERE {
+  VALUES ?targetGraph { ${graphValues} }
+  GRAPH ?targetGraph {
+    VALUES ?root { ${rootValues} }
+    ?subject ?predicate ?object .
+    FILTER(
+      ?subject = ?root ||
+      STRSTARTS(STR(?subject), CONCAT(STR(?root), "/.well-known/genid/"))
+    )
+  }
+}`,
+        targetGraphs,
+        { source: 'publisher.clearPublishedSwmRoots.data' },
+      );
+      // Guarded above; retain this check so a future wrapper that changes its
+      // exposed capability during dispatch cannot silently skip cleanup.
+      if (!dataCleanupApplied) {
+        throw new Error('Confirmed shared-memory cleanup could not dispatch its data UPDATE');
+      }
+      return;
+    }
+
+    // TripleStore.update() is deliberately optional in the public interface.
+    // Preserve the old fully-awaited behaviour for third-party/minimal stores;
+    // only production update-capable stores take the bounded fast path.
+    for (const root of roots) {
+      for (const graph of targetGraphs) {
+        await this.store.deleteByPattern({ graph, subject: root });
+        await this.store.deleteBySubjectPrefix(graph, `${root}/.well-known/genid/`);
         await this.store.deleteByPattern({
-          graph: g, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
+          graph,
+          subject: root,
+          predicate: WORKSPACE_OWNER_PREDICATE,
         });
       }
     }
@@ -5546,19 +5600,91 @@ export class DKGPublisher implements Publisher {
     subGraphName: string | undefined,
     ctx: OperationContext,
   ): Promise<void> {
+    const roots = [...new Set(rootEntities)];
+    if (roots.length === 0) return;
+
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
     const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-    let ownerDeletedTotal = 0;
-    for (const rootEntity of rootEntities) {
-      ownerDeletedTotal += await this.store.deleteByPattern({
-        graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
-      });
-      await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
-      this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
+    if (typeof this.store.update !== 'function') {
+      let ownerDeletedTotal = 0;
+      for (const root of roots) {
+        ownerDeletedTotal += await this.store.deleteByPattern({
+          graph: swmMetaGraph,
+          subject: root,
+          predicate: WORKSPACE_OWNER_PREDICATE,
+        });
+        await this.deleteMetaForRoot(swmMetaGraph, root);
+        this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(root);
+      }
+      if (ownerDeletedTotal > 0) {
+        this.log.info(
+          ctx,
+          `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`,
+        );
+      }
+      return;
     }
-    if (ownerDeletedTotal > 0) {
-      this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);
+
+    assertSafeIri(swmMetaGraph);
+    for (const root of roots) assertSafeIri(root);
+    const rootValues = roots.map((root) => `<${root}>`).join(' ');
+    const rootList = roots.map((root) => `<${root}>`).join(', ');
+    const memberPredicates = `<${DKG_ROOT_ENTITY_LEGACY}>, <${DKG_ENTITY}>`;
+
+    // Preserve deleteMetaForRoot's public-subset semantics in two ordered
+    // DELETE operations inside one SPARQL Update request:
+    //   1. remove an operation subject wholesale only when every remaining
+    //      member is in this consumed root set;
+    //   2. otherwise remove just the consumed member edges, and remove the
+    //      root-keyed ownership rows.
+    // This is still one store admission/mutation, regardless of root count,
+    // and an operation shared by a consumed root plus a live sibling remains
+    // resolvable for that sibling exactly as it did in the serial algorithm.
+    const metadataCleanupApplied = await tryUpdateWithTouchedGraphs(
+      this.store,
+      `DELETE { GRAPH <${swmMetaGraph}> { ?operation ?predicate ?object } }
+WHERE { GRAPH <${swmMetaGraph}> {
+  VALUES ?root { ${rootValues} }
+  ?operation ?memberPredicate ?root .
+  FILTER(?memberPredicate IN (${memberPredicates}))
+  FILTER NOT EXISTS {
+    ?operation ?remainingMemberPredicate ?remainingRoot .
+    FILTER(?remainingMemberPredicate IN (${memberPredicates}))
+    FILTER(?remainingRoot NOT IN (${rootList}))
+  }
+  ?operation ?predicate ?object .
+} };
+DELETE {
+  GRAPH <${swmMetaGraph}> {
+    ?root <${WORKSPACE_OWNER_PREDICATE}> ?owner .
+    ?operation ?memberPredicate ?root .
+  }
+}
+WHERE {
+  GRAPH <${swmMetaGraph}> {
+    VALUES ?root { ${rootValues} }
+    { ?root <${WORKSPACE_OWNER_PREDICATE}> ?owner }
+    UNION
+    {
+      ?operation ?memberPredicate ?root .
+      FILTER(?memberPredicate IN (${memberPredicates}))
     }
+  }
+}`,
+      [swmMetaGraph],
+      { source: 'publisher.clearPublishedSwmRoots.metadata' },
+    );
+    if (!metadataCleanupApplied) {
+      throw new Error('Confirmed shared-memory cleanup could not dispatch its metadata UPDATE');
+    }
+
+    for (const root of roots) {
+      this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(root);
+    }
+    this.log.info(
+      ctx,
+      `Cleared published SWM state for ${roots.length} root(s) after confirmed publish`,
+    );
   }
 
   async clearRemainingSharedMemory(

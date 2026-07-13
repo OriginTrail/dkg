@@ -435,6 +435,60 @@ function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): v
   assertQuadLiteralsMutf8Safe(quads, { label });
 }
 
+/**
+ * Persist the finalization reconcile signal for every safe root in one
+ * server-side mutation. This remains part of the awaited publish commit: the
+ * batching removes per-root round-trips without weakening ordering or
+ * durability.
+ */
+export async function persistKeepRootCopySignals(
+  store: TripleStore,
+  graph: string,
+  rootEntities: string[],
+  keepRootCopyOnLabel: boolean,
+): Promise<void> {
+  assertSafeIri(graph);
+  const roots = [...new Set(rootEntities.filter(isSafeIri))];
+  if (roots.length === 0) return;
+
+  if (typeof store.update === 'function') {
+    const rootValues = roots.map((root) => `<${root}>`).join(' ');
+    await store.update(`DELETE {
+      GRAPH <${graph}> { ?root <${KEEP_ROOT_COPY_PREDICATE}> ?previous }
+    }
+    INSERT {
+      GRAPH <${graph}> { ?root <${KEEP_ROOT_COPY_PREDICATE}> "${keepRootCopyOnLabel}" }
+    }
+    WHERE {
+      VALUES ?root { ${rootValues} }
+      OPTIONAL {
+        GRAPH <${graph}> { ?root <${KEEP_ROOT_COPY_PREDICATE}> ?previous }
+      }
+    }`, {
+      source: 'publish.persistKeepRootCopySignals',
+      touchedGraphs: [graph],
+    });
+    return;
+  }
+
+  // Custom TripleStore implementations may not expose SPARQL UPDATE. Keep the
+  // pre-existing awaited behavior as a compatibility fallback.
+  const keepLiteral = `"${keepRootCopyOnLabel}"`;
+  for (const root of roots) {
+    await store.deleteByPattern({
+      subject: root,
+      predicate: KEEP_ROOT_COPY_PREDICATE,
+      graph,
+    });
+    await store.insert([{
+      subject: root,
+      predicate: KEEP_ROOT_COPY_PREDICATE,
+      object: keepLiteral,
+      graph,
+    }]);
+  }
+}
+
 export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri: string): Quad[] {
   // `graph` is a non-empty placeholder only (buildPublicProjection requires
   // one); normalize it back to the default assertion graph before writing.
@@ -4112,20 +4166,12 @@ export class PublishMethods extends DKGAgentBase {
         const wsMetaGraph = request.subGraphName
           ? gm.sharedMemoryMetaUri(request.contextGraphId, request.subGraphName)
           : contextGraphWorkspaceMetaGraphUri(request.contextGraphId);
-        const keepLiteral = `"${keepRootCopyOnLabel}"`;
-        for (const root of rootEntities.filter(isSafeIri)) {
-          await this.store.deleteByPattern({
-            subject: root,
-            predicate: KEEP_ROOT_COPY_PREDICATE,
-            graph: wsMetaGraph,
-          });
-          await this.store.insert([{
-            subject: root,
-            predicate: KEEP_ROOT_COPY_PREDICATE,
-            object: keepLiteral,
-            graph: wsMetaGraph,
-          }]);
-        }
+        await persistKeepRootCopySignals(
+          this.store,
+          wsMetaGraph,
+          rootEntities,
+          keepRootCopyOnLabel,
+        );
       } catch (err) {
         this.log.warn(ctx, `Failed to persist keepRootCopyOnLabel signal for ${result.ual}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -5151,20 +5197,12 @@ export class PublishMethods extends DKGAgentBase {
         const wsMetaGraph = options?.subGraphName
           ? gm.sharedMemoryMetaUri(contextGraphId, options.subGraphName)
           : contextGraphWorkspaceMetaGraphUri(contextGraphId);
-        const keepLiteral = `"${keepRootCopyOnLabel}"`;
-        for (const root of rootEntities.filter(isSafeIri)) {
-          await this.store.deleteByPattern({
-            subject: root,
-            predicate: KEEP_ROOT_COPY_PREDICATE,
-            graph: wsMetaGraph,
-          });
-          await this.store.insert([{
-            subject: root,
-            predicate: KEEP_ROOT_COPY_PREDICATE,
-            object: keepLiteral,
-            graph: wsMetaGraph,
-          }]);
-        }
+        await persistKeepRootCopySignals(
+          this.store,
+          wsMetaGraph,
+          rootEntities,
+          keepRootCopyOnLabel,
+        );
       } catch (err) {
         this.log.warn(ctx, `Failed to persist keepRootCopyOnLabel signal for ${result.ual}: ${err instanceof Error ? err.message : String(err)}`);
       }
