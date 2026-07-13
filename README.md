@@ -403,11 +403,13 @@ analysis reports are under `bench/results/profiles/`, including
 
 ## Triple Store Backends
 
-A DKG node keeps every assertion in an [RDF](https://www.w3.org/RDF/) triple store. Out of the box the node runs an embedded [Oxigraph](https://github.com/oxigraph/oxigraph) instance, which is everything you need on a workstation — no extra process, no extra port, no extra config. Heavier deployments can swap in [Blazegraph](https://blazegraph.com/) (the mainnet store) or any SPARQL 1.1 server.
+A DKG node keeps every assertion in an [RDF](https://www.w3.org/RDF/) triple store. Out of the box the daemon manages a local [Oxigraph](https://github.com/oxigraph/oxigraph) server, so a workstation needs no separate setup. Heavier deployments can swap in [Blazegraph](https://blazegraph.com/) (the mainnet store) or any SPARQL 1.1 server.
 
 | Backend | When to pick it |
 |---|---|
-| `oxigraph-worker` (default) | Single-operator nodes, dev, CI. No setup. File-backed, capped at process RAM. |
+| `oxigraph-server` (default) | Single-operator nodes, dev, CI. Managed automatically by the daemon with persistent local storage. |
+| `oxigraph` | Embedded in-memory Oxigraph for development and short-lived tests. |
+| `oxigraph-persistent` | Embedded persistent Oxigraph when an explicit existing store path is required. |
 | `blazegraph` | High-throughput nodes, mainnet parity, very large graphs (10M+ quads). Run as a separate daemon (Docker or `java -jar`). Shares cleanly with V6 / V8 instances — DKG scopes its writes to the `did:dkg:context-graph:` named-graph prefix. |
 | `sparql-http` | Any SPARQL 1.1 Protocol server (Fuseki, GraphDB, Stardog, Neptune…). Bring your own URL + (optional) auth header. |
 
@@ -420,7 +422,7 @@ Two paths:
 ```
 $ dkg init
 …
-Triple store backend (oxigraph / blazegraph) (oxigraph): blazegraph
+Triple store backend (oxigraph-server / oxigraph / blazegraph) (oxigraph-server): blazegraph
 Blazegraph SPARQL endpoint URL: http://127.0.0.1:9999/bigdata/namespace/mynode/sparql
   Store endpoint reachable: blazegraph http://127.0.0.1:9999/bigdata/namespace/mynode/sparql
 ```

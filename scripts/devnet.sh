@@ -546,7 +546,7 @@ create_node_config() {
   #             and spawns it on its own port — NO Docker. Node 1 is the node the
   #             UI/e2e suite drives, so the suite now exercises the REAL default
   #             backend and deterministically reproduces SPARQL-over-HTTP-only
-  #             bugs such as #996 — which the old `oxigraph-worker` default hid.)
+  #             bugs such as #996.)
   #   Node 3-4: blazegraph (if Docker) else oxigraph  (in-process baseline)
   #   Node 5-6: sparql-http → external Dockerized Oxigraph  (EXTRA coverage of the
   #             generic external-endpoint path; Docker-only, optional)
@@ -573,6 +573,8 @@ create_node_config() {
       local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
       local ox_port="${!ox_port_var}"
       store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
+    else
+      store_block="\"store\": { \"backend\": \"oxigraph\" },"
     fi
   fi
 
@@ -1769,12 +1771,12 @@ cmd_start() {
     local api_port=$((API_PORT_BASE + i - 1))
     local role="edge"
     [ "$i" -le "$NUM_CORE_NODES" ] && role="core"
-    local store_label="oxigraph-worker"
+    local store_label="oxigraph-server"
     if [ "$i" -ge 3 ] && [ "$i" -le 4 ]; then
       [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"
     fi
     if [ "$i" -ge 5 ]; then
-      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="oxigraph-server" || store_label="oxigraph-worker"
+      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="sparql-http" || store_label="oxigraph"
     fi
     log "Node $i ($role, $store_label): http://127.0.0.1:$api_port/ui"
   done
