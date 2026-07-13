@@ -1486,26 +1486,43 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
 function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
   if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
 
-  for (const root of candidateRoots()) {
+  _bundledNetworkRegistry = loadNetworkRegistryFromRoots(candidateRoots());
+  return _bundledNetworkRegistry;
+}
+
+/**
+ * Build the bundled registry entry-by-entry in root priority order.
+ *
+ * A malformed optional/experimental overlay must not make every known network
+ * unavailable. If a higher-priority root contains a bad copy of one entry, a
+ * valid package-local fallback for that same entry can still supply it.
+ */
+export function loadNetworkRegistryFromRoots(
+  roots: readonly string[],
+): Readonly<Record<string, NetworkConfig>> {
+  const registry: Record<string, NetworkConfig> = {};
+
+  for (const root of roots) {
     const networkDir = join(root, 'network');
+    let entries;
     try {
-      const registry: Record<string, NetworkConfig> = {};
-      for (const entry of readdirSync(networkDir, { withFileTypes: true })) {
-        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-        const name = entry.name.slice(0, -'.json'.length);
+      entries = readdirSync(networkDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const name = entry.name.slice(0, -'.json'.length);
+      if (registry[name] !== undefined) continue;
+      try {
         registry[name] = JSON.parse(
           readFileSync(join(networkDir, entry.name), 'utf-8'),
         ) as NetworkConfig;
-      }
-      if (Object.keys(registry).length > 0) {
-        _bundledNetworkRegistry = registry;
-        return registry;
-      }
-    } catch { /* try the next monorepo/package root */ }
+      } catch { /* isolate a malformed entry and continue */ }
+    }
   }
 
-  _bundledNetworkRegistry = {};
-  return _bundledNetworkRegistry;
+  return registry;
 }
 
 /**

@@ -25,6 +25,7 @@ import {
   sharedHomeInitGate,
   repoDir,
   inferNetworkConfigNameFromChainId,
+  loadNetworkRegistryFromRoots,
   resolveKnownNetworkConfigName,
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
@@ -149,6 +150,25 @@ describe('removePid / removeApiPort (catch path)', () => {
 });
 
 describe('loadNetworkConfig', () => {
+  it('keeps a valid requested network available when an unrelated overlay is malformed', async () => {
+    const root = join(tmpdir(), `dkg-network-registry-${randomBytes(8).toString('hex')}`);
+    await mkdir(join(root, 'network'), { recursive: true });
+    try {
+      await writeFile(join(root, 'network', 'testnet.json'), JSON.stringify({
+        networkName: 'Fixture Testnet',
+        relays: [],
+        defaultNodeRole: 'edge',
+      }));
+      await writeFile(join(root, 'network', 'experimental.json'), '{not-json');
+
+      const registry = loadNetworkRegistryFromRoots([root]);
+      expect(registry.testnet?.networkName).toBe('Fixture Testnet');
+      expect(registry.experimental).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('loads network/testnet.json with correct shape when run from repo', async () => {
     const config = await loadNetworkConfig();
     if (!config) {
