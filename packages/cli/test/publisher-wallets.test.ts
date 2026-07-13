@@ -153,48 +153,6 @@ describe('publisher wallets', () => {
     ).rejects.toThrow('dkg publisher wallet add <privateKey>');
   });
 
-  it('boots and closes the standalone publisher runtime with the persistent fallback when config has no store block', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
-    const wallet = ethers.Wallet.createRandom();
-    await addPublisherWallet(dataDir, wallet.privateKey);
-
-    const runtime = await createPublisherRuntime({
-      dataDir,
-      config: {
-        name: 'test-node',
-        apiPort: 9200,
-        listenPort: 0,
-        nodeRole: 'edge',
-        contextGraphs: [],
-        chain: { type: 'mock' },
-      },
-      pollIntervalMs: 10,
-      errorBackoffMs: 10,
-    });
-
-    await runtime.publisher.lift({
-      swmId: 'swm-main',
-      shareOperationId: 'share-no-store-fallback',
-      roots: ['urn:local:/fallback'],
-      contextGraphId: 'music-social',
-      namespace: 'aloha',
-      scope: 'person-profile',
-      transitionType: 'CREATE',
-      authority: { type: 'owner', proofRef: 'proof:owner:fallback' },
-    });
-
-    await runtime.stop();
-    const persistentStore = await createTripleStore({
-      backend: 'oxigraph-persistent',
-      options: { path: join(dataDir, 'store.nq') },
-    });
-    const inspector = createPublisherInspectorFromStore(persistentStore, true);
-    const jobs = await inspector.publisher.list();
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]?.jobId).toBeDefined();
-    await inspector.stop();
-  });
-
   it('resolves publisher chain defaults from config.networkConfig', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
     const wallet = ethers.Wallet.createRandom();

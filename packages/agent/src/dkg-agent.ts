@@ -685,11 +685,11 @@ export class DKGAgent extends DKGAgentBase {
       const { join } = await import('node:path');
       const persistPath = join(config.dataDir, 'store.nq');
       store = await createTripleStore({
-        backend: 'oxigraph-persistent',
+        backend: 'oxigraph-worker',
         options: { path: persistPath },
         largeLiteralStorage: defaultLargeLiteralStorage(config.dataDir, config.largeLiteralStorage),
       });
-      log.info(ctx, `Persistent triple store: ${persistPath}`);
+      log.info(ctx, `Persistent triple store (worker thread): ${persistPath}`);
     } else {
       store = await createTripleStore({ backend: 'oxigraph' });
       log.warn(ctx, `No dataDir — triple store is in-memory (data will be lost on restart)`);
@@ -1548,6 +1548,14 @@ export class DKGAgent extends DKGAgentBase {
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
+    }
+    try {
+      await this.messenger.stopOutboxDrain();
+    } catch (error) {
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: outbox retry drain failed during shutdown: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     if (this.swmAckQuorumTimer) {
       clearInterval(this.swmAckQuorumTimer);

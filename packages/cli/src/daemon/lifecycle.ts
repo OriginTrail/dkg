@@ -40,7 +40,7 @@ import {
 import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
-import { readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
@@ -305,10 +305,6 @@ import {
 } from './store-health-check.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
-import {
-  resolveDaemonStoreBootPlan,
-  resolveDaemonStoreRuntime,
-} from './store-runtime.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
@@ -1130,25 +1126,6 @@ export async function runDaemonInner(
       ...resolveNetworkDefaultContextGraphs(network),
     ]),
   ];
-  const acceptStoreReset = process.env.DKG_ACCEPT_STORE_RESET === '1';
-  const storeDecision = resolveDaemonStoreBootPlan({
-    config,
-    dataDir: dkgDir(),
-    acceptStoreReset,
-  });
-
-  if (storeDecision.kind === 'invalid-config') {
-    exitOnStoreConfigErrors(storeDecision.operatorConfig, log);
-    throw new Error('Invalid store config validation unexpectedly returned');
-  }
-  if (storeDecision.kind === 'blocked-legacy-cutover') {
-    log(storeDecision.message);
-    process.exit(1);
-  }
-  const storeBoot = storeDecision;
-  if (storeBoot.notice) {
-    log(storeBoot.notice);
-  }
 
   // Auto-wipe per-node chain-state derived files (oxigraph store, publish
   // journal, random-sampling WAL) when the maintainer bumps
@@ -1165,8 +1142,8 @@ export async function runDaemonInner(
   // silently would look like data loss to the operator.
   const backendSwitch = detectBackendSwitch({
     dataDir: dkgDir(),
-    currentBackend: storeBoot.effectiveStore.backend,
-    acceptStoreReset,
+    currentBackend: config.store?.backend ?? 'oxigraph-worker',
+    acceptStoreReset: process.env.DKG_ACCEPT_STORE_RESET === '1',
     log,
   });
   if (backendSwitch.aborted) {
@@ -1202,7 +1179,7 @@ export async function runDaemonInner(
   let managedOxigraph: OxigraphServerHandle | null = null;
   let managed: Awaited<ReturnType<typeof startManagedOxigraph>> = null;
   try {
-    managed = await startManagedOxigraph({ config: storeBoot.effectiveConfig, dataDir: dkgDir(), log });
+    managed = await startManagedOxigraph({ config, dataDir: dkgDir(), log });
     if (managed) {
       managedOxigraph = managed.handle;
       // Every remaining fatal boot path (config validation, store health
@@ -1215,7 +1192,7 @@ export async function runDaemonInner(
   } catch (err) {
     log(
       `[STORE] failed to start managed Oxigraph server: ${(err as Error).message}\n` +
-        `Fix the cause, or switch \`store.backend\` to ` +
+        `Fix the cause, or switch \`store.backend\` to oxigraph-worker (embedded) or ` +
         `sparql-http (operator-managed endpoint) in ~/.dkg/config.json.`,
     );
     process.exit(1);
@@ -1233,13 +1210,22 @@ export async function runDaemonInner(
   // For the directory-backed blob/snapshot stores we use the managed
   // defaults (the rewritten sparql-http backend has no `options.path` to
   // infer a directory from, unlike the local Oxigraph backend).
-  const storeRuntime = resolveDaemonStoreRuntime(storeBoot, managed);
-  const {
-    runtimeStore,
-    runtimeConfig: runtimeStoreConfig,
-    runtimeLargeLiteralStorage,
-    runtimeSnapshotStorage,
-  } = storeRuntime;
+  const runtimeStore = managed?.storeConfig ?? config.store;
+  const runtimeLargeLiteralStorage =
+    managed?.largeLiteralStorage ?? config.largeLiteralStorage;
+  const runtimeSnapshotStorage =
+    managed?.sharedMemoryPublicSnapshotStorage ?? config.sharedMemoryPublicSnapshotStorage;
+  // Config view used only for the boot-time store validation/health steps
+  // below: same as `config` but with the runtime store/blob/snapshot values
+  // swapped in, so a managed config validates against what actually runs.
+  const runtimeStoreConfig: DkgConfig = managed
+    ? {
+        ...config,
+        store: runtimeStore,
+        largeLiteralStorage: runtimeLargeLiteralStorage,
+        sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
+      }
+    : config;
 
   // Refuse to start on invalid external-backend config (missing URL,
   // missing blob/snapshot directory). This fires before the health
@@ -1976,7 +1962,7 @@ export async function runDaemonInner(
         try {
           const runtime = await startPublisherRuntimeIfEnabled({
             dataDir: dkgDir(),
-            config: runtimeStoreConfig,
+            config,
             store: agent.store,
             keypair: agent.wallet.keypair,
             chainBase: publisherChainBase,
@@ -3357,7 +3343,7 @@ export async function runDaemonInner(
         agent,
         publisherControl,
         publisherRuntime,
-        storeRuntime,
+        config,
         startedAt,
         dashDb,
         opWallets,

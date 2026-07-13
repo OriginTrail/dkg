@@ -71,7 +71,7 @@ describe('ensureDkgNodeConfig — store-backend default (issue #960)', () => {
 
   it('does NOT flip an existing (block-less) node onto a new backend', () => {
     // Simulate an existing node: a config.json is already on disk (it had been
-    // running without an explicit store block). Re-running setup must
+    // running on the oxigraph-worker runtime fallback). Re-running setup must
     // not silently switch its backend (which would force a store reset).
     writeFileSync(join(tempHome, 'config.json'), JSON.stringify({ name: 'node-a', nodeRole: 'edge' }) + '\n');
     ensureDkgNodeConfig({
