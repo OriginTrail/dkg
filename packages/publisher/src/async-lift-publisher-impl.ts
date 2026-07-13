@@ -98,6 +98,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
   private readonly knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  private readonly knowledgeAssetVmPublishRecoveryFinalizer?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishRecoveryFinalizer'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
@@ -147,6 +148,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.publishExecutor = config.publishExecutor;
     this.knowledgeAssetVmPublishExecutor = config.knowledgeAssetVmPublishExecutor;
     this.knowledgeAssetVmPublishPreflight = config.knowledgeAssetVmPublishPreflight;
+    this.knowledgeAssetVmPublishRecoveryFinalizer = config.knowledgeAssetVmPublishRecoveryFinalizer;
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
     this.graphManager = new GraphManager(store);
@@ -557,30 +559,53 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   private async recoverKnowledgeAssetVmPublishInterrupted(job: LiftJob): Promise<boolean> {
-    if (job.status === 'broadcast') {
-      const recoverable = job as LiftJobBroadcast;
-      if (this.chainRecoveryResolver) {
-        const resolved = await this.chainRecoveryResolver(recoverable);
-        if (resolved || this.hasInconclusiveRecoveryTimedOut(recoverable)) {
+    if (job.status !== 'broadcast' && job.status !== 'included') return false;
+
+    const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
+    if (this.chainRecoveryResolver) {
+      const resolved = await this.chainRecoveryResolver(recoverable);
+      if (resolved) {
+        if (
+          this.knowledgeAssetVmPublishRecoveryFinalizer &&
+          isKnowledgeAssetVmPublishJobRequest(recoverable.request)
+        ) {
+          try {
+            await this.knowledgeAssetVmPublishRecoveryFinalizer({
+              walletId: recoverable.broadcast.walletId,
+              request: recoverable.request.knowledgeAssetVmPublish,
+              job: recoverable,
+              recovery: resolved,
+            });
+          } catch {
+            // Chain success is authoritative, but local lifecycle repair may be
+            // temporarily blocked (for example while SWM catch-up is still in
+            // progress). Keep the job tx-bearing and retry recovery later. It
+            // is never safe to reset this job and submit a second transaction.
+            return false;
+          }
+
           await this.releaseWalletLockForJob(job);
-          await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+          await this.writeJob(this.finalizeRecoveredJob(
+            recoverable,
+            resolved.inclusion,
+            resolved.finalization,
+          ));
           return true;
         }
-        return false;
+
+        // A chain resolver without the named-lifecycle finalizer cannot safely
+        // claim local recovery. Preserve the explicit terminal diagnosis rather
+        // than silently marking the queue job finalized.
+        await this.releaseWalletLockForJob(job);
+        await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+        return true;
       }
-      if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) {
-        return false;
-      }
-      await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
-      return true;
     }
-    if (job.status === 'included' && this.hasInconclusiveRecoveryTimedOut(job as LiftJobIncluded)) {
-      await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(job as LiftJobIncluded));
-      return true;
-    }
-    return false;
+
+    if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) return false;
+    await this.releaseWalletLockForJob(job);
+    await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+    return true;
   }
 
   private async findActiveKnowledgeAssetVmPublishJob(

@@ -24,6 +24,7 @@ import {
   contextGraphAssertionUri,
   contextGraphLayerUri,
   ASSERTION_SEAL_PREDICATES,
+  ASSERTION_PUBLISH_RECEIPT_PREDICATES,
   createOperationContext,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
@@ -563,6 +564,147 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     );
     expect(vmRows.bindings.map((row) => row['name'])).toContain('"Queued Async VM"');
   }, 60_000);
+
+  it('repairs a named lifecycle after its async publish transaction confirmed during downtime', async () => {
+    const agent = await createAgent('QueuedAsyncVmRecoveryBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Recovery E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-recovery';
+    const root = `${ENTITY_BASE}:queued-async-recovery`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Recovered Async VM"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const confirmed = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(confirmed.status).toBe('confirmed');
+    expect(confirmed.onChainResult).toBeDefined();
+
+    const lifecycleAgent = intent.agentAddress ?? agent.defaultAgentAddress ?? agent.peerId;
+    const lifecycleUri = assertionLifecycleUri(CG_ID, lifecycleAgent, name);
+    const assertionUri = contextGraphAssertionUri(CG_ID, lifecycleAgent, name);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const store = (agent as any).store;
+    const DKG = 'http://dkg.io/ontology/';
+
+    // Recreate the exact #1669 post-restart split-brain: chain/VM data exists,
+    // while the named descriptor and receipt still look merely promoted.
+    for (const predicate of [
+      `${DKG}vmCurrentAssertion`,
+      `${DKG}publishedUal`,
+      `${DKG}assertionGraph`,
+      `${DKG}memoryLayer`,
+      `${DKG}state`,
+    ]) {
+      await store.deleteByPattern({ subject: lifecycleUri, predicate, graph: metaGraph });
+    }
+    await store.deleteByPattern({ subject: assertionUri, predicate: `${DKG}memoryLayer`, graph: metaGraph });
+    for (const predicate of Object.values(ASSERTION_PUBLISH_RECEIPT_PREDICATES)) {
+      await store.deleteByPattern({ subject: assertionUri, predicate, graph: metaGraph });
+    }
+    await store.insert([
+      { subject: lifecycleUri, predicate: `${DKG}state`, object: '"promoted"', graph: metaGraph },
+      { subject: lifecycleUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+      { subject: assertionUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+    ]);
+
+    const onChain = confirmed.onChainResult!;
+    const kaId = BigInt(intent.seal.reservedKaId!);
+    const txHash = onChain.txHash as `0x${string}`;
+    const recoveryInput = {
+      walletId: 'wallet-1',
+      request: intent,
+      job: {
+        jobId: 'recovery-job',
+        jobSlug: 'recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: intent },
+        status: 'broadcast',
+        broadcast: {
+          txHash,
+          walletId: 'wallet-1',
+          merkleRoot: intent.sealMerkleRoot,
+        },
+        timestamps: { acceptedAt: 1, broadcastAt: 2, updatedAt: 2 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+      recovery: {
+        inclusion: {
+          txHash,
+          blockNumber: onChain.blockNumber,
+          blockTimestamp: onChain.blockTimestamp,
+        },
+        finalization: {
+          mode: 'published',
+          txHash,
+          ual: confirmed.ual,
+          batchId: kaId.toString(),
+          startKAId: kaId.toString(),
+          endKAId: kaId.toString(),
+          publisherAddress: onChain.publisherAddress as `0x${string}`,
+        },
+      },
+      publisher: (agent as any).publisher,
+    } as const;
+
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      recovery: {
+        ...recoveryInput.recovery,
+        finalization: {
+          ...recoveryInput.recovery.finalization,
+          endKAId: (kaId + 1n).toString(),
+        },
+      },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+
+    const merkleRootSpy = vi.spyOn((agent as any).chain, 'getLatestMerkleRoot')
+      .mockResolvedValue(ethers.getBytes(`0x${'ff'.repeat(32)}`));
+    try {
+      await expect(
+        agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any),
+      ).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    } finally {
+      merkleRootSpy.mockRestore();
+    }
+    expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+
+    const merkleAuthorSpy = vi.spyOn((agent as any).chain, 'getLatestMerkleRootAuthor')
+      .mockResolvedValue('0x0000000000000000000000000000000000000001');
+    try {
+      await expect(
+        agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any),
+      ).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    } finally {
+      merkleAuthorSpy.mockRestore();
+    }
+    expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+
+    const history = await agent.assertion.history(CG_ID, name);
+    expect(history?.state).toBe('published');
+    expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
+    expect(history?.status).toBe('vm-confirmed');
+    expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
+    expect(history?.publishedUal).toBe(confirmed.ual);
+
+    const receipt = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> "${txHash}" .
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_BLOCK}> ?block .
+    } }`);
+    expect(receipt).toMatchObject({ type: 'boolean', value: true });
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent)).resolves.toMatchObject({
+      action: 'noop',
+      reason: 'already-published',
+    });
+  }, 90_000);
 
   it('async VM publish no-ops when the queued seal is already current in VM', async () => {
     const agent = await createAgent('QueuedAsyncVmAlreadyPublishedBot');

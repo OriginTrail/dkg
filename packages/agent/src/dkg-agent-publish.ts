@@ -131,6 +131,7 @@ import {
   type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
   type LiftRequest, type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -3716,6 +3717,293 @@ export class PublishMethods extends DKGAgentBase {
     return { action: 'execute' };
   }
 
+  async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
+    this: DKGAgent,
+    request: KnowledgeAssetVmPublishRequest,
+    publishedUal: string,
+    packedKaId?: bigint,
+  ): Promise<void> {
+    const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const assertionUri = contextGraphAssertionUri(
+      request.contextGraphId,
+      agentAddress,
+      request.name,
+      request.subGraphName,
+    );
+    const lifecycleUri = assertionLifecycleUri(
+      request.contextGraphId,
+      agentAddress,
+      request.name,
+      request.subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(request.contextGraphId);
+    const bareMerkleRoot = request.sealMerkleRoot.toLowerCase().replace(/^0x/, '');
+    if (!/^[0-9a-f]{64}$/.test(bareMerkleRoot)) {
+      throw new Error(
+        `Cannot stamp recovered VM lifecycle for "${request.name}": invalid seal merkle root ${request.sealMerkleRoot}`,
+      );
+    }
+
+    await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, bareMerkleRoot, metaGraph);
+
+    const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
+    const STATE_PRED = 'http://dkg.io/ontology/state';
+    const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
+    const ASSERTION_GRAPH_PRED = 'http://dkg.io/ontology/assertionGraph';
+    for (const subject of [lifecycleUri, assertionUri]) {
+      await this.store.deleteByPattern({ subject, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+      await this.store.insert([{
+        subject,
+        predicate: MEMORY_LAYER_PRED,
+        object: `"${MemoryLayer.VerifiableMemory}"`,
+        graph: metaGraph,
+      }]);
+    }
+    await this.store.deleteByPattern({ subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
+    await this.store.insert([{
+      subject: lifecycleUri,
+      predicate: STATE_PRED,
+      object: '"published"',
+      graph: metaGraph,
+    }]);
+    await this.store.deleteByPattern({ subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
+    await this.store.insert([{
+      subject: lifecycleUri,
+      predicate: PUBLISHED_UAL_PRED,
+      object: `"${publishedUal}"`,
+      graph: metaGraph,
+    }]);
+
+    if (packedKaId !== undefined) {
+      const vmAuthor = `0x${(packedKaId >> 96n).toString(16).padStart(40, '0')}`;
+      const vmNumber = packedKaId & ((1n << 96n) - 1n);
+      const vmGraph = contextGraphLayerUri(
+        request.contextGraphId,
+        MemoryLayer.VerifiableMemory,
+        vmAuthor,
+        vmNumber,
+        request.subGraphName,
+      );
+      await this.store.deleteByPattern({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
+      await this.store.insert([{
+        subject: lifecycleUri,
+        predicate: ASSERTION_GRAPH_PRED,
+        object: vmGraph,
+        graph: metaGraph,
+      }]);
+
+      const wmGraph = contextGraphLayerUri(
+        request.contextGraphId,
+        MemoryLayer.WorkingMemory,
+        vmAuthor,
+        vmNumber,
+        request.subGraphName,
+      );
+      await this.store.deleteByPattern({ subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+      await this.store.insert([{
+        subject: wmGraph,
+        predicate: MEMORY_LAYER_PRED,
+        object: `"${MemoryLayer.VerifiableMemory}"`,
+        graph: metaGraph,
+      }]);
+    }
+  }
+
+  async _writeQueuedKnowledgeAssetVmPublishReceipt(
+    this: DKGAgent,
+    request: KnowledgeAssetVmPublishRequest,
+    txHash: string,
+    blockNumber: number,
+    packedKaId: bigint,
+  ): Promise<void> {
+    const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const assertionUri = contextGraphAssertionUri(
+      request.contextGraphId,
+      agentAddress,
+      request.name,
+      request.subGraphName,
+    );
+    await this.store.insert(buildAssertionPublishReceiptQuads({
+      assertionUri,
+      metaGraph: contextGraphMetaUri(request.contextGraphId),
+      txHash,
+      blockNumber: BigInt(blockNumber),
+      kaId: packedKaId,
+    }));
+  }
+
+  async finalizeRecoveredQueuedKnowledgeAssetVmPublish(
+    this: DKGAgent,
+    input: AsyncKnowledgeAssetVmPublishRecoveryInput,
+  ): Promise<void> {
+    const ctx = createOperationContext('publishFromSWM');
+    try {
+      await this._finalizeRecoveredQueuedKnowledgeAssetVmPublish(input, ctx);
+    } catch (error) {
+      this.log.warn(
+        ctx,
+        `Named KA recovery for "${input.request.name}" remains pending: ` +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      throw error;
+    }
+  }
+
+  async _finalizeRecoveredQueuedKnowledgeAssetVmPublish(
+    this: DKGAgent,
+    input: AsyncKnowledgeAssetVmPublishRecoveryInput,
+    ctx: OperationContext,
+  ): Promise<void> {
+    const { request, job, recovery } = input;
+    const inconsistent = (message: string): Error =>
+      Object.assign(new Error(`Named KA recovery rejected for "${request.name}": ${message}`), {
+        code: 'KA_VM_RECOVERY_INCONSISTENT',
+      });
+    const sameHex = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase();
+
+    if (!sameHex(job.broadcast.txHash, recovery.inclusion.txHash)) {
+      throw inconsistent(
+        `resolved inclusion tx ${recovery.inclusion.txHash} does not match queued tx ${job.broadcast.txHash}`,
+      );
+    }
+    if (!recovery.finalization.txHash || !sameHex(job.broadcast.txHash, recovery.finalization.txHash)) {
+      throw inconsistent('resolved finalization is not bound to the queued transaction hash');
+    }
+    if (
+      job.broadcast.merkleRoot &&
+      !sameHex(job.broadcast.merkleRoot, request.sealMerkleRoot)
+    ) {
+      throw inconsistent(
+        `queued broadcast merkle root ${job.broadcast.merkleRoot} does not match seal ${request.sealMerkleRoot}`,
+      );
+    }
+
+    let reservedKaId: bigint;
+    try {
+      if (request.seal.reservedKaId !== undefined) {
+        reservedKaId = BigInt(request.seal.reservedKaId);
+      } else if (request.kaNumber !== undefined) {
+        reservedKaId = (BigInt(ethers.getAddress(request.seal.authorAddress)) << 96n) | BigInt(request.kaNumber);
+      } else {
+        throw inconsistent('the immutable request has no reserved KA id');
+      }
+    } catch (error) {
+      if ((error as { code?: unknown })?.code === 'KA_VM_RECOVERY_INCONSISTENT') throw error;
+      throw inconsistent(`invalid reserved KA identity: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    const expectedAuthor = BigInt(ethers.getAddress(request.seal.authorAddress));
+    if ((reservedKaId >> 96n) !== expectedAuthor) {
+      throw inconsistent('reserved KA id author bits do not match the signed author address');
+    }
+
+    const { batchId, startKAId, endKAId, ual, publisherAddress } = recovery.finalization;
+    if (!batchId || !startKAId || !endKAId) {
+      throw inconsistent('chain recovery did not return a singleton V10 KA range');
+    }
+    for (const [field, value] of [
+      ['batchId', batchId],
+      ['startKAId', startKAId],
+      ['endKAId', endKAId],
+    ] as const) {
+      if (BigInt(value) !== reservedKaId) {
+        throw inconsistent(`${field} ${value} does not match reserved KA id ${reservedKaId.toString()}`);
+      }
+    }
+    if (!ual) throw inconsistent('chain recovery did not return the published UAL');
+    const ualKaId = ual.match(/\/([0-9]+)$/)?.[1];
+    if (!ualKaId || BigInt(ualKaId) !== reservedKaId) {
+      throw inconsistent(`published UAL ${ual} does not identify reserved KA id ${reservedKaId.toString()}`);
+    }
+    if (!publisherAddress || !ethers.isAddress(publisherAddress)) {
+      throw inconsistent('chain recovery did not return a valid publisher address');
+    }
+
+    if (typeof this.chain.getLatestMerkleRoot !== 'function') {
+      throw inconsistent('the configured chain adapter cannot verify the recovered KA merkle root');
+    }
+    const chainMerkleRoot = ethers.hexlify(await this.chain.getLatestMerkleRoot(reservedKaId));
+    if (!sameHex(chainMerkleRoot, request.sealMerkleRoot)) {
+      throw inconsistent(
+        `latest on-chain merkle root ${chainMerkleRoot} does not match queued seal ${request.sealMerkleRoot}`,
+      );
+    }
+    const sealedAuthor = ethers.getAddress(request.seal.authorAddress);
+    let verifiedAuthor = sealedAuthor;
+    if (typeof this.chain.getLatestMerkleRootAuthor === 'function') {
+      const chainAuthor = ethers.getAddress(await this.chain.getLatestMerkleRootAuthor(reservedKaId));
+      if (chainAuthor === ethers.ZeroAddress || chainAuthor.toLowerCase() !== sealedAuthor.toLowerCase()) {
+        throw inconsistent(
+          `latest on-chain author ${chainAuthor} does not match sealed author ${sealedAuthor}`,
+        );
+      }
+      verifiedAuthor = chainAuthor;
+    }
+
+    const onChainCgId = normalizeOptionalContextGraphId(
+      await this.getContextGraphOnChainId(request.contextGraphId),
+    );
+    if (!onChainCgId) {
+      throw inconsistent(`context graph ${request.contextGraphId} has no local on-chain id binding`);
+    }
+
+    const materialization = await this.getOrCreateFinalizationHandler().handleChainReconciledKC({
+      contextGraphId: request.contextGraphId,
+      onChainCgId,
+      ual,
+      merkleRoot: ethers.getBytes(request.sealMerkleRoot),
+      publisherAddress,
+      kaId: reservedKaId,
+      versionBlock: recovery.inclusion.blockNumber,
+      authorAddress: verifiedAuthor,
+      subGraphName: request.subGraphName,
+    }, ctx);
+    if (materialization !== 'promoted' && materialization !== 'already-confirmed') {
+      throw inconsistent(`VM materialization is not ready (${materialization}); recovery will retry`);
+    }
+
+    // Both writes are idempotent. If a store operation fails part-way through,
+    // the queue remains tx-bearing and the next recovery pass completes it.
+    await this._writeQueuedKnowledgeAssetVmPublishReceipt(
+      request,
+      recovery.inclusion.txHash,
+      recovery.inclusion.blockNumber,
+      reservedKaId,
+    );
+    await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, ual, reservedKaId);
+
+    const publisher = input.publisher ?? this.publisher;
+    const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
+      request.seal.authorAddress,
+      reservedKaId,
+    );
+    try {
+      await publisher.clearPublishedSwmRoots(
+        request.contextGraphId,
+        [...request.roots],
+        request.subGraphName,
+        ctx,
+        sharedMemoryScope,
+      );
+      if (request.clearSharedMemoryAfter === true) {
+        await publisher.clearRemainingSharedMemory(request.contextGraphId, request.subGraphName, ctx);
+      }
+      await publisher.clearSwmShareComplete(
+        request.contextGraphId,
+        request.name,
+        request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
+        request.subGraphName,
+      );
+    } catch (error) {
+      this.log.warn(
+        ctx,
+        `Recovered named KA ${request.name}, but post-finalization SWM cleanup was incomplete: ` +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
+    this.log.info(ctx, `Recovered confirmed named KA publish ${ual} from ${job.status} job ${job.jobId}`);
+  }
+
   async publishQueuedKnowledgeAssetVmPublish(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
@@ -3986,14 +4274,12 @@ export class PublishMethods extends DKGAgentBase {
 
       if (result.status === 'confirmed' && result.onChainResult) {
         try {
-          const receiptQuads = buildAssertionPublishReceiptQuads({
-            assertionUri,
-            metaGraph,
-            txHash: result.onChainResult.txHash ?? '',
-            blockNumber: BigInt(result.onChainResult.blockNumber ?? 0),
-            kaId: result.onChainResult.batchId ?? 0n,
-          });
-          await this.store.insert(receiptQuads);
+          await this._writeQueuedKnowledgeAssetVmPublishReceipt(
+            request,
+            result.onChainResult.txHash ?? '',
+            result.onChainResult.blockNumber ?? 0,
+            seal.reservedKaId ?? result.onChainResult.kaId ?? result.onChainResult.batchId ?? 0n,
+          );
         } catch (err) {
           this.log.warn(
             ctx,
@@ -4013,57 +4299,11 @@ export class PublishMethods extends DKGAgentBase {
 
     if (result.status === 'confirmed') {
       try {
-        await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-        const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
-        const STATE_PRED = 'http://dkg.io/ontology/state';
-        for (const subj of [lifecycleUri, assertionUri]) {
-          await this.store.deleteByPattern({ subject: subj, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
-          await this.store.insert([
-            { subject: subj, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
-          ]);
-        }
-        await this.store.deleteByPattern({ subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
-        await this.store.insert([
-          { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
-        ]);
-        if (result.ual) {
-          const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
-          await this.store.deleteByPattern({ subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
-          await this.store.insert([
-            { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, object: `"${result.ual}"`, graph: metaGraph },
-          ]);
-        }
-        if (result.status === 'confirmed' && result.onChainResult) {
-          const ASSERTION_GRAPH_PRED = 'http://dkg.io/ontology/assertionGraph';
-          const vmKaId = packedKaId ?? seal.reservedKaId ?? result.onChainResult.kaId ?? result.kaId;
-          if (vmKaId !== undefined && vmKaId !== null) {
-            const vmKaIdBig = BigInt(vmKaId);
-            const vmAuthor = '0x' + (vmKaIdBig >> 96n).toString(16).padStart(40, '0');
-            const vmNumber = vmKaIdBig & ((1n << 96n) - 1n);
-            const vmGraph = contextGraphLayerUri(
-              request.contextGraphId,
-              MemoryLayer.VerifiableMemory,
-              vmAuthor,
-              vmNumber,
-              request.subGraphName,
-            );
-            await this.store.deleteByPattern({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
-            await this.store.insert([
-              { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph },
-            ]);
-            const wmGraph = contextGraphLayerUri(
-              request.contextGraphId,
-              MemoryLayer.WorkingMemory,
-              vmAuthor,
-              vmNumber,
-              request.subGraphName,
-            );
-            await this.store.deleteByPattern({ subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
-            await this.store.insert([
-              { subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
-            ]);
-          }
-        }
+        await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
+          request,
+          result.ual,
+          packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
+        );
       } catch (err) {
         this.log.warn(
           ctx,

@@ -142,4 +142,135 @@ describe('KA async VM publish broadcast progress', () => {
     if (lock.type !== 'bindings') return;
     expect(lock.bindings).toHaveLength(0);
   });
+
+  it('finalizes confirmed KA broadcast and included jobs only after lifecycle-aware recovery succeeds', async () => {
+    const txHash = `0x${'aa'.repeat(32)}` as `0x${string}`;
+    const request = kaVmPublishRequest();
+    const kaId = request.seal.reservedKaId!;
+    const ual = `did:dkg:evm:31337/0x3333333333333333333333333333333333333333/${kaId}`;
+    const finalized: Array<{ jobId: string; status: string }> = [];
+    const publisher = createPublisher({
+      chainRecoveryResolver: async () => ({
+        inclusion: { txHash, blockNumber: 42, blockTimestamp: 2_000 },
+        finalization: {
+          mode: 'published',
+          txHash,
+          ual,
+          batchId: kaId,
+          startKAId: kaId,
+          endKAId: kaId,
+          publisherAddress: '0x4444444444444444444444444444444444444444',
+        },
+      }),
+      knowledgeAssetVmPublishRecoveryFinalizer: async (input) => {
+        expect(input.job.broadcast.txHash).toBe(txHash);
+        expect(input.request.intentKey).toBe(request.intentKey);
+        expect(input.recovery.finalization.ual).toBe(ual);
+        finalized.push({ jobId: input.job.jobId, status: input.job.status });
+      },
+    });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1', merkleRoot: request.sealMerkleRoot },
+    });
+
+    expect(await publisher.recover()).toBe(1);
+    const job = await publisher.getStatus(jobId);
+    expect(finalized).toEqual([{ jobId, status: 'broadcast' }]);
+    expect(job?.status).toBe('finalized');
+    expect(job?.finalization?.ual).toBe(ual);
+    expect(job?.recovery).toEqual({
+      action: 'finalized_from_chain',
+      recoveredFromStatus: 'broadcast',
+      txHashChecked: txHash,
+    });
+
+    const includedJobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(includedJobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(includedJobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1', merkleRoot: request.sealMerkleRoot },
+    });
+    await publisher.update(includedJobId, 'included', {
+      inclusion: { txHash, blockNumber: 42 },
+    });
+
+    expect(await publisher.recover()).toBe(1);
+    const includedJob = await publisher.getStatus(includedJobId);
+    expect(finalized).toEqual([
+      { jobId, status: 'broadcast' },
+      { jobId: includedJobId, status: 'included' },
+    ]);
+    expect(includedJob?.status).toBe('finalized');
+    expect(includedJob?.recovery?.recoveredFromStatus).toBe('included');
+  });
+
+  it('keeps confirmed KA jobs tx-bearing while local lifecycle recovery is blocked', async () => {
+    const txHash = `0x${'bb'.repeat(32)}` as `0x${string}`;
+    const request = kaVmPublishRequest();
+    const kaId = request.seal.reservedKaId!;
+    let attempts = 0;
+    const publisher = createPublisher({
+      recoveryLookupTimeoutMs: 1,
+      chainRecoveryResolver: async () => ({
+        inclusion: { txHash, blockNumber: 43 },
+        finalization: {
+          mode: 'published',
+          txHash,
+          ual: `did:dkg:evm:31337/0x3333333333333333333333333333333333333333/${kaId}`,
+          batchId: kaId,
+          startKAId: kaId,
+          endKAId: kaId,
+          publisherAddress: '0x4444444444444444444444444444444444444444',
+        },
+      }),
+      knowledgeAssetVmPublishRecoveryFinalizer: async () => {
+        attempts += 1;
+        throw new Error('SWM snapshot is still catching up');
+      },
+    });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1', merkleRoot: request.sealMerkleRoot },
+    });
+    now += 100;
+
+    expect(await publisher.recover()).toBe(0);
+    expect(await publisher.recover()).toBe(0);
+    const job = await publisher.getStatus(jobId);
+    expect(attempts).toBe(2);
+    expect(job?.status).toBe('broadcast');
+    expect(job?.broadcast?.txHash).toBe(txHash);
+    expect(job?.failure).toBeUndefined();
+  });
 });

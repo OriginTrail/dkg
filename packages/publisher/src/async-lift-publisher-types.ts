@@ -78,6 +78,22 @@ export interface AsyncKnowledgeAssetVmPublishPreflightInput {
   readonly publisher?: DKGPublisher;
 }
 
+/**
+ * Chain-confirmed recovery input for a named Knowledge Asset publish that was
+ * interrupted after the transaction hash had been durably recorded.
+ *
+ * The finalizer is intentionally separate from the normal executor: recovery
+ * must reconcile local VM/lifecycle state without submitting a second
+ * transaction.
+ */
+export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
+  readonly walletId: string;
+  readonly request: KnowledgeAssetVmPublishRequest;
+  readonly job: LiftJobBroadcast | LiftJobIncluded;
+  readonly recovery: AsyncLiftPublisherRecoveryResult;
+  readonly publisher?: DKGPublisher;
+}
+
 export type AsyncKnowledgeAssetVmPublishPreflightResult =
   | { readonly action: 'execute' }
   | { readonly action: 'noop'; readonly reason?: string };
@@ -100,6 +116,9 @@ export interface AsyncLiftPublisherConfig {
   knowledgeAssetVmPublishPreflight?: (
     input: AsyncKnowledgeAssetVmPublishPreflightInput,
   ) => Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
+  knowledgeAssetVmPublishRecoveryFinalizer?: (
+    input: AsyncKnowledgeAssetVmPublishRecoveryInput,
+  ) => Promise<void>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }

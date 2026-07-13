@@ -221,6 +221,7 @@ export {
   type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncKnowledgeAssetVmPublishPreflightInput,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,

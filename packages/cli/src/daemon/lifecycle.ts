@@ -77,6 +77,7 @@ import {
   isSkolemizedUri,
   selectACKCandidatePeers,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type AsyncLiftPublisherConfig,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -856,6 +857,7 @@ type StartupGenesisValidationInput = Partial<Pick<NetworkConfig, '_status' | 'ge
 
 type KnowledgeAssetVmPublishExecutor = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor']>;
 type KnowledgeAssetVmPublishPreflight = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight']>;
+type KnowledgeAssetVmPublishRecoveryFinalizer = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishRecoveryFinalizer']>;
 type QueuedKnowledgeAssetVmPublishOptions = Parameters<DKGAgent['publishQueuedKnowledgeAssetVmPublish']>[2];
 
 export function createKnowledgeAssetVmPublishExecutor(agent: DKGAgent): KnowledgeAssetVmPublishExecutor {
@@ -895,6 +897,13 @@ export function createKnowledgeAssetVmPublishPreflight(agent: DKGAgent): Knowled
       request,
       publisher ? { publisherOverride: publisher } : undefined,
     );
+}
+
+export function createKnowledgeAssetVmPublishRecoveryFinalizer(
+  agent: DKGAgent,
+): KnowledgeAssetVmPublishRecoveryFinalizer {
+  return async (input: AsyncKnowledgeAssetVmPublishRecoveryInput) =>
+    agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input);
 }
 
 export async function validateStartupGenesis(
@@ -1979,6 +1988,7 @@ export async function runDaemonInner(
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
           knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
           knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+          knowledgeAssetVmPublishRecoveryFinalizer: createKnowledgeAssetVmPublishRecoveryFinalizer(agent),
           log,
         });
         publisherState = outcome;

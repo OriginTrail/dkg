@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, buildKnowledgeAssetUal, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -147,6 +147,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
   knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishRecoveryFinalizer?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishRecoveryFinalizer'];
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -166,6 +167,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       publishEncryptionFactory: args.publishEncryptionFactory,
       knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
       knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
+      knowledgeAssetVmPublishRecoveryFinalizer: args.knowledgeAssetVmPublishRecoveryFinalizer,
     });
     await runtime.runner.start();
     logPublisherWalletAttribution(runtime.wallets, args.log);
@@ -272,6 +274,7 @@ interface PublisherRuntimeBaseArgs {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
   knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishRecoveryFinalizer?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishRecoveryFinalizer'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
 }
@@ -356,6 +359,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
   knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishRecoveryFinalizer?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishRecoveryFinalizer'];
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -370,6 +374,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     publishEncryptionFactory: args.publishEncryptionFactory,
     knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
     knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
+    knowledgeAssetVmPublishRecoveryFinalizer: args.knowledgeAssetVmPublishRecoveryFinalizer,
     publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
@@ -431,6 +436,15 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
             throw new Error(`No publisher configured for wallet ${input.walletId}`);
           }
           return args.knowledgeAssetVmPublishExecutor!({ ...input, publisher });
+        }
+      : undefined,
+    knowledgeAssetVmPublishRecoveryFinalizer: args.knowledgeAssetVmPublishRecoveryFinalizer
+      ? async (input) => {
+          const publisher = publishers.get(input.walletId);
+          if (!publisher) {
+            throw new Error(`No publisher configured for wallet ${input.walletId}`);
+          }
+          return args.knowledgeAssetVmPublishRecoveryFinalizer!({ ...input, publisher });
         }
       : undefined,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
@@ -649,15 +663,15 @@ function createV10ACKProviderForPublisher(
   };
 }
 
-function createChainRecoveryResolver(
+export function createChainRecoveryResolver(
   publishers: Map<string, DKGPublisher>,
 ): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftPublisherRecoveryResult | null> {
   return async (job) => {
     const publisher = publishers.get(job.broadcast.walletId);
     if (!publisher) return null;
-    const chain = (publisher as unknown as { chain?: { resolvePublishByTxHash?: (txHash: string) => Promise<any> } }).chain;
+    const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
     if (!chain?.resolvePublishByTxHash) return null;
-    let result: any;
+    let result;
     try {
       result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
     } catch {
@@ -666,6 +680,11 @@ function createChainRecoveryResolver(
       return null;
     }
     if (!result) return null;
+
+    const recoveredKaId = result.kaId ?? result.startKAId ?? result.batchId;
+    const recoveredUal = result.knowledgeAssetsContract
+      ? buildKnowledgeAssetUal(chain.chainId, result.knowledgeAssetsContract, recoveredKaId)
+      : undefined;
 
     return {
       inclusion: {
@@ -676,6 +695,7 @@ function createChainRecoveryResolver(
       finalization: {
         mode: 'published',
         txHash: result.txHash as `0x${string}`,
+        ual: recoveredUal,
         batchId: result.batchId.toString() as `${bigint}`,
         startKAId: result.startKAId?.toString() as `${bigint}` | undefined,
         endKAId: result.endKAId?.toString() as `${bigint}` | undefined,
