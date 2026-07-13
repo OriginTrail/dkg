@@ -71,15 +71,20 @@ async function getCliReceiptWithFailover(
   providers: ethers.JsonRpcProvider[],
   txHash: string,
   urls?: string[],
-  attemptTimeoutMs = CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+  options: { attemptTimeoutMs?: number; deadlineMs?: number } = {},
 ): Promise<ethers.TransactionReceipt | null> {
   let lastRetryable: unknown;
   let sawNonErrorResponse = false;
+  const attemptTimeoutMs = options.attemptTimeoutMs ?? CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS;
   for (let i = 0; i < providers.length; i += 1) {
+    const remainingMs = options.deadlineMs === undefined
+      ? attemptTimeoutMs
+      : options.deadlineMs - Date.now();
+    if (remainingMs <= 0) break;
     try {
       const receipt = await cliWithTimeout(
         providers[i].getTransactionReceipt(txHash),
-        Math.min(CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, attemptTimeoutMs),
+        Math.min(attemptTimeoutMs, remainingMs),
         `receipt lookup via RPC #${i + 1}`,
       );
       sawNonErrorResponse = true;
@@ -87,7 +92,8 @@ async function getCliReceiptWithFailover(
     } catch (err) {
       if (!isCliRetryableRpcError(err)) throw err;
       lastRetryable = err;
-      if (urls && i < providers.length - 1) {
+      const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
+      if (urls && i < providers.length - 1 && canTryNext) {
         noteRpcFailover('cli receipt lookup', urls[i], err, urls[i + 1]);
       }
     }
@@ -161,7 +167,12 @@ async function sendCliRawTransactionWithFailover(
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     try {
-      const receipt = await getCliReceiptWithFailover(providers, txHash, urls, remainingMs);
+      const receipt = await getCliReceiptWithFailover(
+        providers,
+        txHash,
+        urls,
+        { deadlineMs: deadline },
+      );
       if (receipt) {
         assertCliSuccessfulReceipt(receipt, txHash);
         return receipt;

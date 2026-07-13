@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect, vi } from 'vitest';
 import {
+  CLI_RPC_RECEIPT_TIMEOUT_MS,
   isCliRetryableRpcError,
   isCliKnownTransactionError,
   sendCliRawTransactionWithFailover,
@@ -104,23 +105,60 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     expect(isChainRpcTransportError(err)).toBe(true);
   });
 
-  it('enforces a configured overall receipt deadline across lookup and polling', async () => {
+  it('enforces one configured deadline across every receipt endpoint and polling', async () => {
     vi.useFakeTimers();
     try {
-      const provider = {
+      let firstCalls = 0;
+      let secondCalls = 0;
+      const first = {
         broadcastTransaction: async () => ({ hash: '0xdeadline' }),
-        getTransactionReceipt: async () => new Promise<never>(() => {}),
+        getTransactionReceipt: async () => {
+          firstCalls += 1;
+          return new Promise<never>(() => {});
+        },
+      } as any;
+      const second = {
+        broadcastTransaction: async () => ({ hash: '0xdeadline' }),
+        getTransactionReceipt: async () => {
+          secondCalls += 1;
+          return new Promise<never>(() => {});
+        },
       } as any;
       const result = sendCliRawTransactionWithFailover(
-        [provider],
+        [first, second],
         '0xsigned',
         '0xdeadline',
-        ['https://rpc.example'],
+        ['https://first.example', 'https://second.example'],
         { receiptTimeoutMs: 1_000 },
       ).catch((err) => err);
 
       await vi.advanceTimersByTimeAsync(1_001);
       await expect(result).resolves.toMatchObject({ code: 'RPC_TIMEOUT', txHash: '0xdeadline' });
+      expect(firstCalls).toBe(1);
+      expect(secondCalls).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses the default overall receipt deadline when config omits it', async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = {
+        broadcastTransaction: async () => ({ hash: '0xdefault-deadline' }),
+        getTransactionReceipt: async () => null,
+      } as any;
+      const result = sendCliRawTransactionWithFailover(
+        [provider],
+        '0xsigned',
+        '0xdefault-deadline',
+      ).catch((err) => err);
+
+      await vi.advanceTimersByTimeAsync(CLI_RPC_RECEIPT_TIMEOUT_MS + 1);
+      await expect(result).resolves.toMatchObject({
+        code: 'RPC_TIMEOUT',
+        txHash: '0xdefault-deadline',
+      });
     } finally {
       vi.useRealTimers();
     }
