@@ -205,8 +205,16 @@ export interface ProtocolOutboxStore {
    */
   hasEntry(peer: string, protocol: string, messageId: string): boolean;
 
-  /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
-  hasPendingFor(peer: string): boolean;
+  /**
+   * Snapshot every durable row for one peer. This is the pre-#1579 public
+   * contract retained for custom store compatibility and diagnostics/DHT
+   * bookkeeping only. Automatic retries MUST continue to select from `due` or
+   * `duePage`; a connection event must never drain this snapshot.
+   */
+  pendingFor(peer: string): ProtocolOutboxEntry[];
+
+  /** Optional storage-level fast path for peer-presence bookkeeping. */
+  hasPendingFor?(peer: string): boolean;
 
   /**
    * All entries whose `nextAttemptAt <= now`.

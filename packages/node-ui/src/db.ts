@@ -536,12 +536,11 @@ export class DashboardDB {
       //     (i.e. the `ReliableEnvelope` proto output, not the raw
       //     application payload), so retries replay byte-identical
       //     frames without re-encoding.
-      //   - `idx_outbox_next_attempt` indexes the periodic-tick query
-      //     (`SELECT ... WHERE next_attempt_at <= ?`); the
-      //     opportunistic-flush query
-      //     (`SELECT ... WHERE peer_id = ?`) uses an implicit scan
-      //     on the PK prefix, which is fast enough at expected
-      //     queue sizes (~tens of entries per peer).
+      //   - `idx_outbox_next_attempt` indexes the sole automatic retry query
+      //     (`SELECT ... WHERE next_attempt_at <= ?`). The peer-scoped query is
+      //     retained only for diagnostics/DHT bookkeeping and MUST NOT become a
+      //     connection-triggered drain; it uses the PK prefix at expected queue
+      //     sizes (~tens of entries per peer).
       //
       // No data migration: pure additive. The chat-specific
       // `idx_chat_msgid` from V11 stays in place — PR-3 will drop
@@ -2776,6 +2775,27 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
 
   hasPendingFor(peer: string): boolean {
     return this.db.prepare('SELECT 1 FROM protocol_outbox WHERE peer_id = ? LIMIT 1').get(peer) !== undefined;
+  }
+
+  pendingFor(peer: string): ProtocolOutboxEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM protocol_outbox
+         WHERE peer_id = ?
+         ORDER BY first_failure_at ASC, protocol ASC, message_id ASC`,
+      )
+      .all(peer) as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      payload: Buffer;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
   }
 
   due(now: number): ProtocolOutboxEntry[] {

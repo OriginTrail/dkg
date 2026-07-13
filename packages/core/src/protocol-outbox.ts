@@ -228,7 +228,15 @@ export class ProtocolOutbox {
   }
 
   hasPendingFor(peer: string): boolean {
-    return this.store.hasPendingFor(peer);
+    return this.store.hasPendingFor?.(peer) ?? this.store.pendingFor(peer).length > 0;
+  }
+
+  /**
+   * Compatibility/diagnostic snapshot for a peer. This does not participate in
+   * retry selection; scheduled drains remain exclusively `duePage`-driven.
+   */
+  pendingFor(peer: string): ProtocolOutboxEntry[] {
+    return this.store.pendingFor(peer);
   }
 
   /** Drop entries older than the store's configured max-age. */
@@ -345,6 +353,13 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
 
   hasPendingFor(peer: string): boolean {
     return Array.from(this.entries.values()).some((entry) => entry.peer === peer);
+  }
+
+  pendingFor(peer: string): ProtocolOutboxEntry[] {
+    return Array.from(this.entries.values())
+      .filter((entry) => entry.peer === peer)
+      .sort((a, b) => a.firstFailureAt - b.firstFailureAt)
+      .map(cloneOutboxEntry);
   }
 
   due(now: number): ProtocolOutboxEntry[] {

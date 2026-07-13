@@ -709,8 +709,8 @@ export class JoinRequestMethods extends DKGAgentBase {
     // rc.9 PR-10: the substrate outbox already holds the queued send
     // (deliverPrivateJoinNotification → messenger.sendReliable enqueues
     // on failure). All we do here is log the transport failure for
-    // operator visibility — the substrate's periodic tick + on-connect
-    // flush will drive the retry to eventual delivery without our help.
+    // operator visibility. The substrate's periodic tick is the only automatic
+    // retry trigger and will drive delivery once the persisted backoff is due.
     const ctx = createOperationContext('system');
     this.log.warn(
       ctx,
