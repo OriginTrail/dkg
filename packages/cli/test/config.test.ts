@@ -192,6 +192,7 @@ describe('loadNetworkConfig', () => {
     expect(config.networkName).toBe('DKG V10 Base Testnet');
     expect((config as any).genesisId).toBe('base-testnet');
     expect(config.networkId).toBe('7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b');
+    expect(config.defaultContextGraphs).toEqual([]);
   });
 
   it('loads mainnet prep configs without activating testnet genesis or relays', async () => {
