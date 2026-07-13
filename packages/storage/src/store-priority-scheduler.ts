@@ -126,6 +126,7 @@ export class StorePriorityScheduler {
   private normalInflight = 0;
   private backgroundInflight = 0;
   private readonly queueLimits: StorePriorityQueueLimits;
+  private lastStartedPriority: StoreWorkPriority | undefined;
 
   constructor(
     private readonly maxConcurrent = parsePositiveIntegerEnv('DKG_STORE_MAX_CONCURRENT', DEFAULT_MAX_CONCURRENT),
@@ -246,13 +247,26 @@ export class StorePriorityScheduler {
   private canStart(priority: StoreWorkPriority): boolean {
     const totalInflight = this.ackInflight + this.normalInflight + this.backgroundInflight;
     if (totalInflight >= this.maxConcurrent) return false;
-    if (priority === 'ack') return true;
+    if (priority === 'ack') return !this.shouldHoldNonAckFloor();
 
     const nonAckLimit = this.nonAckLimit();
     const nonAckInflight = this.normalInflight + this.backgroundInflight;
     if (nonAckInflight >= nonAckLimit) return false;
     if (priority === 'normal' && this.shouldHoldBackgroundFloor()) return false;
     return true;
+  }
+
+  private shouldHoldNonAckFloor(): boolean {
+    const nonAckInflight = this.normalInflight + this.backgroundInflight;
+    if (nonAckInflight >= this.nonAckLimit()) return false;
+
+    if (this.queues.normal.length > 0 && this.normalInflight === 0) {
+      // A single-slot scheduler cannot preserve ACK capacity and a normal lane
+      // simultaneously. Alternate after an ACK so both lanes still progress.
+      return this.maxConcurrent > 1 || this.lastStartedPriority === 'ack';
+    }
+
+    return this.shouldHoldBackgroundFloor();
   }
 
   private shouldHoldBackgroundFloor(): boolean {
@@ -277,6 +291,7 @@ export class StorePriorityScheduler {
   private start(entry: QueueEntry<unknown>): void {
     this.cleanupQueuedEntry(entry);
     this.increment(entry.priority);
+    this.lastStartedPriority = entry.priority;
     const startedAt = this.now();
     const waitMs = Math.max(0, startedAt - entry.queuedAt);
     this.observeQueueWait(entry, waitMs);

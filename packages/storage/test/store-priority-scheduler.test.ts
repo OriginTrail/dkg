@@ -7,6 +7,14 @@ import type { StoreWorkPriority } from '../src/triple-store.js';
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe('StorePriorityScheduler', () => {
   for (const priority of ['ack', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
     it(`bounds the ${priority} queue and returns a typed retryable rejection`, async () => {
@@ -216,6 +224,211 @@ describe('StorePriorityScheduler', () => {
     await expect(
       scheduler.run('ack', 'storage-ack.after-throw', async () => 'ok'),
     ).resolves.toBe('ok');
+  });
+
+  it('starts queued normal work while the ACK queue stays saturated', async () => {
+    const scheduler = new StorePriorityScheduler(3, 1, undefined, 0);
+    const events: string[] = [];
+    const ackGates = Array.from({ length: 6 }, deferred);
+    const ackWork = ackGates.map((gate, index) => scheduler.run(
+      'ack',
+      `storage-ack.${index}`,
+      async () => {
+        events.push(`ack-${index}:start`);
+        await gate.promise;
+        events.push(`ack-${index}:end`);
+        return `ack-${index}`;
+      },
+    ));
+    const normalGate = deferred();
+    const normal = scheduler.run('normal', 'publish.clearPublishedSwmRoots', async () => {
+      events.push('normal:start');
+      await normalGate.promise;
+      events.push('normal:end');
+      return 'normal';
+    });
+    await tick();
+
+    expect(scheduler.snapshot).toMatchObject({
+      ackInflight: 3,
+      ackQueued: 3,
+      normalInflight: 0,
+      normalQueued: 1,
+    });
+
+    ackGates[0].resolve();
+    await tick();
+
+    expect(events).toEqual([
+      'ack-0:start',
+      'ack-1:start',
+      'ack-2:start',
+      'ack-0:end',
+      'normal:start',
+    ]);
+    expect(scheduler.snapshot).toMatchObject({
+      ackInflight: 2,
+      ackQueued: 3,
+      normalInflight: 1,
+      normalQueued: 0,
+    });
+
+    normalGate.resolve();
+    for (const gate of ackGates) gate.resolve();
+    await expect(Promise.all([...ackWork, normal])).resolves.toHaveLength(7);
+  });
+
+  it('preserves normal and background floors at the default-like concurrency', async () => {
+    const scheduler = new StorePriorityScheduler(8, 1, undefined, 1);
+    const events: string[] = [];
+    const ackGates = Array.from({ length: 10 }, deferred);
+    const ackWork = ackGates.map((gate, index) => scheduler.run(
+      'ack',
+      `storage-ack.${index}`,
+      async () => {
+        events.push(`ack-${index}:start`);
+        await gate.promise;
+        events.push(`ack-${index}:end`);
+        return `ack-${index}`;
+      },
+    ));
+    const normalGate = deferred();
+    const normal = scheduler.run('normal', 'publish.lifecycle-tail', async () => {
+      events.push('normal:start');
+      await normalGate.promise;
+      events.push('normal:end');
+      return 'normal';
+    });
+    const backgroundGate = deferred();
+    const background = scheduler.run('background', 'sync.catch-up', async () => {
+      events.push('background:start');
+      await backgroundGate.promise;
+      events.push('background:end');
+      return 'background';
+    });
+    await tick();
+
+    ackGates[0].resolve();
+    await tick();
+    expect(events.at(-1)).toBe('background:start');
+    expect(scheduler.snapshot).toMatchObject({
+      ackInflight: 7,
+      ackQueued: 2,
+      normalQueued: 1,
+      backgroundInflight: 1,
+      backgroundReservedSlots: 1,
+    });
+
+    ackGates[1].resolve();
+    await tick();
+    expect(events.at(-1)).toBe('normal:start');
+    expect(scheduler.snapshot).toMatchObject({
+      ackInflight: 6,
+      ackQueued: 2,
+      normalInflight: 1,
+      backgroundInflight: 1,
+      ackReservedSlots: 1,
+      backgroundReservedSlots: 1,
+    });
+
+    normalGate.resolve();
+    backgroundGate.resolve();
+    for (const gate of ackGates) gate.resolve();
+    await expect(Promise.all([...ackWork, normal, background])).resolves.toHaveLength(12);
+  });
+
+  it('keeps the ACK reserve work-conserving when non-ACK capacity is full', async () => {
+    const scheduler = new StorePriorityScheduler(3, 1, undefined, 1);
+    const events: string[] = [];
+    const normalGates = [deferred(), deferred()];
+    const normalWork = normalGates.map((gate, index) => scheduler.run(
+      'normal',
+      `query.${index}`,
+      async () => {
+        events.push(`normal-${index}:start`);
+        await gate.promise;
+        return `normal-${index}`;
+      },
+    ));
+    const backgroundGate = deferred();
+    const background = scheduler.run('background', 'sync.catch-up', async () => {
+      events.push('background:start');
+      await backgroundGate.promise;
+      return 'background';
+    });
+    const ackGate = deferred();
+    const ack = scheduler.run('ack', 'storage-ack.persist', async () => {
+      events.push('ack:start');
+      await ackGate.promise;
+      return 'ack';
+    });
+    await tick();
+
+    expect(events).toEqual(['normal-0:start', 'normal-1:start', 'ack:start']);
+    expect(scheduler.snapshot).toMatchObject({
+      ackInflight: 1,
+      normalInflight: 2,
+      backgroundInflight: 0,
+      backgroundQueued: 1,
+    });
+
+    normalGates[0].resolve();
+    await tick();
+    expect(events.at(-1)).toBe('background:start');
+
+    ackGate.resolve();
+    backgroundGate.resolve();
+    for (const gate of normalGates) gate.resolve();
+    await expect(Promise.all([...normalWork, background, ack])).resolves.toHaveLength(4);
+  });
+
+  it('alternates ACK and normal progress when only one slot exists', async () => {
+    const scheduler = new StorePriorityScheduler(1, 1);
+    const events: string[] = [];
+    const ackGates = [deferred(), deferred()];
+    const normalGates = [deferred(), deferred()];
+    const ackWork = ackGates.map((gate, index) => scheduler.run(
+      'ack',
+      `storage-ack.${index}`,
+      async () => {
+        events.push(`ack-${index}:start`);
+        await gate.promise;
+        return `ack-${index}`;
+      },
+    ));
+    const normalWork = normalGates.map((gate, index) => scheduler.run(
+      'normal',
+      `publish.tail.${index}`,
+      async () => {
+        events.push(`normal-${index}:start`);
+        await gate.promise;
+        return `normal-${index}`;
+      },
+    ));
+    await tick();
+
+    expect(events).toEqual(['ack-0:start']);
+    expect(scheduler.snapshot).toMatchObject({
+      ackInflight: 1,
+      ackQueued: 1,
+      normalQueued: 2,
+      ackReservedSlots: 0,
+    });
+
+    ackGates[0].resolve();
+    await tick();
+    expect(events.at(-1)).toBe('normal-0:start');
+
+    normalGates[0].resolve();
+    await tick();
+    expect(events.at(-1)).toBe('ack-1:start');
+
+    ackGates[1].resolve();
+    await tick();
+    expect(events.at(-1)).toBe('normal-1:start');
+
+    normalGates[1].resolve();
+    await expect(Promise.all([...ackWork, ...normalWork])).resolves.toHaveLength(4);
   });
 
   it('reserves a non-ACK slot for queued background work behind normal traffic', async () => {
