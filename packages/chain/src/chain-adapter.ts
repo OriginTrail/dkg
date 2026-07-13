@@ -158,24 +158,55 @@ export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = { mode: 'per-publish' };
 export const DEFAULT_REPLENISH_TARGET_ALLOWANCE: bigint = 1000n * (10n ** 18n);
 export const DEFAULT_REFILL_BELOW_FRACTION: number = 0.1;
 
-/**
- * Maximum time the EVM adapter awaits a V10 pre-broadcast write-ahead hook.
- * Exceeding this deadline fails closed: the signed transaction is not sent.
- */
+/** Maximum wait for a cooperatively abort-aware V10 write-ahead hook. */
 export const V10_WRITE_AHEAD_HOOK_TIMEOUT_MS = 30_000;
+
+const V10_ABORT_AWARE_CALLBACK = Symbol.for(
+  '@origintrail-official/dkg-chain/v10-abort-aware-callback',
+);
+
+/**
+ * Opt a callback into bounded V10 write-ahead cancellation.
+ *
+ * Only brand a callback when it passes the supplied AbortSignal through every
+ * awaited persistence operation and refuses all late side effects after the
+ * signal aborts. Wrappers may carry the brand only when every delegated
+ * callback provides the same guarantee. Unbranded callbacks retain the legacy
+ * await-to-completion contract so the adapter never abandons a transaction
+ * while an older hook can still persist its WAL record.
+ */
+export function markV10AbortAwareCallback<T extends V10WriteAheadHook>(callback: T): T {
+  Object.defineProperty(callback, V10_ABORT_AWARE_CALLBACK, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  return callback;
+}
+
+/** True only for callbacks that explicitly opted into cooperative abort. */
+export function isV10AbortAwareCallback(callback: unknown): boolean {
+  return typeof callback === 'function'
+    && Reflect.get(callback, V10_ABORT_AWARE_CALLBACK) === true;
+}
 
 /**
  * Context for the V10 pre-broadcast durability hook.
  *
- * The EVM adapter aborts `signal` before rejecting a hook that exceeds
- * {@link V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}. Hook implementations must pass the
- * signal through to cancellable persistence work and refuse late mutations
- * after it is aborted: the associated transaction will not be broadcast.
+ * Hooks explicitly branded with {@link markV10AbortAwareCallback} are aborted
+ * before the adapter rejects a call that exceeds
+ * {@link V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}. Unbranded compatibility hooks see a
+ * live signal but are awaited without that deadline.
  */
 export interface V10WriteAheadHookInfo {
   txHash: string;
   signal: AbortSignal;
 }
+
+export type V10WriteAheadHook = (
+  info: V10WriteAheadHookInfo,
+) => Promise<void> | void;
 
 /** Canonical greenfield UAL: did:dkg:{chainId}/{DKGKnowledgeAssets}/{kaId} */
 export function buildKnowledgeAssetUal(
@@ -703,10 +734,12 @@ export interface V10PublishParams {
    * `eth_sendRawTransaction`. Adapters MUST await the hook — `() => void`
    * alone does not force synchronous callers in TypeScript, so an async hook
    * would otherwise race the broadcast. The EVM adapter enforces
-   * {@link V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}; a hook that misses that deadline
-   * rejects the operation and the transaction remains unbroadcast.
+   * {@link V10_WRITE_AHEAD_HOOK_TIMEOUT_MS} only for callbacks that explicitly
+   * opt into cooperative cancellation with
+   * {@link markV10AbortAwareCallback}. Existing unbranded callbacks remain
+   * awaited to completion before broadcast.
    */
-  onBroadcast?: (info: V10WriteAheadHookInfo) => Promise<void> | void;
+  onBroadcast?: V10WriteAheadHook;
 }
 
 export interface V10UpdateKAParams {
@@ -757,7 +790,7 @@ export interface V10UpdateKAParams {
    * {@link V10PublishParams.onBroadcast} for full semantics
    * (fail-closed contract, exactly-once, Promise return, etc.).
    */
-  onBroadcast?: (info: V10WriteAheadHookInfo) => Promise<void> | void;
+  onBroadcast?: V10WriteAheadHook;
 }
 
 /**

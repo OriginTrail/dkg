@@ -14,7 +14,12 @@
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
-import { DEFAULT_APPROVAL_POLICY, V10_WRITE_AHEAD_HOOK_TIMEOUT_MS, buildEvmDeploymentId } from './chain-adapter.js';
+import {
+  DEFAULT_APPROVAL_POLICY,
+  V10_WRITE_AHEAD_HOOK_TIMEOUT_MS,
+  buildEvmDeploymentId,
+  isV10AbortAwareCallback,
+} from './chain-adapter.js';
 import type {
   ApprovalPolicy,
   V10PublishParams,
@@ -93,6 +98,19 @@ async function runV10WriteAheadHook(
   txHash: string,
 ): Promise<void> {
   const abortController = new AbortController();
+  const hookPromise = Promise.resolve().then(() => hook({
+    txHash,
+    signal: abortController.signal,
+  }));
+  // Existing hooks predate AbortSignal and may persist after any attempted
+  // timeout. Await them to completion so a successful WAL write is always
+  // followed by the matching broadcast. Only explicitly cooperative hooks
+  // may be abandoned safely.
+  if (!isV10AbortAwareCallback(hook)) {
+    await hookPromise;
+    return;
+  }
+
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
@@ -106,7 +124,7 @@ async function runV10WriteAheadHook(
   });
   try {
     await Promise.race([
-      Promise.resolve().then(() => hook({ txHash, signal: abortController.signal })),
+      hookPromise,
       deadline,
     ]);
   } finally {
@@ -1655,8 +1673,9 @@ export class EVMChainAdapterBase {
    * The lane only owns FIFO admission; the nonce-critical work remains direct
    * local control flow here so its ordering and failure boundaries are visible.
    * `onBroadcast` is the durable WAL checkpoint: it `await`s before broadcast
-   * and a throw/timeout fails closed (the signed tx is still local, never sent,
-   * so the caller can retry with no on-chain effect).
+   * and a throw fails closed. Explicitly abort-aware hooks also fail closed on
+   * timeout; unbranded compatibility hooks are awaited to completion so they
+   * cannot persist a late WAL record for an abandoned transaction.
    */
   protected async dispatchSerializedV10Write(
     signer: Wallet,

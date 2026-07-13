@@ -14,7 +14,10 @@ import {
   encodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  EVMChainAdapter,
+  isV10AbortAwareCallback,
+} from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 import { ethers } from 'ethers';
@@ -434,6 +437,9 @@ describe('Phase-sequence contracts', () => {
 
       (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => Promise<void> | void }) => Promise<never> }).createKnowledgeAssets =
         async (params) => {
+          // The emitter awaits an arbitrary public onPhase listener, so it
+          // must retain legacy await-to-completion semantics by default.
+          expect(isV10AbortAwareCallback(params.onBroadcast)).toBe(false);
           await Promise.all([params.onBroadcast?.(), params.onBroadcast?.()]);
           throw new Error('simulated publish broadcast failure');
         };
