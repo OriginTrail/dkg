@@ -49,13 +49,16 @@ export async function rotateDaemonLogIfNeeded(
   const handle = await open(logFile, 'r');
   let bytesRead = 0;
   try {
-    const result = await handle.read(
-      buffer,
-      0,
-      bytesToRead,
-      before.size - bytesToRead,
-    );
-    bytesRead = result.bytesRead;
+    while (bytesRead < bytesToRead) {
+      const result = await handle.read(
+        buffer,
+        bytesRead,
+        bytesToRead - bytesRead,
+        before.size - bytesToRead + bytesRead,
+      );
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
   } finally {
     await handle.close();
   }
