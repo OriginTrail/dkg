@@ -23,7 +23,7 @@
  * matching the Blazegraph-Docker provisioner's contract.
  */
 import { join } from 'node:path';
-import { MANAGED_DAEMON_STORE_BACKEND } from '@origintrail-official/dkg-storage';
+import { MANAGED_DAEMON_STORE_BACKEND } from '../store-backends.js';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
   startOxigraphServer,

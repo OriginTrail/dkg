@@ -1,27 +1,30 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  DEFAULT_DAEMON_STORE_BACKEND,
-  MANAGED_DAEMON_STORE_BACKEND,
-  STORE_BACKENDS,
+  STORAGE_ADAPTERS,
   classifyTripleStoreBackend,
   customTripleStoreBackend,
   isExternalBackend,
-  isManagedLocalBackend,
-  isRetiredStoreBackend,
   isStorageAdapterBackend,
-  storeBackendNames,
-  type KnownStoreBackend,
+  storageAdapterNames,
 } from '@origintrail-official/dkg-storage';
 import { validateStoreConfig, type DkgConfig } from '../src/config.js';
 import {
+  DEFAULT_DAEMON_STORE_BACKEND,
+  MANAGED_DAEMON_STORE_BACKEND,
+  STORE_BACKENDS,
+  isManagedLocalBackend,
+  isRetiredStoreBackend,
   menuBackendChoices,
+  requireStorageAdapterBackend,
+  storeBackendNames,
   supportedBackendNames,
+  type StoreBackend,
 } from '../src/store-backends.js';
 import { checkExternalStoreReachable } from '../src/daemon/store-health-check.js';
 import { planManagedOxigraph } from '../src/daemon/oxigraph-managed.js';
 import { storeBackendHasStatusHealth } from '../src/daemon/routes/status.js';
 
-function configForBackend(backend: KnownStoreBackend): DkgConfig {
+function configForBackend(backend: StoreBackend): DkgConfig {
   const policy = STORE_BACKENDS[backend];
   const options = policy.kind === 'external'
     ? { [policy.queryEndpointOption]: 'http://store.test/query' }
@@ -44,8 +47,8 @@ describe('canonical store backend taxonomy', () => {
       const policy = STORE_BACKENDS[backend];
       const errors = validateStoreConfig(configForBackend(backend));
 
-      expect((supported as readonly KnownStoreBackend[]).includes(backend), backend).toBe(!policy.retired);
-      expect((menu as readonly KnownStoreBackend[]).includes(backend), backend).toBe(!policy.retired && policy.menu);
+      expect((supported as readonly StoreBackend[]).includes(backend), backend).toBe(!policy.retired);
+      expect((menu as readonly StoreBackend[]).includes(backend), backend).toBe(!policy.retired && policy.menu);
       expect(errors.some((error) => error.field === 'store.backend'), backend).toBe(policy.retired);
       if (!policy.retired) expect(errors, backend).toEqual([]);
       if (policy.menu) expect('label' in policy && policy.label.length > 0, backend).toBe(true);
@@ -63,7 +66,7 @@ describe('canonical store backend taxonomy', () => {
       expect(isRetiredStoreBackend(backend), backend).toBe(policy.retired);
       expect(isStorageAdapterBackend(backend), backend).toBe(policy.adapter);
       expect(classifyTripleStoreBackend(backend).kind, backend).toBe(
-        policy.retired ? 'retired' : policy.adapter ? 'adapter' : 'managed-local',
+        policy.adapter ? 'adapter' : 'custom',
       );
       expect(storeBackendHasStatusHealth(backend), backend).toBe(external || managed);
       expect(planManagedOxigraph(configForBackend(backend), '/data') !== null, backend).toBe(managed);
@@ -87,12 +90,30 @@ describe('canonical store backend taxonomy', () => {
     });
   });
 
+  it('composes daemon policy over the storage-owned adapter registry', () => {
+    expect(storageAdapterNames()).toEqual([
+      'oxigraph',
+      'oxigraph-persistent',
+      'blazegraph',
+      'sparql-http',
+    ]);
+    expect(storageAdapterNames()).not.toContain('oxigraph-server');
+    expect(storageAdapterNames()).not.toContain('oxigraph-worker');
+    for (const backend of storageAdapterNames()) {
+      expect(STORE_BACKENDS[backend]).toMatchObject(STORAGE_ADAPTERS[backend]);
+      expect(requireStorageAdapterBackend(backend)).toBe(backend);
+    }
+    expect(() => requireStorageAdapterBackend('oxigraph-server')).toThrow(
+      /not a constructible storage adapter/,
+    );
+  });
+
   it('requires an explicit custom-backend escape hatch outside the known registry', () => {
     const backend = customTripleStoreBackend('vendor-plugin-store');
     expect(classifyTripleStoreBackend(backend)).toEqual({
       kind: 'custom',
       backend: 'vendor-plugin-store',
     });
-    expect(() => customTripleStoreBackend('oxigraph')).toThrow(/known triple-store backend/i);
+    expect(() => customTripleStoreBackend('oxigraph')).toThrow(/known triple-store adapter/i);
   });
 });

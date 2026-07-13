@@ -320,33 +320,29 @@ describe('createTripleStore factory', () => {
     ).rejects.toThrow('queryEndpoint');
   });
 
-  it('rejects the retired oxigraph-worker backend with an actionable message', async () => {
-    await expect(createTripleStore({ backend: 'oxigraph-worker' })).rejects.toThrow(
-      /no longer supported/,
-    );
-  });
-
   it('throws on unknown backend', async () => {
     await expect(createTripleStore({ backend: customTripleStoreBackend('unknown') })).rejects.toThrow(
       'Unknown TripleStore backend',
     );
   });
 
-  it('classifies factory adapters separately from managed and retired daemon names', async () => {
+  it('classifies only factory adapters and leaves daemon policy names outside storage', async () => {
     expect(classifyTripleStoreBackend('oxigraph')).toEqual({
       kind: 'adapter',
       backend: 'oxigraph',
     });
     expect(classifyTripleStoreBackend('oxigraph-server')).toEqual({
-      kind: 'managed-local',
+      kind: 'custom',
       backend: 'oxigraph-server',
     });
     expect(classifyTripleStoreBackend('oxigraph-worker')).toEqual({
-      kind: 'retired',
+      kind: 'custom',
       backend: 'oxigraph-worker',
     });
-    await expect(createTripleStore({ backend: 'oxigraph-server' })).rejects.toThrow(
-      /daemon-managed config backend.*not a constructible storage adapter/,
+    await expect(createTripleStore({
+      backend: customTripleStoreBackend('oxigraph-server'),
+    })).rejects.toThrow(
+      /Unknown TripleStore backend/,
     );
   });
 

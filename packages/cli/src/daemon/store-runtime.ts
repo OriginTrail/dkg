@@ -4,7 +4,7 @@ import {
   DEFAULT_DAEMON_STORE_BACKEND,
   isManagedLocalBackend,
   isRetiredStoreBackend,
-} from '@origintrail-official/dkg-storage';
+} from '../store-backends.js';
 import type { DkgConfig } from '../config.js';
 import { readPersistedStoreBackend } from './daemon-state.js';
 import type { ManagedOxigraphResult } from './oxigraph-managed.js';
@@ -47,6 +47,16 @@ export interface DaemonStoreRuntimePlan extends DaemonStoreBootPlan {
   runtimeConfig: DkgConfig;
   runtimeLargeLiteralStorage: DkgConfig['largeLiteralStorage'];
   runtimeSnapshotStorage: DkgConfig['sharedMemoryPublicSnapshotStorage'];
+}
+
+/** Explicit store views threaded into request routing after startup. */
+export interface StoreRuntimeContext {
+  /** Persisted/operator intent. Routes that save config must use this view. */
+  operatorConfig: DkgConfig;
+  /** Daemon-facing backend after defaults and acknowledged migrations. */
+  effectiveStore: StoreConfig;
+  /** Constructible live adapter config after managed-store materialization. */
+  runtimeStore: StoreConfig;
 }
 
 export function resolveEffectiveDaemonStore(config: Pick<DkgConfig, 'store'>): StoreConfig {

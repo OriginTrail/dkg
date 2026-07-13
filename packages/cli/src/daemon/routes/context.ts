@@ -23,6 +23,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
+import type { StoreRuntimeContext } from '../store-runtime.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -62,6 +63,9 @@ export interface RequestContext {
   publisherRuntime: PublisherRuntime | null;
   /** Lifecycle-owned publisher state; optional for direct route embeddings/tests. */
   publisherAvailability?: AsyncPublisherAvailability;
+  /** Explicit operator/effective/live store views; never infer these from config. */
+  storeRuntime: StoreRuntimeContext;
+  /** Operator config retained for non-store route settings and persistence. */
   config: DkgConfig;
   startedAt: number;
   dashDb: DashboardDB;

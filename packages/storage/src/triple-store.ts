@@ -19,12 +19,9 @@ import {
 } from './changelog-store.js';
 import {
   classifyTripleStoreBackend,
-  getStoreBackendPolicy,
+  getStorageAdapterPolicy,
   isExternalBackend,
   type CustomTripleStoreBackend,
-  type KnownStoreBackend,
-  type ManagedLocalStoreBackend,
-  type RetiredStoreBackend,
   type StorageAdapterBackend,
 } from './store-backends.js';
 
@@ -187,12 +184,7 @@ export type TripleStoreBackend = StorageAdapterBackend | CustomTripleStoreBacken
 /** Explicitly cross from stringly daemon/user config into the factory model. */
 export function toTripleStoreBackend(backend: string): TripleStoreBackend {
   const classification = classifyTripleStoreBackend(backend);
-  if (classification.kind === 'adapter' || classification.kind === 'custom') {
-    return classification.backend;
-  }
-  throw new Error(
-    `Daemon store backend "${backend}" is not a constructible TripleStore adapter`,
-  );
+  return classification.backend;
 }
 
 // The canonical backend taxonomy governs three pieces of daemon behaviour:
@@ -233,7 +225,7 @@ export function getSparqlEndpoint(storeConfig: SparqlEndpointStoreConfig): Sparq
     );
   }
   const opts = (storeConfig.options ?? {}) as Record<string, unknown>;
-  const policy = getStoreBackendPolicy(storeConfig.backend);
+  const policy = getStorageAdapterPolicy(storeConfig.backend);
   if (!policy || policy.kind !== 'external') {
     throw new Error(`No external-store policy found for "${storeConfig.backend}"`);
   }
@@ -280,13 +272,7 @@ export interface TripleStoreConfig {
   changelog?: boolean | ChangelogStoreOptions;
 }
 
-export type NonConstructibleTripleStoreConfig = Omit<TripleStoreConfig, 'backend'> & {
-  backend: ManagedLocalStoreBackend | RetiredStoreBackend;
-};
-
-export type TripleStoreFactoryConfig =
-  | TripleStoreConfig
-  | NonConstructibleTripleStoreConfig;
+export type TripleStoreFactoryConfig = TripleStoreConfig;
 
 type AdapterFactory = (
   options?: Record<string, unknown>,
@@ -297,37 +283,14 @@ const adapterRegistry = new Map<string, AdapterFactory>();
 export function registerTripleStoreAdapter<Backend extends string>(
   name: Backend,
   factory: AdapterFactory,
-): Backend extends KnownStoreBackend ? Backend : CustomTripleStoreBackend {
-  const classification = classifyTripleStoreBackend(name);
-  if (classification.kind === 'retired' || classification.kind === 'managed-local') {
-    throw new Error(
-      `Cannot register non-adapter daemon backend "${name}" as a TripleStore adapter`,
-    );
-  }
+): Backend extends StorageAdapterBackend ? Backend : CustomTripleStoreBackend {
   adapterRegistry.set(name, factory);
-  return name as Backend extends KnownStoreBackend ? Backend : CustomTripleStoreBackend;
+  return name as Backend extends StorageAdapterBackend ? Backend : CustomTripleStoreBackend;
 }
 
 export async function createTripleStore(
   config: TripleStoreFactoryConfig,
 ): Promise<TripleStore> {
-  const classification = classifyTripleStoreBackend(config.backend);
-  if (classification.kind === 'retired') {
-    throw new Error(
-      `TripleStore backend "${config.backend}" is no longer supported. ` +
-        'Use the daemon-managed "oxigraph-server" config, an external ' +
-        '"sparql-http"/"blazegraph" store, or "oxigraph-persistent" for ' +
-        'local embedded persistence.',
-    );
-  }
-  if (classification.kind === 'managed-local') {
-    throw new Error(
-      `TripleStore backend "${config.backend}" is a daemon-managed config backend, ` +
-        'not a constructible storage adapter. Materialize it to "sparql-http" ' +
-        'through daemon startup before calling createTripleStore.',
-    );
-  }
-  const constructibleConfig = config as TripleStoreConfig;
   const factory = adapterRegistry.get(config.backend);
   if (!factory) {
     throw new Error(
@@ -335,16 +298,16 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
-  const store = await factory(resolveAdapterOptions(constructibleConfig));
-  const largeLiteralStorage = resolveLargeLiteralStorageOptions(constructibleConfig);
+  const store = await factory(resolveAdapterOptions(config));
+  const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
     : store;
-  const withGraphSetIndex = wrapGraphSetIndex(withLargeLiteralStorage, constructibleConfig);
+  const withGraphSetIndex = wrapGraphSetIndex(withLargeLiteralStorage, config);
   // Changelog is the OUTERMOST decorator: it observes logical mutations first,
   // reuses the graph-set index's fast listGraphs() for reconcile, and hides its
   // own reserved graph from everything above.
-  return wrapChangelog(withGraphSetIndex, constructibleConfig);
+  return wrapChangelog(withGraphSetIndex, config);
 }
 
 function wrapChangelog(store: TripleStore, config: TripleStoreConfig): TripleStore {
