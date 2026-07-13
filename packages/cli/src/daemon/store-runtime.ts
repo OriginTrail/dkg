@@ -1,5 +1,10 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  DEFAULT_STORE_BACKEND,
+  isManagedLocalBackend,
+  isRetiredStoreBackend,
+} from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
 import { readPersistedStoreBackend } from './chain-reset-wipe.js';
 import type { ManagedOxigraphResult } from './oxigraph-managed.js';
@@ -45,7 +50,7 @@ export interface DaemonStoreRuntimePlan extends DaemonStoreBootPlan {
 }
 
 export function resolveEffectiveDaemonStore(config: Pick<DkgConfig, 'store'>): StoreConfig {
-  return config.store ?? { backend: 'oxigraph-server', options: {} };
+  return config.store ?? { backend: DEFAULT_STORE_BACKEND, options: {} };
 }
 
 export function resolveDaemonStoreBootPlan(opts: {
@@ -56,33 +61,33 @@ export function resolveDaemonStoreBootPlan(opts: {
   const { config, dataDir, acceptStoreReset } = opts;
   const legacyStorePath = join(dataDir, 'store.nq');
   const legacyStoreExists = existsSync(legacyStorePath);
-  const legacyWorkerConfigured = config.store?.backend === 'oxigraph-worker';
-  const configuredForManagedServer = !config.store || config.store.backend === 'oxigraph-server';
+  const retiredStoreConfigured = isRetiredStoreBackend(config.store?.backend);
+  const configuredForManagedServer = !config.store || isManagedLocalBackend(config.store.backend);
   const previousBackend = readPersistedStoreBackend(dataDir);
-  const legacyCutoverAlreadyRecorded = previousBackend === 'oxigraph-server';
+  const legacyCutoverAlreadyRecorded = isManagedLocalBackend(previousBackend);
   const legacyCutoverRequired = legacyStoreExists
-    && (configuredForManagedServer || legacyWorkerConfigured)
+    && (configuredForManagedServer || retiredStoreConfigured)
     && !legacyCutoverAlreadyRecorded;
-  const migrateAcknowledgedWorker = legacyWorkerConfigured
+  const migrateAcknowledgedRetiredStore = retiredStoreConfigured
     && legacyCutoverRequired
     && acceptStoreReset;
-  const effectiveStore = migrateAcknowledgedWorker
+  const effectiveStore = migrateAcknowledgedRetiredStore
     ? resolveEffectiveDaemonStore({})
     : resolveEffectiveDaemonStore(config);
-  const effectiveConfig = config.store && !migrateAcknowledgedWorker
+  const effectiveConfig = config.store && !migrateAcknowledgedRetiredStore
     ? config
     : { ...config, store: effectiveStore };
 
   // A retired worker config with no legacy data has no migration decision to
   // make. Keep that state separate so callers cannot accidentally continue to
   // managed startup with an invalid operator config.
-  if (legacyWorkerConfigured && !legacyCutoverRequired) {
+  if (retiredStoreConfigured && !legacyCutoverRequired) {
     return { kind: 'invalid-config', operatorConfig: config };
   }
 
   if (legacyCutoverRequired && !acceptStoreReset) {
-    const legacySource = legacyWorkerConfigured
-      ? 'worker backend'
+    const legacySource = retiredStoreConfigured
+      ? `${config.store?.backend} backend`
       : config.store
         ? 'worker-backed store'
         : 'implicit worker default';
@@ -100,8 +105,8 @@ export function resolveDaemonStoreBootPlan(opts: {
 
   let notice: string | undefined;
   if (legacyCutoverRequired && acceptStoreReset) {
-    notice = legacyWorkerConfigured
-      ? '[STORE] explicit oxigraph-worker is retired; using oxigraph-server after reset acknowledgement. Legacy store.nq is left untouched.'
+    notice = retiredStoreConfigured
+      ? `[STORE] explicit ${config.store?.backend} is retired; using oxigraph-server after reset acknowledgement. Legacy store.nq is left untouched.`
       : '[STORE] using oxigraph-server after reset acknowledgement. Legacy store.nq is left untouched.';
   } else if (!config.store && acceptStoreReset) {
     notice =

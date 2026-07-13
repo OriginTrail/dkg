@@ -57,7 +57,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { isExternalBackend } from '@origintrail-official/dkg-storage';
+import { isExternalBackend, isManagedLocalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { resolveEffectiveDaemonStore } from '../store-runtime.js';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -421,6 +421,10 @@ export function invalidateExternalStoreQuadsCache(): void {
   storeQuadsInflight = null;
 }
 
+export function storeBackendHasStatusHealth(backend: string | undefined): boolean {
+  return isExternalBackend(backend) || isManagedLocalBackend(backend);
+}
+
 async function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
@@ -680,7 +684,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
               : null;
             return url;
           })()
-        : effectiveStore.backend === 'oxigraph-server'
+        : isManagedLocalBackend(effectiveStore.backend)
           // Managed local server: report its loopback endpoint so `dkg status`
           // renders the external-store health path (storeQuads/unreachable)
           // instead of printing it like a quad-less local store.
@@ -696,7 +700,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // failed query here is how operators see the managed server is down
       // (e.g. after a failed revive) instead of it always looking healthy.
       storeQuads:
-        isExternalBackend(effectiveStore.backend) || effectiveStore.backend === 'oxigraph-server'
+        storeBackendHasStatusHealth(effectiveStore.backend)
           ? await getCachedExternalStoreQuads(agent, Date.now())
           : null,
       uptimeMs: Date.now() - startedAt,

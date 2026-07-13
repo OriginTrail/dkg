@@ -17,6 +17,14 @@ import {
   ChangelogStore,
   type ChangelogStoreOptions,
 } from './changelog-store.js';
+import {
+  getStoreBackendPolicy,
+  isExternalBackend,
+  isRetiredStoreBackend,
+  type StoreBackend,
+} from './store-backends.js';
+
+export { isExternalBackend } from './store-backends.js';
 
 export interface Quad {
   subject: string;
@@ -166,11 +174,9 @@ export async function tryUpdateWithTouchedGraphs(
   return true;
 }
 
-export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'blazegraph' | 'sparql-http' | string;
+export type TripleStoreBackend = StoreBackend | string;
 
-// Backends that talk to a remote SPARQL endpoint over HTTP rather than
-// owning local files. The local/external split governs three pieces of
-// daemon behaviour:
+// The canonical backend taxonomy governs three pieces of daemon behaviour:
 //   1. Store-size metric — local backends report file bytes, external
 //      backends have no file to stat (`getStoreBytes` returns null).
 //   2. Chain-reset wipe — local backends `rm` files, external backends
@@ -181,12 +187,6 @@ export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'blazegrap
 //   3. Boot health check — for external backends, an ASK probe runs at
 //      daemon start; an unreachable endpoint exits the daemon with an
 //      actionable message rather than booting half-broken.
-const EXTERNAL_BACKENDS: ReadonlySet<string> = new Set(['blazegraph', 'sparql-http']);
-
-export function isExternalBackend(backend: string | undefined | null): boolean {
-  return typeof backend === 'string' && EXTERNAL_BACKENDS.has(backend);
-}
-
 /**
  * Shape-normalised SPARQL endpoint extracted from a TripleStoreConfig.
  *
@@ -209,27 +209,27 @@ export function getSparqlEndpoint(storeConfig: TripleStoreConfig): SparqlEndpoin
     );
   }
   const opts = (storeConfig.options ?? {}) as Record<string, unknown>;
-  if (storeConfig.backend === 'blazegraph') {
-    const url = typeof opts.url === 'string' ? opts.url : '';
-    if (!url) {
-      throw new Error('blazegraph storeConfig requires options.url');
-    }
-    return { queryUrl: url, updateUrl: url, headers: {} };
+  const policy = getStoreBackendPolicy(storeConfig.backend);
+  if (!policy || policy.kind !== 'external') {
+    throw new Error(`No external-store policy found for "${storeConfig.backend}"`);
   }
-  // sparql-http
-  const queryEndpoint = typeof opts.queryEndpoint === 'string' ? opts.queryEndpoint : '';
-  if (!queryEndpoint) {
-    throw new Error('sparql-http storeConfig requires options.queryEndpoint');
+  const queryOption = policy.queryEndpointOption;
+  const queryUrl = typeof opts[queryOption] === 'string' ? opts[queryOption] as string : '';
+  if (!queryUrl) {
+    throw new Error(`${storeConfig.backend} storeConfig requires options.${queryOption}`);
   }
-  const updateEndpoint =
-    typeof opts.updateEndpoint === 'string' && opts.updateEndpoint
-      ? opts.updateEndpoint
-      : queryEndpoint;
+  const updateOption = policy.updateEndpointOption;
+  const updateUrl = typeof opts[updateOption] === 'string' && opts[updateOption]
+    ? opts[updateOption] as string
+    : queryUrl;
   const headers: Record<string, string> = {};
-  if (typeof opts.auth === 'string' && opts.auth) {
-    headers['Authorization'] = opts.auth;
+  if ('authOption' in policy) {
+    const auth = opts[policy.authOption];
+    if (typeof auth === 'string' && auth) {
+      headers.Authorization = auth;
+    }
   }
-  return { queryUrl: queryEndpoint, updateUrl: updateEndpoint, headers };
+  return { queryUrl, updateUrl, headers };
 }
 
 export interface LargeLiteralStorageConfig {
@@ -272,9 +272,9 @@ export function registerTripleStoreAdapter(
 export async function createTripleStore(
   config: TripleStoreConfig,
 ): Promise<TripleStore> {
-  if (config.backend === 'oxigraph-worker') {
+  if (isRetiredStoreBackend(config.backend)) {
     throw new Error(
-      'TripleStore backend "oxigraph-worker" is no longer supported. ' +
+      `TripleStore backend "${config.backend}" is no longer supported. ` +
         'Use the daemon-managed "oxigraph-server" config, an external ' +
         '"sparql-http"/"blazegraph" store, or "oxigraph-persistent" for ' +
         'local embedded persistence.',

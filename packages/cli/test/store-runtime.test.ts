@@ -114,7 +114,7 @@ describe('resolveDaemonStoreBootPlan', () => {
     if (blocked.kind !== 'blocked-legacy-cutover') {
       throw new Error(`Expected a blocked legacy cutover, got ${blocked.kind}`);
     }
-    expect(blocked.message).toContain('legacy store.nq from the old worker backend');
+    expect(blocked.message).toContain('legacy store.nq from the old oxigraph-worker backend');
 
     const acknowledged = resolveDaemonStoreBootPlan({ config, dataDir, acceptStoreReset: true });
     expectBootable(acknowledged);
