@@ -284,11 +284,14 @@ export interface DaemonStatusResponse {
   } | null;
   // Triple-store backend fields (RFC 120). For local backends only
   // `storeBackend` is meaningful; external backends additionally surface
-  // `storeUrl` and a TTL-cached `storeQuads` count. `null` when local /
-  // unreachable.
+  // `storeUrl` and a TTL-cached `storeQuads` count. `storeQuadsStatus`
+  // distinguishes an initial background refresh from an unreachable store.
+  // Older daemons omit the status; consumers should retain the legacy
+  // `null` = unreachable fallback in that case.
   storeBackend?: string;
   storeUrl?: string | null;
   storeQuads?: number | null;
+  storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
   // Concurrency admission control (PR #1209 limiter, surfaced by #1230):
   // inFlight = requests currently holding a slot, max = effective cap
   // (0 = disabled), rejectedTotal = cumulative 503-shed count since boot.
