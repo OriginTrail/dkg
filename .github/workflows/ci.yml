@@ -485,7 +485,7 @@ jobs:
             const metadata = JSON.parse(fs.readFileSync("blazegraph-image.json", "utf8"));
             if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
             if (!Number.isInteger(metadata.containerPort) || metadata.containerPort < 1 || metadata.containerPort > 65535) process.exit(1);
-            process.stdout.write(`${metadata.image.trim()}\t${metadata.containerPort}\n`);
+            process.stdout.write(metadata.image.trim() + "\t" + metadata.containerPort + "\n");
           ')"
           IFS=$'\t' read -r image container_port <<< "$runtime"
           if [[ -z "$image" || -z "$container_port" ]]; then
