@@ -1,5 +1,3 @@
-import { mapWithConcurrency } from '../map-with-concurrency.js';
-
 /** Shutdown-safe bounded scheduler: its active promise covers every started worker. */
 export class OutboxDrainer<T> {
   private active: Promise<void> | null = null;
@@ -41,16 +39,25 @@ export class OutboxDrainer<T> {
 
   private async drain(now: number): Promise<void> {
     const due = this.loadDue(now, this.options.batchSize).slice(0, this.options.batchSize);
-    const outcomes = await mapWithConcurrency(due, this.options.concurrency, async (entry) => {
-      if (this.stopping) return undefined;
-      try {
-        await this.processEntry(entry);
-        return undefined;
-      } catch (error) {
-        return error;
+    const failures: unknown[] = [];
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (!this.stopping) {
+        const index = cursor++;
+        if (index >= due.length) return;
+        try {
+          await this.processEntry(due[index]);
+        } catch (error) {
+          failures.push(error);
+        }
       }
-    });
-    const failures = outcomes.filter((error) => error !== undefined);
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(this.options.concurrency, due.length) },
+        () => worker(),
+      ),
+    );
     if (failures.length > 0) {
       throw new AggregateError(failures, `${failures.length} outbox retry worker(s) failed`);
     }

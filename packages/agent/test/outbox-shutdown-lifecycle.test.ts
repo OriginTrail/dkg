@@ -34,4 +34,38 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     await stopping;
     expect(stopNode).toHaveBeenCalledOnce();
   });
+
+  it('logs a failed outbox drain and continues network teardown', async () => {
+    const stopOutboxDrain = vi.fn(async () => { throw new Error('drain failed'); });
+    const stopNode = vi.fn(async () => {});
+    const closeStore = vi.fn(async () => {});
+    const warn = vi.fn();
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: null,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: stopNode },
+      store: { close: closeStore },
+      log: { warn },
+    });
+
+    await expect(agent.stop()).resolves.toBeUndefined();
+
+    expect(stopOutboxDrain).toHaveBeenCalledOnce();
+    expect(stopNode).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('outbox retry drain failed during shutdown: drain failed'),
+    );
+  });
 });

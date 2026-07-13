@@ -65,9 +65,15 @@ describe('OutboxDrainer', () => {
     const tick = drainer.tick(100);
     await new Promise((resolve) => setTimeout(resolve, 0));
     const stopping = drainer.stop();
+    let stopSettled = false;
+    void stopping.then(() => { stopSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(started).toEqual([1]);
+    expect(stopSettled).toBe(false);
     release();
-    await Promise.all([tick, stopping]);
+    await stopping;
+    expect(stopSettled).toBe(true);
+    await tick;
     expect(started).toEqual([1]);
   });
 

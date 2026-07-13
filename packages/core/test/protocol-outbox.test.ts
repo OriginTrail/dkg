@@ -6,6 +6,7 @@ import {
   ProtocolOutbox,
 } from '../src/protocol-outbox.js';
 import { RESPONSE_CACHE_BYTES } from '../src/messenger-types.js';
+import type { ProtocolOutboxEntry, ProtocolOutboxStore } from '../src/messenger-types.js';
 
 const PEER_A = '12D3KooWMilesPlaceholder';
 const PEER_B = '12D3KooWLexPlaceholder';
@@ -154,6 +155,42 @@ describe('ProtocolOutbox.due / peer presence', () => {
 
     expect(outbox.duePage(now, 1.9).map((entry) => entry.messageId)).toEqual(['a-first']);
     expect(outbox.duePage(now, Number.NaN).map((entry) => entry.messageId)).toEqual(['a-first', 'z-last']);
+  });
+
+  it('defensively sorts and caps a legacy store that ignores the page limit', () => {
+    const later: ProtocolOutboxEntry = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: 'later',
+      payload: PAYLOAD,
+      attempts: 1,
+      firstFailureAt: 2000,
+      lastAttemptAt: 2000,
+      nextAttemptAt: 7000,
+      lastError: 'e',
+    };
+    const earlier: ProtocolOutboxEntry = {
+      ...later,
+      messageId: 'earlier',
+      firstFailureAt: 1000,
+      lastAttemptAt: 1000,
+      nextAttemptAt: 6000,
+    };
+    const legacyStore: ProtocolOutboxStore = {
+      enqueue: () => earlier,
+      markDelivered: () => false,
+      hasEntry: () => true,
+      hasPendingFor: () => true,
+      // Deliberately ignores limit and returns the page out of order.
+      due: () => [later, earlier],
+      dropExpired: () => [],
+      size: () => 2,
+      list: () => [later, earlier],
+      getEntry: () => undefined,
+    };
+
+    expect(new ProtocolOutbox(legacyStore).duePage(10_000, 1).map((entry) => entry.messageId))
+      .toEqual(['earlier']);
   });
 
   it('hasPendingFor tracks peer rows without exposing a reconnect drain snapshot', () => {
