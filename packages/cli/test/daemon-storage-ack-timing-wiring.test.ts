@@ -153,6 +153,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         rpcUrl: 'https://private-rpc.example',
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'evm:100',
+        receiptTimeoutMs: 1_200_000,
       },
       ...configOverrides,
     } as any, Date.now())).rejects.toThrow('after-agent-create');
@@ -295,6 +296,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         rpcUrl: 'https://private-rpc.example',
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'evm:100',
+        receiptTimeoutMs: 1_200_000,
       },
     } as any, Date.now());
 
@@ -308,6 +310,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     }));
 
     const startupArg = mocks.startPublisherRuntimeIfEnabled.mock.calls[0]?.[0] as any;
+    expect(startupArg.chainBase).toMatchObject({ receiptTimeoutMs: 1_200_000 });
     const transport = startupArg.ackTransportFactory();
 
     await expect(transport.sendP2P('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);

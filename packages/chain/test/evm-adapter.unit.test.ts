@@ -27,7 +27,7 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
-import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { normalizeReceiptTimeoutMs, RPC_READ_STALL_TIMEOUT_MS, RPC_RECEIPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -36,6 +36,11 @@ import { connectable } from './connectable.js';
 // failover-log lines are observed against a clean slate (otReviewAgent #1329).
 beforeEach(() => {
   _resetRpcFailoverStatsForTest();
+});
+
+it('defaults an omitted receipt deadline to ten minutes', () => {
+  expect(normalizeReceiptTimeoutMs(undefined)).toBe(600_000);
+  expect(RPC_RECEIPT_TIMEOUT_MS).toBe(600_000);
 });
 
 describe('EVMChainAdapter getIdentityIdForAddress cache', () => {

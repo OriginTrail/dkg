@@ -68,34 +68,7 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
-  type ApprovalPolicy,
-  type EVMAdapterConfig,
 } from '@origintrail-official/dkg-chain';
-
-type RuntimeEvmChainConfig = Pick<
-  EVMAdapterConfig,
-  | 'rpcUrl' | 'rpcUrls' | 'walletRpcUrls' | 'hubAddress' | 'tokenAddress'
-  | 'chainId' | 'receiptTimeoutMs' | 'approvalPolicy' | 'cgRegistryScanPageSize'
-  | 'minPublisherNativeWei' | 'minPublisherTracWei'
->;
-
-/** One projection shared by daemon-agent and async-publisher adapter creation. */
-function projectRuntimeEvmChainConfig(chain: ResolvedChainConfig | undefined): RuntimeEvmChainConfig | undefined {
-  if (!chain?.rpcUrl || !chain.hubAddress) return undefined;
-  return {
-    rpcUrl: chain.rpcUrl,
-    rpcUrls: chain.rpcUrls,
-    walletRpcUrls: chain.walletRpcUrls,
-    hubAddress: chain.hubAddress,
-    tokenAddress: chain.tokenAddress,
-    chainId: chain.chainId,
-    receiptTimeoutMs: chain.receiptTimeoutMs,
-    approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy) as ApprovalPolicy | undefined,
-    cgRegistryScanPageSize: chain.cgRegistryScanPageSize,
-    minPublisherNativeWei: chain.minPublisherNativeWei,
-    minPublisherTracWei: chain.minPublisherTracWei,
-  };
-}
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled } from '@origintrail-official/dkg-core';
@@ -143,7 +116,6 @@ import {
   ensureDkgDir,
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
-  type ResolvedChainConfig,
   type NetworkConfig,
   type AutoUpdateConfig,
   type LocalAgentIntegrationCapabilities,
@@ -155,7 +127,6 @@ import {
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
   resolveNetworkConfigName,
-  resolveApprovalPolicy,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
   repoDir,
@@ -175,7 +146,7 @@ import {
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
-import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
+import { createPublicSnapshotStore, createPublisherControlFromStore, projectPublisherRuntimeChainConfig, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -1369,7 +1340,7 @@ export async function runDaemonInner(
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
   const chainBase = resolveChainConfig(config, network);
-  const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
+  const runtimeEvmChainConfig = projectPublisherRuntimeChainConfig(chainBase);
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC

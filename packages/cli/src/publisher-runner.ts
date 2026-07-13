@@ -1,10 +1,10 @@
 import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type EVMAdapterConfig, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ApprovalPolicy, type ChainAdapter, type EVMAdapterConfig, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
+import { loadNetworkConfig, resolveApprovalPolicy, resolveReadyChainConfig, type DkgConfig, type ResolvedChainConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
@@ -15,6 +15,26 @@ export type PublisherRuntimeChainConfig = Pick<
   | 'chainId' | 'receiptTimeoutMs' | 'approvalPolicy' | 'cgRegistryScanPageSize'
   | 'minPublisherNativeWei' | 'minPublisherTracWei'
 >;
+
+/** Canonical ResolvedChainConfig projection used by every runtime adapter. */
+export function projectPublisherRuntimeChainConfig(
+  chain: ResolvedChainConfig | undefined,
+): PublisherRuntimeChainConfig | undefined {
+  if (!chain?.rpcUrl || !chain.hubAddress) return undefined;
+  return {
+    rpcUrl: chain.rpcUrl,
+    rpcUrls: chain.rpcUrls,
+    walletRpcUrls: chain.walletRpcUrls,
+    hubAddress: chain.hubAddress,
+    tokenAddress: chain.tokenAddress,
+    chainId: chain.chainId,
+    receiptTimeoutMs: chain.receiptTimeoutMs,
+    approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy) as ApprovalPolicy | undefined,
+    cgRegistryScanPageSize: chain.cgRegistryScanPageSize,
+    minPublisherNativeWei: chain.minPublisherNativeWei,
+    minPublisherTracWei: chain.minPublisherTracWei,
+  };
+}
 
 /** Single construction boundary for every async-publisher wallet adapter. */
 export function createPublisherWalletChain(
@@ -142,9 +162,7 @@ export async function createPublisherRuntime(args: {
   // the runtime fall back to NoChainAdapter (publisher won't have on-chain
   // finality but still functions).
   const merged = resolveReadyChainConfig(args.config, network);
-  const chainBase = merged?.rpcUrl && merged?.hubAddress
-    ? { rpcUrl: merged.rpcUrl, rpcUrls: merged.rpcUrls, hubAddress: merged.hubAddress, tokenAddress: merged.tokenAddress, chainId: merged.chainId }
-    : undefined;
+  const chainBase = projectPublisherRuntimeChainConfig(merged);
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
     keypair: keypair.keypair,
