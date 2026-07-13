@@ -3,10 +3,12 @@ import * as storageIndex from '../src/index.js';
 import {
   createTripleStore,
   loadSharedMemoryQuadsForScope,
+  loadGraphQualifiedSharedMemoryQuads,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   canonicalSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeWriteGraph,
+  resolveSharedMemoryScopeGraphs,
   resolveSharedMemoryReadGraphs,
   type Quad,
   type SwmKaGraphBound,
@@ -303,6 +305,44 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     }
   });
 
+  it('graph-qualified migration loading preserves sources and matches normal root-closure selection', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('named-qualified-selection');
+    const root = 'urn:test:named:qualified';
+    const child = `${root}/.well-known/genid/child`;
+    const alias = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const scope = {
+      kind: 'named-lifecycle',
+      identity: { agentAddress: AUTHOR_A, kaNumber: 7n },
+    } as const;
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"root"', graph: alias },
+        { subject: child, predicate: 'urn:p', object: '"child"', graph: alias },
+        { subject: 'urn:test:named:other', predicate: 'urn:p', object: '"other"', graph: alias },
+      ]);
+
+      const graphs = await resolveSharedMemoryScopeGraphs(store, swm, scope);
+      const graphQualified = await loadGraphQualifiedSharedMemoryQuads(
+        store,
+        graphs,
+        { rootEntities: [root] },
+      );
+      const normal = await loadSharedMemoryQuadsForScope(
+        store,
+        swm,
+        { rootEntities: [root] },
+        scope,
+      );
+
+      expect(graphQualified.map((quad) => quad.graph)).toEqual([alias, alias]);
+      expect(graphQualified.map(key).sort()).toEqual(normal.map(key).sort());
+      expect(graphQualified.map((quad) => quad.object).sort()).toEqual(['"child"', '"root"']);
+    } finally {
+      await store.close();
+    }
+  });
+
   // `kaGraphBound` was removed from `LoadSelectedSharedMemoryQuadsOptions`, so the
   // four production callers — two of them merkle-DEFINING, one the ACK decline lane
   // — get a compile error if they try to prune. This pins the runtime half: even if
@@ -368,6 +408,8 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     expect(typeof storageIndex.loadSharedMemorySliceWithKaBoundFallback).toBe('function');
     // Named publish flows get a scoped API, not a second range-shaped loader.
     expect(typeof storageIndex.loadSharedMemoryQuadsForScope).toBe('function');
+    expect(typeof storageIndex.loadGraphQualifiedSharedMemoryQuads).toBe('function');
+    expect(typeof storageIndex.migrateSharedMemoryRootClosureToNamedLifecycle).toBe('function');
     expect(typeof storageIndex.canonicalSharedMemoryScopeWriteGraph).toBe('function');
     expect(typeof storageIndex.resolveSharedMemoryScopeWriteGraph).toBe('function');
     expect(storageIndex).not.toHaveProperty('loadNamedKnowledgeAssetSharedMemoryQuads');

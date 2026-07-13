@@ -2539,7 +2539,7 @@ export class DKGAgent extends DKGAgentBase {
         if (finalizedScope.kind !== 'named-lifecycle') {
           throw new Error('seal-in-SWM finalized without a named lifecycle identity');
         }
-        await agent.publisher.ensureFinalizedLifecycleSwmPlacement(
+        const placement = await agent.publisher.ensureFinalizedLifecycleSwmPlacement(
           {
             lifecycle: {
               contextGraphId,
@@ -2552,6 +2552,15 @@ export class DKGAgent extends DKGAgentBase {
           },
           createOperationContext('share'),
         );
+        if (placement.sourceEmpty) {
+          throw Object.assign(
+            new Error(
+              `No shared-memory quads remain for finalized lifecycle "${name}" ` +
+              `in context graph "${contextGraphId}"`,
+            ),
+            { code: 'SWM_MIGRATION_SOURCE_EMPTY' },
+          );
+        }
         // #1116 FIX 2 — make the SWM-resident position observable. The original
         // (possibly skipSeal) promote had no seal yet, so `_stampSwmPointer` ran a
         // no-op then; now that the seal EXISTS, stamp dkg:swmCurrentAssertion to it

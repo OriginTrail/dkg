@@ -274,6 +274,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       createOperationContext('test'),
     );
 
+    expect(ensured.sourceEmpty).toBe(false);
     expect(ensured.migratedLegacyQuadCount).toBe(2);
     expect(ensured.targetGraph).toBe(canonicalGraph);
     expect(ensured).not.toHaveProperty('quads');
@@ -319,6 +320,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       createOperationContext('test'),
     );
 
+    expect(ensured.sourceEmpty).toBe(false);
     expect(ensured.migratedLegacyQuadCount).toBe(0);
     expect(ensured.targetGraph).toBe(canonicalGraph);
     const canonical = await store.query(`ASK { GRAPH <${canonicalGraph}> { <${root}> ?p ?o } }`);
@@ -329,6 +331,44 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     );
     expect(pointer.type).toBe('bindings');
     expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(canonicalGraph);
+  });
+
+  it('returns an explicit source-empty result without repairing lifecycle metadata', async () => {
+    const { publisher, store } = await makeRealPublisher();
+    const root = 'urn:test:root:source-empty';
+    const author = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const canonicalGraph = `${SWM_GRAPH}/${author.toLowerCase()}/10`;
+    const lifecycle = assertionLifecycleUri(CONTEXT_GRAPH, author, 'source-empty');
+    await store.insert([{
+      subject: lifecycle,
+      predicate: 'http://dkg.io/ontology/assertionGraph',
+      object: SWM_GRAPH,
+      graph: `${CONTEXT_GRAPH_URI}/_meta`,
+    }]);
+
+    const ensured = await publisher.ensureFinalizedLifecycleSwmPlacement(
+      {
+        lifecycle: {
+          contextGraphId: CONTEXT_GRAPH,
+          assertionName: 'source-empty',
+          assertionLifecycleAgentAddress: author,
+        },
+        sealAuthorScope: { agentAddress: author, kaNumber: 10n },
+        rootEntities: [root],
+      },
+      createOperationContext('test'),
+    );
+
+    expect(ensured).toEqual({
+      sourceEmpty: true,
+      migratedLegacyQuadCount: 0,
+      targetGraph: canonicalGraph,
+    });
+    const pointer = await store.query(
+      `SELECT ?g WHERE { GRAPH <${CONTEXT_GRAPH_URI}/_meta> { ` +
+      `<${lifecycle}> <http://dkg.io/ontology/assertionGraph> ?g } }`,
+    );
+    expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(SWM_GRAPH);
   });
 
   it('converges a checksum-cased alias without issuing a graphless delete', async () => {
@@ -354,6 +394,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       createOperationContext('test'),
     );
 
+    expect(ensured.sourceEmpty).toBe(false);
     expect(ensured.migratedLegacyQuadCount).toBe(0);
     expect(ensured.targetGraph).toBe(canonicalGraph);
     const alias = await store.query(`ASK { GRAPH <${aliasGraph}> { <${root}> ?p ?o } }`);

@@ -120,6 +120,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
           graph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
         }]);
         return {
+          sourceEmpty: false,
           migratedLegacyQuadCount: 0,
           targetGraph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
         };
@@ -187,6 +188,52 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(result.status).toBe('confirmed');
   });
 
+  it('maps an explicit source-empty placement result to the mint no-data precondition', async () => {
+    const store = new OxigraphStore();
+    const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
+    await store.insert(buildAssertionSealQuads({
+      assertionUri,
+      metaGraph: contextGraphMetaUri(CG),
+      merkleRoot: MERKLE,
+      authorAddress: AGENT_B,
+      authorAttestationR: new Uint8Array(32).fill(1),
+      authorAttestationVS: new Uint8Array(32).fill(2),
+      authorSchemeVersion: 1,
+      chainId: 31337n,
+      kav10Address: AGENT_B,
+      reservedKaId: RESERVED_KA_ID,
+      finalizedAtIso: '2026-01-01T00:00:00.000Z',
+      rootEntities: [ROOT],
+    }) as Quad[]);
+
+    const agent = Object.create(DKGAgent.prototype) as any;
+    agent.store = store;
+    agent.chain = {};
+    agent.defaultAgentAddress = AGENT_B;
+    Object.defineProperty(agent, 'peerId', { value: 'peer-source-empty', configurable: true });
+    agent.log = makeLog();
+    agent.publisher = {
+      hasSwmShareComplete: async () => true,
+      ensureFinalizedLifecycleSwmPlacement: async () => ({
+        sourceEmpty: true,
+        migratedLegacyQuadCount: 0,
+        targetGraph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
+      }),
+    };
+    agent.publishFromSharedMemory = async () => {
+      throw new Error('publish should not be called for an empty source');
+    };
+
+    let thrown: any;
+    try {
+      await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown?.message).toMatch(/No quads in shared memory/);
+    expect(thrown?.code).not.toBe('SWM_MIGRATION_SOURCE_EMPTY');
+  });
+
   it('explicitly migrates an older finalized legacy-bucket share before minting', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
@@ -231,6 +278,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         await store.insert([{ ...legacyQuad, graph: namedGraph }]);
         await store.deleteByPattern({ graph: swmGraph, subject: ROOT });
         return {
+          sourceEmpty: false,
           migratedLegacyQuadCount: 1,
           targetGraph: namedGraph,
         };
@@ -324,6 +372,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         await store.insert([canonicalQuad]);
         await store.delete([legacyQuad]);
         return {
+          sourceEmpty: false,
           migratedLegacyQuadCount: 1,
           targetGraph: namedGraph,
         };

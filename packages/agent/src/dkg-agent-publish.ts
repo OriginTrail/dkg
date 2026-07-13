@@ -449,6 +449,10 @@ export function sharedMemoryScopeForFinalizedLifecycle(
   };
 }
 
+type FinalizedLifecycleSwmLoadResult =
+  | { sourceEmpty: true; quads: [] }
+  | { sourceEmpty: false; quads: Quad[] };
+
 function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): void {
   if (!quads || quads.length === 0) return;
   assertQuadLiteralsMutf8Safe(quads, { label });
@@ -4332,39 +4336,42 @@ export class PublishMethods extends DKGAgentBase {
     // Keep state-changing compatibility recovery explicit and separate from
     // the pure scoped load below. Finalize invokes only the placement operation;
     // publish pays for the load because it consumes the returned payload.
-    let finalizedLifecycleSwmQuads: Quad[];
+    let finalizedLifecycleSwm: FinalizedLifecycleSwmLoadResult;
     if (sharedMemoryScope.kind === 'named-lifecycle') {
-      try {
-        await publisher.ensureFinalizedLifecycleSwmPlacement(
-          {
-            lifecycle: {
-              contextGraphId,
-              assertionName: name,
-              assertionLifecycleAgentAddress: agentAddress,
-              subGraphName: opts?.subGraphName,
-            },
-            sealAuthorScope: sharedMemoryScope.identity,
-            rootEntities: seal.rootEntities,
+      const placement = await publisher.ensureFinalizedLifecycleSwmPlacement(
+        {
+          lifecycle: {
+            contextGraphId,
+            assertionName: name,
+            assertionLifecycleAgentAddress: agentAddress,
+            subGraphName: opts?.subGraphName,
           },
-          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-        );
-        finalizedLifecycleSwmQuads = await this._loadSelectedSWMQuads(
+          sealAuthorScope: sharedMemoryScope.identity,
+          rootEntities: seal.rootEntities,
+        },
+        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      );
+      finalizedLifecycleSwm = placement.sourceEmpty
+        ? { quads: [], sourceEmpty: true }
+        : {
+            quads: await this._loadSelectedSWMQuads(
+              contextGraphId,
+              finalizedLifecycleSelection,
+              opts?.subGraphName,
+              sharedMemoryScope,
+            ),
+            sourceEmpty: false,
+          };
+    } else {
+      finalizedLifecycleSwm = {
+        quads: await this._loadSelectedSWMQuads(
           contextGraphId,
           finalizedLifecycleSelection,
           opts?.subGraphName,
           sharedMemoryScope,
-        );
-      } catch (err) {
-        if ((err as { code?: string })?.code !== 'SWM_MIGRATION_SOURCE_EMPTY') throw err;
-        finalizedLifecycleSwmQuads = [];
-      }
-    } else {
-      finalizedLifecycleSwmQuads = await this._loadSelectedSWMQuads(
-        contextGraphId,
-        finalizedLifecycleSelection,
-        opts?.subGraphName,
-        sharedMemoryScope,
-      );
+        ),
+        sourceEmpty: false,
+      };
     }
 
     let result: PublishResult;
@@ -4375,7 +4382,7 @@ export class PublishMethods extends DKGAgentBase {
       // the merkle from the SWM-selected quads and requires a
       // precomputedUpdateAttestation over (kaId, newMerkleRoot, author); we
       // mint it here from the seal's merkle using the seal's author signer.
-      const updateQuads = finalizedLifecycleSwmQuads;
+      const updateQuads = finalizedLifecycleSwm.quads;
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
         seal,
@@ -4468,8 +4475,8 @@ export class PublishMethods extends DKGAgentBase {
       // it here so the no-data precondition fires for ALL callers regardless of
       // registration. Match the publisher's wording so the route's existing 409
       // mapping (/No quads in shared memory/) still applies.
-      const sealedSwmQuads = finalizedLifecycleSwmQuads;
-      if (sealedSwmQuads.length === 0) {
+      const sealedSwmQuads = finalizedLifecycleSwm.quads;
+      if (finalizedLifecycleSwm.sourceEmpty || sealedSwmQuads.length === 0) {
         throw new Error(
           `No quads in shared memory for context graph ${contextGraphId} matching selection`,
         );
