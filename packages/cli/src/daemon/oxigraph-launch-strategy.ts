@@ -1,4 +1,4 @@
-import type { ChildProcess, StdioOptions } from 'node:child_process';
+import { spawnSync, type ChildProcess, type StdioOptions } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
 import {
@@ -42,7 +42,39 @@ export interface OxigraphLaunchStrategy {
     snapshot?: CgroupOomSnapshot;
     readOomKill: (dir: string) => number | null;
   }): boolean;
+  /** Ask the owned wrapper/server to stop without orphaning descendants. */
+  requestStop(child: ChildProcess): boolean;
+  /** Last-resort bounded cleanup after the graceful window expires. */
+  forceStop(child: ChildProcess): boolean;
   logSummary(): string | null;
+}
+
+function signalChild(child: ChildProcess, signal: NodeJS.Signals): boolean {
+  try {
+    return child.kill(signal);
+  } catch {
+    return false;
+  }
+}
+
+function closeParentPipe(child: ChildProcess): boolean {
+  const pipe = child.stdio?.[3] as
+    | (NodeJS.WritableStream & { writableEnded?: boolean })
+    | null
+    | undefined;
+  if (!pipe || typeof pipe.end !== 'function') return false;
+  if (!pipe.writableEnded) pipe.end();
+  return true;
+}
+
+function forceKillWindowsProcessTree(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  const result = spawnSync(
+    'taskkill.exe',
+    ['/PID', String(pid), '/T', '/F'],
+    { stdio: 'ignore', windowsHide: true },
+  );
+  return result.status === 0;
 }
 
 function cgroupEvidenceIncremented(
@@ -82,6 +114,7 @@ export function createOxigraphLaunchStrategy(opts: {
   nodeExecutable?: string;
   watchdogPath?: string;
   parentIdentity?: string;
+  stopGraceMs?: number;
 }): OxigraphLaunchStrategy {
   if (!opts.memoryLimits) {
     if (opts.platform === 'win32') {
@@ -95,19 +128,26 @@ export function createOxigraphLaunchStrategy(opts: {
           command: nodeExecutable,
           args: [
             watchdogPath,
+            'pipe',
             String(opts.parentPid),
             // fd 3 is an inherited parent-owned pipe. EOF is authoritative
             // worker death and is immune to PID reuse.
-            'pipe:3',
+            '3',
             binaryPath,
             ...binaryArgs,
           ],
+          environment: {
+            DKG_OXIGRAPH_WATCHDOG_STOP_GRACE_MS: String(opts.stopGraceMs ?? 5_000),
+          },
           stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
         }),
         resolveListenerPid: (child, port, host, resolver) =>
           resolver(child, port, host, 'process-tree'),
         observeStderr: () => {},
         classifyOomExit: cgroupEvidenceIncremented,
+        requestStop: closeParentPipe,
+        forceStop: (child) =>
+          forceKillWindowsProcessTree(child.pid ?? -1) || signalChild(child, 'SIGKILL'),
         logSummary: () =>
           'Starting Oxigraph behind a parent-pipe watchdog (Windows kill-on-parent-exit fallback).',
       };
@@ -118,6 +158,8 @@ export function createOxigraphLaunchStrategy(opts: {
       resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'child-only'),
       observeStderr: () => {},
       classifyOomExit: cgroupEvidenceIncremented,
+      requestStop: (child) => signalChild(child, 'SIGTERM'),
+      forceStop: (child) => signalChild(child, 'SIGKILL'),
       logSummary: () => null,
     };
   }
@@ -154,7 +196,9 @@ export function createOxigraphLaunchStrategy(opts: {
           ...(limits.highMiB === undefined ? [] : [`--property=MemoryHigh=${limits.highMiB}M`]),
           `--property=MemoryMax=${limits.maxMiB}M`,
           '--property=MemorySwapMax=0',
-          '--', nodeExecutable, watchdogPath, String(opts.parentPid), parentIdentity, binaryPath, ...binaryArgs,
+          '--', nodeExecutable, watchdogPath,
+          'process-identity', String(opts.parentPid), parentIdentity,
+          binaryPath, ...binaryArgs,
         ],
         environment: {
           XDG_RUNTIME_DIR: runtimeDir,
@@ -169,6 +213,8 @@ export function createOxigraphLaunchStrategy(opts: {
     classifyOomExit(input) {
       return watchdogOomChildren.has(input.child) || cgroupEvidenceIncremented(input);
     },
+    requestStop: (child) => signalChild(child, 'SIGTERM'),
+    forceStop: (child) => signalChild(child, 'SIGKILL'),
     logSummary: () =>
       `Starting Oxigraph in an isolated systemd user scope ` +
       `(MemoryHigh=${limits.highMiB ?? 'unset'}MiB, MemoryMax=${limits.maxMiB}MiB).`,

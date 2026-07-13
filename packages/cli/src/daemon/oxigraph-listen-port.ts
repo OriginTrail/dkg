@@ -18,6 +18,26 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+export type ListenOwnerCommandRunner = (
+  command: string,
+  args: readonly string[],
+  options: { timeout: number },
+) => Promise<{ stdout: string }>;
+
+export interface ListenOwnerLookupOptions {
+  platform?: NodeJS.Platform;
+  runCommand?: ListenOwnerCommandRunner;
+}
+
+const runListenOwnerCommand: ListenOwnerCommandRunner = async (
+  command,
+  args,
+  options,
+) => {
+  const { stdout } = await execFileAsync(command, [...args], options);
+  return { stdout: String(stdout) };
+};
+
 /**
  * Hex port token as it appears in the `local_address` field of
  * `/proc/net/tcp`. Only the IPv4 address is byte-swapped there; the port is
@@ -148,10 +168,13 @@ async function linuxProcessTree(rootPid: number): Promise<Set<number>> {
   return pids;
 }
 
-async function windowsProcessTree(rootPid: number): Promise<Set<number>> {
+async function windowsProcessTree(
+  rootPid: number,
+  runCommand: ListenOwnerCommandRunner,
+): Promise<Set<number>> {
   const pids = new Set<number>([rootPid]);
   try {
-    const { stdout } = await execFileAsync(
+    const { stdout } = await runCommand(
       'powershell.exe',
       [
         '-NoProfile',
@@ -189,9 +212,10 @@ async function windowsProcessTree(rootPid: number): Promise<Set<number>> {
 async function windowsListenOwnerPid(
   pids: ReadonlySet<number>,
   port: number,
+  runCommand: ListenOwnerCommandRunner,
 ): Promise<number | null> {
   try {
-    const { stdout } = await execFileAsync('netstat', ['-ano'], { timeout: 3_000 });
+    const { stdout } = await runCommand('netstat', ['-ano'], { timeout: 3_000 });
     const suffix = `:${port}`;
     for (const line of stdout.split('\n')) {
       if (!line.includes('LISTENING') || !line.includes(suffix)) continue;
@@ -215,6 +239,7 @@ export async function findListenOwnerPid(
   port: number,
   host: string,
   ownership: 'child-only' | 'process-tree' = 'child-only',
+  options: ListenOwnerLookupOptions = {},
 ): Promise<number | null> {
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
     return null;
@@ -222,22 +247,24 @@ export async function findListenOwnerPid(
   if (host !== '127.0.0.1' && host !== 'localhost') return child.pid;
 
   const pid = child.pid;
+  const platform = options.platform ?? process.platform;
+  const runCommand = options.runCommand ?? runListenOwnerCommand;
   const pids = ownership === 'process-tree'
-    ? process.platform === 'linux'
+    ? platform === 'linux'
       ? await linuxProcessTree(pid)
-      : process.platform === 'win32'
-        ? await windowsProcessTree(pid)
+      : platform === 'win32'
+        ? await windowsProcessTree(pid, runCommand)
         : new Set([pid])
     : new Set([pid]);
 
-  if (process.platform === 'win32') {
-    return windowsListenOwnerPid(pids, port);
+  if (platform === 'win32') {
+    return windowsListenOwnerPid(pids, port, runCommand);
   }
 
   const lsofOwner = await lsofListenOwnerPid(pids, port);
   if (lsofOwner !== null) return lsofOwner;
 
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
     const ssOwner = await ssListenOwnerPid(pids, port);
     if (ssOwner !== null) return ssOwner;
     const fuserOwner = await fuserListenOwnerPid(pids, port);

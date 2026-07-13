@@ -9,14 +9,24 @@ import {
 
 describe('Oxigraph parent watchdog', () => {
   it('parses a typed parent/command boundary', () => {
-    expect(parseOxigraphParentWatchdogArgs(['42', '42:1234', '/opt/oxigraph', 'serve']))
+    expect(parseOxigraphParentWatchdogArgs([
+      'process-identity', '42', '42:1234', '/opt/oxigraph', 'serve',
+    ]))
       .toEqual({
-        parentPid: 42,
-        parentIdentity: '42:1234',
+        parent: { kind: 'process-identity', pid: 42, identity: '42:1234' },
         command: '/opt/oxigraph',
         args: ['serve'],
       });
-    expect(() => parseOxigraphParentWatchdogArgs(['nope', 'identity', '/opt/oxigraph']))
+    expect(parseOxigraphParentWatchdogArgs([
+      'pipe', '42', '3', '/opt/oxigraph', 'serve',
+    ])).toEqual({
+      parent: { kind: 'pipe', pid: 42, fd: 3 },
+      command: '/opt/oxigraph',
+      args: ['serve'],
+    });
+    expect(() => parseOxigraphParentWatchdogArgs([
+      'process-identity', 'nope', 'identity', '/opt/oxigraph',
+    ]))
       .toThrow(/Usage/);
   });
 
@@ -32,7 +42,7 @@ describe('Oxigraph parent watchdog', () => {
   it('terminates the child when the daemon parent disappears', async () => {
     let checks = 0;
     const handle = startOxigraphParentWatchdog({
-      parentPid: 42,
+      parent: { kind: 'process-identity', pid: 42 },
       command: process.execPath,
       args: ['-e', 'setInterval(() => {}, 1000)'],
       pollIntervalMs: 5,
@@ -49,8 +59,7 @@ describe('Oxigraph parent watchdog', () => {
 
   it('refuses to spawn when the expected parent identity was reused', () => {
     expect(() => startOxigraphParentWatchdog({
-      parentPid: 42,
-      parentIdentity: '42:original',
+      parent: { kind: 'process-identity', pid: 42, identity: '42:original' },
       command: process.execPath,
       args: ['-e', 'setInterval(() => {}, 1000)'],
       readProcessIdentity: () => '42:replacement',
@@ -59,7 +68,7 @@ describe('Oxigraph parent watchdog', () => {
 
   it('forwards an explicit shutdown signal to the child', async () => {
     const handle = startOxigraphParentWatchdog({
-      parentPid: process.pid,
+      parent: { kind: 'process-identity', pid: process.pid },
       command: process.execPath,
       args: ['-e', 'setInterval(() => {}, 1000)'],
       pollIntervalMs: 5,
@@ -75,9 +84,7 @@ describe('Oxigraph parent watchdog', () => {
   it('treats inherited parent-pipe EOF as authoritative worker death', async () => {
     const parentPipe = new PassThrough();
     const handle = startOxigraphParentWatchdog({
-      parentPid: 42,
-      parentIdentity: 'pipe:3',
-      parentPipe,
+      parent: { kind: 'pipe', pid: 42, stream: parentPipe },
       command: process.execPath,
       args: ['-e', 'setInterval(() => {}, 1000)'],
       stopGraceMs: 100,
@@ -91,7 +98,7 @@ describe('Oxigraph parent watchdog', () => {
 
   it('escalates to SIGKILL when the child ignores SIGTERM', async () => {
     const handle = startOxigraphParentWatchdog({
-      parentPid: process.pid,
+      parent: { kind: 'process-identity', pid: process.pid },
       command: process.execPath,
       args: ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
       pollIntervalMs: 5,
@@ -107,7 +114,7 @@ describe('Oxigraph parent watchdog', () => {
 
   it('reports an externally SIGTERM-killed child as a non-zero wrapper exit', async () => {
     const handle = startOxigraphParentWatchdog({
-      parentPid: process.pid,
+      parent: { kind: 'process-identity', pid: process.pid },
       command: process.execPath,
       args: ['-e', 'setInterval(() => {}, 1000)'],
       pollIntervalMs: 5,
@@ -122,7 +129,7 @@ describe('Oxigraph parent watchdog', () => {
 
   it('captures scoped OOM evidence before the watchdog cgroup can disappear', async () => {
     const handle = startOxigraphParentWatchdog({
-      parentPid: process.pid,
+      parent: { kind: 'process-identity', pid: process.pid },
       command: process.execPath,
       args: ['-e', 'setInterval(() => {}, 1000)'],
       pollIntervalMs: 5,
