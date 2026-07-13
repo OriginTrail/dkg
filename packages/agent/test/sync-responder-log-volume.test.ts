@@ -16,7 +16,10 @@ describe('sync responder page diagnostics', () => {
     const durableMeta = `${prefix}/_meta`;
     const swmData = `${prefix}/_shared_memory`;
     const swmMeta = `${prefix}/_shared_memory_meta`;
+    const catalog = `${prefix}/_catalog`;
     await store.insert([
+      { graph: catalog, subject: prefix, predicate: 'urn:catalog:value', object: '"one"' },
+      { graph: catalog, subject: prefix, predicate: 'urn:catalog:label', object: '"two"' },
       { graph: durableData, subject: 'urn:durable:1', predicate: 'urn:test:value', object: '"one"' },
       { graph: durableData, subject: 'urn:durable:2', predicate: 'urn:test:value', object: '"two"' },
       { graph: durableMeta, subject: prefix, predicate: `${DKG_NS}createdAt`, object: '"2026-07-01T00:00:00Z"' },
@@ -48,6 +51,11 @@ describe('sync responder page diagnostics', () => {
     });
 
     const cases = [
+      {
+        name: 'catalog',
+        prefix: `Sync responder catalog facet for "${contextGraphId}"`,
+        request: { includeSharedMemory: false, phase: 'catalog' as const },
+      },
       {
         name: 'durable data',
         prefix: `Sync responder durable data for "${contextGraphId}"`,

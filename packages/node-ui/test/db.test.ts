@@ -390,11 +390,11 @@ describe('DashboardDB — retention', () => {
       volumeDb.insertLog({ ts: 2_000, level: 'warn', module: 'sync', message: 'keep-warn' });
       volumeDb.insertLog({ ts: 2_001, level: 'error', module: 'sync', message: 'keep-error' });
 
-      expect(volumeDb.pruneLogVolumeBatch()).toMatchObject({ deleted: 2, hasMore: true });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
       // The second batch exactly reaches the cap. The API conservatively asks
       // for one final probe, avoiding a second large count on every batch.
-      expect(volumeDb.pruneLogVolumeBatch()).toMatchObject({ deleted: 2, hasMore: true });
-      expect(volumeDb.pruneLogVolumeBatch()).toMatchObject({ deleted: 0, hasMore: false });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
 
       const rows = volumeDb.db.prepare(
         `SELECT level, message FROM logs ORDER BY id ASC`,
@@ -439,8 +439,8 @@ describe('DashboardDB — retention', () => {
       let compacted = false;
       for (let i = 0; i < 10; i += 1) {
         const result = volumeDb.pruneLogVolumeBatch();
-        compacted ||= result.compacted;
-        if (!result.hasMore && !result.reclaimPending) break;
+        compacted ||= result.status === 'done-compacted';
+        if (result.status === 'done' || result.status === 'done-compacted') break;
       }
 
       const afterBytes = statSync(dbPath).size;

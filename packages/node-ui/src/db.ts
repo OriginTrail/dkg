@@ -118,9 +118,7 @@ export interface DashboardDBOptions {
 
 export interface LogVolumePruneResult {
   deleted: number;
-  hasMore: boolean;
-  compacted: boolean;
-  reclaimPending: boolean;
+  status: 'more' | 'reclaim-pending' | 'done' | 'done-compacted';
 }
 
 /**
@@ -949,9 +947,11 @@ export class DashboardDB {
       if (!reclaim.reclaimPending) this.truncateWal('log-volume prune');
       return {
         deleted: 0,
-        hasMore: false,
-        compacted: reclaim.compacted,
-        reclaimPending: reclaim.reclaimPending,
+        status: reclaim.reclaimPending
+          ? 'reclaim-pending'
+          : reclaim.compacted
+            ? 'done-compacted'
+            : 'done',
       };
     }
 
@@ -980,9 +980,13 @@ export class DashboardDB {
     if (!hasMore && !reclaim.reclaimPending) this.truncateWal('log-volume prune');
     return {
       deleted,
-      hasMore,
-      compacted: reclaim.compacted,
-      reclaimPending: reclaim.reclaimPending,
+      status: hasMore
+        ? 'more'
+        : reclaim.reclaimPending
+          ? 'reclaim-pending'
+          : reclaim.compacted
+            ? 'done-compacted'
+            : 'done',
     };
   }
 
