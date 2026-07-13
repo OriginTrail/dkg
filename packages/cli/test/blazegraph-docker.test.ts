@@ -50,32 +50,12 @@ function runDevnetBlazegraphSmoke(metadata: string): {
   const root = mkdtempSync(join(tmpdir(), 'dkg-devnet-blazegraph-'));
   const capture = join(root, 'docker-run.args');
   writeFileSync(join(root, 'blazegraph-image.json'), metadata);
-  const script = `
-    export DEVNET_SOURCE_ONLY=1
-    source ${JSON.stringify(resolve(REPO_ROOT, 'scripts/devnet.sh'))}
-    REPO_ROOT=${JSON.stringify(root)}
-    BLAZEGRAPH_PORT=19099
-    BLAZEGRAPH_CONTAINER=devnet-blazegraph-smoke
-    blazegraph_started=0
-    docker_responsive() { return 0; }
-    docker() {
-      case "$1" in
-        inspect) return 1 ;;
-        run)
-          printf '%s\\n' "$@" > ${JSON.stringify(capture)}
-          blazegraph_started=1
-          return 0
-          ;;
-        *) return 1 ;;
-      esac
-    }
-    curl() {
-      [ "$blazegraph_started" = "1" ]
-    }
-    if start_blazegraph; then exit 0; else exit 42; fi
-  `;
   try {
-    const result = spawnSync('bash', ['-c', script], { encoding: 'utf-8' });
+    const result = spawnSync('bash', [
+      resolve(REPO_ROOT, 'packages/cli/test/fixtures/devnet-blazegraph-smoke.sh'),
+      root,
+      capture,
+    ], { encoding: 'utf-8' });
     return {
       status: result.status,
       stderr: result.stderr,
@@ -230,6 +210,44 @@ describe('provisionBlazegraphDocker', () => {
     expect(result.url).toBe('http://127.0.0.1:9999/bigdata/namespace/mynode/sparql');
     expect(calls.some((c) => c[0] === 'run')).toBe(false);
     expect(httpCalls.some((c) => c.url.endsWith('/bigdata/status'))).toBe(true);
+  });
+
+  it('reuses the mapped host port from a legacy 8080/tcp container', async () => {
+    const legacyHostPort = 10001;
+    const legacyInspect: DockerCommandResult = {
+      stdout: JSON.stringify([{
+        State: { Running: true },
+        NetworkSettings: {
+          Ports: {
+            '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: String(legacyHostPort) }],
+          },
+        },
+      }]),
+      stderr: '',
+      exitCode: 0,
+    };
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: () => legacyInspect },
+      ],
+    });
+    const { fn, calls: httpCalls } = mockFetch(() => new Response('ok', { status: 200 }));
+
+    const result = await provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: fn,
+      log: () => {},
+    });
+
+    expect(result.reused).toBe(true);
+    expect(result.port).toBe(legacyHostPort);
+    expect(result.url).toBe(
+      `http://127.0.0.1:${legacyHostPort}/bigdata/namespace/mynode/sparql`,
+    );
+    expect(httpCalls[0]?.url).toBe(`http://127.0.0.1:${legacyHostPort}/bigdata/status`);
+    expect(calls.some((call) => call[0] === 'run')).toBe(false);
   });
 
   it('creates the namespace when reusing a container with no existing namespace', async () => {

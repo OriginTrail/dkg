@@ -290,7 +290,13 @@ async function inspectContainer(
     const info = Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
     if (!info) return { exists: true, running: false };
     const running = info.State?.Running === true;
-    const portBinding = info.NetworkSettings?.Ports?.[`${BLAZEGRAPH_CONTAINER_PORT}/tcp`];
+    const ports = info.NetworkSettings?.Ports;
+    // Containers provisioned before the islandora image migration expose the
+    // old image's 8080/tcp port. Prefer the current image contract, but retain
+    // the real host mapping for an already-created legacy container instead of
+    // silently falling back to 9999 and potentially targeting another store.
+    const portBinding = ports?.[`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]
+      ?? (BLAZEGRAPH_CONTAINER_PORT === 8080 ? undefined : ports?.['8080/tcp']);
     const hostPort = Array.isArray(portBinding) && portBinding.length > 0
       ? Number(portBinding[0].HostPort)
       : undefined;
