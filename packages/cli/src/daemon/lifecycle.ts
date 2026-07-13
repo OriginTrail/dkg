@@ -138,6 +138,7 @@ import {
   gitCommandArgs,
   isStandaloneInstall,
   resolveAutoUpdateSource,
+  projectRuntimeEvmChainConfig,
   slotEntryPoint,
   CLI_NPM_PACKAGE,
   exitOnStoreConfigErrors,
@@ -146,7 +147,7 @@ import {
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
-import { createPublicSnapshotStore, createPublisherControlFromStore, projectPublisherRuntimeChainConfig, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
+import { createPublicSnapshotStore, createPublisherControlFromStore, resolveAsyncPublisherAvailability, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -1340,7 +1341,7 @@ export async function runDaemonInner(
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
   const chainBase = resolveChainConfig(config, network);
-  const runtimeEvmChainConfig = projectPublisherRuntimeChainConfig(chainBase);
+  const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -1707,6 +1708,11 @@ export async function runDaemonInner(
   });
 
   let publisherRuntime: PublisherRuntime | null = null;
+  let publisherAvailability: AsyncPublisherAvailability = resolveAsyncPublisherAvailability({
+    config,
+    runtime: null,
+    lifecycleReason: config.publisher?.enabled ? 'publisher_starting' : 'publisher_disabled',
+  });
   // Holds the running async-promote worker lifecycle (PR #3 of the
   // async-promote-queue series). Initialised in `startPostApiPublishing`
   // after the API is up so a recoverOnStartup hiccup never blocks boot;
@@ -1970,7 +1976,17 @@ export async function runDaemonInner(
             log,
           });
           publisherRuntime = runtime;
+          publisherAvailability = resolveAsyncPublisherAvailability({
+            config,
+            runtime,
+            ...(runtime ? {} : { lifecycleReason: 'no_publisher_wallets' as const }),
+          });
         } catch (err: any) {
+          publisherAvailability = resolveAsyncPublisherAvailability({
+            config,
+            runtime: null,
+            lifecycleReason: 'publisher_startup_failed',
+          });
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
         }
       })();
@@ -3351,6 +3367,7 @@ export async function runDaemonInner(
         admissionStats,
         emitMemoryGraphChanged,
         emitNotification,
+        publisherAvailability,
       );
     } catch (err: any) {
       // Single top-level error→HTTP mapping (in http-utils.ts

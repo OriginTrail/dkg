@@ -1,3 +1,9 @@
+import {
+  escapeRdfLiteral,
+  isRdfTerm,
+  normalizeRdfObject,
+} from '@origintrail-official/dkg-rdf-utils';
+
 export interface DkgPublisherExtensionQuadInput {
   subject: unknown;
   predicate: unknown;
@@ -146,25 +152,14 @@ export function normalizeDkgPublisherQuads(
   }));
 }
 
-// NOTE: the MCP adapter inlines a byte-for-byte copy of this normalizer (it is
-// deliberately dep-light and does not import dkg-core) as `normalizeRdfObject` in
-// `packages/mcp-dkg/src/tools/assertions.ts`. If you change the behavior here,
-// update that copy AND its golden fixture in
-// `packages/mcp-dkg/test/rdf-object-normalization-conformance.test.ts` so the
-// public `dkg_knowledge_asset_create({quads})` object contract stays identical
-// across the MCP / OpenClaw / Hermes adapters.
+// Core and MCP preserve their public names as thin compatibility wrappers around
+// the complete dependency-free normalizer in @origintrail-official/dkg-rdf-utils.
 export function normalizeDkgPublisherObject(value: unknown): string {
-  const raw = String(value ?? '');
-  if (isDkgRdfTerm(raw)) return raw;
-  return `"${escapeDkgRdfLiteral(raw)}"`;
+  return normalizeRdfObject(value);
 }
 
 export function isDkgRdfTerm(value: string): boolean {
-  return (
-    /^(?:https?:\/\/|urn:|did:)/i.test(value) ||
-    value.startsWith('_:') ||
-    value.startsWith('"')
-  );
+  return isRdfTerm(value);
 }
 
 /**
@@ -172,14 +167,7 @@ export function isDkgRdfTerm(value: string): boolean {
  * Returns only the escaped body; callers wrap it in quotes.
  */
 export function escapeDkgRdfLiteral(value: string): string {
-  return value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t')
-    .replace(/\f/g, '\\f')
-    .replace(/\x08/g, '\\b');
+  return escapeRdfLiteral(value);
 }
 
 export {

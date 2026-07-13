@@ -27,7 +27,7 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
-import { normalizeReceiptTimeoutMs, RPC_READ_STALL_TIMEOUT_MS, RPC_RECEIPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { resolveReceiptTimeoutMs, RPC_READ_STALL_TIMEOUT_MS, RPC_RECEIPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -39,8 +39,13 @@ beforeEach(() => {
 });
 
 it('defaults an omitted receipt deadline to ten minutes', () => {
-  expect(normalizeReceiptTimeoutMs(undefined)).toBe(600_000);
+  expect(resolveReceiptTimeoutMs(undefined)).toBe(600_000);
   expect(RPC_RECEIPT_TIMEOUT_MS).toBe(600_000);
+});
+
+it('rejects an explicitly invalid receipt deadline at the adapter boundary', () => {
+  expect(() => new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 999 })))
+    .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 });
 
 describe('EVMChainAdapter getIdentityIdForAddress cache', () => {

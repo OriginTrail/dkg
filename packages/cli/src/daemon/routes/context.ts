@@ -16,7 +16,7 @@ import type {
   OperationTracker,
 } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig, loadNetworkConfig } from '../../config.js';
-import type { createPublisherControlFromStore, PublisherRuntime } from '../../publisher-runner.js';
+import type { AsyncPublisherAvailability, createPublisherControlFromStore, PublisherRuntime } from '../../publisher-runner.js';
 import type { ExtractionStatusRecord } from '../../extraction-status.js';
 import type { FileStore } from '../../file-store.js';
 import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
@@ -60,6 +60,8 @@ export interface RequestContext {
   agent: DKGAgent;
   publisherControl: ReturnType<typeof createPublisherControlFromStore>;
   publisherRuntime: PublisherRuntime | null;
+  /** Lifecycle-owned publisher state; optional for direct route embeddings/tests. */
+  publisherAvailability?: AsyncPublisherAvailability;
   config: DkgConfig;
   startedAt: number;
   dashDb: DashboardDB;

@@ -302,7 +302,13 @@ program
       const signedTx = await wallet.signTransaction(filled);
       const txHash = ethers.Transaction.from(signedTx).hash ?? '0x';
       console.log(`  TX: ${txHash}`);
-      const receipt = await sendCliRawTransactionWithFailover(providers, signedTx, txHash, urls);
+      const receipt = await sendCliRawTransactionWithFailover(
+        providers,
+        signedTx,
+        txHash,
+        urls,
+        { receiptTimeoutMs: chainResolved.receiptTimeoutMs },
+      );
       console.log(`  Confirmed in block ${receipt.blockNumber}`);
       console.log(`  New ask: ${amount} TRAC`);
     } catch (err) {

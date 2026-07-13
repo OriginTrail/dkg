@@ -19,7 +19,11 @@ import {
   STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
-import { requireReceiptTimeoutMs } from '@origintrail-official/dkg-chain';
+import {
+  resolveReceiptTimeoutMs,
+  type ApprovalPolicy,
+  type EVMAdapterConfig,
+} from '@origintrail-official/dkg-chain';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -337,6 +341,33 @@ export type ResolvedChainConfig = Partial<
   minPublisherNativeWei?: bigint;
   minPublisherTracWei?: bigint;
 };
+
+export type RuntimeEvmChainConfig = Pick<
+  EVMAdapterConfig,
+  | 'rpcUrl' | 'rpcUrls' | 'walletRpcUrls' | 'hubAddress' | 'tokenAddress'
+  | 'chainId' | 'receiptTimeoutMs' | 'approvalPolicy' | 'cgRegistryScanPageSize'
+  | 'minPublisherNativeWei' | 'minPublisherTracWei'
+>;
+
+/** Neutral projection shared by the agent and every publisher adapter. */
+export function projectRuntimeEvmChainConfig(
+  chain: ResolvedChainConfig | undefined,
+): RuntimeEvmChainConfig | undefined {
+  if (!chain?.rpcUrl || !chain.hubAddress) return undefined;
+  return {
+    rpcUrl: chain.rpcUrl,
+    rpcUrls: chain.rpcUrls,
+    walletRpcUrls: chain.walletRpcUrls,
+    hubAddress: chain.hubAddress,
+    tokenAddress: chain.tokenAddress,
+    chainId: chain.chainId,
+    receiptTimeoutMs: chain.receiptTimeoutMs,
+    approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy) as ApprovalPolicy | undefined,
+    cgRegistryScanPageSize: chain.cgRegistryScanPageSize,
+    minPublisherNativeWei: chain.minPublisherNativeWei,
+    minPublisherTracWei: chain.minPublisherTracWei,
+  };
+}
 
 export interface LargeLiteralStorageConfig {
   enabled?: boolean;
@@ -1462,7 +1493,7 @@ export function resolveChainConfig(
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
   const receiptTimeoutMs = cfg?.receiptTimeoutMs ?? net?.receiptTimeoutMs;
   if (receiptTimeoutMs !== undefined) {
-    merged.receiptTimeoutMs = requireReceiptTimeoutMs(receiptTimeoutMs);
+    merged.receiptTimeoutMs = resolveReceiptTimeoutMs(receiptTimeoutMs);
   }
   // Funding floors: local config wins, else the network overlay's per-chain
   // default (both default 0n downstream in the adapter when unset). Persisted

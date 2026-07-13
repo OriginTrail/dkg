@@ -1,7 +1,9 @@
 import { NO_FUNDED_PUBLISHER_WALLET_CODE, messageIndicatesNoFundedPublisherWallet } from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
+import { isQuorumUnmetError } from './ack-errors.js';
 import {
   createLiftJobFailureMetadata,
+  isTimeoutLiftJobFailure,
   type LiftJobBroadcastMetadata,
   type LiftJobFailureMetadata,
   type LiftJobFinalizationMetadata,
@@ -140,7 +142,11 @@ export function mapPublishExceptionToLiftJobFailure(
     || messageIndicatesNoFundedPublisherWallet(lower);
   const code = isNoFundedWallet && input.failedFromState === 'broadcast'
     ? 'insufficient_funds'
-    : classifyPublishFailureCode(lower, input.failedFromState);
+    : input.failedFromState === 'broadcast' && (
+      isQuorumUnmetError(input.error) || lower.includes('quorumunmeterror')
+    )
+      ? 'quorum_unmet'
+      : classifyPublishFailureCode(lower, input.failedFromState);
 
   return createLiftJobFailureMetadata({
     failedFromState: input.failedFromState,
@@ -150,7 +156,7 @@ export function mapPublishExceptionToLiftJobFailure(
     stackTraceRef: input.stackTraceRef,
     rpcResponseRef: input.rpcResponseRef,
     revertReasonRef: input.revertReasonRef,
-    timeout: input.timeout,
+    timeout: isTimeoutLiftJobFailure(code) ? input.timeout : undefined,
   });
 }
 

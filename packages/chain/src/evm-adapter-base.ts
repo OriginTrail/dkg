@@ -38,7 +38,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, normalizeReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -1013,7 +1013,7 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
-    this.receiptTimeoutMs = normalizeReceiptTimeoutMs(config.receiptTimeoutMs);
+    this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -2600,7 +2600,15 @@ export class EVMChainAdapterBase {
     // endpoint that has it; best-effort `0` only when EVERY endpoint lacks it and
     // no transport error occurred. Non-retryable / transport-exhaustion errors
     // propagate (never masked as a bogus `0`). Order-independent — see the helper.
-    const block = await this.readProviderRetryingNull('getBlock', (p) => p.getBlock(blockNumber));
+    const block = await this.rpcFailover.read(
+      'getBlock',
+      (p) => p.getBlock(blockNumber),
+      {
+        rpcUsageConsumer: 'getBlock',
+        isEmptyResult: (value) => value == null,
+        endpointSetRetry: 'all-throttled',
+      },
+    );
     return block?.timestamp != null ? Number(block.timestamp) : 0;
   }
 

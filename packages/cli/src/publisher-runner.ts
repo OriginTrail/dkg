@@ -1,44 +1,17 @@
 import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ApprovalPolicy, type ChainAdapter, type EVMAdapterConfig, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { loadNetworkConfig, resolveApprovalPolicy, resolveReadyChainConfig, type DkgConfig, type ResolvedChainConfig } from './config.js';
+import { loadNetworkConfig, projectRuntimeEvmChainConfig, resolveReadyChainConfig, type DkgConfig, type RuntimeEvmChainConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
 
-export type PublisherRuntimeChainConfig = Pick<
-  EVMAdapterConfig,
-  | 'rpcUrl' | 'rpcUrls' | 'walletRpcUrls' | 'hubAddress' | 'tokenAddress'
-  | 'chainId' | 'receiptTimeoutMs' | 'approvalPolicy' | 'cgRegistryScanPageSize'
-  | 'minPublisherNativeWei' | 'minPublisherTracWei'
->;
-
-/** Canonical ResolvedChainConfig projection used by every runtime adapter. */
-export function projectPublisherRuntimeChainConfig(
-  chain: ResolvedChainConfig | undefined,
-): PublisherRuntimeChainConfig | undefined {
-  if (!chain?.rpcUrl || !chain.hubAddress) return undefined;
-  return {
-    rpcUrl: chain.rpcUrl,
-    rpcUrls: chain.rpcUrls,
-    walletRpcUrls: chain.walletRpcUrls,
-    hubAddress: chain.hubAddress,
-    tokenAddress: chain.tokenAddress,
-    chainId: chain.chainId,
-    receiptTimeoutMs: chain.receiptTimeoutMs,
-    approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy) as ApprovalPolicy | undefined,
-    cgRegistryScanPageSize: chain.cgRegistryScanPageSize,
-    minPublisherNativeWei: chain.minPublisherNativeWei,
-    minPublisherTracWei: chain.minPublisherTracWei,
-  };
-}
-
 /** Single construction boundary for every async-publisher wallet adapter. */
 export function createPublisherWalletChain(
-  chainBase: PublisherRuntimeChainConfig | undefined,
+  chainBase: RuntimeEvmChainConfig | undefined,
   privateKey: string,
 ): ChainAdapter {
   return chainBase
@@ -59,6 +32,50 @@ export interface PublisherRuntime {
 export interface PublisherRuntimeWallet {
   readonly address: string;
   readonly identityId: bigint;
+}
+
+export type AsyncPublisherUnavailableReason =
+  | 'publisher_disabled'
+  | 'publisher_starting'
+  | 'no_publisher_wallets'
+  | 'publisher_startup_failed';
+
+export type AsyncPublisherAvailability =
+  | { available: true }
+  | {
+      available: false;
+      reason: AsyncPublisherUnavailableReason;
+      retryable: boolean;
+      operatorActionRequired: boolean;
+    };
+
+/**
+ * Canonical readiness boundary for every async-ingress route. Lifecycle may
+ * supply an explicit starting/failure state; otherwise the runtime/config
+ * shape is classified consistently for direct route tests and embedded users.
+ */
+export function resolveAsyncPublisherAvailability(args: {
+  config: DkgConfig;
+  runtime: PublisherRuntime | null;
+  lifecycleReason?: AsyncPublisherUnavailableReason;
+  lifecycleAvailability?: AsyncPublisherAvailability;
+}): AsyncPublisherAvailability {
+  if (args.lifecycleAvailability) return args.lifecycleAvailability;
+  if (args.runtime?.walletIds.length) return { available: true };
+  const reason = args.lifecycleReason
+    ?? (args.runtime
+      ? 'no_publisher_wallets'
+      : args.config.publisher?.enabled
+        ? 'publisher_startup_failed'
+        : 'publisher_disabled');
+  return {
+    available: false,
+    reason,
+    // Only the in-progress state can recover from the same client retry without
+    // operator/config/daemon intervention.
+    retryable: reason === 'publisher_starting',
+    operatorActionRequired: reason !== 'publisher_starting',
+  };
 }
 
 export interface PublisherInspector {
@@ -82,7 +99,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   config: DkgConfig;
   store: TripleStore;
   keypair: Ed25519Keypair;
-  chainBase?: PublisherRuntimeChainConfig;
+  chainBase?: RuntimeEvmChainConfig;
   log: (message: string) => void;
   ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
@@ -127,7 +144,7 @@ interface PublisherRuntimeBaseArgs {
   dataDir: string;
   keypair: Ed25519Keypair;
   store: TripleStore;
-  chainBase?: PublisherRuntimeChainConfig;
+  chainBase?: RuntimeEvmChainConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
@@ -162,7 +179,7 @@ export async function createPublisherRuntime(args: {
   // the runtime fall back to NoChainAdapter (publisher won't have on-chain
   // finality but still functions).
   const merged = resolveReadyChainConfig(args.config, network);
-  const chainBase = projectPublisherRuntimeChainConfig(merged);
+  const chainBase = projectRuntimeEvmChainConfig(merged);
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
     keypair: keypair.keypair,
@@ -210,7 +227,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   dataDir: string;
   store: TripleStore;
   keypair: Ed25519Keypair;
-  chainBase?: PublisherRuntimeChainConfig;
+  chainBase?: RuntimeEvmChainConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;

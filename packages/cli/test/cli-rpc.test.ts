@@ -103,4 +103,26 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     expect(err.txHash).toBe('0xdeadbeef');
     expect(isChainRpcTransportError(err)).toBe(true);
   });
+
+  it('enforces a configured overall receipt deadline across lookup and polling', async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = {
+        broadcastTransaction: async () => ({ hash: '0xdeadline' }),
+        getTransactionReceipt: async () => new Promise<never>(() => {}),
+      } as any;
+      const result = sendCliRawTransactionWithFailover(
+        [provider],
+        '0xsigned',
+        '0xdeadline',
+        ['https://rpc.example'],
+        { receiptTimeoutMs: 1_000 },
+      ).catch((err) => err);
+
+      await vi.advanceTimersByTimeAsync(1_001);
+      await expect(result).resolves.toMatchObject({ code: 'RPC_TIMEOUT', txHash: '0xdeadline' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -7,6 +7,7 @@ import {
   noteRpcExhaustion,
   ChainRpcTransportError,
   createRpcTimeoutError,
+  resolveReceiptTimeoutMs,
 } from '@origintrail-official/dkg-chain';
 import { cliSleep, cliErrorMessage } from './cli-helpers.js';
 
@@ -70,6 +71,7 @@ async function getCliReceiptWithFailover(
   providers: ethers.JsonRpcProvider[],
   txHash: string,
   urls?: string[],
+  attemptTimeoutMs = CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
 ): Promise<ethers.TransactionReceipt | null> {
   let lastRetryable: unknown;
   let sawNonErrorResponse = false;
@@ -77,7 +79,7 @@ async function getCliReceiptWithFailover(
     try {
       const receipt = await cliWithTimeout(
         providers[i].getTransactionReceipt(txHash),
-        CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+        Math.min(CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, attemptTimeoutMs),
         `receipt lookup via RPC #${i + 1}`,
       );
       sawNonErrorResponse = true;
@@ -114,6 +116,7 @@ async function sendCliRawTransactionWithFailover(
   signedTx: string,
   txHash: string,
   urls?: string[],
+  options: { receiptTimeoutMs?: number } = {},
 ): Promise<ethers.TransactionReceipt> {
   let lastError: unknown;
   for (let i = 0; i < providers.length; i += 1) {
@@ -149,16 +152,38 @@ async function sendCliRawTransactionWithFailover(
     );
   }
 
-  const deadline = Date.now() + CLI_RPC_RECEIPT_TIMEOUT_MS;
+  const receiptTimeoutMs = options.receiptTimeoutMs === undefined
+    ? CLI_RPC_RECEIPT_TIMEOUT_MS
+    : resolveReceiptTimeoutMs(options.receiptTimeoutMs);
+  const deadline = Date.now() + receiptTimeoutMs;
+  let lastReceiptError: unknown;
   while (Date.now() < deadline) {
-    const receipt = await getCliReceiptWithFailover(providers, txHash, urls);
-    if (receipt) {
-      assertCliSuccessfulReceipt(receipt, txHash);
-      return receipt;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    try {
+      const receipt = await getCliReceiptWithFailover(providers, txHash, urls, remainingMs);
+      if (receipt) {
+        assertCliSuccessfulReceipt(receipt, txHash);
+        return receipt;
+      }
+    } catch (err) {
+      // A lookup may wrap its per-attempt timeout as
+      // RPC_RECEIPT_LOOKUP_FAILED. Once that attempt consumed the entire
+      // remaining budget, the operation-level deadline is authoritative.
+      if (Date.now() >= deadline) {
+        lastReceiptError = err;
+        break;
+      }
+      if (!isCliRetryableRpcError(err)) throw err;
+      lastReceiptError = err;
     }
-    await cliSleep(CLI_RPC_RECEIPT_POLL_INTERVAL_MS);
+    const sleepMs = Math.min(CLI_RPC_RECEIPT_POLL_INTERVAL_MS, deadline - Date.now());
+    if (sleepMs > 0) await cliSleep(sleepMs);
   }
-  throw new Error(`Transaction ${txHash} was broadcast but no receipt was found within ${CLI_RPC_RECEIPT_TIMEOUT_MS}ms`);
+  throw createRpcTimeoutError(
+    `Transaction ${txHash} was broadcast but no receipt was found within ${receiptTimeoutMs}ms`,
+    { cause: lastReceiptError, txHash },
+  );
 }
 
 export {
@@ -175,4 +200,3 @@ export {
   assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
 };
-

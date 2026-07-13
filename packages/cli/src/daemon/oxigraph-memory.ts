@@ -9,8 +9,10 @@ import { readFileSync } from 'node:fs';
  * restart log, never for control flow.
  *
  * The supervisor captures a snapshot (cgroup dir + `oom_kill` count) while the
- * child is alive, then re-reads `oom_kill` from that dir when the child exits
- * (the dir persists after the pid is gone). An increase means the kernel
+ * child is alive, then best-effort re-reads `oom_kill` when the child exits.
+ * A dedicated scope may disappear as soon as its final process exits, so the
+ * scoped watchdog performs the same comparison while it is still resident.
+ * An increase means the kernel
  * cgroup-OOM-killed oxigraph — typically the operator's unit-level `MemoryMax`
  * cap engaging (the 2026-07 beacon remediation), or a host OOM — which the
  * supervisor surfaces so operators can tell it apart from a plain crash without
@@ -18,7 +20,7 @@ import { readFileSync } from 'node:fs';
  */
 
 export interface CgroupOomSnapshot {
-  /** Absolute cgroup dir under /sys/fs/cgroup. Persists after the pid exits. */
+  /** Absolute cgroup dir under /sys/fs/cgroup. */
   dir: string;
   /** `memory.events` oom_kill count at capture time. */
   oomKill: number;
@@ -54,8 +56,8 @@ export function readCgroupOomSnapshot(
 }
 
 /**
- * Exit-time re-read of `oom_kill` from a captured cgroup dir. Used after the
- * pid is gone (the dir outlives it). Returns null on non-Linux / read failure.
+ * Exit-time re-read of `oom_kill` from a captured cgroup dir. Returns null on
+ * non-Linux, read failure, or when systemd already removed an empty scope.
  */
 export function readCgroupOomKill(dir: string, io: MemoryReaderIo = defaultIo): number | null {
   if (io.platform !== 'linux' || !dir) return null;
