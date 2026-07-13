@@ -26,6 +26,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS } from '../src/evm-adapter-constants.js';
+import { SignerWriteOperation } from '../src/signer-write-lane.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
@@ -66,6 +67,27 @@ const fakeReceipt = (status: number) =>
 const retryable429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
 const neverNull = (pre: string): never => { throw new Error(`unexpected null receipt for ${pre}`); };
 
+function preparedOperation(
+  buildSignedTx: () => Promise<{ signedTx: string; txHash: string }>,
+) {
+  type State = {
+    signedTx?: string;
+    txHash?: string;
+    receipt?: ethers.TransactionReceipt;
+  };
+  return new SignerWriteOperation<any, State, ethers.TransactionReceipt>(
+    () => ({}),
+    (state) => {
+      if (!state.receipt) throw new Error('test write completed without a receipt');
+      return state.receipt;
+    },
+  ).phase('test prepare signed transaction', 60_000, async (_ctx, state) => {
+    const prepared = await buildSignedTx();
+    state.signedTx = prepared.signedTx;
+    state.txHash = prepared.txHash;
+  });
+}
+
 // Drive the REAL dispatch → send → broadcast/receipt path. `buildSignedTx` and
 // `onBroadcast` are spied; only the providers are stubbed.
 async function runDispatch(a: EVMChainAdapter, opts: {
@@ -74,7 +96,13 @@ async function runDispatch(a: EVMChainAdapter, opts: {
 }) {
   const signer = new ethers.Wallet(PK);
   const buildSignedTx = opts.buildSignedTx ?? (async () => ({ signedTx: SIGNED, txHash: TXHASH }));
-  return (a as any).dispatchSerializedV10Write(signer, 'publish', opts.onBroadcast, buildSignedTx, neverNull);
+  return (a as any).dispatchSerializedV10Write(
+    signer,
+    'publish',
+    opts.onBroadcast,
+    preparedOperation(buildSignedTx),
+    neverNull,
+  );
 }
 
 describe('write-path tx-safety invariants (real dispatch/broadcast/receipt path)', () => {
@@ -283,8 +311,12 @@ describe('write-path tx-safety invariants — set-retry MULTI-PASS (S2)', () => 
       const w1build = recorder(async () => { events.push('w1:build'); return { signedTx: SIGNED, txHash: TXHASH }; });
       const w2build = recorder(async () => { events.push('w2:build'); return { signedTx: '0xW2', txHash: '0x' + '22'.repeat(32) }; });
 
-      const w1 = (a as any).dispatchSerializedV10Write(signer, 'publish', undefined, w1build, neverNull);
-      const w2 = (a as any).dispatchSerializedV10Write(signer, 'publish', undefined, w2build, neverNull);
+      const w1 = (a as any).dispatchSerializedV10Write(
+        signer, 'publish', undefined, preparedOperation(w1build), neverNull,
+      );
+      const w2 = (a as any).dispatchSerializedV10Write(
+        signer, 'publish', undefined, preparedOperation(w2build), neverNull,
+      );
 
       // Park write-1 mid-backoff: it has built + 429'd + is sleeping. Write-2 must
       // NOT have started building (the per-wallet lock is held across the set-retry).

@@ -22,7 +22,7 @@ import type {
   ConvictionReader,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { SignerWriteLane, SignerWritePlan } from './signer-write-lane.js';
+import { SignerWriteLane, SignerWriteOperation } from './signer-write-lane.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -45,7 +45,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, V10_WRITE_AHEAD_HOOK_TIMEOUT_MS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -58,6 +58,12 @@ type ContractWriteSender = (
 
 type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
+};
+
+type V10SignerWriteState = {
+  signedTx?: string;
+  txHash?: string;
+  receipt?: ethers.TransactionReceipt;
 };
 
 /** Domain behavior: a stale V10 allowance can trigger exactly one recovery. */
@@ -82,11 +88,9 @@ function allowanceVisibilityPollExecutionBudgetMs(endpointCount: number): number
  * transport bounds stay beside the failover loops that own those phases; this
  * orchestration layer adds broadcast retries/backoff and receipt confirmation.
  */
-function signerTransactionExecutionBudgetMs(endpointCount: number): number {
+function signedTransactionSubmissionExecutionBudgetMs(endpointCount: number): number {
   const broadcastPasses = RPC_ENDPOINT_SET_RETRIES + 1;
-  const populateAndSignBudgetMs = rpcPopulateAndSignExecutionBudgetMs(endpointCount);
-  return populateAndSignBudgetMs
-    + broadcastPasses * rpcBroadcastPassExecutionBudgetMs(endpointCount)
+  return broadcastPasses * rpcBroadcastPassExecutionBudgetMs(endpointCount)
     + RPC_ENDPOINT_SET_RETRIES * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS
     // A receipt lookup may begin just before the poll deadline and still
     // complete successfully after it. Reserve that final endpoint pass (and a
@@ -95,6 +99,43 @@ function signerTransactionExecutionBudgetMs(endpointCount: number): number {
     + RPC_RECEIPT_TIMEOUT_MS
     + rpcReceiptLookupPassExecutionBudgetMs(endpointCount)
     + RPC_RECEIPT_POLL_INTERVAL_MS;
+}
+
+function signerTransactionExecutionBudgetMs(endpointCount: number): number {
+  return rpcPopulateAndSignExecutionBudgetMs(endpointCount)
+    + signedTransactionSubmissionExecutionBudgetMs(endpointCount);
+}
+
+class V10WriteAheadHookTimeoutError extends Error {
+  readonly code = 'V10_WRITE_AHEAD_HOOK_TIMEOUT';
+
+  constructor(label: 'publish' | 'update') {
+    super(
+      `V10 ${label} write-ahead hook timed out after ` +
+      `${V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}ms`,
+    );
+    this.name = 'V10WriteAheadHookTimeoutError';
+  }
+}
+
+async function runV10WriteAheadHook(
+  label: 'publish' | 'update',
+  hook: (info: { txHash: string }) => Promise<void> | void,
+  txHash: string,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(
+      () => reject(new V10WriteAheadHookTimeoutError(label)),
+      V10_WRITE_AHEAD_HOOK_TIMEOUT_MS,
+    );
+    timeout.unref?.();
+  });
+  try {
+    await Promise.race([Promise.resolve().then(() => hook({ txHash })), deadline]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 /**
@@ -1588,57 +1629,137 @@ export class EVMChainAdapterBase {
    * the nonce monotonic; cross-wallet writes are unaffected (different keys
    * run concurrently).
    *
-   * `buildSignedTx` runs INSIDE the lock so the nonce read can't race a
-   * concurrent same-wallet send. `onBroadcast` is the durable WAL checkpoint:
-   * it `await`s before broadcast and a throw fails closed (the signed tx is
-   * still local, never sent, so the caller can retry with no on-chain effect).
+   * The supplied operation owns both each callback and its admission budget;
+   * dispatch appends the bounded WAL and broadcast phases before queueing it.
+   * `onBroadcast` is the durable WAL checkpoint: it `await`s before broadcast
+   * and a throw/timeout fails closed (the signed tx is still local, never sent,
+   * so the caller can retry with no on-chain effect).
    */
   protected async dispatchSerializedV10Write(
     signer: Wallet,
     label: 'publish' | 'update',
     onBroadcast: ((info: { txHash: string }) => Promise<void> | void) | undefined,
-    buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<{ signedTx: string; txHash: string }>,
+    operation: SignerWriteOperation<
+      SerializedSignerWriteContext,
+      V10SignerWriteState,
+      ethers.TransactionReceipt
+    >,
     onNullReceipt: (preBroadcastTxHash: string) => never,
   ): Promise<ethers.TransactionReceipt> {
-    // Declare the exact worst-case phases immediately beside the operation
-    // that executes them. There is no free-form profile/default to keep in
-    // sync: changing the V10 recovery flow means changing this ordered plan at
-    // the same boundary. Optional branches reserve their maximum occupancy.
+    if (onBroadcast) {
+      operation.phase(
+        `V10 ${label} durable write-ahead hook`,
+        V10_WRITE_AHEAD_HOOK_TIMEOUT_MS,
+        async (_ctx, state) => {
+          const preBroadcastTxHash = state.txHash;
+          if (!preBroadcastTxHash) {
+            throw new Error(`V10 ${label} operation reached write-ahead without a signed tx hash`);
+          }
+          try {
+            await runV10WriteAheadHook(label, onBroadcast, preBroadcastTxHash);
+          } catch (hookErr) {
+            throw new Error(
+              `chain:writeahead hook failed before ${label} broadcast: ` +
+              `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+              { cause: hookErr },
+            );
+          }
+        },
+      );
+    }
+    operation.phase(
+      `V10 ${label} broadcast and receipt`,
+      signedTransactionSubmissionExecutionBudgetMs(this.providers.length),
+      async (_ctx, state) => {
+        if (!state.signedTx || !state.txHash) {
+          throw new Error(`V10 ${label} operation reached broadcast without a signed transaction`);
+        }
+        const receipt = await this.sendSignedTransactionAndWait(
+          state.signedTx,
+          state.txHash,
+          `V10 ${label}`,
+        );
+        if (!receipt) onNullReceipt(state.txHash);
+        state.receipt = receipt;
+      },
+    );
+
+    return this.withSerializedSignerWrite(signer, operation);
+  }
+
+  /**
+   * Build the complete pre-broadcast V10 operation. Each phase registers its
+   * executable callback together with the bound consumed by lane admission,
+   * so allowance-recovery work cannot drift away from an independent table.
+   */
+  protected createV10SignerWriteOperation(
+    signer: Wallet,
+    kaContract: Contract,
+    method: 'publish' | 'update',
+    methodParams: unknown,
+    kav10Address: string,
+    tokenAmount: bigint,
+    approvalLabel: string,
+    reapproveLabel: string,
+  ): SignerWriteOperation<
+    SerializedSignerWriteContext,
+    V10SignerWriteState,
+    ethers.TransactionReceipt
+  > {
     const endpointCount = this.providers.length;
     const transactionBudgetMs = signerTransactionExecutionBudgetMs(endpointCount);
     const allowanceReadBudgetMs = rpcCappedPointReadExecutionBudgetMs(endpointCount);
-    const plan = new SignerWritePlan()
-      .reserve('initial V10 allowance gate', allowanceReadBudgetMs)
-      .reserve('optional initial V10 approval transaction', transactionBudgetMs);
-    for (let recovery = 0; recovery < V10_ALLOWANCE_RECOVERY_ATTEMPTS; recovery += 1) {
-      plan
-        .reserve('failed V10 populate/sign before allowance recovery',
-          rpcPopulateAndSignExecutionBudgetMs(endpointCount))
-        .reserve('forced V10 allowance gate', allowanceReadBudgetMs)
-        .reserve('forced V10 approval transaction', transactionBudgetMs)
-        .reserve('forced V10 allowance visibility poll',
-          allowanceVisibilityPollExecutionBudgetMs(endpointCount));
-    }
-    plan.reserve(`V10 ${label} transaction`, transactionBudgetMs);
-
-    return this.withSerializedSignerWrite(signer, plan, async (ctx) => {
-      const { signedTx, txHash: preBroadcastTxHash } = await buildSignedTx(ctx);
-      try {
-        await onBroadcast?.({ txHash: preBroadcastTxHash });
-      } catch (hookErr) {
-        throw new Error(
-          `chain:writeahead hook failed before ${label} broadcast: ` +
-          `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
-        );
-      }
-      const receipt = await this.sendSignedTransactionAndWait(
-        signedTx,
-        preBroadcastTxHash,
-        `V10 ${label}`,
+    const populateAndRecoveryBudgetMs = rpcPopulateAndSignExecutionBudgetMs(endpointCount)
+      + V10_ALLOWANCE_RECOVERY_ATTEMPTS * (
+        rpcPopulateAndSignExecutionBudgetMs(endpointCount)
+        + allowanceReadBudgetMs
+        + transactionBudgetMs
+        + allowanceVisibilityPollExecutionBudgetMs(endpointCount)
       );
-      if (!receipt) onNullReceipt(preBroadcastTxHash);
-      return receipt;
-    });
+
+    return new SignerWriteOperation<
+      SerializedSignerWriteContext,
+      V10SignerWriteState,
+      ethers.TransactionReceipt
+    >(
+      () => ({}),
+      (state) => {
+        if (!state.receipt) throw new Error(`V10 ${method} operation completed without a receipt`);
+        return state.receipt;
+      },
+    )
+      .phase(
+        'initial V10 allowance gate and optional approval transaction',
+        allowanceReadBudgetMs + transactionBudgetMs,
+        async (ctx) => {
+          await this.ensureV10ApproveTrac(
+            signer,
+            kav10Address,
+            tokenAmount,
+            approvalLabel,
+            false,
+            ctx.sendContractTransaction,
+          );
+        },
+      )
+      .phase(
+        `V10 ${method} populate/sign with bounded allowance recovery`,
+        populateAndRecoveryBudgetMs,
+        async (ctx, state) => {
+          const prepared = await this.populateAndSignV10WithAllowanceRecovery(
+            signer,
+            kaContract,
+            method,
+            methodParams,
+            kav10Address,
+            tokenAmount,
+            reapproveLabel,
+            ctx.sendContractTransaction,
+          );
+          state.signedTx = prepared.signedTx;
+          state.txHash = prepared.txHash;
+        },
+      );
   }
 
   protected async sendPopulatedTransaction(
@@ -1683,8 +1804,37 @@ export class EVMChainAdapterBase {
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
-    return this.withSerializedSignerWrite(signer, this.singleTransactionSignerWritePlan(), (ctx) =>
-      ctx.sendContractTransaction(contract, method, args, signer, label, opts),
+    return this.withSerializedSignerWrite(
+      signer,
+      this.createSingleTransactionSignerWriteOperation(async (ctx) =>
+        ctx.sendContractTransaction(
+          contract,
+          method,
+          args,
+          signer,
+          label,
+          opts,
+        ),
+      ),
+    );
+  }
+
+  protected createSingleTransactionSignerWriteOperation<TResult>(
+    execute: (ctx: SerializedSignerWriteContext) => Promise<TResult>,
+  ): SignerWriteOperation<SerializedSignerWriteContext, { result?: TResult }, TResult> {
+    return new SignerWriteOperation<
+      SerializedSignerWriteContext,
+      { result?: TResult },
+      TResult
+    >(
+      () => ({}),
+      (state) => state.result as TResult,
+    ).phase(
+      'single contract transaction',
+      signerTransactionExecutionBudgetMs(this.providers.length),
+      async (ctx, state) => {
+        state.result = await execute(ctx);
+      },
     );
   }
 
@@ -1692,13 +1842,12 @@ export class EVMChainAdapterBase {
    * Owns the per-wallet signer-write lane and exposes the unlocked primitive
    * only to code already running inside that nonce-critical window.
    */
-  protected async withSerializedSignerWrite<T>(
+  protected async withSerializedSignerWrite<TState, TResult>(
     signer: Wallet,
-    plan: SignerWritePlan,
-    fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
-  ): Promise<T> {
-    return this.signerWriteLane.run(signer.address, plan, () =>
-      fn({
+    operation: SignerWriteOperation<SerializedSignerWriteContext, TState, TResult>,
+  ): Promise<TResult> {
+    return this.signerWriteLane.run(signer.address, operation.plan, () =>
+      operation.execute({
         sendContractTransaction: (contract, method, args, innerSigner, label, opts) => {
           if (ethers.getAddress(innerSigner.address) !== ethers.getAddress(signer.address)) {
             throw new Error(
@@ -1708,16 +1857,6 @@ export class EVMChainAdapterBase {
           return this.sendContractTransactionUnlocked(contract, method, args, innerSigner, label, opts);
         },
       }),
-    );
-  }
-
-  protected singleTransactionSignerWritePlan(): SignerWritePlan {
-    // Read the live endpoint width when the entry is queued. RpcFailoverClient
-    // deliberately observes providers/rpcUrls reassignments through a thunk,
-    // so the lane plan must not snapshot constructor-time width.
-    return new SignerWritePlan().reserve(
-      'single contract transaction',
-      signerTransactionExecutionBudgetMs(this.providers.length),
     );
   }
 
@@ -3362,8 +3501,8 @@ export class EVMChainAdapterBase {
     // bounded-per-publish vs replenishing vs unlimited dispatch, and the
     // `this.contracts.token === undefined` no-op for read-only adapters.
     // #953: the approve runs INSIDE the per-wallet serialized window below
-    // (it sends its own tx on `txSigner`), not here — see the buildSignedTx
-    // closure passed to `dispatchSerializedV10Write`.
+    // (it sends its own tx on `txSigner`), not here — it is an executable
+    // phase of `createV10SignerWriteOperation`.
 
     // Build the on-chain PublishParams struct matching the field order +
     // types in `KnowledgeAssetsLifecycle.sol` (RFC-001 author-attestation
@@ -3486,31 +3625,16 @@ export class EVMChainAdapterBase {
       txSigner,
       'publish',
       params.onBroadcast,
-      async (ctx) => {
-        // #953: the initial allowance approve sends its OWN tx on `txSigner`,
-        // so it must run INSIDE the per-wallet lock too. If it stayed before
-        // the lock, two concurrent same-wallet publishes starting from
-        // insufficient allowance would race on the approve nonce and the
-        // second would revert `Nonce too low` before the publish even began.
-        await this.ensureV10ApproveTrac(
-          txSigner,
-          kaAddress,
-          params.tokenAmount,
-          'approve V10 publish TRAC',
-          false,
-          ctx.sendContractTransaction,
-        );
-        return this.populateAndSignV10WithAllowanceRecovery(
-          txSigner,
-          ka as Contract,
-          'publish',
-          publishParamsStruct,
-          kaAddress,
-          params.tokenAmount,
-          'approve V10 publish TRAC (forced re-approve, #888)',
-          ctx.sendContractTransaction,
-        );
-      },
+      this.createV10SignerWriteOperation(
+        txSigner,
+        ka as Contract,
+        'publish',
+        publishParamsStruct,
+        kaAddress,
+        params.tokenAmount,
+        'approve V10 publish TRAC',
+        'approve V10 publish TRAC (forced re-approve, #888)',
+      ),
       () => {
         throw new Error('Transaction receipt is null');
       },

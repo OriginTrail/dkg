@@ -88,6 +88,14 @@ export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 export const RPC_RECEIPT_TIMEOUT_MS = 180_000;
 
 /**
+ * Maximum time a V10 durable write-ahead checkpoint may hold the signer lane
+ * before broadcast. The hook normally persists one small WAL record locally;
+ * 30 seconds leaves ample room for a slow disk while ensuring a wedged hook
+ * cannot block every later transaction routed to the same wallet forever.
+ */
+export const V10_WRITE_AHEAD_HOOK_TIMEOUT_MS = 30_000;
+
+/**
  * Bounded "retry the whole endpoint set" for the BROADCAST phase (S2). After a
  * full per-endpoint broadcast pass exhausts with a retryable error (e.g. a brief
  * window where ALL endpoints 429), `sendSignedTransactionAndWait` re-broadcasts

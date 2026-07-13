@@ -28,7 +28,10 @@ import {
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { SignerWritePlan } from '../src/signer-write-lane.js';
 import { connectable } from './connectable.js';
+
+const testSignerWritePlan = () => new SignerWritePlan().reserve('test busy signer lane', 60_000);
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
 // so a failover/exhaustion warning emitted by one test can't suppress (via the
@@ -4093,7 +4096,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const gate = new Promise<void>((r) => { release = r; });
       void (a as any).signerWriteLane.run(
         walletA.address,
-        (a as any).singleTransactionSignerWritePlan(),
+        testSignerWritePlan(),
         () => gate,
       );
       try {
@@ -4111,7 +4114,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const gate = new Promise<void>((r) => { release = r; });
       void (a as any).signerWriteLane.run(
         walletA.address,
-        (a as any).singleTransactionSignerWritePlan(),
+        testSignerWritePlan(),
         () => gate,
       );
       try {
@@ -4128,12 +4131,12 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const gB = new Promise<void>((r) => { releaseB = r; });
       void (a as any).signerWriteLane.run(
         walletA.address,
-        (a as any).singleTransactionSignerWritePlan(),
+        testSignerWritePlan(),
         () => gA,
       );
       void (a as any).signerWriteLane.run(
         walletB.address,
-        (a as any).singleTransactionSignerWritePlan(),
+        testSignerWritePlan(),
         () => gB,
       );
       try {
@@ -4236,7 +4239,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
         const gate = new Promise<void>((r) => { release = r; });
         void (a as any).signerWriteLane.run(
           walletA.address,
-          (a as any).singleTransactionSignerWritePlan(),
+          testSignerWritePlan(),
           () => gate,
         );
         try {

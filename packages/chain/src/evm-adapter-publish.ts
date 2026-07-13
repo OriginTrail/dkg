@@ -809,8 +809,8 @@ export class PublishMethods extends EVMChainAdapterBase {
     // floors at 1n so metadata-only updates with `newTokenAmount === 0n`
     // still satisfy the contract's `transferFrom(..., 1n)` minimum.
     // #953: the approve runs INSIDE the per-wallet serialized window below
-    // (it sends its own tx on `signer`), not here — see the buildSignedTx
-    // closure passed to `dispatchSerializedV10Write`.
+    // (it sends its own tx on `signer`), not here — it is an executable
+    // phase of `createV10SignerWriteOperation`.
 
     // P-1 review (Codex iter-5): same pattern as the publish path —
     // break the single contract call into populate / sign / hook /
@@ -834,29 +834,16 @@ export class PublishMethods extends EVMChainAdapterBase {
       signer,
       'update',
       params.onBroadcast,
-      async (ctx) => {
-        // #953: approve INSIDE the per-wallet lock (it sends its own tx on
-        // `signer`) so a concurrent same-wallet update/publish can't race on
-        // the approve nonce.
-        await this.ensureV10ApproveTrac(
-          signer,
-          kav10Address,
-          newTokenAmount,
-          'approve V10 update TRAC',
-          false,
-          ctx.sendContractTransaction,
-        );
-        return this.populateAndSignV10WithAllowanceRecovery(
-          signer,
-          ka as Contract,
-          'update',
-          updateParams,
-          kav10Address,
-          newTokenAmount,
-          'approve V10 update TRAC (forced re-approve, #888)',
-          ctx.sendContractTransaction,
-        );
-      },
+      this.createV10SignerWriteOperation(
+        signer,
+        ka as Contract,
+        'update',
+        updateParams,
+        kav10Address,
+        newTokenAmount,
+        'approve V10 update TRAC',
+        'approve V10 update TRAC (forced re-approve, #888)',
+      ),
       (preBroadcastTxHash) => {
         throw new Error(
           `update broadcast succeeded (txHash=${preBroadcastTxHash}) but receipt was null ` +
