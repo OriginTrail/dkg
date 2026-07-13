@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Live-devnet regression for #1573. A temporary edge node's operational wallet
-# is drained of TRAC, then a named publish must fail with the stable funding code
-# before the StorageACK timeout/remote-staging phase.
+# Live-devnet regression for #1573. A temporary edge node's complete operational
+# wallet pool is drained of TRAC, then a named publish must fail with the stable
+# funding code before the StorageACK timeout/remote-staging phase.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,24 +19,32 @@ trap cleanup EXIT INT TERM
 "$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
 "$ROOT/scripts/devnet.sh" stop-node "$NODE" >/dev/null
 
-NODE_DIR="$NODE_DIR" RPC="$RPC" node --input-type=module <<'NODE'
+NODE_DIR="$NODE_DIR" RPC="$RPC" DEPLOYMENTS="$ROOT/packages/evm-module/deployments/localhost_contracts.json" \
+  pnpm --dir "$ROOT/packages/chain" exec node --input-type=module <<'NODE'
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
-const cfg = JSON.parse(readFileSync(join(process.env.NODE_DIR, 'config.json'), 'utf8'));
 const wallets = JSON.parse(readFileSync(join(process.env.NODE_DIR, 'wallets.json'), 'utf8'));
-const key = (wallets.wallets ?? [])[0]?.privateKey;
-const tokenAddress = cfg.chain?.tokenAddress;
-if (!key || !tokenAddress) throw new Error('temporary node wallet/token config missing');
+const deployments = JSON.parse(readFileSync(process.env.DEPLOYMENTS, 'utf8'));
+const keys = (wallets.wallets ?? []).map((entry) => entry.privateKey).filter(Boolean);
+const tokenAddress = deployments.contracts?.Token?.evmAddress;
+if (keys.length === 0 || !tokenAddress) throw new Error('temporary node wallet/token config missing');
 const provider = new ethers.JsonRpcProvider(process.env.RPC);
-const wallet = new ethers.Wallet(key, provider);
-const token = new ethers.Contract(tokenAddress, [
+const tokenAbi = [
   'function balanceOf(address) view returns (uint256)',
   'function transfer(address,uint256) returns (bool)',
-], wallet);
-const balance = await token.balanceOf(wallet.address);
-if (balance > 0n) await (await token.transfer('0x000000000000000000000000000000000000dEaD', balance)).wait();
-if (await token.balanceOf(wallet.address) !== 0n) throw new Error('TRAC drain failed');
+];
+for (const key of keys) {
+  const wallet = new ethers.Wallet(key, provider);
+  const token = new ethers.Contract(tokenAddress, tokenAbi, wallet);
+  const balance = await token.balanceOf(wallet.address);
+  if (balance > 0n) {
+    await (await token.transfer('0x000000000000000000000000000000000000dEaD', balance)).wait();
+  }
+  if (await token.balanceOf(wallet.address) !== 0n) {
+    throw new Error(`TRAC drain failed for ${wallet.address}`);
+  }
+}
 NODE
 
 "$ROOT/scripts/devnet.sh" restart-node "$NODE" >/dev/null
