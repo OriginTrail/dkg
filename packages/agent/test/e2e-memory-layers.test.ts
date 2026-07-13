@@ -784,6 +784,72 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(retainedSwm.bindings).toHaveLength(1);
   }, 60_000);
 
+  it('queued VM publish cleanup preserves a same-root sibling named lifecycle', async () => {
+    const agent = await createAgent('QueuedScopedSameRootCleanupBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Scoped Same Root Cleanup E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-scoped-same-root';
+    const root = `${ENTITY_BASE}:queued-scoped-same-root`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"primary"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    expect(intent.kaNumber).toBeDefined();
+    const lifecycleAgent = intent.agentAddress ?? agent.defaultAgentAddress ?? agent.peerId;
+    const primaryNumber = BigInt(intent.kaNumber!);
+    const primaryGraph = contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.SharedWorkingMemory,
+      lifecycleAgent.toLowerCase(),
+      primaryNumber,
+    );
+    const siblingGraph = contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.SharedWorkingMemory,
+      lifecycleAgent.toLowerCase(),
+      primaryNumber + 1n,
+    );
+    await (agent as any).store.insert([{
+      subject: root,
+      predicate: 'http://schema.org/name',
+      object: '"same-root sibling"',
+      graph: siblingGraph,
+    }]);
+
+    const realPublisher = (agent as any).publisher;
+    const publishSpy = vi.spyOn(realPublisher, 'publish').mockResolvedValue({
+      kaId: intent.seal.reservedKaId !== undefined ? BigInt(intent.seal.reservedKaId) : 1n,
+      ual: 'did:dkg:test/queued-scoped-same-root',
+      merkleRoot: ethers.getBytes(intent.sealMerkleRoot),
+      kaManifest: [{ tokenId: 1n, rootEntity: root, privateTripleCount: 0 }],
+      status: 'confirmed',
+      publicQuads: [],
+    });
+    try {
+      const result = await agent.publishQueuedKnowledgeAssetVmPublish(intent, {
+        quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"primary"', graph: '' }],
+        publisherPeerId: 'queued-scoped-test',
+      });
+      expect(result.status).toBe('confirmed');
+    } finally {
+      publishSpy.mockRestore();
+    }
+
+    const primary = await (agent as any).store.query(
+      `ASK { GRAPH <${primaryGraph}> { <${root}> ?p ?o } }`,
+    );
+    const sibling = await (agent as any).store.query(
+      `ASK { GRAPH <${siblingGraph}> { <${root}> ?p ?o } }`,
+    );
+    expect(primary).toMatchObject({ type: 'boolean', value: false });
+    expect(sibling).toMatchObject({ type: 'boolean', value: true });
+  }, 60_000);
+
   it('async VM publish with clearAfter true clears the remaining SWM scope', async () => {
     const agent = await createAgent('QueuedAsyncVmPublishClearAllBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Clear All E2E' });
@@ -1027,6 +1093,28 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(seal.merkleRoot).toBeDefined();
     expect(seal.authorAddress).toBeDefined();
 
+    // Current D1 creates already allocate a KA number, so this fresh skipSeal
+    // share starts in the deterministic named lifecycle graph and never needs
+    // the legacy bucket. Separate storage migration regressions cover upgraded
+    // pre-D1 bucket data, including two lifecycles that share one root.
+    const historyAfterSeal = await agent.assertion.history(CG_ID, name);
+    expect(historyAfterSeal?.kaNumber).toBeDefined();
+    const legacySwmGraph = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
+    const namedSwmGraph = contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.SharedWorkingMemory,
+      seal.authorAddress.toLowerCase(),
+      BigInt(historyAfterSeal!.kaNumber!),
+    );
+    const legacyAfterSeal = await (agent as any).store.query(
+      `ASK { GRAPH <${legacySwmGraph}> { <${ENTITY_BASE}:sis> ?p ?o } }`,
+    );
+    const namedAfterSeal = await (agent as any).store.query(
+      `ASK { GRAPH <${namedSwmGraph}> { <${ENTITY_BASE}:sis> ?p ?o } }`,
+    );
+    expect(legacyAfterSeal).toMatchObject({ type: 'boolean', value: false });
+    expect(namedAfterSeal).toMatchObject({ type: 'boolean', value: true });
+
     // Post-condition #1: the asset is left PURELY in SWM: the WM draft is empty
     // again (the transient reconstruction draft was dropped).
     const wmAfterSeal = await agent.assertion.query(CG_ID, name);
@@ -1066,6 +1154,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(pub.status).toBe('confirmed');
     expect(pub.ual).toBeDefined();
     expect(pub.seal).toBeDefined();
+    const namedAfterPublish = await (agent as any).store.query(
+      `ASK { GRAPH <${namedSwmGraph}> { <${ENTITY_BASE}:sis> ?p ?o } }`,
+    );
+    expect(namedAfterPublish).toMatchObject({ type: 'boolean', value: false });
   }, 30_000);
 
   it('strips the generated private-CG catalog floor on pre-registration product-path promote', async () => {

@@ -3,6 +3,7 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
+  contextGraphLayerUriCandidates, contextGraphLayerPrefixCandidates,
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
@@ -93,33 +94,55 @@ export function resolveViewGraphs(
       // `subGraphName` + `assertionName` read targets the ROOT assertion graph and
       // misses sub-graph assertions (Codex review on PR #1132).
       if (opts.assertionName) {
+        if (opts.kaNumber !== undefined) {
+          return {
+            graphs: contextGraphLayerUriCandidates(
+              contextGraphId,
+              MemoryLayer.WorkingMemory,
+              opts.agentAddress,
+              opts.kaNumber,
+              opts.subGraphName,
+            ),
+            graphPrefixes: [],
+          };
+        }
         return {
-          graphs: [opts.kaNumber !== undefined
-            ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, opts.agentAddress, opts.kaNumber, opts.subGraphName)
-            : contextGraphAssertionUri(contextGraphId, opts.agentAddress, opts.assertionName, opts.subGraphName)],
+          graphs: [contextGraphAssertionUri(
+            contextGraphId,
+            opts.agentAddress,
+            opts.assertionName,
+            opts.subGraphName,
+          )],
           graphPrefixes: [],
         };
       }
       // PR #1107 review (🟡): span the primary address AND every
       // same-identity alias so a node default agent's legacy peerId-keyed
       // drafts and rc.17+ wallet-keyed drafts are both visible from one
-      // unscoped WM read. Dedupe case-insensitively — graph URIs embed the
-      // address verbatim, so the prefix must use the caller's original form.
-      const seen = new Set<string>([opts.agentAddress.toLowerCase()]);
-      const addresses = [opts.agentAddress];
-      for (const alias of opts.agentAddressAliases ?? []) {
-        if (!alias || seen.has(alias.toLowerCase())) continue;
-        seen.add(alias.toLowerCase());
-        addresses.push(alias);
+      // unscoped WM read. New full EVM-address writes use the lowercase core
+      // identity, while the caller's original casing is retained as a legacy
+      // read prefix for graphs written before canonicalization.
+      const graphPrefixes: string[] = [];
+      const seen = new Set<string>();
+      for (const address of [opts.agentAddress, ...(opts.agentAddressAliases ?? [])]) {
+        if (!address) continue;
+        for (const candidate of contextGraphLayerPrefixCandidates(
+          contextGraphId,
+          MemoryLayer.WorkingMemory,
+          address,
+          opts.subGraphName,
+        )) {
+          if (seen.has(candidate)) continue;
+          seen.add(candidate);
+          graphPrefixes.push(candidate);
+        }
       }
       return {
         graphs: [],
         // Combine main's same-identity alias span (#1107 review 🟡) with
         // #1132's sub-graph scoping (#184/#675): one prefix per alias address,
         // each carrying the optional sub-graph suffix.
-        graphPrefixes: addresses.map(
-          (addr) => `did:dkg:context-graph:${contextGraphId}${sg}/_working_memory/${addr}/`,
-        ),
+        graphPrefixes,
       };
     }
     case 'shared-working-memory':
