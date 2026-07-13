@@ -28,28 +28,31 @@ import githubLight from 'shiki/themes/github-light.mjs';
 // an allow-list to that constructor only limits runtime initialization; it
 // does not shrink the build graph. Core plus explicit grammar/theme imports
 // keeps this lazy chunk limited to the languages CodeBlock accepts.
+// Shiki 4's fine-grained language defaults are registration arrays (usually
+// one entry). Flattening the groups also remains safe if a future Shiki module
+// exports a single registration object instead.
 const languages = [
-  ...bash,
-  ...css,
-  ...diff,
-  ...dockerfile,
-  ...go,
-  ...html,
-  ...javascript,
-  ...json,
-  ...jsx,
-  ...markdown,
-  ...python,
-  ...rust,
-  ...solidity,
-  ...sparql,
-  ...sql,
-  ...toml,
-  ...tsx,
-  ...typescript,
-  ...xml,
-  ...yaml,
-].filter((language, index, all) =>
+  bash,
+  css,
+  diff,
+  dockerfile,
+  go,
+  html,
+  javascript,
+  json,
+  jsx,
+  markdown,
+  python,
+  rust,
+  solidity,
+  sparql,
+  sql,
+  toml,
+  tsx,
+  typescript,
+  xml,
+  yaml,
+].flat().filter((language, index, all) =>
   all.findIndex((candidate) => candidate.name === language.name) === index,
 );
 
