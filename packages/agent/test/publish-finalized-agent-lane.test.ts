@@ -111,15 +111,15 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         markerCalls.push({ contextGraphId, name, agentAddress, subGraphName });
         return agentAddress === AGENT_B;
       },
-      ensureFinalizedLifecycleSwmRoots: async (descriptor: any) => {
+      ensureFinalizedLifecycleSwmPlacement: async (descriptor: any) => {
         ensureCalls.push(descriptor);
+        await store.insert([{
+          subject: ROOT,
+          predicate: 'http://schema.org/name',
+          object: '"B lane"',
+          graph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
+        }]);
         return {
-          quads: [{
-            subject: ROOT,
-            predicate: 'http://schema.org/name',
-            object: '"B lane"',
-            graph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
-          }],
           migratedLegacyQuadCount: 0,
           targetGraph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
         };
@@ -226,12 +226,11 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.log = makeLog();
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      ensureFinalizedLifecycleSwmRoots: async (descriptor: any) => {
+      ensureFinalizedLifecycleSwmPlacement: async (descriptor: any) => {
         ensureCalls.push(descriptor);
         await store.insert([{ ...legacyQuad, graph: namedGraph }]);
         await store.deleteByPattern({ graph: swmGraph, subject: ROOT });
         return {
-          quads: [{ ...legacyQuad, graph: namedGraph }],
           migratedLegacyQuadCount: 1,
           targetGraph: namedGraph,
         };
@@ -319,13 +318,12 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.log = makeLog();
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      ensureFinalizedLifecycleSwmRoots: async (descriptor: any) => {
+      ensureFinalizedLifecycleSwmPlacement: async (descriptor: any) => {
         ensureCalls.push(descriptor);
         const canonicalQuad = { ...legacyQuad, graph: namedGraph };
         await store.insert([canonicalQuad]);
         await store.delete([legacyQuad]);
         return {
-          quads: [canonicalQuad],
           migratedLegacyQuadCount: 1,
           targetGraph: namedGraph,
         };

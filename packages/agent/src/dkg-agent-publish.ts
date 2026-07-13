@@ -101,7 +101,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, resolveSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, canonicalSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -4329,28 +4329,31 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // One publisher-owned operation owns exact selection, optional legacy
-    // migration, alias convergence, and lifecycle-pointer repair. Both finalize
-    // and publish call the same boundary, while routing below only consumes the
-    // returned quads.
+    // Keep state-changing compatibility recovery explicit and separate from
+    // the pure scoped load below. Finalize invokes only the placement operation;
+    // publish pays for the load because it consumes the returned payload.
     let finalizedLifecycleSwmQuads: Quad[];
     if (sharedMemoryScope.kind === 'named-lifecycle') {
       try {
-        finalizedLifecycleSwmQuads = (
-          await publisher.ensureFinalizedLifecycleSwmRoots(
-            {
-              lifecycle: {
-                contextGraphId,
-                assertionName: name,
-                assertionLifecycleAgentAddress: agentAddress,
-                subGraphName: opts?.subGraphName,
-              },
-              sealAuthorScope: sharedMemoryScope.identity,
-              rootEntities: seal.rootEntities,
+        await publisher.ensureFinalizedLifecycleSwmPlacement(
+          {
+            lifecycle: {
+              contextGraphId,
+              assertionName: name,
+              assertionLifecycleAgentAddress: agentAddress,
+              subGraphName: opts?.subGraphName,
             },
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          )
-        ).quads;
+            sealAuthorScope: sharedMemoryScope.identity,
+            rootEntities: seal.rootEntities,
+          },
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+        );
+        finalizedLifecycleSwmQuads = await this._loadSelectedSWMQuads(
+          contextGraphId,
+          finalizedLifecycleSelection,
+          opts?.subGraphName,
+          sharedMemoryScope,
+        );
       } catch (err) {
         if ((err as { code?: string })?.code !== 'SWM_MIGRATION_SOURCE_EMPTY') throw err;
         finalizedLifecycleSwmQuads = [];
@@ -4860,7 +4863,7 @@ export class PublishMethods extends DKGAgentBase {
     scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<'all' | { rootEntities: string[] }> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-    const catalogTargetGraph = resolveSharedMemoryScopeWriteGraph(swmGraph, scope);
+    const catalogTargetGraph = canonicalSharedMemoryScopeWriteGraph(swmGraph, scope);
     const cgDid = contextGraphDataUri(contextGraphId);
     const catalogQuads = buildPublicProjection({
       ual: cgDid,

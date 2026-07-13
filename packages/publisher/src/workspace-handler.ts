@@ -1,10 +1,7 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import {
-  GraphManager,
-  canonicalNamedLifecycleSharedMemoryGraphUri,
-} from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import {
   decodeGossipEnvelope,
@@ -1204,9 +1201,12 @@ export class SharedMemoryHandler {
       // Uniform layout: write the gossiped KA into its per-KA SWM graph
       // …/_shared_memory/{author}/{number} (carried on the wire); else legacy bucket.
       const swmGraph = (kaAuthorAddress && kaNumber)
-        ? canonicalNamedLifecycleSharedMemoryGraphUri(
-            this.graphManager.sharedMemoryUri(contextGraphId, subGraphName),
-            { agentAddress: kaAuthorAddress, kaNumber: BigInt(kaNumber) },
+        ? contextGraphLayerUri(
+            contextGraphId,
+            MemoryLayer.SharedWorkingMemory,
+            kaAuthorAddress,
+            BigInt(kaNumber),
+            subGraphName,
           )
         : this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
       const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);

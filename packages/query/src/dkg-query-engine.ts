@@ -5,6 +5,7 @@ import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
+  canonicalKnowledgeAssetAgentAddress,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   ASSERTION_NAMED_GRAPH_PREFIX,
   isAssertionScopedChildGraph,
@@ -93,24 +94,49 @@ export function resolveViewGraphs(
       // `subGraphName` + `assertionName` read targets the ROOT assertion graph and
       // misses sub-graph assertions (Codex review on PR #1132).
       if (opts.assertionName) {
+        if (opts.kaNumber !== undefined) {
+          const canonicalGraph = contextGraphLayerUri(
+            contextGraphId,
+            MemoryLayer.WorkingMemory,
+            opts.agentAddress,
+            opts.kaNumber,
+            opts.subGraphName,
+          );
+          const legacyGraph =
+            `did:dkg:context-graph:${contextGraphId}${sg}` +
+            `/_working_memory/${opts.agentAddress}/${opts.kaNumber}`;
+          return {
+            graphs: canonicalGraph === legacyGraph
+              ? [canonicalGraph]
+              : [canonicalGraph, legacyGraph],
+            graphPrefixes: [],
+          };
+        }
         return {
-          graphs: [opts.kaNumber !== undefined
-            ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, opts.agentAddress, opts.kaNumber, opts.subGraphName)
-            : contextGraphAssertionUri(contextGraphId, opts.agentAddress, opts.assertionName, opts.subGraphName)],
+          graphs: [contextGraphAssertionUri(
+            contextGraphId,
+            opts.agentAddress,
+            opts.assertionName,
+            opts.subGraphName,
+          )],
           graphPrefixes: [],
         };
       }
       // PR #1107 review (🟡): span the primary address AND every
       // same-identity alias so a node default agent's legacy peerId-keyed
       // drafts and rc.17+ wallet-keyed drafts are both visible from one
-      // unscoped WM read. Dedupe case-insensitively — graph URIs embed the
-      // address verbatim, so the prefix must use the caller's original form.
-      const seen = new Set<string>([opts.agentAddress.toLowerCase()]);
-      const addresses = [opts.agentAddress];
-      for (const alias of opts.agentAddressAliases ?? []) {
-        if (!alias || seen.has(alias.toLowerCase())) continue;
-        seen.add(alias.toLowerCase());
-        addresses.push(alias);
+      // unscoped WM read. New full EVM-address writes use the lowercase core
+      // identity, while the caller's original casing is retained as a legacy
+      // read prefix for graphs written before canonicalization.
+      const addresses: string[] = [];
+      const seen = new Set<string>();
+      for (const address of [opts.agentAddress, ...(opts.agentAddressAliases ?? [])]) {
+        if (!address) continue;
+        for (const candidate of [canonicalKnowledgeAssetAgentAddress(address), address]) {
+          if (seen.has(candidate)) continue;
+          seen.add(candidate);
+          addresses.push(candidate);
+        }
       }
       return {
         graphs: [],

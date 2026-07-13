@@ -240,6 +240,12 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
 
   it('migrates a finalized skipSeal payload from the legacy bucket into its canonical named graph', async () => {
     const { publisher, store } = await makeRealPublisher();
+    const querySources: Array<string | undefined> = [];
+    const realQuery = store.query.bind(store);
+    store.query = async (sparql, options) => {
+      querySources.push(options?.source);
+      return realQuery(sparql, options);
+    };
     const root = 'urn:test:root:skip-seal';
     const child = `${root}/.well-known/genid/child`;
     const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
@@ -255,7 +261,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
         graph: `${CONTEXT_GRAPH_URI}/_meta`,
       },
     ]);
-    const ensured = await publisher.ensureFinalizedLifecycleSwmRoots(
+    const ensured = await publisher.ensureFinalizedLifecycleSwmPlacement(
       {
         lifecycle: {
           contextGraphId: CONTEXT_GRAPH,
@@ -270,7 +276,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
 
     expect(ensured.migratedLegacyQuadCount).toBe(2);
     expect(ensured.targetGraph).toBe(canonicalGraph);
-    expect(ensured.quads).toHaveLength(2);
+    expect(ensured).not.toHaveProperty('quads');
+    expect(querySources.some((source) => source?.endsWith('.result'))).toBe(false);
     expect(await store.deleteByPattern({ graph: SWM_GRAPH, subject: root })).toBe(0);
     expect(await store.deleteByPattern({ graph: SWM_GRAPH, subject: child })).toBe(0);
     expect(await store.deleteByPattern({ graph: canonicalGraph, subject: root })).toBe(1);
@@ -299,7 +306,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       },
     ]);
 
-    const ensured = await publisher.ensureFinalizedLifecycleSwmRoots(
+    const ensured = await publisher.ensureFinalizedLifecycleSwmPlacement(
       {
         lifecycle: {
           contextGraphId: CONTEXT_GRAPH,
@@ -314,7 +321,6 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
 
     expect(ensured.migratedLegacyQuadCount).toBe(0);
     expect(ensured.targetGraph).toBe(canonicalGraph);
-    expect(ensured.quads.map((quad) => quad.object)).toEqual(['"canonical"']);
     const canonical = await store.query(`ASK { GRAPH <${canonicalGraph}> { <${root}> ?p ?o } }`);
     expect(canonical).toMatchObject({ type: 'boolean', value: true });
     const pointer = await store.query(
@@ -335,7 +341,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       q(root, 'http://schema.org/name', '"legacy alias"', aliasGraph),
     ]);
 
-    const ensured = await publisher.ensureFinalizedLifecycleSwmRoots(
+    const ensured = await publisher.ensureFinalizedLifecycleSwmPlacement(
       {
         lifecycle: {
           contextGraphId: CONTEXT_GRAPH,
@@ -350,7 +356,6 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
 
     expect(ensured.migratedLegacyQuadCount).toBe(0);
     expect(ensured.targetGraph).toBe(canonicalGraph);
-    expect(ensured.quads.map((quad) => quad.object)).toEqual(['"legacy alias"']);
     const alias = await store.query(`ASK { GRAPH <${aliasGraph}> { <${root}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${canonicalGraph}> { <${root}> ?p ?o } }`);
     expect(alias).toMatchObject({ type: 'boolean', value: false });
@@ -699,6 +704,7 @@ describe('SharedMemoryHandler lifecycle UAL derivation', () => {
     const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
       assetUalForKaIdentity: () => new Promise<string>(() => {}),
     });
+    const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
     const msg = encodeWorkspacePublishRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
@@ -708,7 +714,7 @@ describe('SharedMemoryHandler lifecycle UAL derivation', () => {
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'op-lifecycle-timeout',
       timestampMs: Date.now(),
-      agentAddress: '0x1111111111111111111111111111111111111111',
+      agentAddress: checksummedAuthor,
       kaNumber: '7',
     });
 
@@ -725,6 +731,20 @@ describe('SharedMemoryHandler lifecycle UAL derivation', () => {
       publisherPeerId: '12D3KooWPeer',
       insertedTriples: 1,
     });
+    const canonicalGraph = `${SWM_GRAPH}/${checksummedAuthor.toLowerCase()}/7`;
+    const checksumAliasGraph = `${SWM_GRAPH}/${checksummedAuthor}/7`;
+    const canonical = await store.query(
+      `ASK { GRAPH <${canonicalGraph}> { <urn:test:root:one> ?p ?o } }`,
+    );
+    const checksumAlias = await store.query(
+      `ASK { GRAPH <${checksumAliasGraph}> { <urn:test:root:one> ?p ?o } }`,
+    );
+    const legacyBucket = await store.query(
+      `ASK { GRAPH <${SWM_GRAPH}> { <urn:test:root:one> ?p ?o } }`,
+    );
+    expect(canonical).toMatchObject({ type: 'boolean', value: true });
+    expect(checksumAlias).toMatchObject({ type: 'boolean', value: false });
+    expect(legacyBucket).toMatchObject({ type: 'boolean', value: false });
   });
 });
 

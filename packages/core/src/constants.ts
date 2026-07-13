@@ -315,6 +315,23 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
   return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
 }
 
+/** Canonical identity segment used by all new per-KA memory-layer writes. */
+export function canonicalKnowledgeAssetAgentAddress(agentAddress: string): string {
+  // Non-EVM legacy identities (notably peer IDs) remain byte-for-byte stable.
+  return /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
+    ? agentAddress.toLowerCase()
+    : agentAddress;
+}
+
+/** Build the layer-independent canonical `{address}/{number}` suffix. */
+export function canonicalKnowledgeAssetGraphIdentitySuffix(
+  agentAddress: string,
+  kaNumber: string | number | bigint,
+): string {
+  const canonicalAgentAddress = canonicalKnowledgeAssetAgentAddress(agentAddress);
+  return `${canonicalAgentAddress}/${kaNumber}`;
+}
+
 /**
  * Uniform per-KA graph URI for ANY memory layer (OT-RFC-46 Chorus).
  *
@@ -324,7 +341,8 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
  * builder, and (downstream) ONE read path. `kaNumber` is the per-author KA
  * number (the identifying half of the UAL `did:dkg:{chain}/{addr}/{number}`),
  * minted at create. A KA moves between layers by swapping only the `{_layer}`
- * segment; the `{addr}/{number}` suffix is stable for its whole lifecycle.
+ * segment; the canonical `{addr}/{number}` suffix is stable for its whole
+ * lifecycle.
  */
 export function contextGraphLayerUri(
   contextGraphId: string,
@@ -336,7 +354,7 @@ export function contextGraphLayerUri(
   const base = subGraphName
     ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
     : `did:dkg:context-graph:${contextGraphId}`;
-  return `${base}/${memoryLayerSlug(layer)}/${agentAddress}/${kaNumber}`;
+  return `${base}/${memoryLayerSlug(layer)}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
 }
 
 export interface ContextGraphLayerIdentity {

@@ -12,6 +12,7 @@ import {
   contextGraphSubGraphMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphCatalogUri,
+  canonicalKnowledgeAssetGraphIdentitySuffix,
   isSafeIri,
   assertSafeIri,
   sparqlString,
@@ -301,28 +302,6 @@ interface NamedLifecycleGraphResolution {
 }
 
 /**
- * One stable identity-to-graph mapping for all new named-lifecycle writes.
- *
- * EVM addresses are case-insensitive identities, while RDF graph IRIs are
- * case-sensitive strings. Lower-casing here makes write placement independent
- * of historical store contents and enumeration order. Read resolution below
- * separately discovers checksum-cased aliases written by older versions.
- */
-export function canonicalNamedLifecycleSharedMemoryGraphUri(
-  bucketGraph: string,
-  identity: NamedKnowledgeAssetGraphIdentity,
-): string {
-  assertSafeIri(bucketGraph);
-  const { agentAddress, kaNumber } = identity;
-  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
-    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
-  }
-  const graph = `${bucketGraph}/${agentAddress.toLowerCase()}/${kaNumber.toString()}`;
-  assertSafeIri(graph);
-  return graph;
-}
-
-/**
  * Legacy read compatibility only: find every historical checksum-casing alias
  * for the same logical lifecycle. This scan must never influence where new
  * data is written.
@@ -333,7 +312,10 @@ async function resolveNamedLifecycleReadPolicy(
   identity: NamedKnowledgeAssetGraphIdentity,
   options?: QueryOptions,
 ): Promise<NamedLifecycleGraphResolution> {
-  const canonicalGraph = canonicalNamedLifecycleSharedMemoryGraphUri(bucketGraph, identity);
+  const canonicalGraph = canonicalSharedMemoryScopeWriteGraph(bucketGraph, {
+    kind: 'named-lifecycle',
+    identity,
+  });
   const legacyCompatibleReadGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
     .filter((graph) => {
       const child = parseBoundableSwmChildGraph(bucketGraph, graph);
@@ -367,14 +349,34 @@ export async function resolveSharedMemoryScopeGraphs(
     : [canonicalGraph];
 }
 
-/** Resolve the single graph to WRITE for a semantic scope. */
-export function resolveSharedMemoryScopeWriteGraph(
+/** Resolve the single canonical graph to WRITE for a semantic scope. */
+export function canonicalSharedMemoryScopeWriteGraph(
   bucketGraph: string,
   scope: SharedMemoryGraphScope,
 ): string {
   assertSafeIri(bucketGraph);
   if (scope.kind === 'complete-family') return bucketGraph;
-  return canonicalNamedLifecycleSharedMemoryGraphUri(bucketGraph, scope.identity);
+  const { agentAddress, kaNumber } = scope.identity;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
+    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
+  }
+  const graph = `${bucketGraph}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
+  assertSafeIri(graph);
+  return graph;
+}
+
+/**
+ * @deprecated Use the synchronous `canonicalSharedMemoryScopeWriteGraph`.
+ * Retained for integrations compiled against the original public async
+ * `(store, bucketGraph, scope, options?)` contract.
+ */
+export async function resolveSharedMemoryScopeWriteGraph(
+  _store: TripleStore,
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+  _options?: QueryOptions,
+): Promise<string> {
+  return canonicalSharedMemoryScopeWriteGraph(bucketGraph, scope);
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */

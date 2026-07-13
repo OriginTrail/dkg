@@ -3,7 +3,7 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, canonicalNamedLifecycleSharedMemoryGraphUri, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -119,8 +119,7 @@ export interface FinalizedLifecycleSwmDescriptor {
   rootEntities: readonly string[];
 }
 
-export interface EnsuredFinalizedLifecycleSwmRoots {
-  quads: Quad[];
+export interface EnsuredFinalizedLifecycleSwmPlacement {
   migratedLegacyQuadCount: number;
   targetGraph: string;
 }
@@ -5459,18 +5458,24 @@ export class DKGPublisher implements Publisher {
     const num = await this.resolveKaNumber(contextGraphId, agentAddress, name, subGraphName);
     const bucketGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     return num !== null
-      ? canonicalNamedLifecycleSharedMemoryGraphUri(
-          bucketGraph,
-          { agentAddress, kaNumber: num },
+      ? contextGraphLayerUri(
+          contextGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          agentAddress,
+          num,
+          subGraphName,
         )
       : bucketGraph;
   }
 
   /** SWM graph URI from an explicit `{author, number}` (receiver-side / freshly-allocated generic share). */
   private swmGraphUriFor(contextGraphId: string, agentAddress: string, kaNumber: bigint, subGraphName?: string): string {
-    return canonicalNamedLifecycleSharedMemoryGraphUri(
-      this.graphManager.sharedMemoryUri(contextGraphId, subGraphName),
-      { agentAddress, kaNumber },
+    return contextGraphLayerUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      agentAddress,
+      kaNumber,
+      subGraphName,
     );
   }
 
@@ -5494,10 +5499,10 @@ export class DKGPublisher implements Publisher {
    * only copy. The lifecycle pointer is updated only after the data move, and a
    * retry also repairs that pointer when the target already contains the data.
    */
-  async ensureFinalizedLifecycleSwmRoots(
+  async ensureFinalizedLifecycleSwmPlacement(
     descriptor: FinalizedLifecycleSwmDescriptor,
     ctx: OperationContext,
-  ): Promise<EnsuredFinalizedLifecycleSwmRoots> {
+  ): Promise<EnsuredFinalizedLifecycleSwmPlacement> {
     const { lifecycle, sealAuthorScope } = descriptor;
     const {
       contextGraphId,
@@ -5512,22 +5517,25 @@ export class DKGPublisher implements Publisher {
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const scope = { kind: 'named-lifecycle', identity: sealAuthorScope } as const;
-    const targetGraph = canonicalNamedLifecycleSharedMemoryGraphUri(
-      swmGraph,
-      sealAuthorScope,
+    const targetGraph = contextGraphLayerUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      sealAuthorScope.agentAddress,
+      sealAuthorScope.kaNumber,
+      subGraphName,
     );
     const exactGraphs = await resolveSharedMemoryScopeGraphs(
       this.store,
       swmGraph,
       scope,
-      { source: 'publisher.ensureFinalizedLifecycleSwmRoots.graphs' },
+      { source: 'publisher.ensureFinalizedLifecycleSwmPlacement.graphs' },
     );
     const exactQuads = await loadSharedMemoryQuadsForScope(
       this.store,
       swmGraph,
       { rootEntities: roots },
       scope,
-      { querySource: 'publisher.ensureFinalizedLifecycleSwmRoots.existing' },
+      { querySource: 'publisher.ensureFinalizedLifecycleSwmPlacement.existing' },
     );
     const values = roots.map((root) => `<${root}>`).join(' ');
     const legacyResult = await this.store.query(
@@ -5538,7 +5546,7 @@ export class DKGPublisher implements Publisher {
           FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
         }
       }`,
-      { source: 'publisher.ensureFinalizedLifecycleSwmRoots.legacy' },
+      { source: 'publisher.ensureFinalizedLifecycleSwmPlacement.legacy' },
     );
     const legacyQuads = legacyResult.type === 'quads' ? legacyResult.quads : [];
     if (legacyQuads.length === 0 && exactQuads.length === 0) {
@@ -5554,9 +5562,16 @@ export class DKGPublisher implements Publisher {
     // Materialize the canonical graph before deleting any source. This makes
     // legacy-bucket and historical checksum-alias migration retryable even if
     // a process fails between the insert, source deletion, and pointer repair.
-    await this.store.insert(
-      [...exactQuads, ...legacyQuads].map((quad) => ({ ...quad, graph: targetGraph })),
-    );
+    const canonicalQuadsByTriple = new Map<string, Quad>();
+    for (const quad of [...exactQuads, ...legacyQuads]) {
+      const canonicalQuad = { ...quad, graph: targetGraph };
+      canonicalQuadsByTriple.set(
+        JSON.stringify([quad.subject, quad.predicate, quad.object]),
+        canonicalQuad,
+      );
+    }
+    const canonicalQuads = [...canonicalQuadsByTriple.values()];
+    await this.store.insert(canonicalQuads);
     // A CONSTRUCT result is a default-graph dataset, so exactQuads cannot tell
     // us which source graph supplied each triple. Reattach every resolved
     // historical alias explicitly before deleting. Mapping the union to each
@@ -5598,15 +5613,7 @@ export class DKGPublisher implements Publisher {
         `Migrated ${legacyQuads.length} legacy SWM triple(s) for <${lifecycleUri}> to <${targetGraph}>`,
       );
     }
-    const quads = await loadSharedMemoryQuadsForScope(
-      this.store,
-      swmGraph,
-      { rootEntities: roots },
-      scope,
-      { querySource: 'publisher.ensureFinalizedLifecycleSwmRoots.result' },
-    );
     return {
-      quads,
       migratedLegacyQuadCount: legacyQuads.length,
       targetGraph,
     };

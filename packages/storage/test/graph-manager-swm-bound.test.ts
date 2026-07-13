@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest';
 import * as storageIndex from '../src/index.js';
 import {
   createTripleStore,
-  canonicalNamedLifecycleSharedMemoryGraphUri,
   loadSharedMemoryQuadsForScope,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
+  canonicalSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeWriteGraph,
   resolveSharedMemoryReadGraphs,
   type Quad,
@@ -261,12 +261,12 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
         scope,
       );
       expect(quads.map((quad) => quad.object)).toEqual(['"exact"']);
-      expect(canonicalNamedLifecycleSharedMemoryGraphUri(swm, scope.identity)).toBe(
+      expect(canonicalSharedMemoryScopeWriteGraph(swm, scope)).toBe(
         `${swm}/${AUTHOR_A}/7`,
       );
-      expect(resolveSharedMemoryScopeWriteGraph(swm, scope)).toBe(
-        `${swm}/${AUTHOR_A}/7`,
-      );
+      await expect(resolveSharedMemoryScopeWriteGraph(store, swm, scope, {
+        source: 'test.deprecated-write-resolver',
+      })).resolves.toBe(`${swm}/${AUTHOR_A}/7`);
     } finally {
       await store.close();
     }
@@ -297,7 +297,7 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
       );
 
       expect(quads.map((quad) => quad.object).sort()).toEqual(['"mixed"', '"upper"']);
-      expect(resolveSharedMemoryScopeWriteGraph(swm, scope)).toBe(canonical);
+      expect(canonicalSharedMemoryScopeWriteGraph(swm, scope)).toBe(canonical);
     } finally {
       await store.close();
     }
@@ -368,6 +368,7 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     expect(typeof storageIndex.loadSharedMemorySliceWithKaBoundFallback).toBe('function');
     // Named publish flows get a scoped API, not a second range-shaped loader.
     expect(typeof storageIndex.loadSharedMemoryQuadsForScope).toBe('function');
+    expect(typeof storageIndex.canonicalSharedMemoryScopeWriteGraph).toBe('function');
     expect(typeof storageIndex.resolveSharedMemoryScopeWriteGraph).toBe('function');
     expect(storageIndex).not.toHaveProperty('loadNamedKnowledgeAssetSharedMemoryQuads');
   });

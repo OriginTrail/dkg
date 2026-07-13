@@ -197,6 +197,18 @@ describe('V10 named graph URIs', () => {
     expect(suffix(vm)).toBe('0xAbc/7');
   });
 
+  it('canonicalizes a full EVM-address suffix uniformly across every memory layer', () => {
+    const mixed = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const expectedSuffix = '0xabcdef0123456789abcdef0123456789abcdef01/7';
+    for (const layer of [
+      MemoryLayer.WorkingMemory,
+      MemoryLayer.SharedWorkingMemory,
+      MemoryLayer.VerifiableMemory,
+    ]) {
+      expect(contextGraphLayerUri(id, layer, mixed, 7).endsWith(expectedSuffix)).toBe(true);
+    }
+  });
+
   it('uniform per-KA layer URI: sub-graph scoping is uniform across layers', () => {
     expect(contextGraphLayerUri(id, MemoryLayer.VerifiableMemory, '0xAbc', 7, 'game-state'))
       .toBe('did:dkg:context-graph:42/game-state/_verifiable_memory/0xAbc/7');

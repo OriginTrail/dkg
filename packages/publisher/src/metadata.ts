@@ -1,8 +1,5 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import {
-  GraphManager,
-  canonicalNamedLifecycleSharedMemoryGraphUri,
-} from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import {
   validateSubGraphName,
   isSafeIri,
@@ -1455,9 +1452,12 @@ export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta, o
     ? contextGraphLayerUri(meta.contextGraphId, MemoryLayer.WorkingMemory, meta.agentAddress, meta.kaNumber, meta.subGraphName)
     : contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const swmGraphUri = meta.kaNumber !== undefined
-    ? canonicalNamedLifecycleSharedMemoryGraphUri(
-        contextGraphSharedMemoryUri(meta.contextGraphId, meta.subGraphName),
-        { agentAddress: meta.agentAddress, kaNumber: BigInt(meta.kaNumber) },
+    ? contextGraphLayerUri(
+        meta.contextGraphId,
+        MemoryLayer.SharedWorkingMemory,
+        meta.agentAddress,
+        meta.kaNumber,
+        meta.subGraphName,
       )
     : contextGraphSharedMemoryUri(meta.contextGraphId, meta.subGraphName);
 

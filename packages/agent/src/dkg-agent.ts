@@ -2539,7 +2539,7 @@ export class DKGAgent extends DKGAgentBase {
         if (finalizedScope.kind !== 'named-lifecycle') {
           throw new Error('seal-in-SWM finalized without a named lifecycle identity');
         }
-        await agent.publisher.ensureFinalizedLifecycleSwmRoots(
+        await agent.publisher.ensureFinalizedLifecycleSwmPlacement(
           {
             lifecycle: {
               contextGraphId,
