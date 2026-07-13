@@ -225,6 +225,51 @@ describe('VmReconcileScheduler', () => {
     resolveCurrent();
     await retry;
   });
+
+  it('preserves a periodic retry queued behind a failing live pass', async () => {
+    let runs = 0;
+    let resolveCurrent!: () => void;
+    let rejectCurrent!: (error: Error) => void;
+    const scheduler = new VmReconcileScheduler(
+      async () => {
+        runs += 1;
+        await new Promise<void>((resolve, reject) => {
+          resolveCurrent = resolve;
+          rejectCurrent = reject;
+        });
+      },
+      () => undefined,
+    );
+
+    const first = scheduler.triggerLive('cg');
+    void scheduler.triggerPeriodic('cg');
+    rejectCurrent(new Error('store deadline exceeded'));
+    await first;
+
+    expect(runs).toBe(2); // queued periodic pass starts despite the live failure hold
+    resolveCurrent();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scheduler.isInFlight('cg')).toBe(false);
+  });
+
+  it('isolates the live failure hold per context graph', async () => {
+    const ran: string[] = [];
+    const failures: string[] = [];
+    const scheduler = new VmReconcileScheduler(
+      async (key) => {
+        ran.push(key);
+        if (key === 'cg-a') throw new Error('cg-a unavailable');
+      },
+      (key) => failures.push(key),
+    );
+
+    await scheduler.triggerLive('cg-a');
+    await scheduler.triggerLive('cg-a'); // held after failure
+    await scheduler.triggerLive('cg-b'); // unrelated CG still runs immediately
+
+    expect(ran).toEqual(['cg-a', 'cg-b']);
+    expect(failures).toEqual(['cg-a']);
+  });
 });
 
 describe('RecentUalSet', () => {
