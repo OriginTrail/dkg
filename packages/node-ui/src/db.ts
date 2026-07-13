@@ -8,6 +8,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
+  type ProtocolOutboxMetadataStore,
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
 
@@ -2676,12 +2677,17 @@ interface ProtocolOutboxMetadataRow {
   last_error: string | null;
 }
 
+interface ProtocolOutboxRow extends ProtocolOutboxMetadataRow {
+  payload: Buffer;
+}
+
 // Keep payload out of metadata queries so SQLite never materializes retry BLOBs in JavaScript.
 const PROTOCOL_OUTBOX_METADATA_COLUMNS =
   'peer_id, protocol, message_id, attempts, ' +
   'first_failure_at, last_attempt_at, next_attempt_at, last_error';
 
-export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
+export class SqliteProtocolOutboxStore
+  implements ProtocolOutboxStore, ProtocolOutboxMetadataStore {
   private readonly db: Database.Database;
   private maxAgeMs = 24 * 60 * 60 * 1000;
   private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
@@ -2861,35 +2867,32 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {
-    const cutoff = now - this.maxAgeMs;
-    const rows = this.db
-      .prepare(`SELECT * FROM protocol_outbox WHERE first_failure_at < ?`)
-      .all(cutoff) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+    return this.dropExpiredRows<ProtocolOutboxRow, ProtocolOutboxEntry>(
+      now,
+      '*',
+      SqliteProtocolOutboxStore.rowToEntry,
+    );
   }
 
   dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    return this.dropExpiredRows<ProtocolOutboxMetadataRow, ProtocolOutboxMetadata>(
+      now,
+      PROTOCOL_OUTBOX_METADATA_COLUMNS,
+      SqliteProtocolOutboxStore.rowToMetadata,
+    );
+  }
+
+  private dropExpiredRows<Row, Result>(
+    now: number,
+    columns: string,
+    project: (row: Row) => Result,
+  ): Result[] {
     const cutoff = now - this.maxAgeMs;
     const rows = this.db
-      .prepare(
-        `SELECT ${PROTOCOL_OUTBOX_METADATA_COLUMNS}
-         FROM protocol_outbox
-         WHERE first_failure_at < ?`,
-      )
-      .all(cutoff) as ProtocolOutboxMetadataRow[];
+      .prepare(`SELECT ${columns} FROM protocol_outbox WHERE first_failure_at < ?`)
+      .all(cutoff) as Row[];
     this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
-    return rows.map(SqliteProtocolOutboxStore.rowToMetadata);
+    return rows.map(project);
   }
 
   size(): number {
@@ -2949,17 +2952,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     return SqliteProtocolOutboxStore.rowToEntry(row);
   }
 
-  private static rowToEntry(row: {
-    peer_id: string;
-    protocol: string;
-    message_id: string;
-    payload: Buffer;
-    attempts: number;
-    first_failure_at: number;
-    last_attempt_at: number;
-    next_attempt_at: number;
-    last_error: string | null;
-  }): ProtocolOutboxEntry {
+  private static rowToEntry(row: ProtocolOutboxRow): ProtocolOutboxEntry {
     return {
       ...SqliteProtocolOutboxStore.rowToMetadata(row),
       payload: new Uint8Array(row.payload),

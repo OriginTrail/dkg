@@ -253,6 +253,18 @@ interface ProtocolOutboxStoreBase {
 }
 
 /**
+ * Optional payload-free storage capability. First-party stores implement this
+ * directly; `ProtocolOutbox` adapts older custom stores at its boundary.
+ */
+export interface ProtocolOutboxMetadataStore {
+  /** Delete expired rows without reading or returning payload bytes. */
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[];
+
+  /** Read diagnostics metadata without materializing payload bytes. */
+  listMetadata(): ProtocolOutboxMetadata[];
+}
+
+/**
  * Current sender-side outbox store contract. Peer bookkeeping uses a boolean
  * fast path; retry selection remains exclusively `due`/`duePage`-driven.
  *
@@ -260,11 +272,11 @@ interface ProtocolOutboxStoreBase {
  * do not need to materialize full payload-bearing peer snapshots.
  */
 export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
-  /** Delete expired rows without reading or returning payload bytes. */
-  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[];
+  /** Optional payload-free cleanup path for first-party and upgraded stores. */
+  dropExpiredMetadata?: ProtocolOutboxMetadataStore['dropExpiredMetadata'];
 
-  /** Read diagnostics metadata without materializing payload bytes. */
-  listMetadata(): ProtocolOutboxMetadata[];
+  /** Optional payload-free diagnostics path for first-party and upgraded stores. */
+  listMetadata?: ProtocolOutboxMetadataStore['listMetadata'];
 
   /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
   hasPendingFor(peer: string): boolean;
@@ -282,10 +294,10 @@ export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
  */
 export interface LegacyProtocolOutboxStore extends ProtocolOutboxStoreBase {
   /** Optional forward-compatible cleanup path that omits payload bytes. */
-  dropExpiredMetadata?(now: number): ProtocolOutboxMetadata[];
+  dropExpiredMetadata?: ProtocolOutboxMetadataStore['dropExpiredMetadata'];
 
   /** Optional forward-compatible diagnostics path that omits payload bytes. */
-  listMetadata?(): ProtocolOutboxMetadata[];
+  listMetadata?: ProtocolOutboxMetadataStore['listMetadata'];
 
   /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
   pendingFor(peer: string): ProtocolOutboxEntry[];

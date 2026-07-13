@@ -26,6 +26,38 @@ function fixture() {
   return { store, outbox };
 }
 
+function legacyStoreWithoutMetadata(
+  backing: InMemoryProtocolOutboxStore,
+): LegacyProtocolOutboxStore {
+  return {
+    enqueue: backing.enqueue.bind(backing),
+    markDelivered: backing.markDelivered.bind(backing),
+    hasEntry: backing.hasEntry.bind(backing),
+    pendingFor: backing.pendingFor.bind(backing),
+    due: backing.due.bind(backing),
+    dropExpired: backing.dropExpired.bind(backing),
+    size: backing.size.bind(backing),
+    list: backing.list.bind(backing),
+    getEntry: backing.getEntry.bind(backing),
+  };
+}
+
+function currentStoreWithoutMetadata(
+  backing: InMemoryProtocolOutboxStore,
+): ProtocolOutboxStore {
+  return {
+    enqueue: backing.enqueue.bind(backing),
+    markDelivered: backing.markDelivered.bind(backing),
+    hasEntry: backing.hasEntry.bind(backing),
+    hasPendingFor: backing.hasPendingFor.bind(backing),
+    due: backing.due.bind(backing),
+    dropExpired: backing.dropExpired.bind(backing),
+    size: backing.size.bind(backing),
+    list: backing.list.bind(backing),
+    getEntry: backing.getEntry.bind(backing),
+  };
+}
+
 describe('ProtocolOutbox.enqueueFailure', () => {
   it('creates a new entry on first failure with default backoff', () => {
     const { outbox } = fixture();
@@ -314,7 +346,8 @@ describe('ProtocolOutbox.dropExpired', () => {
   });
 
   it('falls back to legacy stores while omitting payloads from expiration metadata', () => {
-    const { outbox } = fixture();
+    const backing = new InMemoryProtocolOutboxStore();
+    const outbox = new ProtocolOutbox(legacyStoreWithoutMetadata(backing));
     outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 0);
 
     const dropped = outbox.dropExpiredMetadata(24 * 60 * 60 * 1000 + 1);
@@ -326,13 +359,25 @@ describe('ProtocolOutbox.dropExpired', () => {
 
 describe('ProtocolOutbox.listMetadata', () => {
   it('falls back to legacy stores without exposing payloads', () => {
-    const { outbox } = fixture();
+    const backing = new InMemoryProtocolOutboxStore();
+    const outbox = new ProtocolOutbox(legacyStoreWithoutMetadata(backing));
     outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
 
     const pending = outbox.listMetadata();
 
     expect(pending).toHaveLength(1);
     expect(pending[0]).not.toHaveProperty('payload');
+  });
+
+  it('keeps current stores without metadata fast paths source-compatible', () => {
+    const backing = new InMemoryProtocolOutboxStore();
+    const store: ProtocolOutboxStore = currentStoreWithoutMetadata(backing);
+    const outbox = new ProtocolOutbox(store);
+    outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 0);
+
+    expect(outbox.listMetadata()[0]).not.toHaveProperty('payload');
+    expect(outbox.dropExpiredMetadata(24 * 60 * 60 * 1000 + 1)[0])
+      .not.toHaveProperty('payload');
   });
 
   it('preserves metadata fast paths when adapting legacy peer-snapshot stores', () => {

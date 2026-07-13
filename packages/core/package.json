@@ -19,8 +19,9 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && pnpm run test:types",
     "test": "vitest run",
+    "test:types": "tsc --project tsconfig.type-tests.json",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
