@@ -65,4 +65,4 @@ export {
   waitForTransactionReceiptWithFailover,
   type TransactionReceiptEndpoint,
   type TransactionReceiptWaitOptions,
-} from './receipt-wait.js';
+} from './rpc-failover-client.js';

@@ -29,8 +29,8 @@ import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvm
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
-import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
-import { waitForReceiptWithDeadline, type ReceiptLookupOptions } from './receipt-wait.js';
+import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
+import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';

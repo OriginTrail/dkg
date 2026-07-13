@@ -1,147 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { type JsonRpcProvider, type TransactionReceipt } from 'ethers';
-import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
-import { errorCode, errorMessage } from './evm-adapter-errors.js';
-import {
-  assertSuccessfulReceipt,
-  isRetryableRpcError,
-  sleep,
-  withTimeout,
-} from './evm-adapter-rpc.js';
-import {
-  RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  RPC_RECEIPT_POLL_INTERVAL_MS,
-  resolveReceiptTimeoutMs,
-} from './evm-adapter-constants.js';
-import { noteRpcExhaustion, noteRpcFailover } from './rpc-failover-log.js';
-
-/**
- * Optional absolute deadline for one complete receipt-lookup pass. The shared
- * endpoint-pass helper caps every attempt to the remaining operation budget.
- */
-export interface ReceiptLookupOptions {
-  deadlineMs?: number;
-}
-
-/** @internal Shared only between chain-package receipt transports. */
-export interface ReceiptPassEndpoint<TReceipt> {
-  /** Telemetry metadata only; absence must never remove an endpoint from flow. */
-  rpcUrl?: string;
-  /** Optional raw endpoint preflight; the shared pass budgets this stage. */
-  validate?: (attempt: number) => Promise<void>;
-  /** Raw receipt lookup; invoked only after validation finishes within budget. */
-  lookup: (txHash: string, attempt: number) => Promise<TReceipt | null>;
-  recordOutcome?: (outcome: 'success' | 'failure') => void;
-}
-
-/** @internal Shared only between chain-package receipt transports. */
-export interface ReceiptPassOptions<TReceipt> {
-  endpoints: readonly ReceiptPassEndpoint<TReceipt>[];
-  txHash: string;
-  deadlineMs?: number;
-  logLabel: string;
-  /** Canonical URL order for exhaustion telemetry when attempts are sticky. */
-  exhaustionRpcUrls?: readonly string[];
-}
-
-/** @internal Result retains the serving endpoint for adapter telemetry. */
-export interface ReceiptPassResult<TReceipt> {
-  receipt: TReceipt | null;
-  endpoint?: ReceiptPassEndpoint<TReceipt>;
-}
-
-/**
- * Run one endpoint stage inside the attempt's remaining budget. The stage
- * thunk is deliberately invoked only after the budget check, so a validation
- * timeout can never start a detached receipt lookup.
- */
-async function runReceiptAttemptStage<T>(
-  stage: () => Promise<T>,
-  attemptDeadlineMs: number,
-  label: string,
-): Promise<T> {
-  const remainingMs = attemptDeadlineMs - Date.now();
-  if (remainingMs <= 0) {
-    throw createRpcTimeoutError(`${label} exceeded its receipt-attempt deadline`);
-  }
-  return withTimeout(stage(), remainingMs, label);
-}
-
-/**
- * One canonical receipt endpoint-pass state machine. Both the adapter transport
- * and direct CLI writes use this loop for retry classification, null-response
- * semantics, failover/exhaustion telemetry, and all deadline accounting.
- * Endpoint callbacks provide separate raw validation and lookup stages. This
- * helper alone computes the combined attempt budget and does not invoke lookup
- * unless validation completed before that same budget expired.
- * @internal Shared only between chain-package receipt transports.
- */
-export async function getReceiptAcrossEndpoints<TReceipt>(
-  options: ReceiptPassOptions<TReceipt>,
-): Promise<ReceiptPassResult<TReceipt>> {
-  let lastRetryable: unknown;
-  let sawNonErrorResponse = false;
-
-  for (let i = 0; i < options.endpoints.length; i += 1) {
-    const endpoint = options.endpoints[i];
-    const attemptStartedAt = Date.now();
-    const remainingMs = options.deadlineMs === undefined
-      ? RPC_RECEIPT_ATTEMPT_TIMEOUT_MS
-      : options.deadlineMs - attemptStartedAt;
-    if (remainingMs <= 0) break;
-    const attemptDeadlineMs = attemptStartedAt + Math.min(
-      RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-      remainingMs,
-    );
-
-    try {
-      const validate = endpoint.validate;
-      if (validate) {
-        await runReceiptAttemptStage(
-          () => validate(i + 1),
-          attemptDeadlineMs,
-          `receipt endpoint validation via RPC #${i + 1}`,
-        );
-      }
-      const receipt = await runReceiptAttemptStage(
-        () => endpoint.lookup(options.txHash, i + 1),
-        attemptDeadlineMs,
-        `receipt lookup via RPC #${i + 1}`,
-      );
-      sawNonErrorResponse = true;
-      if (receipt) {
-        endpoint.recordOutcome?.('success');
-        return { receipt, endpoint };
-      }
-    } catch (err) {
-      if (!isRetryableRpcError(err)) throw err;
-      lastRetryable = err;
-      endpoint.recordOutcome?.('failure');
-
-      const nextEndpoint = options.endpoints[i + 1];
-      const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
-      if (endpoint.rpcUrl && nextEndpoint?.rpcUrl && canTryNext) {
-        noteRpcFailover(options.logLabel, endpoint.rpcUrl, err, nextEndpoint.rpcUrl);
-      }
-    }
-  }
-
-  if (lastRetryable && !sawNonErrorResponse) {
-    const rpcUrls = options.exhaustionRpcUrls
-      ?? options.endpoints.map(endpoint => endpoint.rpcUrl);
-    if (rpcUrls.every((url): url is string => typeof url === 'string')) {
-      noteRpcExhaustion(options.logLabel, rpcUrls);
-    }
-    throw new ChainRpcTransportError(
-      'RPC_RECEIPT_LOOKUP_FAILED',
-      `Receipt lookup for transaction ${options.txHash} failed on all configured RPC endpoints: ${errorMessage(lastRetryable)}`,
-      { cause: lastRetryable, txHash: options.txHash },
-    );
-  }
-
-  return { receipt: null };
-}
+import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { errorCode } from './evm-adapter-errors.js';
+import { isRetryableRpcError, sleep } from './evm-adapter-rpc.js';
 
 export interface ReceiptWaitTimeoutContext {
   txHash: string;
@@ -159,7 +20,7 @@ export interface WaitForReceiptWithDeadlineOptions<TReceipt> {
    */
   getReceipt: (
     txHash: string,
-    options: Required<ReceiptLookupOptions>,
+    options: { deadlineMs: number },
   ) => Promise<TReceipt | null>;
   assertSuccessfulReceipt: (receipt: TReceipt) => void;
   formatTimeoutMessage: (context: ReceiptWaitTimeoutContext) => string;
@@ -167,10 +28,10 @@ export interface WaitForReceiptWithDeadlineOptions<TReceipt> {
 
 /**
  * Canonical operation-level receipt wait used by adapter-backed and direct CLI
- * writes. This one primitive owns the absolute deadline, polling cadence,
- * retryable-error handling, and final typed `RPC_TIMEOUT` creation. The endpoint
- * pass is shared too; transports contribute only lookup hooks such as chain-id
- * validation, stickiness, and tracing. Every pass receives the same deadline.
+ * writes. This primitive owns only the absolute deadline, polling cadence,
+ * retryable-error handling, and final typed `RPC_TIMEOUT` creation. Endpoint
+ * ordering/failover belongs to `RpcFailoverClient`; every pass receives this
+ * same operation deadline.
  */
 export async function waitForReceiptWithDeadline<TReceipt>(
   options: WaitForReceiptWithDeadlineOptions<TReceipt>,
@@ -216,52 +77,4 @@ export async function waitForReceiptWithDeadline<TReceipt>(
     }),
     { cause: lastError, txHash: options.txHash },
   );
-}
-
-export interface TransactionReceiptWaitOptions {
-  /** Overall submitted-transaction receipt deadline (default 10 minutes). */
-  receiptTimeoutMs?: number;
-  /** Low-cardinality transport label. Defaults to `direct transaction`. */
-  logLabel?: string;
-}
-
-/** One direct receipt endpoint with optional telemetry metadata kept in-band. */
-export interface TransactionReceiptEndpoint {
-  provider: JsonRpcProvider;
-  rpcUrl?: string;
-}
-
-/**
- * Stable direct-write boundary used by CLI commands after a raw transaction is
- * broadcast. Absolute-deadline and callback plumbing stay package-internal;
- * callers supply providers, a tx hash, and operator-facing timeout config.
- */
-export async function waitForTransactionReceiptWithFailover(
-  endpoints: readonly TransactionReceiptEndpoint[],
-  txHash: string,
-  options: TransactionReceiptWaitOptions = {},
-): Promise<TransactionReceipt> {
-  const receiptTimeoutMs = resolveReceiptTimeoutMs(options.receiptTimeoutMs);
-  const logLabel = options.logLabel ?? 'direct transaction';
-  const receiptPassEndpoints: ReceiptPassEndpoint<TransactionReceipt>[] = endpoints.map(endpoint => ({
-    ...(endpoint.rpcUrl ? { rpcUrl: endpoint.rpcUrl } : {}),
-    lookup: hash => endpoint.provider.getTransactionReceipt(hash),
-  }));
-
-  return waitForReceiptWithDeadline({
-    txHash,
-    receiptTimeoutMs,
-    pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
-    getReceipt: async (hash, { deadlineMs }) => (
-      await getReceiptAcrossEndpoints({
-        endpoints: receiptPassEndpoints,
-        txHash: hash,
-        deadlineMs,
-        logLabel: `${logLabel} receipt lookup`,
-      })
-    ).receipt,
-    assertSuccessfulReceipt: receipt => assertSuccessfulReceipt(receipt, logLabel),
-    formatTimeoutMessage: () =>
-      `Transaction ${txHash} was broadcast but no receipt was found within ${receiptTimeoutMs}ms`,
-  });
 }
