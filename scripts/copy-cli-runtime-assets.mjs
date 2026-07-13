@@ -44,7 +44,9 @@ function enumerateNetworkOverlays(sourceNetworkDir) {
 /**
  * Read + VALIDATE the CLI runtime-asset manifest from the repo root — the single
  * FAIL-CLOSED source of truth shared by the pack-time copy (below) and the
- * `release:verify-pack` preflight (scripts/release-packages.mjs). Throws if the
+ * `release:verify-pack` preflight (scripts/release-packages.mjs). It returns
+ * separate copied-asset and required-pack lists so package-local helpers are
+ * never mistaken for files owned by the copier. Throws if the
  * source tree can't produce the full set (network/ missing or empty, or
  * project.json absent), so the verifier can never silently build a required list
  * that omits the network overlays — it enforces exactly the same invariant as
@@ -78,10 +80,15 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
     sourceProjectJson,
     sourceBlazegraphImageJson,
     networkJsonFiles: overlays,
-    // Package-relative runtime paths that MUST appear inside the published
-    // tarball. The parser is already package-local; the remaining entries are
-    // materialized below from their repo-root sources.
-    relPaths: [
+    // Package-relative files this function materializes from repo-root sources.
+    copiedRuntimeAssets: [
+      'project.json',
+      'blazegraph-image.json',
+      ...overlays.map((file) => `network/${file}`),
+    ],
+    // Complete publish contract. The parser is package-local source, while the
+    // entries above are copied during build/prepack.
+    requiredPackAssets: [
       'project.json',
       'blazegraph-image.json',
       'blazegraph-image-metadata.cjs',

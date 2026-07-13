@@ -478,41 +478,20 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Verify provisioned Blazegraph image contract"
-        run: |
-          set -euo pipefail
-          runtime="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json)"
-          IFS=$'\t' read -r image container_port <<< "$runtime"
-          if [[ -z "$image" || -z "$container_port" ]]; then
-            echo "::error::Could not read image contract from blazegraph-image.json"
-            exit 1
-          fi
-          manifest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}')"
-          printf '%s\n' "$manifest" | jq -e '
-            ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | index("amd64") != null)
-            and
-            ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | index("arm64") != null)
-          '
-
-          container="dkg-ci-blazegraph-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-          docker run -d --name "$container" -p "127.0.0.1::${container_port}" "$image" >/dev/null
-          binding="$(docker port "$container" "${container_port}/tcp")"
-          host_port="${binding##*:}"
-          ready=0
-          for _ in $(seq 1 120); do
-            if curl -fsS --max-time 2 "http://127.0.0.1:${host_port}/bigdata/status" >/dev/null; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [[ "$ready" != "1" ]]; then
-            docker logs "$container" || true
-            echo "::error::Pinned Blazegraph image did not serve /bigdata/status on declared container port ${container_port}"
-            exit 1
-          fi
+        run: bash scripts/ci/verify-blazegraph-image-contract.sh
       - name: "CLI tests"
         run: pnpm --filter @origintrail-official/dkg test
+
+  bura-blazegraph-arm64:
+    name: "Bura: Blazegraph arm64 image (native)"
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Verify provisioned Blazegraph image contract on arm64"
+        run: bash scripts/ci/verify-blazegraph-image-contract.sh
 
   bura-supporting:
     name: "Bura: query"

@@ -291,19 +291,26 @@ test('packages/cli lifecycle is wired to the copy script (build + prepack)', () 
   assert.match(cliPkg.scripts.build ?? '', /copy-cli-runtime-assets\.mjs/, 'build must run the copy script');
 });
 
-test('the copy and the verifier consume one shared asset manifest', () => withFixture((root) => {
+test('the manifest distinguishes copied assets from complete pack requirements', () => withFixture((root) => {
   writeCliPackFixture(root);
-  const { relPaths } = cliRuntimeAssetManifest({ rootDir: root });
-  // What the copy materializes (project/image metadata + every network overlay)…
-  assert.deepEqual(relPaths, [
+  const { copiedRuntimeAssets, requiredPackAssets } = cliRuntimeAssetManifest({ rootDir: root });
+  assert.deepEqual(copiedRuntimeAssets, [
+    'project.json',
+    'blazegraph-image.json',
+    'network/mainnet-base.json',
+    'network/testnet.json',
+  ]);
+  assert.deepEqual(requiredPackAssets, [
     'project.json',
     'blazegraph-image.json',
     'blazegraph-image-metadata.cjs',
     'network/mainnet-base.json',
     'network/testnet.json',
   ]);
-  // …is exactly what the verifier requires, plus the generated build-info.json.
-  const spyReport = () => JSON.stringify([{ files: [...relPaths, 'build-info.json'].map((p) => ({ path: p })) }]);
+  assert.ok(copiedRuntimeAssets.every((asset) => requiredPackAssets.includes(asset)));
+  const spyReport = () => JSON.stringify([{
+    files: [...requiredPackAssets, 'build-info.json'].map((p) => ({ path: p })),
+  }]);
   assert.deepEqual(findMissingCliPackAssets(root, spyReport), []);
 }));
 
