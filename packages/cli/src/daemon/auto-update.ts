@@ -1543,11 +1543,9 @@ export async function performNpmUpdate(
  * version to `~/.dkg/previous-version` so `dkg rollback` (Edge
  * branch) has a target to reinstall.
  *
- * Tradeoffs accepted (per RFC §7.2):
- *   - Non-atomic: a mid-install crash leaves the global state
- *     half-updated. Recovery is `npm install -g` re-run.
- *   - Network-dependent rollback: requires the npm registry to
- *     have the previous version available.
+ * The npm mutation itself is not atomic, so completion is followed by an
+ * executable/version self-check. A failed check immediately reinstalls the
+ * recorded previous version before the daemon is allowed to restart.
  *
  * The function returns `'updated'` after the npm install completes;
  * the caller is responsible for stopping the running daemon so the
@@ -1617,14 +1615,7 @@ async function _performNpmUpdateInnerEdge(
   log(`Auto-update (npm-edge): running '${installCmd}'…`);
   try {
     const installStart = Date.now();
-    await execAsyncIo(installCmd, {
-      encoding: "utf-8",
-      timeout: 300_000,
-      // Allow npm's progress / warning output to surface in the daemon
-      // log — operators tailing the log get real-time feedback on slow
-      // installs. stderr → stdout merge mirrors how npm itself runs
-      // interactively.
-    });
+    await installGlobalCliVersion(execAsyncIo, targetVersion);
     const installMs = Date.now() - installStart;
     log(`Auto-update (npm-edge): npm install completed in ${installMs}ms.`);
   } catch (installErr: any) {
@@ -1640,11 +1631,62 @@ async function _performNpmUpdateInnerEdge(
     return "failed";
   }
 
+  try {
+    const reported = await verifyGlobalDkgVersion(execAsyncIo, targetVersion, 'self-check');
+    log(`Auto-update (npm-edge): self-check passed (${reported}).`);
+  } catch (verifyErr: any) {
+    log(`Auto-update (npm-edge): post-install self-check failed — ${verifyErr?.message ?? verifyErr}.`);
+    if (!currentVersion) {
+      log('Auto-update (npm-edge): previous version is unknown; automatic rollback is unavailable.');
+      return 'failed';
+    }
+    const rollbackCmd = `npm install -g ${CLI_NPM_PACKAGE}@${currentVersion}`;
+    log(`Auto-update (npm-edge): rolling back with '${rollbackCmd}'…`);
+    try {
+      await installGlobalCliVersion(execAsyncIo, currentVersion);
+      const reported = await verifyGlobalDkgVersion(execAsyncIo, currentVersion, 'rollback');
+      log(`Auto-update (npm-edge): rollback restored ${reported}.`);
+    } catch (rollbackErr: any) {
+      log(`Auto-update (npm-edge): CRITICAL rollback failed — ${rollbackErr?.message ?? rollbackErr}.`);
+    }
+    return 'failed';
+  }
+
   log(
     `Auto-update (npm-edge): ${CLI_NPM_PACKAGE}@${targetVersion} installed. ` +
       "Stop the daemon to restart from the new entry point.",
   );
   return "updated";
+}
+
+type EdgeExec = typeof _autoUpdateIo.exec;
+
+async function installGlobalCliVersion(execIo: EdgeExec, version: string): Promise<void> {
+  await execIo(`npm install -g ${CLI_NPM_PACKAGE}@${version}`, {
+    encoding: 'utf-8',
+    timeout: 300_000,
+  });
+}
+
+function parseReportedDkgVersion(output: string): string | undefined {
+  return output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/)?.[1];
+}
+
+async function verifyGlobalDkgVersion(
+  execIo: EdgeExec,
+  expectedVersion: string,
+  context: 'self-check' | 'rollback',
+): Promise<string> {
+  const { stdout, stderr } = await execIo('dkg --version', {
+    encoding: 'utf-8',
+    timeout: 30_000,
+  });
+  const reported = `${stdout ?? ''} ${stderr ?? ''}`.trim();
+  const parsed = parseReportedDkgVersion(reported);
+  if (parsed !== expectedVersion) {
+    throw new Error(`${context} expected ${expectedVersion}, got ${parsed ?? (reported || 'empty version output')}`);
+  }
+  return reported;
 }
 
 export async function checkForUpdate(
