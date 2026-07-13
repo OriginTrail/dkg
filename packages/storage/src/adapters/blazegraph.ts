@@ -13,6 +13,10 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
+import {
+  formatSparqlJsonBindings,
+  type AdapterSparqlJsonSelectResponse,
+} from './sparql-json-results.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
@@ -356,23 +360,14 @@ export class BlazegraphStore implements TripleStore {
       }
 
       const json = await deadline.waitFor(
-        res.json() as Promise<BlazeSelectResponse | BlazeAskResponse>,
+        res.json() as Promise<AdapterSparqlJsonSelectResponse | BlazeAskResponse>,
       );
 
       if (isAsk || 'boolean' in json) {
         return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
       }
 
-      const sr = json as BlazeSelectResponse;
-      const vars = sr.head?.vars ?? [];
-      const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
-        const obj: Record<string, string> = {};
-        for (const v of vars) {
-          const cell = row[v];
-          if (cell) obj[v] = blazeTermToString(cell);
-        }
-        return obj;
-      });
+      const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
       return { type: 'bindings', bindings } satisfies SelectResult;
     });
   }
@@ -498,37 +493,8 @@ export class BlazegraphStore implements TripleStore {
 // Blazegraph JSON result types
 // =====================================================================
 
-interface BlazeTermValue {
-  type: 'uri' | 'literal' | 'bnode' | 'typed-literal';
-  value: string;
-  datatype?: string;
-  'xml:lang'?: string;
-}
-
-interface BlazeSelectResponse {
-  head: { vars: string[] };
-  results: { bindings: Array<Record<string, BlazeTermValue>> };
-}
-
 interface BlazeAskResponse {
   boolean: boolean;
-}
-
-function escapeNQuadsLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
-}
-
-function blazeTermToString(t: BlazeTermValue): string {
-  if (t.type === 'bnode') return `_:${t.value}`;
-  if (t.type === 'literal' || t.type === 'typed-literal') {
-    const escaped = escapeNQuadsLiteral(t.value);
-    if (t['xml:lang']) return `"${escaped}"@${t['xml:lang']}`;
-    if (t.datatype && t.datatype !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${escaped}"^^<${t.datatype}>`;
-    }
-    return `"${escaped}"`;
-  }
-  return t.value;
 }
 
 // =====================================================================
