@@ -17,6 +17,7 @@ import {
   ChangelogStore,
   type ChangelogStoreOptions,
 } from './changelog-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export interface Quad {
   subject: string;
@@ -151,8 +152,10 @@ export interface TripleStore {
 
 /**
  * Run a server-side update whose affected named graphs are known by the caller.
- * Returns `false` when the store does not support `update()` so feature code can
- * apply its own fallback policy without duplicating method binding or hint wiring.
+ * Returns `false` when the store does not support `update()` directly, or when
+ * a decorator reports that its wrapped store lacks the capability. Genuine
+ * update execution errors propagate so feature code cannot mask an outage or
+ * partially executed mutation as a compatibility fallback.
  */
 export async function tryUpdateWithTouchedGraphs(
   store: TripleStore,
@@ -162,8 +165,18 @@ export async function tryUpdateWithTouchedGraphs(
 ): Promise<boolean> {
   const update = store.update;
   if (typeof update !== 'function') return false;
-  await update.call(store, sparql, { ...options, touchedGraphs });
-  return true;
+  try {
+    await update.call(store, sparql, { ...options, touchedGraphs });
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'update'
+    ) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;

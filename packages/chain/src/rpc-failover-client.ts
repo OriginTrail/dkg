@@ -335,9 +335,7 @@ export class RpcFailoverClient {
       opts?.skipPreferred ?? false,
       opts?.isEmptyResult,
     );
-    const run = opts?.endpointSetRetry === 'all-throttled'
-      ? () => this.withThrottleRetries(runPass)
-      : runPass;
+    const run = () => this.runReadPasses(label, runPass, opts?.endpointSetRetry);
     return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
@@ -367,13 +365,17 @@ export class RpcFailoverClient {
         const metrics = getMetrics();
         const startedAt = Date.now();
         try {
-          const out = await this.runAcrossProviders(
+          const out = await this.runReadPasses(
             label,
-            (p) => fn(this.rebindContract(contract, p)),
-            opts?.isRetryable ?? isContractViewRetryable,
-            opts?.policy ?? 'pointRead',
-            opts?.skipPreferred ?? false,
-            opts?.isEmptyResult,
+            () => this.runAcrossProviders(
+              label,
+              (p) => fn(this.rebindContract(contract, p)),
+              opts?.isRetryable ?? isContractViewRetryable,
+              opts?.policy ?? 'pointRead',
+              opts?.skipPreferred ?? false,
+              opts?.isEmptyResult,
+            ),
+            opts?.endpointSetRetry,
           );
           this.recordRpcOutcome('eth_call', 'ok');
           return out;
@@ -756,7 +758,6 @@ export class RpcFailoverClient {
     // (a transport failure occurred, so "every endpoint lacks it" can't be
     // concluded and the empty value must NOT be returned as definitive).
     if (lastRetryable) {
-      noteRpcExhaustion(label, canonical.map((e) => e.rpcUrl));
       // Single provider → carry the typed code but keep the original message
       // byte-identical (there is no second endpoint, so the raw message reads
       // cleaner and any message-inspecting caller keeps seeing it). Multiple
@@ -786,6 +787,28 @@ export class RpcFailoverClient {
       `${label} read failed: no configured RPC endpoints`,
       { rpcUrls: [] },
     );
+  }
+
+  /**
+   * Shared endpoint-set orchestration for provider and contract reads. A
+   * recoverable all-throttled pass stays internal; terminal exhaustion is
+   * reported exactly once only after the retry policy has settled.
+   */
+  private async runReadPasses<T>(
+    label: string,
+    runPass: () => Promise<T>,
+    endpointSetRetry?: ReadOpts['endpointSetRetry'],
+  ): Promise<T> {
+    try {
+      return endpointSetRetry === 'all-throttled'
+        ? await this.withThrottleRetries(runPass)
+        : await runPass();
+    } catch (error) {
+      if (error instanceof ProviderSetExhaustedError) {
+        noteRpcExhaustion(label, error.rpcUrls ?? []);
+      }
+      throw error;
+    }
   }
 
   private async withThrottleRetries<T>(run: () => Promise<T>): Promise<T> {

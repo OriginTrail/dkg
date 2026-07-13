@@ -8,6 +8,7 @@ import type {
   UpdateOptions,
   StorePressureSnapshot,
 } from './triple-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -131,7 +132,12 @@ export interface ChangelogHead {
  * factory return type.
  */
 export interface ChangelogReader {
-  /** Durable head cursor `(era, seq)` — era mismatch or `seq` rollback ⇒ full resync. */
+  /**
+   * Live head cursor `(era, seq)` — era mismatch or `seq` rollback ⇒ full resync.
+   * `signal` is honored at the method boundary. `source` and `priority` are not
+   * forwarded because steady-state reads are served from memory; use
+   * {@link headSeq} for an explicitly durable storage read with query metadata.
+   */
   changelogHead(options?: QueryOptions): Promise<ChangelogHead>;
   /** Change records with `seq > sinceSeq`, ascending, at most `limit`. */
   readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]>;
@@ -196,7 +202,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   private readonly onAppend?: (record: ChangeRecord) => void;
   private readonly eraGuard?: ChangelogEraGuard;
 
-  /** Last ALLOCATED seq (0 = none). Next seq is `seq + 1`. */
+  /** Last durably committed seq (0 = none). Next seq is `seq + 1`. */
   private seq = 0;
   /** Log generation id, established (read or minted) on seed. Null until then. */
   private eraValue: string | null = null;
@@ -325,7 +331,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
-      throw new Error('ChangelogStore: inner store does not support update()');
+      throw new UnsupportedTripleStoreCapabilityError('update', 'ChangelogStore');
     }
     if (!this.enabled) return this.inner.update(sparql, options);
     // Reject BEFORE the mutation runs so it never touches the reserved plane.
@@ -392,17 +398,30 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   // ------------------------------------------------------------------
 
   /**
-   * Durable head cursor `(era, seq)` the sync responder returns so a requester
+   * Live head cursor `(era, seq)` the sync responder returns so a requester
    * can advance its cursor and detect a wipe/reseed (era change) or a rollback
-   * (`seq` < the requester's cursor). Establishes the era on first call.
+   * (`seq` < the requester's cursor). Establishes the durable starting state on
+   * first call, then serves the serialized writer's authoritative head from memory.
+   *
+   * QueryOptions boundary: cancellation is checked before and after the shared
+   * one-time seed. `source` and `priority` are intentionally not forwarded: the
+   * seed uses internal source tags and steady-state calls perform no storage read.
+   * Call {@link headSeq} when a caller needs a durable read carrying those options.
    */
   async changelogHead(options?: QueryOptions): Promise<ChangelogHead> {
+    const signal = options?.signal;
+    throwIfAborted(signal);
     await this.ensureSeeded();
-    const seq = await this.headSeq(options);
-    return { era: this.eraValue as string, seq };
+    throwIfAborted(signal);
+    // All changelog writes pass through the serialized single-writer path and
+    // advance `seq` only after their marker transaction commits. Once seeded,
+    // this is therefore the authoritative live head; repeating MAX(?seq) for
+    // every sync request only adds an expensive store read under contention.
+    // Keep headSeq() below as the explicit durable diagnostic/restart primitive.
+    return { era: this.eraValue as string, seq: this.seq };
   }
 
-  /** Highest seq durably present in the log (0 if empty). */
+  /** Highest seq durably present in the log (0 if empty); always queries storage. */
   async headSeq(options?: QueryOptions): Promise<number> {
     const res = await this.inner.query(
       `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${CHANGELOG_GRAPH}> { ?e <${P_SEQ}> ?seq } }`,
@@ -780,6 +799,11 @@ function queryOptionsFromUpdateOptions(options?: UpdateOptions): QueryOptions | 
   if (!options) return undefined;
   const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
   return readOptions;
+}
+
+/** Preserve the caller's exact abort reason while keeping query-free reads cancellable. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason;
 }
 
 /**

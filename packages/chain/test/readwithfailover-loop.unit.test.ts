@@ -139,6 +139,44 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
       .resolves.toBe('recovered');
     expect(primary.read.calls).toHaveLength(2);
     expect(backup.read.calls).toHaveLength(2);
+    expect(getRpcFailoverStats().exhaustions).toBe(0);
+  });
+
+  it('recovers from message-only throttles without recording a terminal exhaustion', async () => {
+    let backupAttempt = 0;
+    const primary = { read: recorder(async () => { throw new Error('rate limit exceeded'); }) };
+    const backup = { read: recorder(async () => {
+      backupAttempt += 1;
+      if (backupAttempt === 1) throw new Error('Too Many Requests');
+      return 'recovered-from-message-only-throttle';
+    }) };
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+      readThrottleRetries: 2,
+      readThrottleBackoffMs: 1,
+    });
+
+    await expect(client.read('message-only throttle', (provider: any) => provider.read(), {
+      endpointSetRetry: 'all-throttled',
+    })).resolves.toBe('recovered-from-message-only-throttle');
+    expect(primary.read.calls).toHaveLength(2);
+    expect(backup.read.calls).toHaveLength(2);
+    expect(getRpcFailoverStats().exhaustions).toBe(0);
+  });
+
+  it('records one terminal exhaustion after all throttle retries are spent', async () => {
+    const primary = { read: recorder(async () => { throw retryable429(); }) };
+    const backup = { read: recorder(async () => { throw retryable429(); }) };
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+      readThrottleRetries: 2,
+      readThrottleBackoffMs: 1,
+    });
+
+    await expect(client.read('terminal throttle', (provider: any) => provider.read(), {
+      endpointSetRetry: 'all-throttled',
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(primary.read.calls).toHaveLength(3);
+    expect(backup.read.calls).toHaveLength(3);
+    expect(getRpcFailoverStats().exhaustions).toBe(1);
   });
 
   it('does not retry a mixed timeout plus 429 endpoint exhaustion', async () => {
@@ -288,6 +326,9 @@ describe('RpcFailoverClient.read — per-attempt cap (named policies, log-scan s
 // over on a post-decode error). So BAD_DATA must surface DIRECTLY (no failover),
 // while a real transient (429) still fails over; opts.isRetryable overrides it.
 describe('RpcFailoverClient.readContract — per-provider rebinding + view classifier (B-2, #2/#3)', () => {
+  beforeEach(() => { _resetRpcFailoverStatsForTest(); });
+  afterEach(() => { _resetRpcFailoverStatsForTest(); });
+
   const badDataError = () => {
     const e: any = new Error('could not decode result data (value="0x", code=BAD_DATA)');
     e.code = 'BAD_DATA';
@@ -326,6 +367,29 @@ describe('RpcFailoverClient.readContract — per-provider rebinding + view class
     // result coming from backupView, and primaryView hit exactly once (not twice).
     expect(primaryView.calls).toHaveLength(1);
     expect(backupView.calls).toHaveLength(1);
+  });
+
+  it('readContract applies all-throttled endpoint-set retry through the shared runner', async () => {
+    const p0 = {}; const p1 = {};
+    const primaryView = recorder(async () => { throw retryable429(); });
+    let backupAttempt = 0;
+    const backupView = recorder(async () => {
+      backupAttempt += 1;
+      if (backupAttempt === 1) throw retryable429();
+      return 'RECOVERED-CONTRACT-RESULT';
+    });
+    const contract = perProviderContract((p) => (p === p0 ? { view: primaryView } : { view: backupView }));
+    const client = makeClient([p0, p1], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+      readThrottleRetries: 2,
+      readThrottleBackoffMs: 1,
+    });
+
+    await expect(client.readContract('someView', contract, (c: any) => c.view(), {
+      endpointSetRetry: 'all-throttled',
+    })).resolves.toBe('RECOVERED-CONTRACT-RESULT');
+    expect(primaryView.calls).toHaveLength(2);
+    expect(backupView.calls).toHaveLength(2);
+    expect(getRpcFailoverStats().exhaustions).toBe(0);
   });
 
   it('an explicit opts.isRetryable OVERRIDES the isContractViewRetryable default (BAD_DATA → rebinds to the BACKUP view)', async () => {
