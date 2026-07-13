@@ -14,7 +14,7 @@ import type {
   UpdateOptions,
 } from '../triple-store.js';
 import {
-  formatRdfLiteralTerm,
+  formatRdfLiteralBinding,
   parseRdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
@@ -510,13 +510,11 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
 function termToString(t: OxTerm): string {
   if (t.termType === 'Literal') {
     const lit = t as oxigraph.Literal;
-    if (lit.language) {
-      return formatRdfLiteralTerm({ kind: 'language', value: lit.value, language: lit.language });
-    }
-    if (lit.datatype?.value) {
-      return formatRdfLiteralTerm({ kind: 'typed', value: lit.value, datatype: lit.datatype.value });
-    }
-    return formatRdfLiteralTerm({ kind: 'plain', value: lit.value });
+    return formatRdfLiteralBinding({
+      value: lit.value,
+      language: lit.language || undefined,
+      datatype: lit.datatype?.value,
+    });
   }
   if (t.termType === 'BlankNode') return `_:${t.value}`;
   return t.value;

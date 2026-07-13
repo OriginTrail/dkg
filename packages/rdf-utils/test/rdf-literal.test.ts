@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   escapeRdfLiteral,
+  formatRdfLiteralBinding,
   formatRdfLiteralTerm,
   isRdfTerm,
   normalizeRdfObject,
   parseRdfLiteralTerm,
   type RdfLiteralTerm,
-  unescapeRdfLiteral,
 } from '../src/index.js';
 
 describe('escapeRdfLiteral', () => {
@@ -42,6 +42,18 @@ describe('RDF literal term codec', () => {
     })).toBe(`"${body}"`);
   });
 
+  it('selects the canonical literal kind from SPARQL binding metadata', () => {
+    expect(formatRdfLiteralBinding({ value })).toBe(`"${body}"`);
+    expect(formatRdfLiteralBinding({ value, language: 'en' })).toBe(`"${body}"@en`);
+    expect(formatRdfLiteralBinding({ value, datatype: 'urn:test:datatype' }))
+      .toBe(`"${body}"^^<urn:test:datatype>`);
+    expect(formatRdfLiteralBinding({
+      value,
+      language: 'en',
+      datatype: 'urn:test:ignored-when-language-is-present',
+    })).toBe(`"${body}"@en`);
+  });
+
   it.each<RdfLiteralTerm>([
     { kind: 'plain', value },
     { kind: 'language', value, language: 'sr-Latn' },
@@ -71,9 +83,18 @@ describe('RDF literal term codec', () => {
   });
 
   it('unescapes standard short and Unicode escapes in a single parity-safe pass', () => {
-    expect(unescapeRdfLiteral('quote:\\" slash:\\\\ controls:\\b\\t\\n\\f\\r BMP:\\u00E9 astral:\\U0001F600'))
-      .toBe('quote:" slash:\\ controls:\b\t\n\f\r BMP:é astral:😀');
-    expect(unescapeRdfLiteral('literal-backslash-n:\\\\n')).toBe('literal-backslash-n:\\n');
+    expect(parseRdfLiteralTerm(
+      '"quote:\\" slash:\\\\ controls:\\b\\t\\n\\f\\r BMP:\\u00E9 astral:\\U0001F600"',
+    )).toEqual({ kind: 'plain', value: 'quote:" slash:\\ controls:\b\t\n\f\r BMP:é astral:😀' });
+    expect(parseRdfLiteralTerm('"literal-backslash-n:\\\\n"'))
+      .toEqual({ kind: 'plain', value: 'literal-backslash-n:\\n' });
+  });
+
+  it('preserves supported raw tabs in suffixed literal terms', () => {
+    expect(parseRdfLiteralTerm('"a\tb"@en'))
+      .toEqual({ kind: 'language', value: 'a\tb', language: 'en' });
+    expect(parseRdfLiteralTerm('"a\tb"^^<urn:test:datatype>'))
+      .toEqual({ kind: 'typed', value: 'a\tb', datatype: 'urn:test:datatype' });
   });
 
   it('rejects non-literal and malformed literal terms', () => {

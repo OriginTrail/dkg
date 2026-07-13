@@ -28,9 +28,15 @@ export type RdfLiteralTerm =
   | { kind: 'language'; value: string; language: string }
   | { kind: 'typed'; value: string; datatype: string };
 
+export interface RdfLiteralBinding {
+  value: string;
+  language?: string;
+  datatype?: string;
+}
+
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const RDF_LITERAL_TERM_PATTERN =
-  /^"((?:[^"\\\u0000-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*)"(?:@([A-Za-z]+(?:-[A-Za-z0-9]+)*)|\^\^<([^>]+)>)?$/;
+  /^"((?:[^"\\\u0000-\u0008\u000A-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*)"(?:@([A-Za-z]+(?:-[A-Za-z0-9]+)*)|\^\^<([^>]+)>)?$/;
 
 /** Serialize an RDF literal binding as the N-Triples-style term used by DKG APIs. */
 export function formatRdfLiteralTerm(term: RdfLiteralTerm): string {
@@ -42,12 +48,31 @@ export function formatRdfLiteralTerm(term: RdfLiteralTerm): string {
   return `"${escaped}"`;
 }
 
+/** Serialize a SPARQL result binding without duplicating literal-kind policy in adapters. */
+export function formatRdfLiteralBinding(binding: RdfLiteralBinding): string {
+  if (binding.language) {
+    return formatRdfLiteralTerm({
+      kind: 'language',
+      value: binding.value,
+      language: binding.language,
+    });
+  }
+  if (binding.datatype) {
+    return formatRdfLiteralTerm({
+      kind: 'typed',
+      value: binding.value,
+      datatype: binding.datatype,
+    });
+  }
+  return formatRdfLiteralTerm({ kind: 'plain', value: binding.value });
+}
+
 /**
  * Reverse {@link escapeRdfLiteral} and the standard N-Triples string escapes.
  * The single left-to-right pass preserves escape parity: `\\\\n` becomes a
  * literal backslash followed by `n`, rather than a newline.
  */
-export function unescapeRdfLiteral(value: string): string {
+function decodeValidatedRdfLiteralBody(value: string): string {
   if (!value.includes('\\')) return value;
 
   let result = '';
@@ -89,7 +114,7 @@ export function parseRdfLiteralTerm(term: string): RdfLiteralTerm | null {
 
   let value: string;
   try {
-    value = unescapeRdfLiteral(match[1]);
+    value = decodeValidatedRdfLiteralBody(match[1]);
   } catch {
     return null;
   }

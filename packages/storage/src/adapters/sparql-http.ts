@@ -32,7 +32,7 @@ import type {
   AskResult,
   StorePressureSnapshot,
 } from '../triple-store.js';
-import { formatRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { formatRdfLiteralBinding } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
@@ -672,13 +672,11 @@ interface W3CAskResponse {
 function w3cTermToString(t: W3CTerm): string {
   if (t.type === 'bnode') return `_:${t.value}`;
   if (t.type === 'literal' || t.type === 'typed-literal') {
-    if (t['xml:lang']) {
-      return formatRdfLiteralTerm({ kind: 'language', value: t.value, language: t['xml:lang'] });
-    }
-    if (t.datatype) {
-      return formatRdfLiteralTerm({ kind: 'typed', value: t.value, datatype: t.datatype });
-    }
-    return formatRdfLiteralTerm({ kind: 'plain', value: t.value });
+    return formatRdfLiteralBinding({
+      value: t.value,
+      language: t['xml:lang'],
+      datatype: t.datatype,
+    });
   }
   return t.value;
 }

@@ -47,6 +47,20 @@ describe('OxigraphStore literal round-trip: read → delete matches', () => {
     expect(after.type === 'bindings' && after.bindings).toHaveLength(0);
   });
 
+  it.each([
+    ['language-tagged', '"raw\ttab"@en'],
+    ['typed', '"raw\ttab"^^<urn:test:datatype>'],
+  ])('deleteByPattern preserves a raw tab in a %s literal term', async (_kind, object) => {
+    const store = new OxigraphStore();
+    await store.insert([{ subject: S, predicate: P, object, graph: G } as Quad]);
+
+    const deleted = await store.deleteByPattern({ graph: G, subject: S, predicate: P, object });
+    expect(deleted).toBe(1);
+
+    const after = await store.query(`SELECT ?o WHERE { GRAPH <${G}> { ?s ?p ?o } }`);
+    expect(after.type === 'bindings' && after.bindings).toHaveLength(0);
+  });
+
   it('does not over-delete: a same-S/P sibling literal survives', async () => {
     const store = new OxigraphStore();
     await store.insert([

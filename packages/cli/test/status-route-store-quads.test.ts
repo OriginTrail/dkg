@@ -7,6 +7,16 @@ import {
 } from '../src/daemon/routes/status.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
+const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
+  runtime: null,
+  availability: {
+    available: false,
+    reason: 'publisher_disabled',
+    retryable: false,
+    operatorActionRequired: true,
+  },
+};
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -32,6 +42,7 @@ async function startStatusServer(query: () => Promise<unknown>): Promise<{
     await handleStatusRoutes({
       req,
       res,
+      publisherState: DISABLED_PUBLISHER_STATE,
       path: url.pathname,
       url,
       network: null,
