@@ -1272,6 +1272,40 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * Resolve and authorize an explicitly pinned publisher through one shared
+   * boundary. Reservation and transaction submission both call this helper so
+   * signer-pool membership, authorization policy, and error shaping cannot
+   * drift between the preflight and the final write.
+   */
+  protected async resolvePinnedPublisherSigner(
+    contextGraphId: bigint,
+    publisherAddress: string,
+  ): Promise<Wallet> {
+    const selected = this.findSignerByAddress(publisherAddress);
+    if (!selected) {
+      throw new Error(
+        `Configured publisherAddress ${publisherAddress} is not present in the EVM signer pool.`,
+      );
+    }
+    if (this.contracts.contextGraphs) {
+      const authorized = await this.readContract(
+        this.contracts.contextGraphs,
+        'contextGraphs.isAuthorizedPublisher',
+        'isAuthorizedPublisher',
+        contextGraphId,
+        selected.address,
+      );
+      if (!authorized) {
+        throw new Error(
+          `Configured publisherAddress ${selected.address} is not authorized to publish ` +
+          `to context graph ${contextGraphId.toString()}.`,
+        );
+      }
+    }
+    return selected;
+  }
+
+  /**
    * Classify an RPC error for low-cardinality metric labels: `timeout` for the
    * synthetic `withTimeout` TIMEOUT code, else `error`. Used by the adapter's own
    * instrumented `eth_getLogs` page scan (`queryEventLogsPage`) so the `outcome`
@@ -3311,25 +3345,10 @@ export class EVMChainAdapterBase {
 
     let txSigner: Wallet;
     if (params.publisherAddress) {
-      const selected = this.findSignerByAddress(params.publisherAddress);
-      if (!selected) {
-        throw new Error(
-          `Configured publisherAddress ${params.publisherAddress} is not present in the EVM signer pool.`,
-        );
-      }
-      if (this.contracts.contextGraphs) {
-        const authorized = await this.readContract(
-          this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
-          'isAuthorizedPublisher', params.contextGraphId, selected.address,
-        );
-        if (!authorized) {
-          throw new Error(
-            `Configured publisherAddress ${selected.address} is not authorized to publish ` +
-            `to context graph ${params.contextGraphId.toString()}.`,
-          );
-        }
-      }
-      txSigner = selected;
+      txSigner = await this.resolvePinnedPublisherSigner(
+        params.contextGraphId,
+        params.publisherAddress,
+      );
     } else {
       // No pre-pinned publisher address: select cost-aware here, where the
       // publish `tokenAmount` IS known (unlike the publisher's pre-pin via
