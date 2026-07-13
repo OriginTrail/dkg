@@ -111,7 +111,8 @@ import {
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
-  prepareGeneratedPrivateCatalogFloor,
+  appendMissingGeneratedPrivateCatalogFloor,
+  replaceGeneratedPrivateCatalogFloor,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
@@ -1688,10 +1689,11 @@ export class PublishMethods extends DKGAgentBase {
     // fails closed (throws) consistently with publish, where the OLD update path
     // would have proceeded. Fail-closed, never a leak; see PR #1208 notes.
     const preparedUpdateCatalog = isCuratedUpdate && updateOnChainId != null
-      ? prepareGeneratedPrivateCatalogFloor(contextGraphId, quads, {
-          graph: contextGraphDataUri(contextGraphId),
-          mode: 'replace-generated',
-        })
+      ? replaceGeneratedPrivateCatalogFloor(
+          contextGraphId,
+          quads,
+          contextGraphDataUri(contextGraphId),
+        )
       : undefined;
     const updateQuads = preparedUpdateCatalog?.quads ?? quads;
 
@@ -3949,8 +3951,13 @@ export class PublishMethods extends DKGAgentBase {
         undefined,
         publishBindingOptions,
       );
-      const encryptInlinePayload = resolvedEncryptInlinePayload ?? publishOptions.encryptInlinePayload;
-      const encryptInlineChunked = resolvedEncryptInlineChunked ?? publishOptions.encryptInlineChunked;
+      const queuedPublishPolicy = {
+        encryptInlinePayload: resolvedEncryptInlinePayload ?? publishOptions.encryptInlinePayload,
+        encryptInlineChunked: resolvedEncryptInlineChunked ?? publishOptions.encryptInlineChunked,
+        catalogFloor: queuedOnChainContextGraphId && resolvedEncryptInlinePayload
+          ? 'generated-private' as const
+          : 'none' as const,
+      };
       // #1670 — finalized private assertions seal the deterministic public
       // catalog floor, but assertionPromote deliberately keeps that synthetic
       // root out of the per-user-root immutable share snapshot. The synchronous
@@ -3959,14 +3966,14 @@ export class PublishMethods extends DKGAgentBase {
       // publisher has no catalog commitment/staging bytes, so cores fall back to
       // their (intentionally absent) curated SWM copy and decline NO_DATA_IN_SWM.
       //
-      // Gate this on the live, chain-policy-resolved encryption callback rather
-      // than the queued mapper placeholder. That keeps public CGs untouched and
-      // prevents caller-supplied policy hints from manufacturing trusted catalog
-      // triples. The shared preparation boundary performs exact-key
+      // The explicit queued policy requires both a verified on-chain CG binding
+      // and a live curated-policy encryption result. That keeps local-only and
+      // public CGs untouched and prevents queued mapper placeholders from
+      // manufacturing trusted catalog triples. The shared preparation boundary performs exact-key
       // de-duplication for legacy snapshots and returns the trust allow-list
       // with the quads so queued/update/sync paths cannot drift independently.
-      const preparedQueuedCatalog = resolvedEncryptInlinePayload
-        ? prepareGeneratedPrivateCatalogFloor(request.contextGraphId, snapshotQuads)
+      const preparedQueuedCatalog = queuedPublishPolicy.catalogFloor === 'generated-private'
+        ? appendMissingGeneratedPrivateCatalogFloor(request.contextGraphId, snapshotQuads)
         : undefined;
       const queuedPublishQuads = preparedQueuedCatalog?.quads ?? snapshotQuads;
       result = await publisher.publish({
@@ -3992,8 +3999,8 @@ export class PublishMethods extends DKGAgentBase {
           reservedKaId: recoveredReservedKaId ?? 0n,
         },
         onChainContextGraphId: queuedOnChainContextGraphId,
-        encryptInlinePayload,
-        encryptInlineChunked,
+        encryptInlinePayload: queuedPublishPolicy.encryptInlinePayload,
+        encryptInlineChunked: queuedPublishPolicy.encryptInlineChunked,
         ...(preparedQueuedCatalog
           ? {
               trustedNonManifestCatalogTriples:
@@ -4835,10 +4842,10 @@ export class PublishMethods extends DKGAgentBase {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
     const catalogTargetGraph = canonicalSharedMemoryScopeWriteGraph(swmGraph, scope);
     const cgDid = contextGraphDataUri(contextGraphId);
-    const { quads: catalogQuads } = prepareGeneratedPrivateCatalogFloor(
+    const { quads: catalogQuads } = appendMissingGeneratedPrivateCatalogFloor(
       contextGraphId,
       [],
-      { graph: catalogTargetGraph },
+      catalogTargetGraph,
     );
     await this.store.insert(catalogQuads);
     this.log.info(

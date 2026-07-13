@@ -60,54 +60,20 @@ export function generatedPrivateCatalogTripleKeys(contextGraphId: string): Reado
   return new Set(generatedPrivateCatalogFloorQuads(contextGraphId).map(catalogTripleKey));
 }
 
-export interface PrepareGeneratedPrivateCatalogFloorOptions {
-  /** Graph term applied to newly generated floor quads. */
-  graph?: string;
-  /**
-   * append-missing preserves immutable/legacy snapshots and fills only absent
-   * deterministic triples. replace-generated rebuilds the recognized catalog
-   * partition while retaining ordinary private data on the CG-DID subject.
-   */
-  mode?: 'append-missing' | 'replace-generated';
-}
-
 export interface PreparedGeneratedPrivateCatalogFloor {
   quads: Quad[];
   trustedNonManifestCatalogTriples: ReadonlySet<string>;
 }
 
-/**
- * Single preparation boundary for the deterministic private-CG catalog floor.
- *
- * Callers receive the publish quads and their exact trust allow-list together,
- * so queue, sync, and update paths cannot drift by generating one without the
- * other. This helper does not decide whether a CG is private; that security
- * decision remains with the live chain-policy resolver at each call site.
- */
-export function prepareGeneratedPrivateCatalogFloor(
+export function appendMissingGeneratedPrivateCatalogFloor(
   contextGraphId: string,
   quads: readonly Quad[],
-  options: PrepareGeneratedPrivateCatalogFloorOptions = {},
+  graph = '',
 ): PreparedGeneratedPrivateCatalogFloor {
-  const floor = generatedPrivateCatalogFloorQuads(
-    contextGraphId,
-    options.graph ?? '',
-  );
+  const floor = generatedPrivateCatalogFloorQuads(contextGraphId, graph);
   const trustedNonManifestCatalogTriples = generatedPrivateCatalogTripleKeys(
     contextGraphId,
   );
-
-  if (options.mode === 'replace-generated') {
-    const { otherQuads } = partitionCatalogQuads(
-      quads,
-      contextGraphDataUri(contextGraphId),
-    );
-    return {
-      quads: [...otherQuads, ...floor],
-      trustedNonManifestCatalogTriples,
-    };
-  }
-
   const present = new Set(quads.map(catalogTripleKey));
   return {
     quads: [
@@ -115,6 +81,26 @@ export function prepareGeneratedPrivateCatalogFloor(
       ...floor.filter((quad) => !present.has(catalogTripleKey(quad))),
     ],
     trustedNonManifestCatalogTriples,
+  };
+}
+
+export function replaceGeneratedPrivateCatalogFloor(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  graph = '',
+): PreparedGeneratedPrivateCatalogFloor {
+  const { otherQuads } = partitionCatalogQuads(
+    quads,
+    contextGraphDataUri(contextGraphId),
+  );
+  return {
+    quads: [
+      ...otherQuads,
+      ...generatedPrivateCatalogFloorQuads(contextGraphId, graph),
+    ],
+    trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(
+      contextGraphId,
+    ),
   };
 }
 

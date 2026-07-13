@@ -728,7 +728,12 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     const agentLike = {
       peerId: 'did:dkg:agent:queued-encryption',
       defaultAgentAddress: '0x1111111111111111111111111111111111111111',
-      chain: {},
+      chain: {
+        getEvmChainId: recorder(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: recorder(
+          async () => '0x2222222222222222222222222222222222222222',
+        ),
+      },
       store,
       log: {
         info: recorder(() => undefined),
@@ -741,6 +746,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
         clearSwmShareComplete: recorder(async () => undefined),
       },
       createV10ACKProvider: recorder(() => undefined),
+      getContextGraphOnChainId: recorder(async () => '7'),
       _resolveEncryptInlinePayload: recorder(async () => realInline),
       _resolveEncryptInlineChunked: recorder(async () => realChunked),
       _stampPointer: recorder(async () => undefined),
@@ -758,6 +764,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
           vs: `0x${'56'.repeat(32)}`,
         },
         schemeVersion: 1,
+        reservedKaId: ((BigInt('0x1111111111111111111111111111111111111111') << 96n) | 1n).toString(),
       },
       sealChainId: '31337',
       sealKav10Address: '0x2222222222222222222222222222222222222222',
@@ -788,18 +795,19 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       undefined,
       undefined,
       undefined,
-      undefined,
+      { aeadBindingContextGraphId: '7' },
     ]);
     expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
       'private-cg',
       undefined,
       undefined,
       undefined,
-      undefined,
+      { aeadBindingContextGraphId: '7' },
     ]);
     expect(publisherPublish.calls.at(-1)?.[0]).toMatchObject({
       encryptInlinePayload: realInline,
       encryptInlineChunked: realChunked,
+      onChainContextGraphId: '7',
       trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys('private-cg'),
     });
     const publishedQuads = publisherPublish.calls.at(-1)?.[0].quads;
@@ -809,6 +817,79 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     }
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload).not.toBe(failClosedInline);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlineChunked).not.toBe(failClosedChunked);
+  });
+
+  it('does not trust or append a catalog floor for a private local-only queued publish', async () => {
+    const realInline = recorder(async (plaintext: Uint8Array) => plaintext);
+    const publisherPublish = recorder(async (_opts: any) => ({
+      status: 'tentative',
+      ual: 'did:dkg:local/queued-private-local',
+    }));
+    const agentLike = {
+      peerId: 'did:dkg:agent:queued-private-local',
+      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      chain: {},
+      store: {
+        query: recorder(async () => ({ type: 'bindings', bindings: [] })),
+        insert: recorder(async () => undefined),
+        deleteByPattern: recorder(async () => undefined),
+      },
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      publisher: {
+        publish: publisherPublish,
+        clearSwmShareComplete: recorder(async () => undefined),
+      },
+      createV10ACKProvider: recorder(() => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => realInline),
+      _resolveEncryptInlineChunked: recorder(async () => undefined),
+      _stampPointer: recorder(async () => undefined),
+    } as any;
+    const request: KnowledgeAssetVmPublishRequest = {
+      contextGraphId: 'private-local-cg',
+      name: 'queued-private-local-ka',
+      shareOperationId: 'share-op-private-local',
+      roots: ['urn:test:queued-private-local'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: '0x1111111111111111111111111111111111111111',
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    };
+    const originalQuads = [{
+      subject: 'urn:test:queued-private-local',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Private Local"',
+      graph: '',
+    }];
+
+    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+      agentLike,
+      request,
+      { contextGraphId: request.contextGraphId, quads: originalQuads },
+    );
+
+    expect(publisherPublish.calls.at(-1)?.[0]).toMatchObject({
+      quads: originalQuads,
+      encryptInlinePayload: realInline,
+      onChainContextGraphId: undefined,
+    });
+    expect(publisherPublish.calls.at(-1)?.[0]).not.toHaveProperty(
+      'trustedNonManifestCatalogTriples',
+    );
   });
 
   it('does not trust or append a catalog floor from queued placeholder callbacks', async () => {

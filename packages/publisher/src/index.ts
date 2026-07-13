@@ -21,12 +21,12 @@ export {
   catalogTripleKey,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
-  prepareGeneratedPrivateCatalogFloor,
+  appendMissingGeneratedPrivateCatalogFloor,
+  replaceGeneratedPrivateCatalogFloor,
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
   type TrustedCatalogTripleKeys,
   type TrustedCatalogRootSplit,
-  type PrepareGeneratedPrivateCatalogFloorOptions,
   type PreparedGeneratedPrivateCatalogFloor,
 } from './catalog-trust.js';
 export { resolveLiftWorkspaceSlice } from './workspace-resolution.js';

@@ -13,7 +13,8 @@ import {
   computeKCRootV10 as computeKCRoot,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
-  prepareGeneratedPrivateCatalogFloor,
+  appendMissingGeneratedPrivateCatalogFloor,
+  replaceGeneratedPrivateCatalogFloor,
   catalogTripleKey,
   validatePublishRequest,
   assertTrustedCatalogTriplesAreGeneratedFloor,
@@ -147,7 +148,7 @@ describe('generated private catalog preparation', () => {
     const legacyFloorQuad = { ...floor[0], graph: 'urn:legacy:catalog' };
     const content = q('urn:test:shipment:1', 'http://schema.org/name', '"Shipment 1"');
 
-    const prepared = prepareGeneratedPrivateCatalogFloor(
+    const prepared = appendMissingGeneratedPrivateCatalogFloor(
       contextGraphId,
       [content, legacyFloorQuad],
     );
@@ -167,10 +168,10 @@ describe('generated private catalog preparation', () => {
     const privateCgDidQuad = q(cgDid, 'urn:test:private-note', '"keep encrypted"');
     const staleFloor = generatedPrivateCatalogFloorQuads(contextGraphId, 'urn:stale');
 
-    const prepared = prepareGeneratedPrivateCatalogFloor(
+    const prepared = replaceGeneratedPrivateCatalogFloor(
       contextGraphId,
       [privateCgDidQuad, ...staleFloor],
-      { graph: cgDid, mode: 'replace-generated' },
+      cgDid,
     );
 
     expect(prepared.quads[0]).toBe(privateCgDidQuad);
