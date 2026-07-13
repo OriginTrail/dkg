@@ -13,6 +13,10 @@ import type {
   TripleStoreQueryOptions,
   UpdateOptions,
 } from '../triple-store.js';
+import {
+  formatCanonicalRdfLiteralTerm,
+  parseRdfLiteralTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
@@ -457,8 +461,8 @@ function formatTerm(term: string): string {
 
 function parseTerm(term: string): oxigraph.NamedNode | oxigraph.Literal | oxigraph.BlankNode {
   if (term.startsWith('"')) {
-    const match = term.match(/^"((?:[^"\\]|\\.)*)"(?:@(\S+)|\^\^<([^>]+)>)?$/);
-    if (match) {
+    const literal = parseRdfLiteralTerm(term);
+    if (literal) {
       // UNESCAPE the captured lexical form: query results (fromOxQuad →
       // termToString) hand back N-Quads-ESCAPED literals, and store.load()
       // (insert) UNescapes on parse — so a literal whose value contains
@@ -467,45 +471,16 @@ function parseTerm(term: string): oxigraph.NamedNode | oxigraph.Literal | oxigra
       // whose value is the ESCAPED form, which never matches the stored term,
       // so deleteByPattern / delete silently affect ZERO quads. (Empirically
       // reproduced; this is the OT-RFC-56 boot-sweep no-op blocker.)
-      const value = unescapeNQuadsLiteral(match[1]);
-      if (match[2]) return oxigraph.literal(value, match[2]);
-      if (match[3]) return oxigraph.literal(value, oxigraph.namedNode(match[3]));
-      return oxigraph.literal(value);
+      if (literal.kind === 'language') return oxigraph.literal(literal.value, literal.language);
+      if (literal.kind === 'typed') {
+        return oxigraph.literal(literal.value, oxigraph.namedNode(literal.datatype));
+      }
+      return oxigraph.literal(literal.value);
     }
     return oxigraph.literal(term.slice(1, -1));
   }
   if (term.startsWith('_:')) return oxigraph.blankNode(term.slice(2));
   return oxigraph.namedNode(term);
-}
-
-/**
- * Reverse {@link escapeNQuadsLiteral} (and the standard N-Quads/Turtle string
- * escapes) so a lexical form round-trips exactly through
- * `termToString → parseTerm`. Single left-to-right pass, so `\\n` (an escaped
- * backslash then a literal `n`) correctly yields `\n` (backslash + n), not LF.
- */
-function unescapeNQuadsLiteral(s: string): string {
-  if (!s.includes('\\')) return s;
-  let out = '';
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c !== '\\' || i + 1 >= s.length) { out += c; continue; }
-    const n = s[++i];
-    switch (n) {
-      case 'n': out += '\n'; break;
-      case 'r': out += '\r'; break;
-      case 't': out += '\t'; break;
-      case 'b': out += '\b'; break;
-      case 'f': out += '\f'; break;
-      case '"': out += '"'; break;
-      case "'": out += "'"; break;
-      case '\\': out += '\\'; break;
-      case 'u': out += String.fromCodePoint(parseInt(s.slice(i + 1, i + 5), 16)); i += 4; break;
-      case 'U': out += String.fromCodePoint(parseInt(s.slice(i + 1, i + 9), 16)); i += 8; break;
-      default: out += n; break; // unknown escape: drop the backslash, keep the char
-    }
-  }
-  return out;
 }
 
 function toOxQuad(q: DKGQuad): oxigraph.Quad | null {
@@ -532,22 +507,24 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
   };
 }
 
-function escapeNQuadsLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
-}
-
 function termToString(t: OxTerm): string {
   if (t.termType === 'Literal') {
     const lit = t as oxigraph.Literal;
-    const escaped = escapeNQuadsLiteral(lit.value);
-    if (lit.language) return `"${escaped}"@${lit.language}`;
-    if (
-      lit.datatype &&
-      lit.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string'
-    ) {
-      return `"${escaped}"^^<${lit.datatype.value}>`;
+    if (lit.language) {
+      return formatCanonicalRdfLiteralTerm({
+        kind: 'language',
+        value: lit.value,
+        language: lit.language,
+      });
     }
-    return `"${escaped}"`;
+    if (lit.datatype) {
+      return formatCanonicalRdfLiteralTerm({
+        kind: 'typed',
+        value: lit.value,
+        datatype: lit.datatype.value,
+      });
+    }
+    return formatCanonicalRdfLiteralTerm({ kind: 'plain', value: lit.value });
   }
   if (t.termType === 'BlankNode') return `_:${t.value}`;
   return t.value;

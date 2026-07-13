@@ -5,9 +5,23 @@ import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-co
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
+import {
+  projectRuntimeEvmChainConfig,
+  type RuntimeEvmChainConfig,
+} from './runtime-chain-config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
+
+/** Single construction boundary for every async-publisher wallet adapter. */
+export function createPublisherWalletChain(
+  chainBase: RuntimeEvmChainConfig | undefined,
+  privateKey: string,
+): ChainAdapter {
+  return chainBase
+    ? new EVMChainAdapter({ ...chainBase, privateKey, allowNoAdminSigner: true })
+    : new NoChainAdapter();
+}
 
 export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
@@ -30,14 +44,61 @@ export type AsyncPublisherUnavailableReason =
   | 'no_publisher_wallets'
   | 'publisher_startup_failed';
 
+type PublisherDisabledAvailability = {
+  available: false;
+  reason: 'publisher_disabled';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type PublisherStartingAvailability = {
+  available: false;
+  reason: 'publisher_starting';
+  retryable: true;
+  operatorActionRequired: false;
+};
+
+type NoPublisherWalletsAvailability = {
+  available: false;
+  reason: 'no_publisher_wallets';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type PublisherStartupFailedAvailability = {
+  available: false;
+  reason: 'publisher_startup_failed';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type AsyncPublisherUnavailableAvailability =
+  | PublisherDisabledAvailability
+  | PublisherStartingAvailability
+  | NoPublisherWalletsAvailability
+  | PublisherStartupFailedAvailability;
+
 export type AsyncPublisherAvailability =
   | { available: true }
-  | {
-      available: false;
-      reason: AsyncPublisherUnavailableReason;
-      retryable: boolean;
-      operatorActionRequired: boolean;
-    };
+  | AsyncPublisherUnavailableAvailability;
+
+function unavailablePublisherAvailability(reason: 'publisher_disabled'): PublisherDisabledAvailability;
+function unavailablePublisherAvailability(reason: 'publisher_starting'): PublisherStartingAvailability;
+function unavailablePublisherAvailability(reason: 'no_publisher_wallets'): NoPublisherWalletsAvailability;
+function unavailablePublisherAvailability(reason: 'publisher_startup_failed'): PublisherStartupFailedAvailability;
+function unavailablePublisherAvailability(reason: AsyncPublisherUnavailableReason): AsyncPublisherUnavailableAvailability;
+function unavailablePublisherAvailability(
+  reason: AsyncPublisherUnavailableReason,
+): AsyncPublisherUnavailableAvailability {
+  switch (reason) {
+    case 'publisher_starting':
+      return { available: false, reason, retryable: true, operatorActionRequired: false };
+    case 'publisher_disabled':
+    case 'no_publisher_wallets':
+    case 'publisher_startup_failed':
+      return { available: false, reason, retryable: false, operatorActionRequired: true };
+  }
+}
 
 /**
  * Canonical readiness boundary for every async-ingress route. Lifecycle may
@@ -48,9 +109,7 @@ export function resolveAsyncPublisherAvailability(args: {
   config: DkgConfig;
   runtime: PublisherRuntime | null;
   lifecycleReason?: AsyncPublisherUnavailableReason;
-  lifecycleAvailability?: AsyncPublisherAvailability;
 }): AsyncPublisherAvailability {
-  if (args.lifecycleAvailability) return args.lifecycleAvailability;
   if (args.runtime?.walletIds.length) return { available: true };
   const reason = args.lifecycleReason
     ?? (args.runtime
@@ -58,14 +117,7 @@ export function resolveAsyncPublisherAvailability(args: {
       : args.config.publisher?.enabled
         ? 'publisher_startup_failed'
         : 'publisher_disabled');
-  return {
-    available: false,
-    reason,
-    // Only the in-progress state can recover from the same client retry without
-    // operator/config/daemon intervention.
-    retryable: reason === 'publisher_starting',
-    operatorActionRequired: reason !== 'publisher_starting',
-  };
+  return unavailablePublisherAvailability(reason);
 }
 
 export interface PublisherInspector {
@@ -89,13 +141,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   config: DkgConfig;
   store: TripleStore;
   keypair: Ed25519Keypair;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
+  chainBase?: RuntimeEvmChainConfig;
   log: (message: string) => void;
   ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
@@ -136,17 +182,88 @@ export async function startPublisherRuntimeIfEnabled(args: {
   }
 }
 
+export type PublisherStartupOutcome =
+  | {
+      runtime: PublisherRuntime;
+      availability: Extract<AsyncPublisherAvailability, { available: true }>;
+    }
+  | {
+      runtime: null;
+      availability: PublisherDisabledAvailability;
+    }
+  | {
+      runtime: null;
+      availability: NoPublisherWalletsAvailability;
+    }
+  | {
+      runtime: null;
+      availability: PublisherStartupFailedAvailability;
+      error: unknown;
+    };
+
+export type PublisherState =
+  | PublisherStartupOutcome
+  | {
+      runtime: null;
+      availability: PublisherStartingAvailability;
+    };
+
+/**
+ * Initial daemon state before the deferred publisher bootstrap settles. Routes
+ * receive this whole discriminated value, so runtime and readiness cannot
+ * disagree in a request context.
+ */
+export function createInitialPublisherState(config: DkgConfig): PublisherState {
+  if (!config.publisher?.enabled) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_disabled'),
+    };
+  }
+  return {
+    runtime: null,
+    availability: unavailablePublisherAvailability('publisher_starting'),
+  };
+}
+
+/**
+ * Explicit daemon-startup boundary. The compatibility helper above retains its
+ * historical nullable return, while lifecycle code consumes this discriminant
+ * and never has to guess which unavailable state a null runtime represents.
+ */
+export async function startPublisherRuntimeWithOutcome(
+  args: Parameters<typeof startPublisherRuntimeIfEnabled>[0],
+): Promise<PublisherStartupOutcome> {
+  if (!args.config.publisher?.enabled) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_disabled'),
+    };
+  }
+
+  try {
+    const runtime = await startPublisherRuntimeIfEnabled(args);
+    if (!runtime) {
+      return {
+        runtime: null,
+        availability: unavailablePublisherAvailability('no_publisher_wallets'),
+      };
+    }
+    return { runtime, availability: { available: true } };
+  } catch (error) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_startup_failed'),
+      error,
+    };
+  }
+}
+
 interface PublisherRuntimeBaseArgs {
   dataDir: string;
   keypair: Ed25519Keypair;
   store: TripleStore;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
+  chainBase?: RuntimeEvmChainConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
@@ -181,9 +298,7 @@ export async function createPublisherRuntime(args: {
   // the runtime fall back to NoChainAdapter (publisher won't have on-chain
   // finality but still functions).
   const merged = resolveReadyChainConfig(args.config, network);
-  const chainBase = merged?.rpcUrl && merged?.hubAddress
-    ? { rpcUrl: merged.rpcUrl, rpcUrls: merged.rpcUrls, hubAddress: merged.hubAddress, tokenAddress: merged.tokenAddress, chainId: merged.chainId }
-    : undefined;
+  const chainBase = projectRuntimeEvmChainConfig(merged);
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
     keypair: keypair.keypair,
@@ -231,13 +346,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   dataDir: string;
   store: TripleStore;
   keypair: Ed25519Keypair;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
+  chainBase?: RuntimeEvmChainConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
@@ -276,17 +385,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   const wallets: ConfiguredPublisherWallet[] = [];
 
   for (const wallet of publisherWallets.wallets) {
-    const chain = args.chainBase
-      ? new EVMChainAdapter({
-          rpcUrl: args.chainBase.rpcUrl,
-          rpcUrls: args.chainBase.rpcUrls,
-          privateKey: wallet.privateKey,
-          hubAddress: args.chainBase.hubAddress,
-          tokenAddress: args.chainBase.tokenAddress,
-          chainId: args.chainBase.chainId,
-          allowNoAdminSigner: true,
-        })
-      : new NoChainAdapter();
+    const chain = createPublisherWalletChain(args.chainBase, wallet.privateKey);
     const identityId = await chain.getIdentityId();
     wallets.push({
       address: wallet.address,

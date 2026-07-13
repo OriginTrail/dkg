@@ -19,7 +19,6 @@ import type {
   ApprovalPolicy,
   V10PublishParams,
   OnChainPublishResult,
-  ConvictionReader,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
@@ -28,8 +27,9 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
-import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
+import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
+import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
@@ -38,7 +38,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -540,8 +540,16 @@ async function contractAddress(contract: Contract): Promise<string> {
  * publish TRAC floor to a gas-only tx would wrongly reject a valid,
  * gas-funded, zero-TRAC wallet. `native+trac` (publish/update) additionally
  * requires own-TRAC to cover the publish above the operator floor, with an
- * optional Publishing Conviction Account (PCA) fallback.
+ * explicit Publishing Conviction Account (PCA) policy: disabled, provisional
+ * signer discovery, or an exact epoch-bearing publish plan.
  */
+export type PcaFundingMode =
+  | { kind: 'none' }
+  /** Candidate discovery while an omitted lifetime is still signer-dependent. */
+  | { kind: 'provisional-publish' }
+  /** Exact publish plan: the PCA lock must equal `epochs`. */
+  | { kind: 'publish'; epochs: number };
+
 export type FundingMode =
   | { kind: 'native-only'; nativeFloorWei: bigint }
   | {
@@ -549,7 +557,8 @@ export type FundingMode =
       nativeFloorWei: bigint;
       tracFloorWei: bigint;
       requiredTracWei: bigint;
-      consultPca: boolean;
+      /** Explicit PCA semantics; exact publish checks cannot omit the lock. */
+      pca: PcaFundingMode;
     };
 
 export type NativeOnlyFundingMode = Extract<FundingMode, { kind: 'native-only' }>;
@@ -629,6 +638,7 @@ export class EVMChainAdapterBase {
   protected readonly rpcFailover: RpcFailoverClient;
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
+  protected readonly receiptTimeoutMs: number;
 
   protected readonly configuredStaticChainId?: bigint;
 
@@ -1012,6 +1022,7 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
+    this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1268,6 +1279,40 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * Resolve and authorize an explicitly pinned publisher through one shared
+   * boundary. Reservation and transaction submission both call this helper so
+   * signer-pool membership, authorization policy, and error shaping cannot
+   * drift between the preflight and the final write.
+   */
+  protected async resolvePinnedPublisherSigner(
+    contextGraphId: bigint,
+    publisherAddress: string,
+  ): Promise<Wallet> {
+    const selected = this.findSignerByAddress(publisherAddress);
+    if (!selected) {
+      throw new Error(
+        `Configured publisherAddress ${publisherAddress} is not present in the EVM signer pool.`,
+      );
+    }
+    if (this.contracts.contextGraphs) {
+      const authorized = await this.readContract(
+        this.contracts.contextGraphs,
+        'contextGraphs.isAuthorizedPublisher',
+        'isAuthorizedPublisher',
+        contextGraphId,
+        selected.address,
+      );
+      if (!authorized) {
+        throw new Error(
+          `Configured publisherAddress ${selected.address} is not authorized to publish ` +
+          `to context graph ${contextGraphId.toString()}.`,
+        );
+      }
+    }
+    return selected;
+  }
+
+  /**
    * Classify an RPC error for low-cardinality metric labels: `timeout` for the
    * synthetic `withTimeout` TIMEOUT code, else `error`. Used by the adapter's own
    * instrumented `eth_getLogs` page scan (`queryEventLogsPage`) so the `outcome`
@@ -1295,8 +1340,11 @@ export class EVMChainAdapterBase {
    * Thin delegator to `this.rpcFailover.getReceipt` — the per-endpoint receipt
    * loop. Used by `waitForReceiptWithFailover` and the `publish.ts` callers.
    */
-  protected getTransactionReceiptWithFailover(txHash: string): Promise<ethers.TransactionReceipt | null> {
-    return this.rpcFailover.getReceipt(txHash);
+  protected getTransactionReceiptWithFailover(
+    txHash: string,
+    options?: ReceiptLookupOptions,
+  ): Promise<ethers.TransactionReceipt | null> {
+    return this.rpcFailover.getReceipt(txHash, options);
   }
 
   /**
@@ -1406,26 +1454,16 @@ export class EVMChainAdapterBase {
     txHash: string,
     label: string,
   ): Promise<ethers.TransactionReceipt> {
-    const deadline = Date.now() + RPC_RECEIPT_TIMEOUT_MS;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      try {
-        const receipt = await this.getTransactionReceiptWithFailover(txHash);
-        if (receipt) {
-          assertSuccessfulReceipt(receipt, label);
-          return receipt;
-        }
-      } catch (err) {
-        if (!isRetryableRpcError(err)) throw err;
-        lastError = err;
-      }
-      await sleep(RPC_RECEIPT_POLL_INTERVAL_MS);
-    }
-    throw createRpcTimeoutError(
-      `${label} tx ${txHash} timed out waiting for a receipt after ${RPC_RECEIPT_TIMEOUT_MS}ms` +
-      (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
-      { cause: lastError, txHash },
-    );
+    return waitForReceiptWithDeadline({
+      txHash,
+      receiptTimeoutMs: this.receiptTimeoutMs,
+      pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
+      getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
+      assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
+      formatTimeoutMessage: ({ lastError }) =>
+        `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
+        (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
+    });
   }
 
   protected async signPopulatedTransaction(
@@ -1837,41 +1875,61 @@ export class EVMChainAdapterBase {
    * `nextAuthorizedSigner` is the thin publish wrapper over this; RS / update /
    * relay route through it with their own `txClass` + `FundingMode` in later phases.
    */
-  protected async selectSigner(spec: SelectSignerSpec): Promise<Wallet> {
+  protected async _withSignerSelection<T extends { address: string }>(
+    select: (ordered: Wallet[]) => Promise<T>,
+  ): Promise<T> {
     const previousSelection = this.signerSelectionQueue;
     let releaseSelection!: () => void;
     this.signerSelectionQueue = new Promise<void>((resolve) => { releaseSelection = resolve; });
     await previousSelection;
     try {
-      // Candidate wallets in round-robin order from the current cursor.
       const start = this.signerIndex % this.signerPool.length;
       const ordered: Wallet[] = [];
       for (let i = 0; i < this.signerPool.length; i += 1) {
         ordered.push(this.signerPool[(start + i) % this.signerPool.length]);
       }
+      const chosen = await select(ordered);
+      const chosenPoolIdx = this.signerPool.findIndex((s) => s.address === chosen.address);
+      this.signerIndex = (chosenPoolIdx >= 0 ? chosenPoolIdx : 0) + 1;
+      return chosen;
+    } finally {
+      releaseSelection();
+    }
+  }
 
+  protected async _authorizedPublisherSigners(
+    ordered: Wallet[],
+    contextGraphId: bigint,
+  ): Promise<Wallet[]> {
+    if (!this.contracts.contextGraphs) return ordered;
+    const eligible: Wallet[] = [];
+    for (const signer of ordered) {
+      if (await this.readContract(
+        this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
+        'isAuthorizedPublisher', contextGraphId, signer.address,
+      )) {
+        eligible.push(signer);
+      }
+    }
+    if (eligible.length === 0) {
+      throw new Error(
+        `No authorized publisher wallet found in signer pool for context graph ${contextGraphId.toString()}. ` +
+        'Ensure at least one configured wallet is permitted by on-chain publish authority.',
+      );
+    }
+    return eligible;
+  }
+
+  protected async selectSigner(spec: SelectSignerSpec): Promise<Wallet> {
+    return this._withSignerSelection(async (ordered) => {
       // Eligibility by class. `rotatable-policy` filters to on-chain authorized
       // publishers for the CG; with no ContextGraphs surface every operational
       // wallet is a candidate (funding-aware over the whole pool, NOT a plain
       // pick). `rotatable-free` (RS) narrows to on-chain-registered operational
       // wallets, failing CLOSED. `rotatable-funded` uses the whole pool.
       let eligible: Wallet[];
-      if (spec.txClass === 'rotatable-policy' && this.contracts.contextGraphs) {
-        eligible = [];
-        for (const signer of ordered) {
-          if (await this.readContract(
-            this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
-            'isAuthorizedPublisher', spec.contextGraphId, signer.address,
-          )) {
-            eligible.push(signer);
-          }
-        }
-        if (eligible.length === 0) {
-          throw new Error(
-            `No authorized publisher wallet found in signer pool for context graph ${spec.contextGraphId.toString()}. ` +
-            'Ensure at least one configured wallet is permitted by on-chain publish authority.',
-          );
-        }
+      if (spec.txClass === 'rotatable-policy') {
+        eligible = await this._authorizedPublisherSigners(ordered, spec.contextGraphId);
       } else if (spec.txClass === 'rotatable-free') {
         // FAIL CLOSED to registered operational wallets. An unregistered signer
         // resolves to identity 0 on `RandomSampling` and reverts, burning the
@@ -1886,17 +1944,13 @@ export class EVMChainAdapterBase {
 
       const chosen = this.fundedWalletSelectionDisabled
         ? eligible[0]
-        : await this.selectFundedSigner(eligible, spec.funding, spec.preferIdle ?? false);
-
-      // Advance the cursor just past the chosen wallet so the next selection
-      // rotates — preserving cross-wallet nonce concurrency (#953) when more
-      // than one wallet is funded.
-      const chosenPoolIdx = this.signerPool.findIndex((s) => s.address === chosen.address);
-      this.signerIndex = (chosenPoolIdx >= 0 ? chosenPoolIdx : 0) + 1;
+        : await this.selectFundedSigner(
+          eligible,
+          spec.funding,
+          { preferIdle: spec.preferIdle ?? false },
+        );
       return chosen;
-    } finally {
-      releaseSelection();
-    }
+    });
   }
 
   /**
@@ -1906,7 +1960,13 @@ export class EVMChainAdapterBase {
    * agent). Idle preference is OFF for publish until soaked. Behaviour is
    * unchanged from the pre-`selectSigner` implementation.
    */
-  protected async nextAuthorizedSigner(contextGraphId: bigint, requiredTracWei: bigint = 0n): Promise<Wallet> {
+  protected async nextAuthorizedSigner(
+    contextGraphId: bigint,
+    requiredTracWei: bigint = 0n,
+    options: {
+      publishEpochs?: number;
+    } = {},
+  ): Promise<Wallet> {
     return this.selectSigner({
       txClass: 'rotatable-policy',
       contextGraphId,
@@ -1915,7 +1975,9 @@ export class EVMChainAdapterBase {
         nativeFloorWei: this.minPublisherNativeWei,
         tracFloorWei: this.minPublisherTracWei,
         requiredTracWei,
-        consultPca: true,
+        pca: options.publishEpochs === undefined
+          ? { kind: 'provisional-publish' }
+          : { kind: 'publish', epochs: options.publishEpochs },
       },
       preferIdle: false,
     });
@@ -1983,39 +2045,69 @@ export class EVMChainAdapterBase {
    * then max TRAC) so the write still attempts and the contract gives the real
    * verdict.
    */
+  private async _scanCandidateFunding<T extends { address: string }>(
+    candidates: T[],
+    fundingFor: (candidate: T) => FundingMode,
+    forceRefresh = false,
+  ): Promise<{
+    fundings: Array<{ native: bigint | null; trac: bigint | null }>;
+    fundableIdx: number[];
+  }> {
+    const fundingModes = candidates.map(fundingFor);
+    const fundings = await Promise.all(
+      candidates.map((candidate, index) => {
+        const funding = fundingModes[index];
+        return this.getWalletFunding(candidate.address, {
+          forceRefresh,
+          metrics: funding.kind,
+        });
+      }),
+    );
+    const fundable = await Promise.all(
+      candidates.map((candidate, index) => this.isWalletFundable(
+        candidate.address,
+        fundings[index],
+        fundingModes[index],
+      )),
+    );
+    const fundableIdx: number[] = [];
+    for (let index = 0; index < fundable.length; index += 1) {
+      if (fundable[index]) fundableIdx.push(index);
+    }
+    return { fundings, fundableIdx };
+  }
+
+  private _preferredFundableCandidate<T extends { address: string }>(
+    candidates: T[],
+    fundableIdx: number[],
+    preferIdle: boolean,
+  ): T {
+    if (preferIdle && !this.idleAwareSelectionDisabled) {
+      const idle = fundableIdx.find((index) =>
+        !this.signerTxSerializer.isActive(candidates[index].address));
+      if (idle !== undefined) return candidates[idle];
+    }
+    return candidates[fundableIdx[0]];
+  }
+
   protected async selectFundedSigner(
     candidates: Wallet[],
     funding: FundingMode,
-    preferIdle: boolean,
+    policy: { preferIdle: boolean },
   ): Promise<Wallet> {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
-    const fundings = await Promise.all(
-      candidates.map((s) => this.getWalletFunding(s.address, { metrics: funding.kind })),
+    const { fundings, fundableIdx } = await this._scanCandidateFunding(
+      candidates,
+      () => funding,
     );
-    // Fundability is own-balance first (cheap), with a Publishing Conviction
-    // Account (PCA) fallback for `native+trac`: a registered+covering PCA agent
-    // wallet pays the publish from its conviction account, NOT its own TRAC, so
-    // it legitimately holds gas + zero own-TRAC (`native-only` specs never
-    // consult the PCA).
-    const fundable = await Promise.all(
-      candidates.map((s, i) => this.isWalletFundable(s.address, fundings[i], funding)),
-    );
-    const fundableIdx: number[] = [];
-    for (let i = 0; i < candidates.length; i += 1) {
-      if (fundable[i]) fundableIdx.push(i);
-    }
     if (fundableIdx.length > 0) {
       // Idle preference is a SOFT, fail-open bias: among funded candidates,
       // prefer one whose per-wallet send lock is currently free so a
       // deadline-bound write doesn't queue behind a slow in-flight send. Falls
       // straight through to the first funded candidate when none is idle or the
       // preference is off — so it can never EXCLUDE a wallet, only reorder.
-      if (preferIdle && !this.idleAwareSelectionDisabled) {
-        const idle = fundableIdx.find((i) => !this.signerTxSerializer.isActive(candidates[i].address));
-        if (idle !== undefined) return candidates[idle];
-      }
-      return candidates[fundableIdx[0]];
+      return this._preferredFundableCandidate(candidates, fundableIdx, policy.preferIdle);
     }
     let bestIdx = 0;
     for (let i = 1; i < candidates.length; i += 1) {
@@ -2029,11 +2121,58 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * Fail-closed counterpart used only by explicit publisher reservation. The
+   * common selector stays best-effort; this path verifies its cached choice and
+   * force-refreshes every candidate before claiming that the pool is unfunded.
+   */
+  protected async selectFundedSignerOrThrow(
+    candidates: Wallet[],
+    funding: NativeAndTracFundingMode,
+    policy: { preferIdle: boolean },
+  ): Promise<Wallet> {
+    return this._selectFundedCandidateOrThrow(candidates, () => funding, policy);
+  }
+
+  /**
+   * Canonical fail-closed funded-candidate selector. Ordinary strict signer
+   * reservation and publish-plan candidates share the same cached scan, fresh
+   * terminal recheck, idle preference, diagnostics, and typed failure.
+   */
+  protected async _selectFundedCandidateOrThrow<T extends { address: string }>(
+    candidates: T[],
+    fundingFor: (candidate: T) => NativeAndTracFundingMode,
+    policy: { preferIdle: boolean },
+  ): Promise<T> {
+    const initial = await this._scanCandidateFunding(candidates, fundingFor);
+    if (initial.fundableIdx.length > 0) {
+      return this._preferredFundableCandidate(candidates, initial.fundableIdx, policy.preferIdle);
+    }
+
+    // Cached balances are appropriate for soft routing, but a terminal
+    // whole-pool claim must be based on a fresh snapshot. Operators commonly
+    // fund a wallet and retry immediately, inside the advisory cache TTL.
+    const refreshed = await this._scanCandidateFunding(candidates, fundingFor, true);
+    if (refreshed.fundableIdx.length > 0) {
+      return this._preferredFundableCandidate(candidates, refreshed.fundableIdx, policy.preferIdle);
+    }
+
+    const diagnostics = candidates.map((candidate, index) => ({
+      address: candidate.address,
+      nativeWei: refreshed.fundings[index].native,
+      tracWei: refreshed.fundings[index].trac,
+    }));
+    throw new InsufficientPublisherFundsError(
+      formatNoFundedPublisherWalletMessage(diagnostics),
+      diagnostics,
+    );
+  }
+
+  /**
    * The single fundability predicate, parameterized by {@link FundingMode}:
    * native gas above the floor, AND — for `native+trac` — own-TRAC covers the
    * write (above the operator floor AND `>= requiredTracWei`, the cost — `0n`
    * when unknown, so only the floor applies), OR the wallet is a registered,
-   * covering PCA agent (when `consultPca`). `native-only` (RS / relay / settle)
+   * covering PCA agent (when `pca` is enabled). `native-only` (RS / relay / settle)
    * gates on gas ALONE — it never applies a TRAC floor, so a valid gas-funded
    * zero-TRAC wallet is not wrongly rejected. A `null` metric (read failed / no
    * token contract) is treated as satisfied so selection FAILS OPEN. The PCA
@@ -2051,7 +2190,12 @@ export class EVMChainAdapterBase {
     const ownTracOk = f.trac === null
       || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
     if (ownTracOk) return true;
-    return funding.consultPca ? this.isConvictionFundedAgent(address, funding.requiredTracWei) : false;
+    if (funding.pca.kind === 'none') return false;
+    return this.isConvictionFundedAgent(
+      address,
+      funding.requiredTracWei,
+      funding.pca.kind === 'publish' ? funding.pca.epochs : undefined,
+    );
   }
 
   /**
@@ -2069,7 +2213,7 @@ export class EVMChainAdapterBase {
       nativeFloorWei: this.minPublisherNativeWei,
       tracFloorWei: this.minPublisherTracWei,
       requiredTracWei,
-      consultPca: true,
+      pca: { kind: 'provisional-publish' },
     });
   }
 
@@ -2085,28 +2229,16 @@ export class EVMChainAdapterBase {
    * allowance rounds up to ≥1 wei but cannot cover a real publish can still pass;
    * that is an attacker-induced edge that degrades to a single retry, not a fund
    * loss. When the real cost is threaded (the createKnowledgeAssets paths) the
-   * probe prices the actual publish and rejects such squats.
+   * probe prices the actual publish and rejects such squats. The conviction
+   * mixin supplies the concrete typed implementation; this base fallback keeps
+   * adapter assemblies without that capability safely on own-TRAC funding.
    */
-  protected async isConvictionFundedAgent(address: string, requiredCostWei: bigint): Promise<boolean> {
-    if (!this.contracts.dkgPublishingConvictionNFT) return false;
-    // Typed against the shared ConvictionReader interface that ConvictionMethods
-    // `implements`, so a rename/signature change in the mixin is a compile error.
-    const conv = this as unknown as ConvictionReader;
-    try {
-      const accountId = await withTimeout(
-        conv.getConvictionAgentAccountId(address),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'pca agent account lookup',
-      );
-      if (accountId <= 0n) return false;
-      return await withTimeout(
-        conv.convictionAccountCanCover(accountId, requiredCostWei > 0n ? requiredCostWei : 1n),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'pca account coverage probe',
-      );
-    } catch {
-      return false;
-    }
+  protected async isConvictionFundedAgent(
+    _address: string,
+    _requiredCostWei: bigint,
+    _publishEpochs?: number,
+  ): Promise<boolean> {
+    return false;
   }
 
   /**
@@ -2272,7 +2404,7 @@ export class EVMChainAdapterBase {
     if (/receipt is null|receipt was null|replaced or dropped|write-?ahead/.test(msg)) {
       return false;
     }
-    return /transfer amount exceeds balance|erc20insufficientbalance|insufficient allowance|toolowallowance|insufficient funds/.test(msg);
+    return /transfer amount exceeds balance|erc20insufficientbalance|insufficient allowance|toolowallowance|toolowbalance|insufficient funds/.test(msg);
   }
 
   /** All operational wallet addresses (for display / funding). */
@@ -3243,25 +3375,10 @@ export class EVMChainAdapterBase {
 
     let txSigner: Wallet;
     if (params.publisherAddress) {
-      const selected = this.findSignerByAddress(params.publisherAddress);
-      if (!selected) {
-        throw new Error(
-          `Configured publisherAddress ${params.publisherAddress} is not present in the EVM signer pool.`,
-        );
-      }
-      if (this.contracts.contextGraphs) {
-        const authorized = await this.readContract(
-          this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
-          'isAuthorizedPublisher', params.contextGraphId, selected.address,
-        );
-        if (!authorized) {
-          throw new Error(
-            `Configured publisherAddress ${selected.address} is not authorized to publish ` +
-            `to context graph ${params.contextGraphId.toString()}.`,
-          );
-        }
-      }
-      txSigner = selected;
+      txSigner = await this.resolvePinnedPublisherSigner(
+        params.contextGraphId,
+        params.publisherAddress,
+      );
     } else {
       // No pre-pinned publisher address: select cost-aware here, where the
       // publish `tokenAmount` IS known (unlike the publisher's pre-pin via
@@ -3269,6 +3386,7 @@ export class EVMChainAdapterBase {
       txSigner = await this.nextAuthorizedSigner(
         params.contextGraphId,
         floorPublishTokenAmount(params.tokenAmount),
+        { publishEpochs: params.epochs },
       );
     }
     const ka = this.contracts.knowledgeAssetsLifecycle.connect(txSigner) as Contract;
