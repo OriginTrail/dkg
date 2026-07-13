@@ -143,41 +143,36 @@ type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
   configurePolicy?: (policy: ProtocolOutboxStorePolicy) => void;
 };
 
-/** Required internal shape after optional public capabilities are normalized. */
-type NormalizedProtocolOutboxStore = ProtocolOutboxStore & ProtocolOutboxMetadataStore;
-
 /**
- * Keep compatibility at the constructor boundary. Internally the outbox only
- * sees the current metadata + boolean peer-presence contract, while legacy
- * stores are adapted once with all method receivers preserved.
+ * Keep peer-presence compatibility at the constructor boundary. Current
+ * stores retain their identity; only legacy peer-snapshot stores are adapted.
  */
-function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): NormalizedProtocolOutboxStore {
-  const normalized: NormalizedProtocolOutboxStore = {
-    enqueue: store.enqueue.bind(store),
-    markDelivered: store.markDelivered.bind(store),
-    hasEntry: store.hasEntry.bind(store),
-    due: store.due.bind(store),
-    dropExpired: store.dropExpired.bind(store),
-    dropExpiredMetadata: store.dropExpiredMetadata
-      ? store.dropExpiredMetadata.bind(store)
-      : (now) => store.dropExpired(now).map(cloneOutboxMetadata),
-    size: store.size.bind(store),
-    list: store.list.bind(store),
-    listMetadata: store.listMetadata
-      ? store.listMetadata.bind(store)
-      : () => store.list().map(cloneOutboxMetadata),
-    getEntry: store.getEntry.bind(store),
-    hasPendingFor: store.hasPendingFor
-      ? store.hasPendingFor.bind(store)
-      : (peer) => (store as LegacyProtocolOutboxStore).pendingFor(peer).length > 0,
+function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOutboxStore {
+  if (typeof store.hasPendingFor === 'function') return store as ProtocolOutboxStore;
+
+  const legacy = store as LegacyProtocolOutboxStore;
+  const normalized: ProtocolOutboxStore = {
+    enqueue: legacy.enqueue.bind(legacy),
+    markDelivered: legacy.markDelivered.bind(legacy),
+    hasEntry: legacy.hasEntry.bind(legacy),
+    due: legacy.due.bind(legacy),
+    dropExpired: legacy.dropExpired.bind(legacy),
+    size: legacy.size.bind(legacy),
+    list: legacy.list.bind(legacy),
+    getEntry: legacy.getEntry.bind(legacy),
+    hasPendingFor: (peer) => legacy.pendingFor(peer).length > 0,
+    pendingFor: legacy.pendingFor.bind(legacy),
   };
-  if (store.duePage) normalized.duePage = store.duePage.bind(store);
-  if (store.pendingFor) normalized.pendingFor = store.pendingFor.bind(store);
+  if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
+  if (legacy.dropExpiredMetadata) {
+    normalized.dropExpiredMetadata = legacy.dropExpiredMetadata.bind(legacy);
+  }
+  if (legacy.listMetadata) normalized.listMetadata = legacy.listMetadata.bind(legacy);
   return normalized;
 }
 
 export class ProtocolOutbox {
-  private readonly store: NormalizedProtocolOutboxStore;
+  private readonly store: ProtocolOutboxStore;
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
@@ -316,7 +311,8 @@ export class ProtocolOutbox {
 
   /** Metadata-only expiration, with a compatibility fallback for legacy stores. */
   dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    return this.store.dropExpiredMetadata(now).map(cloneOutboxMetadata);
+    const dropped = this.store.dropExpiredMetadata?.(now) ?? this.store.dropExpired(now);
+    return dropped.map(cloneOutboxMetadata);
   }
 
   /** Total entries currently queued. */
@@ -335,7 +331,8 @@ export class ProtocolOutbox {
 
   /** Metadata-only diagnostics snapshot, with a compatibility fallback. */
   listMetadata(): ProtocolOutboxMetadata[] {
-    return this.store.listMetadata().map(cloneOutboxMetadata);
+    const entries = this.store.listMetadata?.() ?? this.store.list();
+    return entries.map(cloneOutboxMetadata);
   }
 
   /**
