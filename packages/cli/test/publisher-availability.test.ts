@@ -6,7 +6,9 @@ import {
   resolveAsyncPublisherAvailability,
   startPublisherRuntimeWithOutcome,
   type PublisherRuntime,
+  type PublisherState,
 } from '../src/publisher-runner.js';
+import { publisherCompatibilityAliases } from '../src/daemon/routes/context.js';
 
 const runtime = (wallets: unknown[]): PublisherRuntime => ({
   wallets,
@@ -58,6 +60,27 @@ describe('resolveAsyncPublisherAvailability', () => {
         retryable: false,
         operatorActionRequired: true,
       },
+    });
+  });
+
+  it('derives legacy route-plugin aliases from the canonical state', async () => {
+    const state = await startPublisherRuntimeWithOutcome({
+      config: { publisher: { enabled: false } },
+    } as Parameters<typeof startPublisherRuntimeWithOutcome>[0]);
+
+    expect(publisherCompatibilityAliases(state)).toEqual({
+      publisherRuntime: state.runtime,
+      publisherAvailability: state.availability,
+    });
+
+    const readyState: PublisherState = {
+      status: 'started',
+      runtime: runtime([{}]),
+      availability: { available: true },
+    };
+    expect(publisherCompatibilityAliases(readyState)).toEqual({
+      publisherRuntime: readyState.runtime,
+      publisherAvailability: readyState.availability,
     });
   });
 

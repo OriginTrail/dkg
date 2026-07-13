@@ -16,7 +16,12 @@ import type {
   OperationTracker,
 } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig, loadNetworkConfig } from '../../config.js';
-import type { createPublisherControlFromStore, PublisherState } from '../../publisher-runner.js';
+import type {
+  AsyncPublisherAvailability,
+  createPublisherControlFromStore,
+  PublisherRuntime,
+  PublisherState,
+} from '../../publisher-runner.js';
 import type { ExtractionStatusRecord } from '../../extraction-status.js';
 import type { FileStore } from '../../file-store.js';
 import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
@@ -61,6 +66,10 @@ export interface RequestContext {
   publisherControl: ReturnType<typeof createPublisherControlFromStore>;
   /** Lifecycle-owned runtime and readiness as one correlated state. */
   publisherState: PublisherState;
+  /** @deprecated Route plugins should use publisherState.runtime. */
+  publisherRuntime: PublisherRuntime | null;
+  /** @deprecated Route plugins should use publisherState.availability. */
+  publisherAvailability?: AsyncPublisherAvailability;
   config: DkgConfig;
   startedAt: number;
   dashDb: DashboardDB;
@@ -100,4 +109,17 @@ export interface RequestContext {
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */
   emitNotification?: (event: NotificationSseEvent) => void;
+}
+
+/**
+ * Preserve the pre-publisherState route-plugin contract without allowing the
+ * compatibility fields to become independent sources of truth.
+ */
+export function publisherCompatibilityAliases(
+  publisherState: PublisherState,
+): Pick<RequestContext, 'publisherRuntime' | 'publisherAvailability'> {
+  return {
+    publisherRuntime: publisherState.runtime,
+    publisherAvailability: publisherState.availability,
+  };
 }

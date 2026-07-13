@@ -30,14 +30,61 @@ export type AsyncPublisherUnavailableReason =
   | 'no_publisher_wallets'
   | 'publisher_startup_failed';
 
+type PublisherDisabledAvailability = {
+  available: false;
+  reason: 'publisher_disabled';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type PublisherStartingAvailability = {
+  available: false;
+  reason: 'publisher_starting';
+  retryable: true;
+  operatorActionRequired: false;
+};
+
+type NoPublisherWalletsAvailability = {
+  available: false;
+  reason: 'no_publisher_wallets';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type PublisherStartupFailedAvailability = {
+  available: false;
+  reason: 'publisher_startup_failed';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type AsyncPublisherUnavailableAvailability =
+  | PublisherDisabledAvailability
+  | PublisherStartingAvailability
+  | NoPublisherWalletsAvailability
+  | PublisherStartupFailedAvailability;
+
 export type AsyncPublisherAvailability =
   | { available: true }
-  | {
-      available: false;
-      reason: AsyncPublisherUnavailableReason;
-      retryable: boolean;
-      operatorActionRequired: boolean;
-    };
+  | AsyncPublisherUnavailableAvailability;
+
+function unavailablePublisherAvailability(reason: 'publisher_disabled'): PublisherDisabledAvailability;
+function unavailablePublisherAvailability(reason: 'publisher_starting'): PublisherStartingAvailability;
+function unavailablePublisherAvailability(reason: 'no_publisher_wallets'): NoPublisherWalletsAvailability;
+function unavailablePublisherAvailability(reason: 'publisher_startup_failed'): PublisherStartupFailedAvailability;
+function unavailablePublisherAvailability(reason: AsyncPublisherUnavailableReason): AsyncPublisherUnavailableAvailability;
+function unavailablePublisherAvailability(
+  reason: AsyncPublisherUnavailableReason,
+): AsyncPublisherUnavailableAvailability {
+  switch (reason) {
+    case 'publisher_starting':
+      return { available: false, reason, retryable: true, operatorActionRequired: false };
+    case 'publisher_disabled':
+    case 'no_publisher_wallets':
+    case 'publisher_startup_failed':
+      return { available: false, reason, retryable: false, operatorActionRequired: true };
+  }
+}
 
 /**
  * Canonical readiness boundary for every async-ingress route. Lifecycle may
@@ -56,14 +103,7 @@ export function resolveAsyncPublisherAvailability(args: {
       : args.config.publisher?.enabled
         ? 'publisher_startup_failed'
         : 'publisher_disabled');
-  return {
-    available: false,
-    reason,
-    // Only the in-progress state can recover from the same client retry without
-    // operator/config/daemon intervention.
-    retryable: reason === 'publisher_starting',
-    operatorActionRequired: reason !== 'publisher_starting',
-  };
+  return unavailablePublisherAvailability(reason);
 }
 
 export interface PublisherInspector {
@@ -141,14 +181,19 @@ export type PublisherStartupOutcome =
       availability: Extract<AsyncPublisherAvailability, { available: true }>;
     }
   | {
-      status: 'disabled' | 'no_publisher_wallets';
+      status: 'disabled';
       runtime: null;
-      availability: Extract<AsyncPublisherAvailability, { available: false }>;
+      availability: PublisherDisabledAvailability;
+    }
+  | {
+      status: 'no_publisher_wallets';
+      runtime: null;
+      availability: NoPublisherWalletsAvailability;
     }
   | {
       status: 'failed';
       runtime: null;
-      availability: Extract<AsyncPublisherAvailability, { available: false }>;
+      availability: PublisherStartupFailedAvailability;
       error: unknown;
     };
 
@@ -157,23 +202,8 @@ export type PublisherState =
   | {
       status: 'starting';
       runtime: null;
-      availability: Extract<AsyncPublisherAvailability, { available: false }>;
+      availability: PublisherStartingAvailability;
     };
-
-function resolveUnavailablePublisherAvailability(
-  config: DkgConfig,
-  reason: AsyncPublisherUnavailableReason,
-): Extract<AsyncPublisherAvailability, { available: false }> {
-  const availability = resolveAsyncPublisherAvailability({
-    config,
-    runtime: null,
-    lifecycleReason: reason,
-  });
-  if (availability.available) {
-    throw new Error(`Publisher state invariant violated for ${reason}`);
-  }
-  return availability;
-}
 
 /**
  * Initial daemon state before the deferred publisher bootstrap settles. Routes
@@ -185,13 +215,13 @@ export function createInitialPublisherState(config: DkgConfig): PublisherState {
     return {
       status: 'disabled',
       runtime: null,
-      availability: resolveUnavailablePublisherAvailability(config, 'publisher_disabled'),
+      availability: unavailablePublisherAvailability('publisher_disabled'),
     };
   }
   return {
     status: 'starting',
     runtime: null,
-    availability: resolveUnavailablePublisherAvailability(config, 'publisher_starting'),
+    availability: unavailablePublisherAvailability('publisher_starting'),
   };
 }
 
@@ -207,7 +237,7 @@ export async function startPublisherRuntimeWithOutcome(
     return {
       status: 'disabled',
       runtime: null,
-      availability: resolveUnavailablePublisherAvailability(args.config, 'publisher_disabled'),
+      availability: unavailablePublisherAvailability('publisher_disabled'),
     };
   }
 
@@ -217,7 +247,7 @@ export async function startPublisherRuntimeWithOutcome(
       return {
         status: 'no_publisher_wallets',
         runtime: null,
-        availability: resolveUnavailablePublisherAvailability(args.config, 'no_publisher_wallets'),
+        availability: unavailablePublisherAvailability('no_publisher_wallets'),
       };
     }
     return { status: 'started', runtime, availability: { available: true } };
@@ -225,7 +255,7 @@ export async function startPublisherRuntimeWithOutcome(
     return {
       status: 'failed',
       runtime: null,
-      availability: resolveUnavailablePublisherAvailability(args.config, 'publisher_startup_failed'),
+      availability: unavailablePublisherAvailability('publisher_startup_failed'),
       error,
     };
   }

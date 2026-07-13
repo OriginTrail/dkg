@@ -310,6 +310,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
+import { publisherCompatibilityAliases } from './routes/context.js';
 import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
@@ -333,7 +334,12 @@ import type { RoutePlugin } from './plugin-api.js';
 
 export type HandleRequestInput = Omit<
   RequestContext,
-  'url' | 'path' | 'requestToken' | 'requestAgentAddress'
+  | 'url'
+  | 'path'
+  | 'requestToken'
+  | 'requestAgentAddress'
+  | 'publisherRuntime'
+  | 'publisherAvailability'
 >;
 
 export async function handleRequest(input: HandleRequestInput): Promise<void> {
@@ -349,6 +355,7 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
 
   const ctx: RequestContext = {
     ...input,
+    ...publisherCompatibilityAliases(input.publisherState),
     url,
     path,
     requestToken,
