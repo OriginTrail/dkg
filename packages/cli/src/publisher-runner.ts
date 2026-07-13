@@ -4,7 +4,7 @@ import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapte
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { loadNetworkConfig, resolveNetworkConfigName, resolveReadyChainConfig, type DkgConfig } from './config.js';
+import { loadNetworkConfig, loadResolvedNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import {
   projectRuntimeEvmChainConfig,
   type RuntimeEvmChainConfig,
@@ -288,7 +288,7 @@ export async function createPublisherRuntime(args: {
     throw new Error('No publisher wallets configured. Use `dkg publisher wallet add <privateKey>` first.');
   }
 
-  const network = await loadNetworkConfig(resolveNetworkConfigName(args.config));
+  const { network } = await loadResolvedNetworkConfig(args.config, loadNetworkConfig);
   const keypair = await loadOrCreateAgentWallet(args.dataDir);
   const store = await createPublisherStore(args.dataDir, args.config);
   const publicSnapshotStore = createPublicSnapshotStore(args.dataDir, args.config);

@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync
 import { tmpdir, homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
+import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
 import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
+import { listBundledNetworkConfigNames } from '../src/config.js';
 
 /**
  * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
@@ -259,7 +261,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     );
     return {
       loadNetworkConfig,
-      networkConfigNames: ['testnet', 'mainnet-base', 'mainnet-gnosis', 'mainnet-neuroweb'],
+      networkConfigNames: listBundledNetworkConfigNames(),
       ensureDkgNodeConfig,
       startDaemon,
       loadOpWallets,
@@ -441,6 +443,38 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       chain: {
         chainId: 'fixture:42',
         rpcUrl: 'https://fixture-rpc.invalid',
+      },
+    });
+  });
+
+  it('uses bundled registry candidates that are intentionally absent from the setup menu', async () => {
+    expect(SELECTABLE_SETUP_NETWORKS).not.toContain('mainnet-neuroweb');
+    expect(listBundledNetworkConfigNames()).toContain('mainnet-neuroweb');
+
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(join(dkgDir, 'config.json'), JSON.stringify({
+      name: 'legacy-neuroweb',
+      apiPort: 9200,
+      chain: {
+        type: 'evm',
+        chainId: 'neuroweb:2043',
+        rpcUrl: 'https://operator-neuroweb.invalid',
+        hubAddress: '0x0000000000000000000000000000000000000042',
+      },
+    }, null, 2));
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const deps = makeDeps();
+
+    await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);
+
+    expect((deps.ensureDkgNodeConfig as any).calls[0][0].networkConfigName)
+      .toBe('mainnet-neuroweb');
+    expect(JSON.parse(readFileSync(join(dkgDir, 'config.json'), 'utf-8'))).toMatchObject({
+      networkConfig: 'mainnet-neuroweb',
+      chain: {
+        chainId: 'neuroweb:2043',
+        rpcUrl: 'https://operator-neuroweb.invalid',
       },
     });
   });

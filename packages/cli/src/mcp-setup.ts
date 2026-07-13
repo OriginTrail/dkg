@@ -75,7 +75,9 @@ import TOML from '@iarna/toml';
 import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
 import {
   assertSelectableNetwork,
+  resolveKnownNetworkConfigName,
   type DkgConfig,
+  type NetworkChainIdentity,
 } from './config.js';
 
 export interface McpSetupCliOptions {
@@ -157,7 +159,7 @@ export interface PlannedItem {
  */
 export interface McpSetupActionDeps {
   loadNetworkConfig: typeof import('@origintrail-official/dkg-adapter-openclaw').loadNetworkConfig;
-  /** Candidate names resolved through the same injected loader above. */
+  /** All bundled candidate names, including networks omitted from setup UI. */
   networkConfigNames: readonly string[];
   /**
    * Codex Round-23 Fix 30: agent-agnostic config-write helper from
@@ -230,24 +232,16 @@ function resolveKnownNetworkConfigNameFromLoader(
     name: string,
   ) => ReturnType<McpSetupActionDeps['loadNetworkConfig']>,
 ): string | undefined {
-  const explicit = config?.networkConfig?.trim();
-  if (explicit) return explicit;
-
-  const chainId = config?.chain?.chainId?.trim().toLowerCase();
-  if (!chainId) return undefined;
-
-  let matchedName: string | undefined;
+  const registry: Record<string, NetworkChainIdentity> = {};
   for (const name of networkConfigNames) {
     try {
       const network = loadNetworkConfig(name);
-      if (network.chain?.chainId?.trim().toLowerCase() !== chainId) continue;
-      if (matchedName && matchedName !== name) return undefined;
-      matchedName = name;
+      registry[name] = { chain: network.chain };
     } catch {
       // One unavailable candidate must not prevent inference from the rest.
     }
   }
-  return matchedName;
+  return resolveKnownNetworkConfigName(config, registry);
 }
 
 /**

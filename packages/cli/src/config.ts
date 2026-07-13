@@ -1490,6 +1490,13 @@ function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
   return _bundledNetworkRegistry;
 }
 
+/** Every valid network overlay bundled with this CLI, including entries that
+ * are intentionally omitted from the interactive setup menu. Persisted-config
+ * inference must use this registry rather than UI curation. */
+export function listBundledNetworkConfigNames(): readonly string[] {
+  return Object.keys(loadBundledNetworkRegistry()).sort();
+}
+
 /**
  * Build the bundled registry entry-by-entry in root priority order.
  *
@@ -1530,9 +1537,13 @@ export function loadNetworkRegistryFromRoots(
  * Production reads network/*.json, so adding a network needs no second table.
  * Tests and embedders may supply a registry explicitly.
  */
+export interface NetworkChainIdentity {
+  chain?: { chainId?: string | null };
+}
+
 export function inferNetworkConfigNameFromChainId(
   chainId: string | null | undefined,
-  registry: Readonly<Record<string, Pick<NetworkConfig, 'chain'>>> = loadBundledNetworkRegistry(),
+  registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
 ): string | undefined {
   const normalized = chainId?.trim().toLowerCase();
   if (!normalized) return undefined;
@@ -1556,10 +1567,11 @@ export function inferNetworkConfigNameFromChainId(
  */
 export function resolveKnownNetworkConfigName(
   config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
 ): string | undefined {
   const explicitNetwork = config?.networkConfig?.trim();
   if (explicitNetwork) return explicitNetwork;
-  return inferNetworkConfigNameFromChainId(config?.chain?.chainId);
+  return inferNetworkConfigNameFromChainId(config?.chain?.chainId, registry);
 }
 
 /**
@@ -1574,6 +1586,24 @@ export function resolveNetworkConfigName(
   config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
 ): string {
   return resolveKnownNetworkConfigName(config) ?? loadProjectConfig().defaultNetwork;
+}
+
+export interface LoadedResolvedNetworkConfig {
+  name: string;
+  network: NetworkConfig | null;
+}
+
+/**
+ * Resolve legacy chain-only homes and load their effective overlay at one
+ * boundary. Callers that need network metadata should use this instead of
+ * manually composing resolveNetworkConfigName() and loadNetworkConfig().
+ */
+export async function loadResolvedNetworkConfig(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  loader: (name: string) => Promise<NetworkConfig | null> = loadNetworkConfig,
+): Promise<LoadedResolvedNetworkConfig> {
+  const name = resolveNetworkConfigName(config);
+  return { name, network: await loader(name) };
 }
 
 /**

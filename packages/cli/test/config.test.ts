@@ -25,6 +25,8 @@ import {
   sharedHomeInitGate,
   repoDir,
   inferNetworkConfigNameFromChainId,
+  listBundledNetworkConfigNames,
+  loadResolvedNetworkConfig,
   loadNetworkRegistryFromRoots,
   resolveKnownNetworkConfigName,
   resolveNetworkConfigName,
@@ -560,6 +562,22 @@ describe('localAgentIntegrations config round-trip', () => {
       expect(network).not.toBeNull();
       expect(inferNetworkConfigNameFromChainId(network?.chain?.chainId)).toBe(name);
     }
+  });
+
+  it('lists every bundled overlay, including networks omitted from setup menus', () => {
+    expect(listBundledNetworkConfigNames()).toEqual([
+      'mainnet-base',
+      'mainnet-gnosis',
+      'mainnet-neuroweb',
+      'testnet',
+    ]);
+  });
+
+  it('loads a legacy chain-only config through one resolved-network boundary', async () => {
+    const resolved = await loadResolvedNetworkConfig({ chain: { chainId: 'neuroweb:2043' } });
+
+    expect(resolved.name).toBe('mainnet-neuroweb');
+    expect(resolved.network?.chain?.chainId).toBe('neuroweb:2043');
   });
 
   it('refuses to infer an ambiguous chain shared by two overlays', () => {
