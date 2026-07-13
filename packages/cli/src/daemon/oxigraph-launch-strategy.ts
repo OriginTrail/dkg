@@ -1,7 +1,10 @@
 import type { ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
-import { OXIGRAPH_WATCHDOG_OOM_MARKER } from './oxigraph-parent-watchdog.js';
+import {
+  OXIGRAPH_WATCHDOG_OOM_MARKER,
+  readLinuxProcessIdentity,
+} from './oxigraph-parent-watchdog.js';
 
 export interface OxigraphMemoryLimits {
   highMiB?: number;
@@ -77,6 +80,7 @@ export function createOxigraphLaunchStrategy(opts: {
   uid: number;
   nodeExecutable?: string;
   watchdogPath?: string;
+  parentIdentity?: string;
 }): OxigraphLaunchStrategy {
   if (!opts.memoryLimits) {
     return {
@@ -99,6 +103,12 @@ export function createOxigraphLaunchStrategy(opts: {
   const runtimeDir = `/run/user/${opts.uid}`;
   const watchdogPath = opts.watchdogPath ?? fileURLToPath(new URL('./oxigraph-parent-watchdog.js', import.meta.url));
   const nodeExecutable = opts.nodeExecutable ?? process.execPath;
+  const parentIdentity = opts.parentIdentity ?? readLinuxProcessIdentity(opts.parentPid);
+  if (!parentIdentity) {
+    throw new Error(
+      `Managed Oxigraph memory limits require a readable identity for daemon PID ${opts.parentPid}`,
+    );
+  }
   const watchdogOomChildren = new WeakSet<ChildProcess>();
   let generation = 0;
 
@@ -115,7 +125,7 @@ export function createOxigraphLaunchStrategy(opts: {
           ...(limits.highMiB === undefined ? [] : [`--property=MemoryHigh=${limits.highMiB}M`]),
           `--property=MemoryMax=${limits.maxMiB}M`,
           '--property=MemorySwapMax=0',
-          '--', nodeExecutable, watchdogPath, String(opts.parentPid), binaryPath, ...binaryArgs,
+          '--', nodeExecutable, watchdogPath, String(opts.parentPid), parentIdentity, binaryPath, ...binaryArgs,
         ],
         environment: {
           XDG_RUNTIME_DIR: runtimeDir,

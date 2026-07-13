@@ -118,6 +118,9 @@ function startOpts(port: number, extra: Record<string, unknown> = {}) {
     stopGraceMs: 1_000,
     restartBackoffBaseMs: 100,
     restartBackoffMaxMs: 200,
+    // Cross-platform tests simulate the Linux systemd command shape on macOS,
+    // where `/proc/<pid>/stat` is unavailable.
+    parentIdentity: `${process.pid}:test`,
     log: () => {},
     ...extra,
   };
@@ -142,6 +145,7 @@ describe('buildOxigraphSpawnSpec', () => {
       uid: 1000,
       nodeExecutable: '/opt/node',
       watchdogPath: '/opt/oxigraph-watchdog.js',
+      parentIdentity: '42:1234',
     });
     strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
     strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
@@ -162,8 +166,8 @@ describe('buildOxigraphSpawnSpec', () => {
       '--property=MemoryMax=3072M',
       '--property=MemorySwapMax=0',
     ]);
-    expect(spec.args.slice(-7)).toEqual([
-      '/opt/node', '/opt/oxigraph-watchdog.js', '42',
+    expect(spec.args.slice(-8)).toEqual([
+      '/opt/node', '/opt/oxigraph-watchdog.js', '42', '42:1234',
       '/opt/oxigraph', 'serve', '--bind', '127.0.0.1:7878',
     ]);
   });
@@ -200,6 +204,7 @@ describe('startOxigraphServer (real child processes)', () => {
     const handle = await startOxigraphServer(startOpts(port, {
       memoryLimits: { highMiB: 128, maxMiB: 256 },
       platform: 'linux',
+      parentIdentity: `${process.pid}:test`,
       io: {
         spawn: injectedSpawn,
         findListenOwnerPid: async (child: import('node:child_process').ChildProcess, _port: number, _host: string, ownership?: 'child-only' | 'process-tree') => {

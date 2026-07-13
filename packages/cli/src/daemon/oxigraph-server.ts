@@ -94,6 +94,8 @@ export interface StartOxigraphServerOptions {
   memoryLimits?: OxigraphMemoryLimits;
   /** Runtime platform. Injectable so command construction is portable in tests. */
   platform?: NodeJS.Platform;
+  /** Parent identity override for cross-platform systemd command tests. */
+  parentIdentity?: string;
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -142,6 +144,7 @@ export async function startOxigraphServer(
     platform: opts.platform ?? process.platform,
     parentPid: process.pid,
     uid: typeof process.getuid === 'function' ? process.getuid() : -1,
+    parentIdentity: opts.parentIdentity,
   });
   const ioOverrides = opts.io ?? {};
   const io: OxigraphServerIo = {

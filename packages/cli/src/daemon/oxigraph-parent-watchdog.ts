@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { constants as osConstants } from 'node:os';
@@ -13,11 +14,15 @@ export const OXIGRAPH_WATCHDOG_OOM_MARKER =
 
 export interface OxigraphParentWatchdogOptions {
   parentPid: number;
+  /** `/proc/<pid>/stat` start-time identity captured by the daemon worker. */
+  parentIdentity?: string;
   command: string;
   args: readonly string[];
   pollIntervalMs?: number;
+  stopGraceMs?: number;
   spawnChild?: typeof spawn;
   isProcessAlive?: (pid: number) => boolean;
+  readProcessIdentity?: (pid: number) => string | null;
   readOomSnapshot?: (pid: number) => CgroupOomSnapshot | null;
   readOomKill?: (dir: string) => number | null;
 }
@@ -45,6 +50,29 @@ function processIsAlive(pid: number): boolean {
 }
 
 /**
+ * Return a PID-reuse-safe Linux process identity.
+ *
+ * `/proc/<pid>/stat` field 22 is the process start time in clock ticks since
+ * boot. Pairing it with the PID distinguishes the original daemon from a later
+ * process that happens to reuse the same numeric PID.
+ */
+export function readLinuxProcessIdentity(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const commEnd = stat.lastIndexOf(')');
+    if (commEnd < 0) return null;
+    // Text after `) ` starts at field 3 (`state`). Field 22 (`starttime`) is
+    // therefore zero-based index 19 in this suffix.
+    const fields = stat.slice(commEnd + 2).trim().split(/\s+/);
+    const startTime = fields[19];
+    return startTime && /^\d+$/.test(startTime) ? `${pid}:${startTime}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Keep Oxigraph tied to the DKG daemon even though systemd places it in a
  * sibling cgroup. The typed watchdog forwards shutdown signals and terminates
  * Oxigraph within one poll interval if the original daemon PID disappears.
@@ -59,9 +87,25 @@ export function startOxigraphParentWatchdog(
 
   const spawnChild = opts.spawnChild ?? spawn;
   const isProcessAlive = opts.isProcessAlive ?? processIsAlive;
+  const readProcessIdentity = opts.readProcessIdentity ?? readLinuxProcessIdentity;
   const readOomSnapshot = opts.readOomSnapshot ?? readCgroupOomSnapshot;
   const readOomKill = opts.readOomKill ?? readCgroupOomKill;
   const pollIntervalMs = opts.pollIntervalMs ?? 1_000;
+  const stopGraceMs = opts.stopGraceMs ?? 5_000;
+  const expectedParentIdentity = opts.parentIdentity;
+  const parentMatches = (): boolean =>
+    expectedParentIdentity === undefined
+      ? isProcessAlive(opts.parentPid)
+      : readProcessIdentity(opts.parentPid) === expectedParentIdentity;
+
+  // Do not create an Oxigraph child when the daemon vanished (or its PID was
+  // reused) before systemd got around to launching this watchdog.
+  if (!parentMatches()) {
+    throw new Error(
+      `Oxigraph parent ${opts.parentPid} disappeared or changed identity before child spawn`,
+    );
+  }
+
   const child = spawnChild(opts.command, [...opts.args], { stdio: 'inherit' });
   // The watchdog already runs inside the transient scope, so it can retain a
   // valid baseline and re-read memory.events while the scope still contains
@@ -70,19 +114,38 @@ export function startOxigraphParentWatchdog(
   const oomSnapshot = readOomSnapshot(process.pid);
   let parentLost = false;
   let stopping = false;
+  let escalationTimer: NodeJS.Timeout | null = null;
+
+  const childAlive = (): boolean =>
+    child.exitCode === null && child.signalCode === null;
+
+  const beginStop = (signal: NodeJS.Signals): void => {
+    if (stopping) return;
+    stopping = true;
+    if (childAlive()) child.kill(signal);
+    if (signal === 'SIGKILL' || !childAlive()) return;
+    escalationTimer = setTimeout(() => {
+      if (childAlive()) child.kill('SIGKILL');
+    }, stopGraceMs);
+    escalationTimer.unref?.();
+  };
 
   const timer = setInterval(() => {
-    if (stopping || isProcessAlive(opts.parentPid)) return;
+    if (stopping || parentMatches()) return;
     parentLost = true;
-    stopping = true;
-    child.kill('SIGTERM');
+    beginStop('SIGTERM');
   }, pollIntervalMs);
   timer.unref?.();
 
   const result = new Promise<OxigraphParentWatchdogResult>((resolveResult, reject) => {
-    child.once('error', reject);
+    child.once('error', (error) => {
+      clearInterval(timer);
+      if (escalationTimer) clearTimeout(escalationTimer);
+      reject(error);
+    });
     child.once('exit', (code, signal) => {
       clearInterval(timer);
+      if (escalationTimer) clearTimeout(escalationTimer);
       const sigkillCompatibleExit = signal === 'SIGKILL' || code === 137;
       const oomKillNow = oomSnapshot ? readOomKill(oomSnapshot.dir) : null;
       const oomKilled = sigkillCompatibleExit
@@ -92,28 +155,37 @@ export function startOxigraphParentWatchdog(
     });
   });
 
+  // Close the spawn race: the parent may die after the pre-spawn identity
+  // check but before the child exists. Re-check only after exit/error handlers
+  // are attached, then begin the same bounded cleanup path.
+  if (!parentMatches()) {
+    parentLost = true;
+    beginStop('SIGTERM');
+  }
+
   return {
     child,
     result,
     stop(signal: NodeJS.Signals = 'SIGTERM') {
-      if (stopping) return;
-      stopping = true;
-      child.kill(signal);
+      beginStop(signal);
     },
   };
 }
 
 export function parseOxigraphParentWatchdogArgs(argv: readonly string[]): {
   parentPid: number;
+  parentIdentity: string;
   command: string;
   args: string[];
 } {
-  const [rawParentPid, command, ...args] = argv;
+  const [rawParentPid, parentIdentity, command, ...args] = argv;
   const parentPid = Number(rawParentPid);
-  if (!Number.isInteger(parentPid) || parentPid <= 0 || !command) {
-    throw new Error('Usage: oxigraph-parent-watchdog <parent-pid> <command> [args...]');
+  if (!Number.isInteger(parentPid) || parentPid <= 0 || !parentIdentity || !command) {
+    throw new Error(
+      'Usage: oxigraph-parent-watchdog <parent-pid> <parent-identity> <command> [args...]',
+    );
   }
-  return { parentPid, command, args };
+  return { parentPid, parentIdentity, command, args };
 }
 
 export function conventionalSignalExitCode(signal: NodeJS.Signals): number {

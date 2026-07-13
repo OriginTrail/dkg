@@ -12,6 +12,14 @@ import {
   sleep, withSelectedDkgHome, selectedDkgHomeForEnv, probeHostForApiHost,
 } from './cli-helpers.js';
 import { resolveDaemonNodeCommand } from './daemon-entrypoint.js';
+import {
+  MANAGED_OXIGRAPH_BACKEND,
+  resolveManagedOxigraphPort,
+} from './daemon/oxigraph-managed.js';
+import {
+  reapWorkerProcessGroup,
+  waitForTcpPortRelease,
+} from './daemon/worker-process-group.js';
 
 async function appendSupervisorLog(message: string): Promise<void> {
   await ensureDkgDir();
@@ -21,6 +29,83 @@ async function appendSupervisorLog(message: string): Promise<void> {
 function supervisorWarn(message: string): void {
   console.warn(message);
   void appendSupervisorLog(message).catch(() => {});
+}
+
+interface WorkerExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+async function waitForWorkerExit(
+  child: ReturnType<typeof spawn>,
+): Promise<WorkerExit> {
+  return new Promise<WorkerExit>((resolve) => {
+    let settled = false;
+    const finish = (exit: WorkerExit) => {
+      if (settled) return;
+      settled = true;
+      resolve(exit);
+    };
+    child.once('exit', (code, signal) => finish({ code, signal }));
+    child.once('error', () => finish({ code: 1, signal: null }));
+  });
+}
+
+async function configuredManagedOxigraphPort(): Promise<number | null> {
+  const config = await loadConfig();
+  if (config.store?.backend !== MANAGED_OXIGRAPH_BACKEND) return null;
+  return resolveManagedOxigraphPort(config.store.options);
+}
+
+/**
+ * Cleanup barrier between a worker exit and its replacement.
+ *
+ * POSIX workers are private process-group leaders. Reap that exact group,
+ * then (for a configured managed store) verify the loopback listener is gone.
+ * The port check also covers systemd-scope mode, where Oxigraph deliberately
+ * lives outside the worker's group and its parent watchdog performs cleanup.
+ */
+async function cleanupWorkerOwnedProcesses(
+  workerPid: number | undefined,
+  exit: WorkerExit,
+): Promise<boolean> {
+  try {
+    const result = await reapWorkerProcessGroup(workerPid);
+    if (!result.empty) {
+      supervisorWarn(
+        `[supervisor] worker process group ${workerPid ?? 'unknown'} still has survivors ` +
+          `after SIGTERM/SIGKILL; refusing to spawn a replacement.`,
+      );
+      return false;
+    }
+    if (result.termSent || result.killSent) {
+      supervisorWarn(
+        `[supervisor] reaped worker process group ${workerPid} after exit ` +
+          `(code=${exit.code ?? 'null'}, signal=${exit.signal ?? 'null'}, ` +
+          `sigkill=${result.killSent}).`,
+      );
+    }
+
+    const managedPort = await configuredManagedOxigraphPort();
+    if (managedPort !== null) {
+      const released = await waitForTcpPortRelease('127.0.0.1', managedPort);
+      if (!released) {
+        supervisorWarn(
+          `[supervisor] managed Oxigraph port 127.0.0.1:${managedPort} is still listening ` +
+            `after worker cleanup; refusing to spawn a replacement.`,
+        );
+        return false;
+      }
+    }
+    return true;
+  } catch (error) {
+    supervisorWarn(
+      `[supervisor] worker descendant cleanup failed: ` +
+        `${error instanceof Error ? error.message : String(error)}; ` +
+        `refusing to spawn a replacement.`,
+    );
+    return false;
+  }
 }
 
 /**
@@ -107,8 +192,13 @@ async function runDaemonSupervisor(): Promise<void> {
       {
         stdio: ['ignore', 'ignore', 'ignore'],
         env: withSelectedDkgHome(process.env),
+        // POSIX: make the worker a private session/process-group leader. Its
+        // PID is then the exact PGID the cleanup barrier owns. Windows needs
+        // a Job Object/pipe watchdog instead and keeps the existing shape.
+        detached: process.platform !== 'win32',
       },
     );
+    const workerPid = child.pid;
 
     // Positive-liveness watchdog. Catches the generic zombie shape (HTTP
     // listener dead but process still alive) that the exit-watcher can't
@@ -118,10 +208,18 @@ async function runDaemonSupervisor(): Promise<void> {
     // packages/cli/src/daemon/supervisor-liveness.ts for the full rationale.
     const stopWatcher = await maybeStartSupervisorLivenessWatcher(child);
 
-    const rawExitCode = await new Promise<number | null>((resolve) => {
-      child.once('exit', (code) => resolve(code));
-    });
+    const workerExit = await waitForWorkerExit(child);
     stopWatcher();
+    if (!(await cleanupWorkerOwnedProcesses(workerPid, workerExit))) {
+      process.exitCode = 1;
+      return;
+    }
+    const rawExitCode = workerExit.code;
+    if (workerExit.signal) {
+      supervisorWarn(
+        `[supervisor] worker exited by ${workerExit.signal} (code=${rawExitCode ?? 'null'}).`,
+      );
+    }
     const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
     if (forced) {
       console.warn(
@@ -173,17 +271,24 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
       {
         stdio: 'inherit',
         env: childEnv,
+        detached: process.platform !== 'win32',
       },
     );
+    const workerPid = currentChild.pid;
 
     const stopWatcher = await maybeStartSupervisorLivenessWatcher(currentChild);
 
-    const rawExitCode = await new Promise<number | null>((resolve) => {
-      currentChild!.once('exit', (code) => resolve(code));
-      currentChild!.once('error', () => resolve(1));
-    });
+    const workerExit = await waitForWorkerExit(currentChild);
     stopWatcher();
     currentChild = null;
+    if (!(await cleanupWorkerOwnedProcesses(workerPid, workerExit))) process.exit(1);
+    const rawExitCode = workerExit.code;
+    if (workerExit.signal) {
+      supervisorWarn(
+        `[supervisor] foreground worker exited by ${workerExit.signal} ` +
+          `(code=${rawExitCode ?? 'null'}).`,
+      );
+    }
     const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
     if (forced) {
       console.warn(

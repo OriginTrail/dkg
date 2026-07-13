@@ -83,6 +83,8 @@ export default defineConfig({
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-managed.test.ts',
+          'test/oxigraph-parent-watchdog.test.ts',
+          'test/worker-process-group.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
           // keeping it in the fast unit lane costs nothing.
@@ -117,6 +119,9 @@ export default defineConfig({
           // wallets) — no hardhat.
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
+          // Supervisor control-plane regression; uses a fake worker and temp
+          // DKG_HOME only (no Hardhat/network dependency).
+          'test/daemon-lifecycle.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],
