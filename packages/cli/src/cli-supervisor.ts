@@ -42,6 +42,45 @@ async function waitForWorkerExit(
   });
 }
 
+interface FinalizedWorkerExit {
+  cleanupSucceeded: boolean;
+  rawExitCode: number | null;
+  forced: boolean;
+  originalExitCode: number | null;
+}
+
+async function finalizeWorkerExit(
+  workerPid: number | undefined,
+  workerExit: WorkerExit,
+  stopWatcher: () => void,
+  label: string,
+): Promise<FinalizedWorkerExit> {
+  stopWatcher();
+  const rawExitCode = workerExit.code;
+  const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
+  const cleanupSucceeded = await cleanupDaemonWorker(
+    workerPid,
+    workerExit,
+    { warn: supervisorWarn },
+  );
+  if (!cleanupSucceeded) {
+    return { cleanupSucceeded, rawExitCode, forced, originalExitCode };
+  }
+  if (workerExit.signal) {
+    supervisorWarn(
+      `[supervisor] ${label} exited by ${workerExit.signal} ` +
+        `(code=${rawExitCode ?? 'null'}).`,
+    );
+  }
+  if (forced) {
+    console.warn(
+      `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
+        `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
+    );
+  }
+  return { cleanupSucceeded, rawExitCode, forced, originalExitCode };
+}
+
 /**
  * Wire up the supervisor-liveness watchdog for a spawned worker child.
  *
@@ -143,24 +182,17 @@ async function runDaemonSupervisor(): Promise<void> {
     const stopWatcher = await maybeStartSupervisorLivenessWatcher(child);
 
     const workerExit = await waitForWorkerExit(child);
-    stopWatcher();
-    if (!(await cleanupDaemonWorker(workerPid, workerExit, { warn: supervisorWarn }))) {
+    const finalizedExit = await finalizeWorkerExit(
+      workerPid,
+      workerExit,
+      stopWatcher,
+      'worker',
+    );
+    if (!finalizedExit.cleanupSucceeded) {
       process.exitCode = 1;
       return;
     }
-    const rawExitCode = workerExit.code;
-    if (workerExit.signal) {
-      supervisorWarn(
-        `[supervisor] worker exited by ${workerExit.signal} (code=${rawExitCode ?? 'null'}).`,
-      );
-    }
-    const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
-    if (forced) {
-      console.warn(
-        `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
-          `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
-      );
-    }
+    const { originalExitCode } = finalizedExit;
 
     if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
       crashRestartCount = 0;
@@ -213,25 +245,17 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
     const stopWatcher = await maybeStartSupervisorLivenessWatcher(currentChild);
 
     const workerExit = await waitForWorkerExit(currentChild);
-    stopWatcher();
+    const finalizedExit = await finalizeWorkerExit(
+      workerPid,
+      workerExit,
+      stopWatcher,
+      'foreground worker',
+    );
     currentChild = null;
-    if (!(await cleanupDaemonWorker(workerPid, workerExit, { warn: supervisorWarn }))) {
+    if (!finalizedExit.cleanupSucceeded) {
       process.exit(1);
     }
-    const rawExitCode = workerExit.code;
-    if (workerExit.signal) {
-      supervisorWarn(
-        `[supervisor] foreground worker exited by ${workerExit.signal} ` +
-          `(code=${rawExitCode ?? 'null'}).`,
-      );
-    }
-    const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
-    if (forced) {
-      console.warn(
-        `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
-          `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
-      );
-    }
+    const { originalExitCode } = finalizedExit;
 
     if (signalled) process.exit(originalExitCode ?? 0);
 

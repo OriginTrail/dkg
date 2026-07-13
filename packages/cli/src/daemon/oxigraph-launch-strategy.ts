@@ -18,6 +18,10 @@ export interface OxigraphSpawnSpec {
   stdio?: StdioOptions;
 }
 
+export interface OxigraphLaunchStrategyIo {
+  spawnSync: typeof spawnSync;
+}
+
 export type ListenOwnerResolver = (
   child: ChildProcess,
   port: number,
@@ -67,9 +71,12 @@ function disconnectParentIpc(child: ChildProcess): boolean {
   }
 }
 
-function forceKillWindowsProcessTree(pid: number): boolean {
+function forceKillWindowsProcessTree(
+  pid: number,
+  runSpawnSync: typeof spawnSync,
+): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
-  const result = spawnSync(
+  const result = runSpawnSync(
     'taskkill.exe',
     ['/PID', String(pid), '/T', '/F'],
     { stdio: 'ignore', windowsHide: true },
@@ -115,7 +122,12 @@ export function createOxigraphLaunchStrategy(opts: {
   watchdogPath?: string;
   parentIdentity?: string;
   stopGraceMs?: number;
+  io?: Partial<OxigraphLaunchStrategyIo>;
 }): OxigraphLaunchStrategy {
+  const io: OxigraphLaunchStrategyIo = {
+    spawnSync,
+    ...opts.io,
+  };
   if (!opts.memoryLimits) {
     if (opts.platform === 'win32') {
       const watchdogPath = opts.watchdogPath ?? fileURLToPath(
@@ -144,7 +156,7 @@ export function createOxigraphLaunchStrategy(opts: {
         classifyOomExit: cgroupEvidenceIncremented,
         shutdown: (child, phase) => phase === 'graceful'
           ? disconnectParentIpc(child)
-          : forceKillWindowsProcessTree(child.pid ?? -1) || signalChild(child, 'SIGKILL'),
+          : forceKillWindowsProcessTree(child.pid ?? -1, io.spawnSync) || signalChild(child, 'SIGKILL'),
         shutdownTimeoutMs: (configuredGraceMs) => configuredGraceMs + 250,
         logSummary: () =>
           'Starting Oxigraph behind an IPC parent watchdog (Windows kill-on-parent-exit fallback).',

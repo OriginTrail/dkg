@@ -84,7 +84,16 @@ async function writeWorkspaceTsconfig(tsconfigPath: string): Promise<void> {
   );
 }
 
-async function runSupervisor(tempHome: string, tsconfigPath: string): Promise<void> {
+interface SupervisorResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+async function runSupervisorProcess(
+  tempHome: string,
+  tsconfigPath: string,
+): Promise<SupervisorResult> {
   const env = {
     ...process.env,
     HOME: tempHome,
@@ -108,17 +117,26 @@ async function runSupervisor(tempHome: string, tsconfigPath: string): Promise<vo
 
   const code = await new Promise<number | null>((resolveExit, reject) => {
     child.once('error', reject);
-    child.once('exit', code => resolveExit(code));
+    child.once('close', code => resolveExit(code));
   });
 
-  if (code !== 0) {
+  return {
+    code,
+    stdout: Buffer.concat(stdout).toString('utf8'),
+    stderr: Buffer.concat(stderr).toString('utf8'),
+  };
+}
+
+async function runSupervisor(tempHome: string, tsconfigPath: string): Promise<void> {
+  const result = await runSupervisorProcess(tempHome, tsconfigPath);
+  if (result.code !== 0) {
     throw new Error(
-      `daemon-supervisor exited with ${code}\n` +
-      Buffer.concat(stdout).toString('utf8') +
-      Buffer.concat(stderr).toString('utf8'),
+      `daemon-supervisor exited with ${result.code}\n` +
+      result.stdout +
+      result.stderr,
     );
   }
-  expect(code).toBe(0);
+  expect(result.code).toBe(0);
 }
 
 async function freePort(): Promise<number> {
@@ -132,6 +150,15 @@ async function freePort(): Promise<number> {
   const port = address.port;
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
   return port;
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe('daemon lifecycle control-plane files', () => {
@@ -277,6 +304,112 @@ describe('daemon lifecycle control-plane files', () => {
       expect(readFileSync(replacementBound, 'utf8')).toBe('bound');
       const orphanPid = Number(readFileSync(listenerReady, 'utf8'));
       expect(() => process.kill(orphanPid, 0)).toThrow();
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'fails closed instead of respawning while an external managed-store listener survives',
+    async () => {
+      tempRoot = await mkdtemp(join(tmpdir(), 'dkg-supervised-fail-closed-'));
+      const selectedHome = join(tempRoot, '.dkg-dev');
+      const tsconfigPath = join(tempRoot, 'tsx-tsconfig.json');
+      const slotDir = join(selectedHome, 'releases', 'a');
+      const fakeWorker = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
+      const listenerScript = join(tempRoot, 'external-listener.cjs');
+      const stateFile = join(tempRoot, 'first-worker-started');
+      const listenerReady = join(tempRoot, 'external-listener-ready');
+      const replacementStarted = join(tempRoot, 'replacement-started');
+      const managedPort = await freePort();
+
+      await mkdir(dirname(fakeWorker), { recursive: true });
+      await mkdir(join(selectedHome, 'releases'), { recursive: true });
+      await writeWorkspaceTsconfig(tsconfigPath);
+      await writeFile(
+        join(selectedHome, 'config.json'),
+        JSON.stringify({
+          name: 'supervisor-fail-closed-regression',
+          apiPort: 25003,
+          listenPort: 0,
+          nodeRole: 'core',
+          store: {
+            backend: 'oxigraph-server',
+            options: { port: managedPort },
+          },
+        }),
+      );
+      await symlink('a', join(selectedHome, 'releases', 'current'));
+      await writeFile(
+        listenerScript,
+        [
+          "const fs = require('node:fs');",
+          "const net = require('node:net');",
+          `const port = ${managedPort};`,
+          `const ready = ${JSON.stringify(listenerReady)};`,
+          "const server = net.createServer(() => {});",
+          "server.listen(port, '127.0.0.1', () => fs.writeFileSync(ready, String(process.pid)));",
+          'setInterval(() => {}, 1000);',
+          '',
+        ].join('\n'),
+      );
+      await writeFile(
+        fakeWorker,
+        [
+          '#!/usr/bin/env node',
+          "const fs = require('node:fs');",
+          "const { spawn } = require('node:child_process');",
+          `const state = ${JSON.stringify(stateFile)};`,
+          `const ready = ${JSON.stringify(listenerReady)};`,
+          `const replacement = ${JSON.stringify(replacementStarted)};`,
+          `const listener = ${JSON.stringify(listenerScript)};`,
+          "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
+          'if (fs.existsSync(state)) {',
+          "  fs.writeFileSync(replacement, 'unexpected');",
+          '  process.exit(0);',
+          '}',
+          "fs.writeFileSync(state, '1');",
+          "const external = spawn(process.execPath, [listener], { detached: true, stdio: 'ignore' });",
+          'external.unref();',
+          'const deadline = Date.now() + 5000;',
+          'const timer = setInterval(() => {',
+          '  if (fs.existsSync(ready)) {',
+          '    clearInterval(timer);',
+          '    process.exit(1);',
+          '  } else if (Date.now() >= deadline) {',
+          '    clearInterval(timer);',
+          '    process.exit(3);',
+          '  }',
+          '}, 10);',
+          '',
+        ].join('\n'),
+      );
+      await chmod(fakeWorker, 0o755);
+
+      try {
+        const result = await runSupervisorProcess(tempRoot, tsconfigPath);
+
+        expect(result.code).toBe(1);
+        expect(result.stderr).toMatch(/still listening.*refusing to spawn a replacement/);
+        expect(existsSync(replacementStarted)).toBe(false);
+      } finally {
+        if (existsSync(listenerReady)) {
+          const listenerPid = Number(readFileSync(listenerReady, 'utf8'));
+          try {
+            process.kill(listenerPid, 'SIGTERM');
+          } catch {
+            /* already gone */
+          }
+          for (let i = 0; i < 50 && processExists(listenerPid); i++) {
+            await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+          }
+          if (processExists(listenerPid)) {
+            try {
+              process.kill(listenerPid, 'SIGKILL');
+            } catch {
+              /* already gone */
+            }
+          }
+        }
+      }
     },
   );
 });
