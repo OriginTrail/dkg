@@ -2483,7 +2483,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catches up late subscribers (the "Monday Fun Facts" case). Only armed when
     // the chain adapter exposes the per-CG registration-ordinal reads.
     if (this.vmReconcileEnabled()) {
-      this.reconcileCoalescer = new ReconcileCoalescer((localCgId) => this.runVmReconcileForCg(localCgId));
+      this.reconcileCoalescer = new ReconcileCoalescer(
+        (localCgId) => this.runVmReconcileForCg(localCgId),
+        // A failed store/RPC sweep is retried by the periodic safety net. Live
+        // KACG nudges during the interval must not hot-loop the same heavy scan.
+        { failureBackoffMs: DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS },
+      );
       const runSweep = (): void => {
         this.runVmReconcileSweep().catch((err: unknown) => {
           this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -2719,8 +2719,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     } catch (err) {
       this.log.warn(
         createOperationContext('system'),
-        `VM reconcile for "${localCgId}" failed: ${err instanceof Error ? err.message : String(err)}`,
+        `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
       );
+      // Let ReconcileCoalescer distinguish a failed pass from a clean one so it
+      // can suppress the immediate trailing/live-nudge retry. The coalescer
+      // still resolves its public trigger promise after recording the cooldown.
+      throw err;
     }
   }
 

@@ -160,21 +160,45 @@ export async function reconcileContextGraph(
 export class ReconcileCoalescer {
   private readonly inFlight = new Map<string, Promise<void>>();
   private readonly again = new Set<string>();
+  private readonly retryAfter = new Map<string, number>();
+  private readonly failureBackoffMs: number;
+  private readonly now: () => number;
 
-  constructor(private readonly run: (key: string) => Promise<void>) {}
+  constructor(
+    private readonly run: (key: string) => Promise<void>,
+    options: { failureBackoffMs?: number; now?: () => number } = {},
+  ) {
+    this.failureBackoffMs = Math.max(0, options.failureBackoffMs ?? 0);
+    this.now = options.now ?? Date.now;
+  }
 
   trigger(key: string): Promise<void> {
+    const retryAfter = this.retryAfter.get(key);
+    if (retryAfter !== undefined) {
+      if (this.now() < retryAfter) return Promise.resolve();
+      this.retryAfter.delete(key);
+    }
     const existing = this.inFlight.get(key);
     if (existing) {
       // A run is in flight — mark that one more pass is needed after it.
       this.again.add(key);
       return existing;
     }
+    let failed = false;
     const promise = this.run(key)
-      .catch(() => { /* run is responsible for its own logging */ })
+      .catch(() => {
+        // The run is responsible for logging. A configured cooldown keeps live
+        // chain-event nudges from immediately re-running the same expensive
+        // failed sweep; the periodic sweep retries after the window expires.
+        failed = true;
+        if (this.failureBackoffMs > 0) {
+          this.retryAfter.set(key, this.now() + this.failureBackoffMs);
+        }
+      })
       .finally(() => {
         this.inFlight.delete(key);
-        if (this.again.delete(key)) void this.trigger(key);
+        const runAgain = this.again.delete(key);
+        if (runAgain && (!failed || this.failureBackoffMs === 0)) void this.trigger(key);
       });
     this.inFlight.set(key, promise);
     return promise;

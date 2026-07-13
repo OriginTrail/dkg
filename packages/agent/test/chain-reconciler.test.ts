@@ -188,6 +188,35 @@ describe('ReconcileCoalescer', () => {
     await Promise.all([coalescer.trigger('a'), coalescer.trigger('b')]);
     expect(ran.sort()).toEqual(['a', 'b']);
   });
+
+  it('backs off a failed key and suppresses its queued trailing run', async () => {
+    let now = 1_000;
+    let runs = 0;
+    let rejectCurrent!: (error: Error) => void;
+    const coalescer = new ReconcileCoalescer(
+      async () => {
+        runs += 1;
+        await new Promise<void>((_resolve, reject) => { rejectCurrent = reject; });
+      },
+      { failureBackoffMs: 60_000, now: () => now },
+    );
+
+    const first = coalescer.trigger('cg');
+    void coalescer.trigger('cg'); // asks for a trailing run while the first is active
+    rejectCurrent(new Error('store deadline exceeded'));
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(1); // failed pass does not immediately run the queued pass
+
+    await coalescer.trigger('cg');
+    expect(runs).toBe(1); // live nudge inside the cooldown is ignored
+
+    now += 60_000;
+    const retry = coalescer.trigger('cg');
+    expect(runs).toBe(2); // periodic trigger at the boundary retries normally
+    rejectCurrent(new Error('still unavailable'));
+    await retry;
+  });
 });
 
 describe('RecentUalSet', () => {
