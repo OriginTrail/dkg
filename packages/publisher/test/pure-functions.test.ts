@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import {
   skolemize,
   isBlankNode,
@@ -15,6 +16,7 @@ import {
   generatedPrivateCatalogTripleKeys,
   appendMissingGeneratedPrivateCatalogFloor,
   prepareGeneratedPrivateCatalogFloor,
+  replaceCatalogPartitionWithGeneratedPrivateFloor,
   replaceGeneratedPrivateCatalogFloor,
   catalogTripleKey,
   validatePublishRequest,
@@ -144,6 +146,17 @@ describe('merkle', () => {
 });
 
 describe('generated private catalog preparation', () => {
+  it('rejects unsafe generated subjects and non-empty graph IRIs', () => {
+    expect(() => generatedPrivateCatalogFloorQuads(
+      'bad> <urn:p> <urn:o> . <urn:x',
+    )).toThrow(/Unsafe or empty IRI/);
+    expect(() => appendMissingGeneratedPrivateCatalogFloor(
+      'safe-cg',
+      [],
+      'urn:unsafe> <urn:p>',
+    )).toThrow(/Unsafe or empty IRI/);
+  });
+
   it('preserves the public preparation API for default append and explicit replacement', () => {
     const contextGraphId = 'private-catalog-api-cg';
     const cgDid = `did:dkg:context-graph:${contextGraphId}`;
@@ -194,15 +207,26 @@ describe('generated private catalog preparation', () => {
       .toEqual(generatedPrivateCatalogTripleKeys(contextGraphId));
   });
 
-  it('replaces only recognized catalog triples and preserves private CG-DID data', () => {
+  it('replaces the complete catalog partition and preserves private CG-DID data', () => {
     const contextGraphId = 'private-catalog-cg';
     const cgDid = `did:dkg:context-graph:${contextGraphId}`;
     const privateCgDidQuad = q(cgDid, 'urn:test:private-note', '"keep encrypted"');
+    const recommendedCatalogQuad = q(
+      cgDid,
+      DKG_ONTOLOGY.DCT_PUBLISHER,
+      'urn:test:publisher',
+      'urn:stale',
+    );
     const staleFloor = generatedPrivateCatalogFloorQuads(contextGraphId, 'urn:stale');
 
-    const prepared = replaceGeneratedPrivateCatalogFloor(
+    const prepared = replaceCatalogPartitionWithGeneratedPrivateFloor(
       contextGraphId,
-      [privateCgDidQuad, ...staleFloor],
+      [privateCgDidQuad, recommendedCatalogQuad, ...staleFloor],
+      cgDid,
+    );
+    const deprecatedAlias = replaceGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [privateCgDidQuad, recommendedCatalogQuad, ...staleFloor],
       cgDid,
     );
 
@@ -210,7 +234,9 @@ describe('generated private catalog preparation', () => {
     expect(prepared.quads.slice(1)).toEqual(
       generatedPrivateCatalogFloorQuads(contextGraphId, cgDid),
     );
+    expect(prepared.quads).not.toContainEqual(recommendedCatalogQuad);
     expect(prepared.quads.filter((quad) => quad.graph === 'urn:stale')).toHaveLength(0);
+    expect(deprecatedAlias).toEqual(prepared);
   });
 });
 

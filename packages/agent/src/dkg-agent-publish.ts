@@ -112,7 +112,7 @@ import {
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
   appendMissingGeneratedPrivateCatalogFloor,
-  replaceGeneratedPrivateCatalogFloor,
+  replaceCatalogPartitionWithGeneratedPrivateFloor,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
@@ -441,6 +441,43 @@ export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri
   // one); normalize it back to the default assertion graph before writing.
   return buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: assertionUri })
     .map((quad) => ({ ...quad, graph: '' }));
+}
+
+function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
+  contextGraphId: string;
+  snapshotQuads: readonly Quad[];
+  onChainContextGraphId?: string;
+  resolvedEncryptInlinePayload: PublishOptions['encryptInlinePayload'];
+  resolvedEncryptInlineChunked: PublishOptions['encryptInlineChunked'];
+  queuedEncryptInlinePayload: PublishOptions['encryptInlinePayload'];
+  queuedEncryptInlineChunked: PublishOptions['encryptInlineChunked'];
+}): Pick<
+  PublishOptions,
+  | 'quads'
+  | 'encryptInlinePayload'
+  | 'encryptInlineChunked'
+  | 'trustedNonManifestCatalogTriples'
+> {
+  const encryptionOptions = {
+    encryptInlinePayload:
+      input.resolvedEncryptInlinePayload ?? input.queuedEncryptInlinePayload,
+    encryptInlineChunked:
+      input.resolvedEncryptInlineChunked ?? input.queuedEncryptInlineChunked,
+  };
+  if (!input.onChainContextGraphId || !input.resolvedEncryptInlinePayload) {
+    return { quads: [...input.snapshotQuads], ...encryptionOptions };
+  }
+
+  const preparedCatalog = appendMissingGeneratedPrivateCatalogFloor(
+    input.contextGraphId,
+    input.snapshotQuads,
+  );
+  return {
+    quads: preparedCatalog.quads,
+    ...encryptionOptions,
+    trustedNonManifestCatalogTriples:
+      preparedCatalog.trustedNonManifestCatalogTriples,
+  };
 }
 
 /**
@@ -1689,7 +1726,7 @@ export class PublishMethods extends DKGAgentBase {
     // fails closed (throws) consistently with publish, where the OLD update path
     // would have proceeded. Fail-closed, never a leak; see PR #1208 notes.
     const preparedUpdateCatalog = isCuratedUpdate && updateOnChainId != null
-      ? replaceGeneratedPrivateCatalogFloor(
+      ? replaceCatalogPartitionWithGeneratedPrivateFloor(
           contextGraphId,
           quads,
           contextGraphDataUri(contextGraphId),
@@ -3951,13 +3988,6 @@ export class PublishMethods extends DKGAgentBase {
         undefined,
         publishBindingOptions,
       );
-      const queuedPublishPolicy = {
-        encryptInlinePayload: resolvedEncryptInlinePayload ?? publishOptions.encryptInlinePayload,
-        encryptInlineChunked: resolvedEncryptInlineChunked ?? publishOptions.encryptInlineChunked,
-        catalogFloor: queuedOnChainContextGraphId && resolvedEncryptInlinePayload
-          ? 'generated-private' as const
-          : 'none' as const,
-      };
       // #1670 — finalized private assertions seal the deterministic public
       // catalog floor, but assertionPromote deliberately keeps that synthetic
       // root out of the per-user-root immutable share snapshot. The synchronous
@@ -3966,20 +3996,25 @@ export class PublishMethods extends DKGAgentBase {
       // publisher has no catalog commitment/staging bytes, so cores fall back to
       // their (intentionally absent) curated SWM copy and decline NO_DATA_IN_SWM.
       //
-      // The explicit queued policy requires both a verified on-chain CG binding
+      // The queued preparation boundary requires both a verified on-chain CG binding
       // and a live curated-policy encryption result. That keeps local-only and
       // public CGs untouched and prevents queued mapper placeholders from
       // manufacturing trusted catalog triples. The shared preparation boundary performs exact-key
       // de-duplication for legacy snapshots and returns the trust allow-list
       // with the quads so queued/update/sync paths cannot drift independently.
-      const preparedQueuedCatalog = queuedPublishPolicy.catalogFloor === 'generated-private'
-        ? appendMissingGeneratedPrivateCatalogFloor(request.contextGraphId, snapshotQuads)
-        : undefined;
-      const queuedPublishQuads = preparedQueuedCatalog?.quads ?? snapshotQuads;
+      const queuedPublishPreparation = prepareQueuedKnowledgeAssetVmPublishOptions({
+        contextGraphId: request.contextGraphId,
+        snapshotQuads,
+        onChainContextGraphId: queuedOnChainContextGraphId,
+        resolvedEncryptInlinePayload,
+        resolvedEncryptInlineChunked,
+        queuedEncryptInlinePayload: publishOptions.encryptInlinePayload,
+        queuedEncryptInlineChunked: publishOptions.encryptInlineChunked,
+      });
       result = await publisher.publish({
         ...publisherPublishOptions,
         contextGraphId: request.contextGraphId,
-        quads: queuedPublishQuads,
+        quads: queuedPublishPreparation.quads,
         privateQuads: snapshotPrivateQuads.length > 0 ? snapshotPrivateQuads : undefined,
         publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
         subGraphName: request.subGraphName,
@@ -3999,12 +4034,12 @@ export class PublishMethods extends DKGAgentBase {
           reservedKaId: recoveredReservedKaId ?? 0n,
         },
         onChainContextGraphId: queuedOnChainContextGraphId,
-        encryptInlinePayload: queuedPublishPolicy.encryptInlinePayload,
-        encryptInlineChunked: queuedPublishPolicy.encryptInlineChunked,
-        ...(preparedQueuedCatalog
+        encryptInlinePayload: queuedPublishPreparation.encryptInlinePayload,
+        encryptInlineChunked: queuedPublishPreparation.encryptInlineChunked,
+        ...(queuedPublishPreparation.trustedNonManifestCatalogTriples
           ? {
               trustedNonManifestCatalogTriples:
-                preparedQueuedCatalog.trustedNonManifestCatalogTriples,
+                queuedPublishPreparation.trustedNonManifestCatalogTriples,
             }
           : {}),
       });

@@ -1,5 +1,6 @@
 import {
   DKG_ONTOLOGY,
+  assertSafeIri,
   contextGraphDataUri,
   partitionCatalogQuads,
 } from '@origintrail-official/dkg-core';
@@ -27,7 +28,8 @@ export function generatedPrivateCatalogFloorQuads(
   contextGraphId: string,
   graph = '',
 ): Quad[] {
-  const cgDid = contextGraphDataUri(contextGraphId);
+  const cgDid = assertSafeIri(contextGraphDataUri(contextGraphId));
+  if (graph !== '') assertSafeIri(graph);
   return [
     {
       subject: cgDid,
@@ -76,15 +78,34 @@ export interface PrepareGeneratedPrivateCatalogFloorOptions {
   mode?: 'append-missing' | 'replace-generated';
 }
 
-export function appendMissingGeneratedPrivateCatalogFloor(
+type GeneratedPrivateCatalogFloorOperation =
+  | { kind: 'append-missing'; graph?: string }
+  | { kind: 'replace-catalog-partition'; graph?: string };
+
+function prepareGeneratedPrivateCatalogFloorOperation(
   contextGraphId: string,
   quads: readonly Quad[],
-  graph = '',
+  operation: GeneratedPrivateCatalogFloorOperation,
 ): PreparedGeneratedPrivateCatalogFloor {
-  const floor = generatedPrivateCatalogFloorQuads(contextGraphId, graph);
+  const floor = generatedPrivateCatalogFloorQuads(
+    contextGraphId,
+    operation.graph ?? '',
+  );
   const trustedNonManifestCatalogTriples = generatedPrivateCatalogTripleKeys(
     contextGraphId,
   );
+
+  if (operation.kind === 'replace-catalog-partition') {
+    const { otherQuads } = partitionCatalogQuads(
+      quads,
+      contextGraphDataUri(contextGraphId),
+    );
+    return {
+      quads: [...otherQuads, ...floor],
+      trustedNonManifestCatalogTriples,
+    };
+  }
+
   const present = new Set(quads.map(catalogTripleKey));
   return {
     quads: [
@@ -95,24 +116,46 @@ export function appendMissingGeneratedPrivateCatalogFloor(
   };
 }
 
+export function appendMissingGeneratedPrivateCatalogFloor(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  graph = '',
+): PreparedGeneratedPrivateCatalogFloor {
+  return prepareGeneratedPrivateCatalogFloorOperation(
+    contextGraphId,
+    quads,
+    { kind: 'append-missing', graph },
+  );
+}
+
+/**
+ * Replace the complete recognized catalog partition for this CG DID with the
+ * deterministic private floor. This intentionally removes recommended and
+ * opt-in catalog predicates as well as stale generated floor triples.
+ */
+export function replaceCatalogPartitionWithGeneratedPrivateFloor(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  graph = '',
+): PreparedGeneratedPrivateCatalogFloor {
+  return prepareGeneratedPrivateCatalogFloorOperation(
+    contextGraphId,
+    quads,
+    { kind: 'replace-catalog-partition', graph },
+  );
+}
+
+/** @deprecated Use replaceCatalogPartitionWithGeneratedPrivateFloor. */
 export function replaceGeneratedPrivateCatalogFloor(
   contextGraphId: string,
   quads: readonly Quad[],
   graph = '',
 ): PreparedGeneratedPrivateCatalogFloor {
-  const { otherQuads } = partitionCatalogQuads(
+  return replaceCatalogPartitionWithGeneratedPrivateFloor(
+    contextGraphId,
     quads,
-    contextGraphDataUri(contextGraphId),
+    graph,
   );
-  return {
-    quads: [
-      ...otherQuads,
-      ...generatedPrivateCatalogFloorQuads(contextGraphId, graph),
-    ],
-    trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(
-      contextGraphId,
-    ),
-  };
 }
 
 /**
@@ -127,17 +170,12 @@ export function prepareGeneratedPrivateCatalogFloor(
   quads: readonly Quad[],
   options: PrepareGeneratedPrivateCatalogFloorOptions = {},
 ): PreparedGeneratedPrivateCatalogFloor {
-  if (options.mode === 'replace-generated') {
-    return replaceGeneratedPrivateCatalogFloor(
-      contextGraphId,
-      quads,
-      options.graph,
-    );
-  }
-  return appendMissingGeneratedPrivateCatalogFloor(
+  return prepareGeneratedPrivateCatalogFloorOperation(
     contextGraphId,
     quads,
-    options.graph,
+    options.mode === 'replace-generated'
+      ? { kind: 'replace-catalog-partition', graph: options.graph }
+      : { kind: 'append-missing', graph: options.graph },
   );
 }
 
