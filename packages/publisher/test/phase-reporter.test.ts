@@ -1,7 +1,48 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PhaseReporter, runWithPhaseCleanup } from '../src/publisher.js';
+import {
+  PhaseReporter,
+  invokePhaseCallback,
+  runWithPhaseCleanup,
+  type PhaseCallback,
+} from '../src/publisher.js';
 
 describe('PhaseReporter', () => {
+  it('preserves void-style callback assignability and still awaits async callbacks', async () => {
+    const phases: string[] = [];
+    // Returning Array.push is a common expression-bodied callback that was
+    // accepted by the original void contract and must remain source-compatible.
+    const valueReturningCallback: PhaseCallback = (phase) => phases.push(phase);
+    const objectReturningCallback: PhaseCallback = () => ({ observed: true });
+    await invokePhaseCallback(valueReturningCallback, 'sync', 'start');
+    await invokePhaseCallback(objectReturningCallback, 'object', 'start');
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const asyncCallback: PhaseCallback = async (phase) => {
+      phases.push(`${phase}:started`);
+      await gate;
+      phases.push(`${phase}:finished`);
+    };
+    let settled = false;
+    const pending = invokePhaseCallback(asyncCallback, 'async', 'start')
+      .finally(() => { settled = true; });
+
+    await vi.waitFor(() => expect(phases).toContain('async:started'));
+    expect(settled).toBe(false);
+    release();
+    await pending;
+    expect(phases).toEqual(['sync', 'async:started', 'async:finished']);
+
+    const asyncFailure = new Error('async callback failed');
+    const rejectingAsyncCallback: PhaseCallback = async () => {
+      await Promise.resolve();
+      throw asyncFailure;
+    };
+    await expect(
+      invokePhaseCallback(rejectingAsyncCallback, 'async-failure', 'start'),
+    ).rejects.toBe(asyncFailure);
+  });
+
   it('awaits start, work and end in order with their respective contexts', async () => {
     const events: string[] = [];
     const reporter = new PhaseReporter(async (_phase, status, context) => {

@@ -25,11 +25,16 @@ export interface PhaseCallbackContext {
   txHash?: string;
 }
 
+/**
+ * `void` intentionally preserves the original callback assignability: callers
+ * may use expression bodies with incidental values or async functions. Every
+ * production emitter still awaits the callback's actual runtime result.
+ */
 export type PhaseCallback = (
   phase: string,
   status: 'start' | 'end',
   context?: PhaseCallbackContext,
-) => Promise<void> | void;
+) => void;
 
 export interface PhaseScopeOptions {
   startContext?: PhaseCallbackContext;
