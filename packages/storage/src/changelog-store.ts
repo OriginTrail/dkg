@@ -131,7 +131,12 @@ export interface ChangelogHead {
  * factory return type.
  */
 export interface ChangelogReader {
-  /** Durable head cursor `(era, seq)` — era mismatch or `seq` rollback ⇒ full resync. */
+  /**
+   * Live head cursor `(era, seq)` — era mismatch or `seq` rollback ⇒ full resync.
+   * `signal` is honored at the method boundary. `source` and `priority` are not
+   * forwarded because steady-state reads are served from memory; use
+   * {@link headSeq} for an explicitly durable storage read with query metadata.
+   */
   changelogHead(options?: QueryOptions): Promise<ChangelogHead>;
   /** Change records with `seq > sinceSeq`, ascending, at most `limit`. */
   readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]>;
@@ -392,14 +397,21 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   // ------------------------------------------------------------------
 
   /**
-   * Durable head cursor `(era, seq)` the sync responder returns so a requester
+   * Live head cursor `(era, seq)` the sync responder returns so a requester
    * can advance its cursor and detect a wipe/reseed (era change) or a rollback
-   * (`seq` < the requester's cursor). Establishes the era on first call.
+   * (`seq` < the requester's cursor). Establishes the durable starting state on
+   * first call, then serves the serialized writer's authoritative head from memory.
+   *
+   * QueryOptions boundary: cancellation is checked before and after the shared
+   * one-time seed. `source` and `priority` are intentionally not forwarded: the
+   * seed uses internal source tags and steady-state calls perform no storage read.
+   * Call {@link headSeq} when a caller needs a durable read carrying those options.
    */
   async changelogHead(options?: QueryOptions): Promise<ChangelogHead> {
-    throwIfAborted(options?.signal);
+    const signal = options?.signal;
+    throwIfAborted(signal);
     await this.ensureSeeded();
-    throwIfAborted(options?.signal);
+    throwIfAborted(signal);
     // All changelog writes pass through the serialized single-writer path and
     // advance `seq` only after their marker transaction commits. Once seeded,
     // this is therefore the authoritative live head; repeating MAX(?seq) for

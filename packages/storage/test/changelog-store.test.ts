@@ -602,7 +602,7 @@ describe('ChangelogStore — era foundation & reader capability', () => {
     await log.insert([q('http://ex.org/a', G1)]);
     await log.insert([q('http://ex.org/b', G2)]);
     expect((await log.changelogHead()).seq).toBe(2);
-    expect((await log.changelogHead()).seq).toBe(2);
+    expect((await log.changelogHead({ source: 'sync.head', priority: 'ack' })).seq).toBe(2);
     expect(durableHeadQueries()).toBe(1); // no per-request SPARQL aggregation
 
     expect(await log.headSeq()).toBe(2);

@@ -295,6 +295,34 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(2);
   });
 
+  it('retries every read after a warm revalidation failure when revalidateMs is 0', async () => {
+    const now = 1_000;
+    const cached = 'did:dkg:context-graph:cached-zero-revalidate';
+    const recovered = 'did:dkg:context-graph:recovered-zero-revalidate';
+    const inner = new OxigraphStore();
+    await inner.insert([q(cached)]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 0,
+      revalidateFailureBackoffMs: 10,
+      now: () => now,
+    });
+
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    await inner.insert([q(recovered)]);
+    counting.failListGraphs = true;
+
+    // A failed warm scan still serves the last known set for availability.
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(2);
+
+    // Recovery is visible on the very next read at the same timestamp. The
+    // configured failure delay must not override the always-revalidate contract.
+    counting.failListGraphs = false;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, recovered]));
+    expect(counting.listGraphsCalls).toBe(3);
+  });
+
   it('coalesces concurrent refresh callers onto one listGraphs scan', async () => {
     const inner = new OxigraphStore();
     await inner.insert([q('did:dkg:context-graph:coalesced')]);
