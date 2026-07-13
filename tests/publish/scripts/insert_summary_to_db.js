@@ -3,6 +3,12 @@ import { Client } from 'pg';
 import 'dotenv/config';
 
 const files = process.argv.slice(2);
+let hadFailure = false;
+
+if (files.length === 0) {
+    console.error('❌ No summary files were provided');
+    process.exitCode = 1;
+}
 
 // Match only if blockchain_name ends with exactly one of these full port tokens
 const MAINNET_PORTS = [':8453', ':100', ':2043'];
@@ -16,6 +22,7 @@ for (const file of files) {
         summary = JSON.parse(raw);
     } catch (err) {
         console.error(`❌ Failed to read or parse ${file}:`, err.message);
+        hadFailure = true;
         continue;
     }
 
@@ -47,6 +54,8 @@ for (const file of files) {
         console.log(`✅ Connected to DB (${isMainnet ? 'mainnet' : 'testnet'})`);
     } catch (err) {
         console.error('❌ Failed to connect to DB:', err.message);
+        hadFailure = true;
+        try { await db.end(); } catch (_) {}
         continue;
     }
 
@@ -79,6 +88,7 @@ for (const file of files) {
         console.log(`✅ Inserted ${file} into table '${tableName}'`);
     } catch (err) {
         console.error(`❌ Failed to insert ${file} into DB (table '${tableName}'):`, err.message);
+        hadFailure = true;
     }
 
     try {
@@ -86,5 +96,8 @@ for (const file of files) {
         console.log('✅ DB connection closed');
     } catch (err) {
         console.error('❌ Failed to close DB connection:', err.message);
+        hadFailure = true;
     }
 }
+
+if (hadFailure) process.exitCode = 1;

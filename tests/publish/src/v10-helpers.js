@@ -6,7 +6,7 @@ import { fetch as undiciFetch, Agent } from 'undici';
 // collection (up to ~8 min when ACKs are failing). That surfaced as
 // "UND_ERR_HEADERS_TIMEOUT" and hid the node's real storage_ack error.
 // This fetch waits long enough for the node's own verdict to arrive.
-const HTTP_TIMEOUT_MS = Number(process.env.V10_HTTP_TIMEOUT_MS || 12 * 60 * 1000);
+export const HTTP_TIMEOUT_MS = Number(process.env.V10_HTTP_TIMEOUT_MS || 12 * 60 * 1000);
 const longAgent = new Agent({ headersTimeout: HTTP_TIMEOUT_MS, bodyTimeout: HTTP_TIMEOUT_MS });
 export const longFetch = (url, opts = {}) => undiciFetch(url, { ...opts, dispatcher: longAgent });
 import { readFileSync } from 'fs';

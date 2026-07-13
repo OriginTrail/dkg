@@ -3,6 +3,12 @@ import { Client } from 'pg';
 import 'dotenv/config';
 
 const files = process.argv.slice(2);
+let hadFailure = false;
+
+if (files.length === 0) {
+    console.error('❌ No error files were provided');
+    process.exitCode = 1;
+}
 
 for (const file of files) {
     console.log(`📁 Processing error file: ${file}`);
@@ -13,12 +19,14 @@ for (const file of files) {
         errors = JSON.parse(raw);
     } catch (err) {
         console.error(`❌ Failed to read or parse ${file}:`, err.message);
+        hadFailure = true;
         continue;
     }
 
     const match = file.match(/errors_(.+)\.json$/);
     if (!match) {
         console.error(`❌ Filename format incorrect for ${file}. Expected: errors_<NodeName>.json`);
+        hadFailure = true;
         continue;
     }
 
@@ -114,6 +122,7 @@ for (const file of files) {
         await db.query('BEGIN');
     } catch (err) {
         console.error('❌ Failed to connect to DB:', err.message);
+        hadFailure = true;
         // Always release the socket — a connected-but-unfinished pg Client keeps
         // the Node event loop alive and hangs the whole import step indefinitely.
         try { await db.end(); } catch (_) {}
@@ -189,6 +198,7 @@ for (const file of files) {
                 console.log(`✅ Inserted ${row.ka_label} (attempt ${insertedCount}) for ${row.node_name}`);
             } catch (err) {
                 console.error(`❌ Failed to insert KA ${row.ka_label}:`, err.message);
+                hadFailure = true;
             }
         }
     } else {
@@ -316,6 +326,7 @@ for (const file of files) {
                 console.log(`✅ Inserted ${row.ka_label} (attempt ${insertedCount}) for ${row.node_name}`);
             } catch (err) {
                 console.error(`❌ Failed to insert KA ${row.ka_label}:`, err.message);
+                hadFailure = true;
             }
         }
     }
@@ -325,6 +336,7 @@ for (const file of files) {
         await db.query('COMMIT');
     } catch (err) {
         console.error('❌ Failed to commit transaction:', err.message);
+        hadFailure = true;
         await db.query('ROLLBACK');
     }
 
@@ -333,5 +345,8 @@ for (const file of files) {
         console.log('✅ DB connection closed');
     } catch (err) {
         console.error('❌ Failed to close DB connection:', err.message);
+        hadFailure = true;
     }
 }
+
+if (hadFailure) process.exitCode = 1;

@@ -27,8 +27,5 @@ defineChainPublishSuite({
   // 'megagiga' no longer exists on the beacons after their stores were rebuilt).
   // The suite's ensure-CG step creates+registers it if missing.
   contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'jenkins-publish-tests',
-  // Fallback UAL for read ops when a publish fails. Set via DKG_FALLBACK_UAL once
-  // real Base Sepolia testnet nodes exist (publish one KA, use its UAL here).
-  fallbackUal: process.env.DKG_FALLBACK_UAL || '',
   nodes,
 });
