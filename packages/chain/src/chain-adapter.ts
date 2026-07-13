@@ -144,6 +144,19 @@ export const DEFAULT_REFILL_BELOW_FRACTION: number = 0.1;
  */
 export const V10_WRITE_AHEAD_HOOK_TIMEOUT_MS = 30_000;
 
+/**
+ * Context for the V10 pre-broadcast durability hook.
+ *
+ * The EVM adapter aborts `signal` before rejecting a hook that exceeds
+ * {@link V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}. Hook implementations must pass the
+ * signal through to cancellable persistence work and refuse late mutations
+ * after it is aborted: the associated transaction will not be broadcast.
+ */
+export interface V10WriteAheadHookInfo {
+  txHash: string;
+  signal: AbortSignal;
+}
+
 /** Canonical greenfield UAL: did:dkg:{chainId}/{DKGKnowledgeAssets}/{kaId} */
 export function buildKnowledgeAssetUal(
   chainId: string,
@@ -673,7 +686,7 @@ export interface V10PublishParams {
    * {@link V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}; a hook that misses that deadline
    * rejects the operation and the transaction remains unbroadcast.
    */
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (info: V10WriteAheadHookInfo) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -724,7 +737,7 @@ export interface V10UpdateKAParams {
    * {@link V10PublishParams.onBroadcast} for full semantics
    * (fail-closed contract, exactly-once, Promise return, etc.).
    */
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (info: V10WriteAheadHookInfo) => Promise<void> | void;
 }
 
 /**

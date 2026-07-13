@@ -25,6 +25,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import type { V10WriteAheadHookInfo } from '../src/chain-adapter.js';
 import { RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS } from '../src/evm-adapter-constants.js';
 import { SignerWriteOperation } from '../src/signer-write-lane.js';
 
@@ -76,12 +77,13 @@ function preparedOperation(
     receipt?: ethers.TransactionReceipt;
   };
   return new SignerWriteOperation<any, State, ethers.TransactionReceipt>(
+    60_000,
     () => ({}),
     (state) => {
       if (!state.receipt) throw new Error('test write completed without a receipt');
       return state.receipt;
     },
-  ).phase('test prepare signed transaction', 60_000, async (_ctx, state) => {
+  ).phase('test prepare signed transaction', async (_ctx, state) => {
     const prepared = await buildSignedTx();
     state.signedTx = prepared.signedTx;
     state.txHash = prepared.txHash;
@@ -91,7 +93,7 @@ function preparedOperation(
 // Drive the REAL dispatch → send → broadcast/receipt path. `buildSignedTx` and
 // `onBroadcast` are spied; only the providers are stubbed.
 async function runDispatch(a: EVMChainAdapter, opts: {
-  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
+  onBroadcast?: (info: V10WriteAheadHookInfo) => Promise<void> | void;
   buildSignedTx?: () => Promise<{ signedTx: string; txHash: string }>;
 }) {
   const signer = new ethers.Wallet(PK);

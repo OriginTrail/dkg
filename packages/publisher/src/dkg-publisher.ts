@@ -1,5 +1,10 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
+import type {
+  AddBatchToContextGraphParams,
+  ChainAdapter,
+  OnChainPublishResult,
+  V10WriteAheadHookInfo,
+} from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
@@ -32,6 +37,7 @@ import {
   listAssertionScopedGraphUris,
   listGraphsByPrefix,
 } from './assertion-scoped-graphs.js';
+
 import {
   generateConfirmedFullMetadata,
   buildDeterministicTokenRows,
@@ -71,6 +77,12 @@ import {
 } from './errors.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
+
+function assertWriteAheadPhaseActive(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error('V10 write-ahead hook was aborted before broadcast');
+  }
+}
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -3180,20 +3192,26 @@ export class DKGPublisher implements Publisher {
         // phase; adapters upgrading to the new hook regain the
         // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
         let wroteAhead = false;
-        const emitPhase = async (phase: string, status: 'start' | 'end') => {
-          await (onPhase?.(phase, status) as unknown as Promise<void> | void);
+        const emitPhase = async (
+          phase: string,
+          status: 'start' | 'end',
+          signal?: AbortSignal,
+        ) => {
+          assertWriteAheadPhaseActive(signal);
+          await onPhase?.(phase, status, { signal });
+          // A listener may resume after the adapter deadline. Re-check before
+          // advancing to another durable phase.
+          assertWriteAheadPhaseActive(signal);
         };
-        const emitWriteAheadStart = async (info?: { txHash?: string }) => {
+        const emitWriteAheadStart = async (info?: V10WriteAheadHookInfo) => {
           if (wroteAhead) return;
-          wroteAhead = true;
           // PR #241 Codex iter-5: emit a hash-bearing phase BEFORE the
           // generic `chain:writeahead:start` so WAL listeners can
           // persist the signed-but-not-yet-broadcast tx identity
           // (spec axiom 4 / §06 "txHash persisted" requirement, P-1.2
           // in BUGS_FOUND.md). The phase name encodes the hash because
-          // `PhaseCallback` is a 2-arg function; adding a detail
-          // parameter would be a source-level break for existing
-          // onPhase consumers. Listeners can regex the phase string
+          // phase callbacks do not carry transaction details. Listeners can
+          // regex the phase string
           // to recover the hash, or legacy consumers can ignore it.
           //
           // Emit balanced `start` + `end` back-to-back: the phase is a
@@ -3203,10 +3221,13 @@ export class DKGPublisher implements Publisher {
           // matching end" golden-sequence invariant.
           if (info?.txHash) {
             const phase = `chain:txsigned:tx-${info.txHash}`;
-            await emitPhase(phase, 'start');
-            await emitPhase(phase, 'end');
+            await emitPhase(phase, 'start', info.signal);
+            await emitPhase(phase, 'end', info.signal);
           }
-          await emitPhase('chain:writeahead', 'start');
+          await emitPhase('chain:writeahead', 'start', info?.signal);
+          // Do not let a late continuation cause `finally` to close a WAL
+          // window that the timed-out hook never successfully opened.
+          wroteAhead = true;
         };
         // OT-RFC-43 Option 1 — reserve the deterministic packed kaId for this
         // author BEFORE the on-chain mint, so the UAL is known pre-tx and the
@@ -4122,22 +4143,28 @@ export class DKGPublisher implements Publisher {
     let txResult: { success: boolean; hash: string; blockNumber?: number; txIndex?: number; publisherAddress?: string };
     let earlyReturn: PublishResult | undefined;
     let wroteAhead = false;
-    const emitPhase = async (phase: string, status: 'start' | 'end') => {
-      await (onPhase?.(phase, status) as unknown as Promise<void> | void);
+    const emitPhase = async (
+      phase: string,
+      status: 'start' | 'end',
+      signal?: AbortSignal,
+    ) => {
+      assertWriteAheadPhaseActive(signal);
+      await onPhase?.(phase, status, { signal });
+      assertWriteAheadPhaseActive(signal);
     };
-    const emitWriteAheadStart = async (info?: { txHash?: string }) => {
+    const emitWriteAheadStart = async (info?: V10WriteAheadHookInfo) => {
       if (wroteAhead) return;
-      wroteAhead = true;
       // Mirror the publish path (above): emit a balanced, hash-bearing
       // phase first so WAL listeners record the signed-but-not-yet-
       // broadcast update tx identity, then the generic
       // `chain:writeahead:start` for legacy consumers.
       if (info?.txHash) {
         const phase = `chain:txsigned:tx-${info.txHash}`;
-        await emitPhase(phase, 'start');
-        await emitPhase(phase, 'end');
+        await emitPhase(phase, 'start', info.signal);
+        await emitPhase(phase, 'end', info.signal);
       }
-      await emitPhase('chain:writeahead', 'start');
+      await emitPhase('chain:writeahead', 'start', info?.signal);
+      wroteAhead = true;
     };
     // CRITICAL CORRECTNESS INVARIANT (consensus): the digest fields the
     // peers sign MUST be byte-identical to what the on-chain update tx

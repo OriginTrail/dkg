@@ -330,7 +330,10 @@ export class MockChainAdapter implements ChainAdapter {
     const mockUpdateTxHash = this.peekTxHash();
     try {
       // Codex PR #241 iter-7: `await` an async WAL hook.
-      await params.onBroadcast?.({ txHash: mockUpdateTxHash });
+      await params.onBroadcast?.({
+        txHash: mockUpdateTxHash,
+        signal: new AbortController().signal,
+      });
     } catch (hookErr) {
       throw new Error(
         `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
@@ -1461,7 +1464,10 @@ export class MockChainAdapter implements ChainAdapter {
     try {
       // Codex PR #241 iter-7: `await` so async WAL writes run to
       // completion before the mock "broadcasts".
-      await params.onBroadcast?.({ txHash: mockPublishTxHash });
+      await params.onBroadcast?.({
+        txHash: mockPublishTxHash,
+        signal: new AbortController().signal,
+      });
     } catch (hookErr) {
       throw new Error(
         `chain:writeahead hook failed before createKnowledgeAssets broadcast (mock): ` +

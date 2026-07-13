@@ -31,7 +31,7 @@ import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { SignerWritePlan } from '../src/signer-write-lane.js';
 import { connectable } from './connectable.js';
 
-const testSignerWritePlan = () => new SignerWritePlan().reserve('test busy signer lane', 60_000);
+const testSignerWritePlan = () => new SignerWritePlan(60_000).describePhase('test busy signer lane');
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
 // so a failover/exhaustion warning emitted by one test can't suppress (via the

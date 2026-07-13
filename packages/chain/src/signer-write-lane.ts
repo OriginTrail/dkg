@@ -1,80 +1,86 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * One explicitly-budgeted phase of a signer write. Keeping the phase label
- * beside its bound makes the queue admission plan auditable at the call site.
+ * Queue admission is intentionally a coarse operation-wide bound rather than
+ * a second model of every RPC read, retry and backoff nested below the adapter.
+ * The concrete helpers still own and enforce their individual deadlines; this
+ * value only decides how long a successor may wait for the nonce lane.
+ *
+ * Thirty minutes is conservative enough for the supported V10
+ * approve/re-approve, populate/sign, WAL and receipt-recovery path while still
+ * bounding abandoned queued work. Because every executable phase is covered
+ * by the same operation envelope, adding a nested retry cannot silently make a
+ * hand-maintained admission formula stale.
  */
-export interface SignerWritePhase {
-  label: string;
-  executionBudgetMs: number;
-}
+export const SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS = 30 * 60 * 1000;
 
 /**
- * Ordered worst-case plan for one nonce-critical signer write.
- *
- * Callers reserve the actual phases their operation may execute, in execution
- * order. The lane derives its admission deadline from those phases instead of
- * accepting an opaque total or a free-form operation/profile name.
+ * Admission policy and an auditable list of the callbacks executed by one
+ * nonce-critical signer write. Phase labels describe the real execution path;
+ * the single coarse budget is deliberately independent of its nested helper
+ * topology.
  */
 export class SignerWritePlan {
-  private readonly phases: SignerWritePhase[] = [];
+  private readonly labels: string[] = [];
 
-  reserve(label: string, executionBudgetMs: number): this {
-    if (!Number.isFinite(executionBudgetMs) || executionBudgetMs <= 0) {
-      throw new Error(`Signer write phase ${label} must have a positive execution budget`);
+  constructor(readonly admissionBudgetMs: number) {
+    if (!Number.isFinite(admissionBudgetMs) || admissionBudgetMs <= 0) {
+      throw new Error('Signer write operation must have a positive admission budget');
     }
-    this.phases.push({ label, executionBudgetMs });
+  }
+
+  describePhase(label: string): this {
+    if (!label.trim()) throw new Error('Signer write phase must have a label');
+    this.labels.push(label);
     return this;
   }
 
-  get executionBudgetMs(): number {
-    return this.phases.reduce((total, phase) => total + phase.executionBudgetMs, 0);
-  }
-
   get phaseLabels(): readonly string[] {
-    return this.phases.map((phase) => phase.label);
+    return [...this.labels];
   }
 }
 
 /**
- * One executable phase of a signer write. The callback and its worst-case
- * occupancy are registered by the same method, so adding work to the
- * nonce-critical window necessarily changes the admission plan as well.
+ * One executable phase of a signer write. All phases share the operation-wide
+ * coarse admission envelope above.
  */
-interface SignerWriteOperationPhase<TContext, TState> extends SignerWritePhase {
+interface SignerWriteOperationPhase<TContext, TState> {
+  label: string;
   execute: (context: TContext, state: TState) => Promise<void>;
 }
 
 /**
  * Executable signer-write admission plan.
  *
- * `phase` is deliberately the only way to add work: a caller cannot append an
- * opaque callback without also declaring that callback's execution budget.
- * Operations are single-use because their ordered phase list is sealed as
- * soon as execution begins.
+ * `phase` is deliberately the only way to add work, so the plan's labels and
+ * executable callbacks cannot drift. Operations are single-use because their
+ * ordered phase list is sealed as soon as execution begins.
  */
 export class SignerWriteOperation<TContext, TState, TResult> {
-  private readonly admissionPlan = new SignerWritePlan();
+  private readonly admissionPlan: SignerWritePlan;
   private readonly phases: SignerWriteOperationPhase<TContext, TState>[] = [];
   private started = false;
 
   constructor(
+    admissionBudgetMs: number,
     private readonly createState: () => TState,
     // Result selection is synchronous by design. Any awaited post-processing
-    // belongs in a named, budgeted phase rather than an invisible epilogue.
+    // belongs in a named phase inside the admission envelope rather than an
+    // invisible epilogue.
     private readonly selectResult: (state: TState) => TResult,
-  ) {}
+  ) {
+    this.admissionPlan = new SignerWritePlan(admissionBudgetMs);
+  }
 
   phase(
     label: string,
-    executionBudgetMs: number,
     execute: (context: TContext, state: TState) => Promise<void>,
   ): this {
     if (this.started) {
       throw new Error('Cannot add a signer write phase after execution has started');
     }
-    this.admissionPlan.reserve(label, executionBudgetMs);
-    this.phases.push({ label, executionBudgetMs, execute });
+    this.admissionPlan.describePhase(label);
+    this.phases.push({ label, execute });
     return this;
   }
 
@@ -96,7 +102,7 @@ export class SignerWriteOperation<TContext, TState, TResult> {
 type SignerWriteLaneEntryState = 'queued' | 'running' | 'timed-out' | 'skipped' | 'settled';
 
 interface SignerWriteLaneEntry {
-  executionBudgetMs: number;
+  admissionBudgetMs: number;
   state: SignerWriteLaneEntryState;
 }
 
@@ -142,9 +148,9 @@ export class SignerWriteLane {
     plan: SignerWritePlan,
     fn: () => Promise<T>,
   ): Promise<T> {
-    const executionBudgetMs = plan.executionBudgetMs;
-    if (executionBudgetMs <= 0) {
-      throw new Error('Signer write plan must reserve at least one phase');
+    const admissionBudgetMs = plan.admissionBudgetMs;
+    if (admissionBudgetMs <= 0) {
+      throw new Error('Signer write plan must define a positive admission budget');
     }
     const lane = this.lanes.get(signerAddress) ?? {
       tail: Promise.resolve(),
@@ -155,9 +161,9 @@ export class SignerWriteLane {
     const queueDepth = lane.entries.size + 1;
     const waitMs = [...lane.entries]
       .filter((predecessor) => predecessor.state === 'queued' || predecessor.state === 'running')
-      .reduce((total, predecessor) => total + predecessor.executionBudgetMs, 0);
+      .reduce((total, predecessor) => total + predecessor.admissionBudgetMs, 0);
     const laneEntry: SignerWriteLaneEntry = {
-      executionBudgetMs,
+      admissionBudgetMs,
       state: 'queued',
     };
     lane.entries.add(laneEntry);

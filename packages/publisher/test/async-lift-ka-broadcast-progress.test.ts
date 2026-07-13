@@ -105,6 +105,58 @@ describe('KA async VM publish broadcast progress', () => {
     expect(afterRecover?.broadcast?.txHash).toBe(txHash);
   });
 
+  it('does not persist late broadcast progress after the write-ahead generation is aborted', async () => {
+    const txHash = `0x${'de'.repeat(32)}` as `0x${string}`;
+    let jobId = '';
+    let releaseDelegate!: () => void;
+    const delegateGate = new Promise<void>((resolve) => { releaseDelegate = resolve; });
+    let delegateStarted!: () => void;
+    const delegateDidStart = new Promise<void>((resolve) => { delegateStarted = resolve; });
+    const durablePhases: string[] = [];
+    let statusAfterLateHook: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
+
+    const publisher = createPublisher({
+      resolvedSliceOverrides: {
+        onPhase: async (phase, status, context) => {
+          if (phase.startsWith('chain:txsigned:') && status === 'start') {
+            delegateStarted();
+            await delegateGate;
+          }
+          if (context?.signal?.aborted) return;
+          durablePhases.push(`${phase}:${status}`);
+        },
+      },
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        const controller = new AbortController();
+        const lateHook = input.publishOptions.onPhase?.(
+          `chain:txsigned:tx-${txHash}`,
+          'start',
+          { signal: controller.signal },
+        );
+        await delegateDidStart;
+
+        // Model the adapter deadline: invalidate the generation first, then
+        // allow the delayed listener to resolve.
+        controller.abort();
+        releaseDelegate();
+        await lateHook;
+        statusAfterLateHook = await publisher.getStatus(jobId);
+        throw new Error('write-ahead hook timed out; transaction not broadcast');
+      },
+    });
+    await stageShareSnapshot();
+
+    jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(statusAfterLateHook?.status).toBe('validated');
+    expect(statusAfterLateHook?.broadcast).toBeUndefined();
+    expect(durablePhases).not.toContain(`chain:txsigned:tx-${txHash}:start`);
+    expect(durablePhases.some((phase) => phase.startsWith('chain:writeahead:'))).toBe(false);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.broadcast).toBeUndefined();
+  });
+
   it('does not reset tx-bearing KA broadcast jobs to accepted on recovery timeout', async () => {
     const txHash = `0x${'ef'.repeat(32)}` as `0x${string}`;
     const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });

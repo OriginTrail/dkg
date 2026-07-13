@@ -18,11 +18,16 @@ import { DEFAULT_APPROVAL_POLICY, V10_WRITE_AHEAD_HOOK_TIMEOUT_MS, buildEvmDeplo
 import type {
   ApprovalPolicy,
   V10PublishParams,
+  V10WriteAheadHookInfo,
   OnChainPublishResult,
   ConvictionReader,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { SignerWriteLane, SignerWriteOperation } from './signer-write-lane.js';
+import {
+  SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
+  SignerWriteLane,
+  SignerWriteOperation,
+} from './signer-write-lane.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -31,10 +36,6 @@ import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import {
   RpcFailoverClient,
-  rpcCappedPointReadExecutionBudgetMs,
-  rpcBroadcastPassExecutionBudgetMs,
-  rpcPopulateAndSignExecutionBudgetMs,
-  rpcReceiptLookupPassExecutionBudgetMs,
   type ReadOpts,
 } from './rpc-failover-client.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
@@ -74,38 +75,6 @@ function allowanceVisibilityPollBackoffMs(attemptIndex: number): number {
   return Math.min(250 * (attemptIndex + 1), 1500);
 }
 
-function allowanceVisibilityPollExecutionBudgetMs(endpointCount: number): number {
-  const readBudgetMs = rpcCappedPointReadExecutionBudgetMs(endpointCount);
-  let backoffBudgetMs = 0;
-  for (let i = 0; i < V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS - 1; i += 1) {
-    backoffBudgetMs += allowanceVisibilityPollBackoffMs(i);
-  }
-  return V10_ALLOWANCE_VISIBILITY_POLL_ATTEMPTS * readBudgetMs + backoffBudgetMs;
-}
-
-/**
- * Conservative occupancy of one serialized transaction. Phase-specific
- * transport bounds stay beside the failover loops that own those phases; this
- * orchestration layer adds broadcast retries/backoff and receipt confirmation.
- */
-function signedTransactionSubmissionExecutionBudgetMs(endpointCount: number): number {
-  const broadcastPasses = RPC_ENDPOINT_SET_RETRIES + 1;
-  return broadcastPasses * rpcBroadcastPassExecutionBudgetMs(endpointCount)
-    + RPC_ENDPOINT_SET_RETRIES * RPC_ENDPOINT_SET_RETRY_BACKOFF_MS
-    // A receipt lookup may begin just before the poll deadline and still
-    // complete successfully after it. Reserve that final endpoint pass (and a
-    // terminal poll sleep for the no-receipt path) rather than dropping the
-    // next queued write while its predecessor is still legitimately settling.
-    + RPC_RECEIPT_TIMEOUT_MS
-    + rpcReceiptLookupPassExecutionBudgetMs(endpointCount)
-    + RPC_RECEIPT_POLL_INTERVAL_MS;
-}
-
-function signerTransactionExecutionBudgetMs(endpointCount: number): number {
-  return rpcPopulateAndSignExecutionBudgetMs(endpointCount)
-    + signedTransactionSubmissionExecutionBudgetMs(endpointCount);
-}
-
 class V10WriteAheadHookTimeoutError extends Error {
   readonly code = 'V10_WRITE_AHEAD_HOOK_TIMEOUT';
 
@@ -120,19 +89,26 @@ class V10WriteAheadHookTimeoutError extends Error {
 
 async function runV10WriteAheadHook(
   label: 'publish' | 'update',
-  hook: (info: { txHash: string }) => Promise<void> | void,
+  hook: (info: V10WriteAheadHookInfo) => Promise<void> | void,
   txHash: string,
 ): Promise<void> {
+  const abortController = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
-    timeout = setTimeout(
-      () => reject(new V10WriteAheadHookTimeoutError(label)),
-      V10_WRITE_AHEAD_HOOK_TIMEOUT_MS,
-    );
+    timeout = setTimeout(() => {
+      // Invalidate the hook's generation before the adapter rejects the
+      // operation. A late continuation can observe the abort and must not
+      // persist WAL/progress for a transaction that will never be sent.
+      abortController.abort();
+      reject(new V10WriteAheadHookTimeoutError(label));
+    }, V10_WRITE_AHEAD_HOOK_TIMEOUT_MS);
     timeout.unref?.();
   });
   try {
-    await Promise.race([Promise.resolve().then(() => hook({ txHash })), deadline]);
+    await Promise.race([
+      Promise.resolve().then(() => hook({ txHash, signal: abortController.signal })),
+      deadline,
+    ]);
   } finally {
     if (timeout) clearTimeout(timeout);
   }
@@ -1638,7 +1614,7 @@ export class EVMChainAdapterBase {
   protected async dispatchSerializedV10Write(
     signer: Wallet,
     label: 'publish' | 'update',
-    onBroadcast: ((info: { txHash: string }) => Promise<void> | void) | undefined,
+    onBroadcast: ((info: V10WriteAheadHookInfo) => Promise<void> | void) | undefined,
     operation: SignerWriteOperation<
       SerializedSignerWriteContext,
       V10SignerWriteState,
@@ -1649,7 +1625,6 @@ export class EVMChainAdapterBase {
     if (onBroadcast) {
       operation.phase(
         `V10 ${label} durable write-ahead hook`,
-        V10_WRITE_AHEAD_HOOK_TIMEOUT_MS,
         async (_ctx, state) => {
           const preBroadcastTxHash = state.txHash;
           if (!preBroadcastTxHash) {
@@ -1669,7 +1644,6 @@ export class EVMChainAdapterBase {
     }
     operation.phase(
       `V10 ${label} broadcast and receipt`,
-      signedTransactionSubmissionExecutionBudgetMs(this.providers.length),
       async (_ctx, state) => {
         if (!state.signedTx || !state.txHash) {
           throw new Error(`V10 ${label} operation reached broadcast without a signed transaction`);
@@ -1688,9 +1662,9 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Build the complete pre-broadcast V10 operation. Each phase registers its
-   * executable callback together with the bound consumed by lane admission,
-   * so allowance-recovery work cannot drift away from an independent table.
+   * Build the complete pre-broadcast V10 operation. The operation's single
+   * conservative admission envelope intentionally does not reproduce the
+   * nested allowance/retry call graph; the concrete helpers own those limits.
    */
   protected createV10SignerWriteOperation(
     signer: Wallet,
@@ -1706,22 +1680,12 @@ export class EVMChainAdapterBase {
     V10SignerWriteState,
     ethers.TransactionReceipt
   > {
-    const endpointCount = this.providers.length;
-    const transactionBudgetMs = signerTransactionExecutionBudgetMs(endpointCount);
-    const allowanceReadBudgetMs = rpcCappedPointReadExecutionBudgetMs(endpointCount);
-    const populateAndRecoveryBudgetMs = rpcPopulateAndSignExecutionBudgetMs(endpointCount)
-      + V10_ALLOWANCE_RECOVERY_ATTEMPTS * (
-        rpcPopulateAndSignExecutionBudgetMs(endpointCount)
-        + allowanceReadBudgetMs
-        + transactionBudgetMs
-        + allowanceVisibilityPollExecutionBudgetMs(endpointCount)
-      );
-
     return new SignerWriteOperation<
       SerializedSignerWriteContext,
       V10SignerWriteState,
       ethers.TransactionReceipt
     >(
+      SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
       () => ({}),
       (state) => {
         if (!state.receipt) throw new Error(`V10 ${method} operation completed without a receipt`);
@@ -1730,7 +1694,6 @@ export class EVMChainAdapterBase {
     )
       .phase(
         'initial V10 allowance gate and optional approval transaction',
-        allowanceReadBudgetMs + transactionBudgetMs,
         async (ctx) => {
           await this.ensureV10ApproveTrac(
             signer,
@@ -1744,7 +1707,6 @@ export class EVMChainAdapterBase {
       )
       .phase(
         `V10 ${method} populate/sign with bounded allowance recovery`,
-        populateAndRecoveryBudgetMs,
         async (ctx, state) => {
           const prepared = await this.populateAndSignV10WithAllowanceRecovery(
             signer,
@@ -1827,11 +1789,11 @@ export class EVMChainAdapterBase {
       { result?: TResult },
       TResult
     >(
+      SIGNER_WRITE_OPERATION_ADMISSION_BUDGET_MS,
       () => ({}),
       (state) => state.result as TResult,
     ).phase(
       'single contract transaction',
-      signerTransactionExecutionBudgetMs(this.providers.length),
       async (ctx, state) => {
         state.result = await execute(ctx);
       },

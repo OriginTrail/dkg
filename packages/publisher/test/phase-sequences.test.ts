@@ -393,9 +393,9 @@ describe('Phase-sequence contracts', () => {
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
 
-      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => void }) => Promise<never> }).createKnowledgeAssets =
+      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => Promise<void> | void }) => Promise<never> }).createKnowledgeAssets =
         async (params) => {
-          params.onBroadcast?.();
+          await params.onBroadcast?.();
           throw new Error('simulated publish broadcast failure');
         };
 
@@ -415,6 +415,59 @@ describe('Phase-sequence contracts', () => {
     },
   );
 
+  it('publish: an aborted late hook emits no tx-bearing progress or WAL start', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    let releaseListener!: () => void;
+    const listenerGate = new Promise<void>((resolve) => { releaseListener = resolve; });
+    let markListenerStarted!: () => void;
+    const listenerStarted = new Promise<void>((resolve) => { markListenerStarted = resolve; });
+    let broadcasted = false;
+    (chain as unknown as {
+      createKnowledgeAssets: (params: {
+        onBroadcast?: (info: { txHash: string; signal: AbortSignal }) => Promise<void> | void;
+      }) => Promise<never>;
+    }).createKnowledgeAssets = async (params) => {
+      const controller = new AbortController();
+      const lateHook = params.onBroadcast?.({
+        txHash: `0x${'ab'.repeat(32)}`,
+        signal: controller.signal,
+      });
+      await listenerStarted;
+      controller.abort();
+      releaseListener();
+      await expect(lateHook).rejects.toThrow('write-ahead hook was aborted before broadcast');
+      if (!controller.signal.aborted) broadcasted = true;
+      throw new Error('simulated write-ahead timeout');
+    };
+
+    const calls: [string, 'start' | 'end'][] = [];
+    const onPhase: PhaseCallback = async (phase, status, context) => {
+      if (phase.startsWith('chain:txsigned:') && status === 'start') {
+        markListenerStarted();
+        await listenerGate;
+      }
+      if (context?.signal?.aborted) return;
+      calls.push([phase, status]);
+    };
+    const quads = [q(ENTITY, 'http://schema.org/name', '"Late"')];
+
+    await expect(
+      publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase }),
+    ).rejects.toThrow('simulated write-ahead timeout');
+
+    expect(broadcasted).toBe(false);
+    expect(calls.some(([phase]) => phase.startsWith('chain:txsigned:'))).toBe(false);
+    expect(calls.some(([phase]) => phase === 'chain:writeahead')).toBe(false);
+  });
+
   it(
     'update: chain:writeahead pairs start with end when adapter calls onBroadcast THEN throws ' +
       '(P-1 iter-2 regression — update re-throws, WAL window still closed)',
@@ -432,9 +485,9 @@ describe('Phase-sequence contracts', () => {
       const pub = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: origQuads });
       expect(pub.status).toBe('confirmed');
 
-      (chain as unknown as { updateKnowledgeCollectionV10: (params: { onBroadcast?: () => void }) => Promise<never> }).updateKnowledgeCollectionV10 =
+      (chain as unknown as { updateKnowledgeCollectionV10: (params: { onBroadcast?: () => Promise<void> | void }) => Promise<never> }).updateKnowledgeCollectionV10 =
         async (params) => {
-          params.onBroadcast?.();
+          await params.onBroadcast?.();
           throw new Error('simulated update broadcast failure');
         };
       if (typeof (chain as { updateKnowledgeAssets?: unknown }).updateKnowledgeAssets === 'function') {

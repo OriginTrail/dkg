@@ -1035,19 +1035,24 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     delegate?: PhaseCallback;
   }): PhaseCallback {
     let recordedTxHash: LiftJobHex | undefined;
-    return async (phase, status) => {
-      await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
+    return async (phase, status, context) => {
+      await params.delegate?.(phase, status, context);
+      // The EVM adapter invalidates this pre-broadcast attempt before it
+      // rejects a timed-out hook. A delayed delegate must not turn the job into
+      // `broadcast` after the associated transaction was explicitly abandoned.
+      if (context?.signal?.aborted) return;
       if (status !== 'start') return;
       const txHash = txHashFromSignedPhase(phase);
       if (!txHash || recordedTxHash) return;
-      recordedTxHash = txHash;
-      await this.recordKnowledgeAssetVmPublishBroadcastProgress({
+      const recorded = await this.recordKnowledgeAssetVmPublishBroadcastProgress({
         jobId: params.jobId,
         walletId: params.walletId,
         txHash,
         merkleRoot: params.merkleRoot,
         publicByteSize: params.publicByteSize,
+        signal: context?.signal,
       });
+      if (recorded) recordedTxHash = txHash;
     };
   }
 
@@ -1057,14 +1062,18 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     txHash: LiftJobHex;
     merkleRoot: LiftJobHex;
     publicByteSize?: number;
-  }): Promise<void> {
+    signal?: AbortSignal;
+  }): Promise<boolean> {
+    if (params.signal?.aborted) return false;
     const current = await this.getRequiredJob(params.jobId);
-    if (current.status === 'broadcast') return;
+    if (params.signal?.aborted) return false;
+    if (current.status === 'broadcast') return true;
     if (current.status !== 'validated') {
       throw new Error(
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
+    if (params.signal?.aborted) return false;
     await this.update(params.jobId, 'broadcast', {
       broadcast: {
         txHash: params.txHash,
@@ -1073,6 +1082,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         publicByteSize: params.publicByteSize,
       },
     });
+    return true;
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {

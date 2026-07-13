@@ -14,7 +14,20 @@ export interface KAManifestEntry {
   privateTripleCount?: number;
 }
 
-export type PhaseCallback = (phase: string, status: 'start' | 'end') => void;
+/** Cancellation context used by pre-broadcast durability phases. */
+export interface PhaseCallbackContext {
+  /**
+   * Aborted when the adapter abandons the associated transaction. Durable
+   * listeners must check this after awaited work and suppress late writes.
+   */
+  signal?: AbortSignal;
+}
+
+export type PhaseCallback = (
+  phase: string,
+  status: 'start' | 'end',
+  context?: PhaseCallbackContext,
+) => Promise<void> | void;
 
 export type ReceiverSignature = { identityId: bigint; r: Uint8Array; vs: Uint8Array };
 

@@ -6,30 +6,31 @@ import {
   SignerWritePlan,
 } from '../src/signer-write-lane.js';
 
-const plan = (executionBudgetMs: number) =>
-  new SignerWritePlan().reserve('test signer-write phase', executionBudgetMs);
+const plan = (admissionBudgetMs: number) =>
+  new SignerWritePlan(admissionBudgetMs).describePhase('test signer-write phase');
 
 describe('SignerWriteLane', () => {
-  it('couples every executable operation phase to its admission budget', async () => {
+  it('covers every executable operation phase with one coarse admission budget', async () => {
     const events: string[] = [];
     const operation = new SignerWriteOperation<{ prefix: string }, { value: string }, string>(
+      50,
       () => ({ value: '' }),
       (state) => state.value,
     )
-      .phase('prepare', 20, async (context, state) => {
+      .phase('prepare', async (context, state) => {
         events.push('prepare');
         state.value = context.prefix;
       })
-      .phase('submit', 30, async (_context, state) => {
+      .phase('submit', async (_context, state) => {
         events.push('submit');
         state.value += '-sent';
       });
 
-    expect(operation.plan.executionBudgetMs).toBe(50);
+    expect(operation.plan.admissionBudgetMs).toBe(50);
     expect(operation.plan.phaseLabels).toEqual(['prepare', 'submit']);
     await expect(operation.execute({ prefix: 'tx' })).resolves.toBe('tx-sent');
     expect(events).toEqual(['prepare', 'submit']);
-    expect(() => operation.phase('unplanned late work', 10, async () => undefined))
+    expect(() => operation.phase('unplanned late work', async () => undefined))
       .toThrow('Cannot add a signer write phase after execution has started');
     await expect(operation.execute({ prefix: 'again' }))
       .rejects.toThrow('Signer write operation can only execute once');
@@ -77,14 +78,14 @@ describe('SignerWriteLane', () => {
     }
   });
 
-  it('derives admission from the predecessor write plan phases', async () => {
+  it('uses the predecessor operation-wide admission budget while retaining phase labels', async () => {
     vi.useFakeTimers();
     try {
       const lane = new SignerWriteLane();
-      const predecessorPlan = new SignerWritePlan()
-        .reserve('populate and sign', 20_000)
-        .reserve('broadcast and receipt', 10_000);
-      expect(predecessorPlan.executionBudgetMs).toBe(30_000);
+      const predecessorPlan = new SignerWritePlan(30_000)
+        .describePhase('populate and sign')
+        .describePhase('broadcast and receipt');
+      expect(predecessorPlan.admissionBudgetMs).toBe(30_000);
       expect(predecessorPlan.phaseLabels).toEqual([
         'populate and sign',
         'broadcast and receipt',
