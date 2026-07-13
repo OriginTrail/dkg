@@ -4,9 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import {
+  RUNTIME_BUILD_EXCLUSIONS,
+  runtimeBuildPnpmArgs,
+} from '../runtime-build-plan.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const ROOT_PACKAGE_JSON = path.join(REPO_ROOT, 'package.json');
 const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 
 const REQUIRED_RUNTIME_PACKAGES = [
@@ -29,33 +32,14 @@ const REQUIRED_RUNTIME_PACKAGES = [
   '@origintrail-official/kafka-plugin',
 ];
 
-function shellTokens(command) {
-  return [...command.matchAll(/'([^']*)'|"([^"]*)"|(\S+)/g)]
-    .map((match) => match[1] ?? match[2] ?? match[3]);
-}
-
 test('release runtime build plan includes workspace dependencies but excludes Hardhat', () => {
-  const rootPackage = JSON.parse(fs.readFileSync(ROOT_PACKAGE_JSON, 'utf8'));
-  const buildCommand = rootPackage.scripts?.['build:runtime:packages'];
-
-  assert.equal(typeof buildCommand, 'string');
-  const tokens = shellTokens(buildCommand);
-  assert.deepEqual(tokens.slice(0, 2), ['pnpm', '-r']);
-  assert.deepEqual(tokens.slice(-2), ['run', 'build']);
   assert.ok(
-    tokens.includes('!@origintrail-official/dkg-evm-module'),
+    RUNTIME_BUILD_EXCLUSIONS.includes('@origintrail-official/dkg-evm-module'),
     'runtime dependency closure must explicitly subtract evm-module',
   );
 
-  // Resolve the exact filters used by the release build, replacing only the
-  // mutating `run build` operation with pnpm's read-only workspace listing.
-  const planArgs = [
-    ...tokens.slice(1, -2),
-    'list',
-    '--depth',
-    '-1',
-    '--json',
-  ];
+  // Resolve the canonical filters with pnpm's read-only workspace listing.
+  const planArgs = runtimeBuildPnpmArgs(['list', '--depth', '-1', '--json']);
   const selected = JSON.parse(execFileSync(PNPM, planArgs, {
     cwd: REPO_ROOT,
     encoding: 'utf8',
