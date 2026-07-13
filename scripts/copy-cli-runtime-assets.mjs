@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Copy the repo-root runtime config assets that `@origintrail-official/dkg`
 // (packages/cli) ships in its published tarball: the per-network overlays
-// (`network/*.json`) and `project.json`.
+// (`network/*.json`), `project.json`, and the pinned Blazegraph image metadata.
 //
 // These files live at the repo root but must be present INSIDE packages/cli at
 // pack time because `packages/cli/package.json#files` lists "network" and
 // "project.json" — and npm silently omits `files` entries that don't exist on
-// disk when the tarball is built.
+// disk when the tarball is built. The image-metadata parser itself lives in
+// packages/cli because both the source-tree callers and the published CLI use
+// that exact module as the validation boundary.
 //
 // Historically this copy was a side effect of the `build` script. That made it
 // cache-unsafe: `turbo.json` declares the build task's outputs as `dist/**`
@@ -23,9 +25,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import blazegraphImageMetadata from '../packages/cli/blazegraph-image-metadata.cjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_ROOT_DIR = path.resolve(path.dirname(SCRIPT_PATH), '..');
+const { readBlazegraphImageMetadata } = blazegraphImageMetadata;
 
 function enumerateNetworkOverlays(sourceNetworkDir) {
   if (!fs.existsSync(sourceNetworkDir) || !fs.statSync(sourceNetworkDir).isDirectory()) {
@@ -40,7 +44,9 @@ function enumerateNetworkOverlays(sourceNetworkDir) {
 /**
  * Read + VALIDATE the CLI runtime-asset manifest from the repo root — the single
  * FAIL-CLOSED source of truth shared by the pack-time copy (below) and the
- * `release:verify-pack` preflight (scripts/release-packages.mjs). Throws if the
+ * `release:verify-pack` preflight (scripts/release-packages.mjs). It returns
+ * separate copied-asset and required-pack lists so package-local helpers are
+ * never mistaken for files owned by the copier. Throws if the
  * source tree can't produce the full set (network/ missing or empty, or
  * project.json absent), so the verifier can never silently build a required list
  * that omits the network overlays — it enforces exactly the same invariant as
@@ -50,6 +56,7 @@ function enumerateNetworkOverlays(sourceNetworkDir) {
 export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
   const sourceNetworkDir = path.join(rootDir, 'network');
   const sourceProjectJson = path.join(rootDir, 'project.json');
+  const sourceBlazegraphImageJson = path.join(rootDir, 'blazegraph-image.json');
   const overlays = enumerateNetworkOverlays(sourceNetworkDir);
   if (overlays === null) {
     throw new Error(`copy-cli-runtime-assets: repo-root network/ directory not found at ${sourceNetworkDir}`);
@@ -60,13 +67,33 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
   if (!fs.existsSync(sourceProjectJson)) {
     throw new Error(`copy-cli-runtime-assets: repo-root project.json not found at ${sourceProjectJson}`);
   }
+  try {
+    readBlazegraphImageMetadata(sourceBlazegraphImageJson);
+  } catch {
+    throw new Error(
+      `copy-cli-runtime-assets: valid repo-root blazegraph-image.json not found at ${sourceBlazegraphImageJson}`,
+    );
+  }
   return {
     rootDir,
     sourceNetworkDir,
     sourceProjectJson,
+    sourceBlazegraphImageJson,
     networkJsonFiles: overlays,
-    // package-relative paths that MUST appear inside the published tarball
-    relPaths: ['project.json', ...overlays.map((file) => `network/${file}`)],
+    // Package-relative files this function materializes from repo-root sources.
+    copiedRuntimeAssets: [
+      'project.json',
+      'blazegraph-image.json',
+      ...overlays.map((file) => `network/${file}`),
+    ],
+    // Complete publish contract. The parser is package-local source, while the
+    // entries above are copied during build/prepack.
+    requiredPackAssets: [
+      'project.json',
+      'blazegraph-image.json',
+      'blazegraph-image-metadata.cjs',
+      ...overlays.map((file) => `network/${file}`),
+    ],
   };
 }
 
@@ -79,10 +106,16 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
  * leak into the tarball (files: ["network"] ships the whole directory).
  */
 export function copyCliRuntimeAssets({ rootDir = DEFAULT_ROOT_DIR } = {}) {
-  const { sourceNetworkDir, sourceProjectJson, networkJsonFiles } = cliRuntimeAssetManifest({ rootDir });
+  const {
+    sourceNetworkDir,
+    sourceProjectJson,
+    sourceBlazegraphImageJson,
+    networkJsonFiles,
+  } = cliRuntimeAssetManifest({ rootDir });
   const cliDir = path.join(rootDir, 'packages', 'cli');
   const targetNetworkDir = path.join(cliDir, 'network');
   const targetProjectJson = path.join(cliDir, 'project.json');
+  const targetBlazegraphImageJson = path.join(cliDir, 'blazegraph-image.json');
 
   fs.rmSync(targetNetworkDir, { recursive: true, force: true });
   fs.mkdirSync(targetNetworkDir, { recursive: true });
@@ -90,6 +123,7 @@ export function copyCliRuntimeAssets({ rootDir = DEFAULT_ROOT_DIR } = {}) {
     fs.copyFileSync(path.join(sourceNetworkDir, file), path.join(targetNetworkDir, file));
   }
   fs.copyFileSync(sourceProjectJson, targetProjectJson);
+  fs.copyFileSync(sourceBlazegraphImageJson, targetBlazegraphImageJson);
 
   return { rootDir, cliDir, networkJsonFiles };
 }
@@ -103,7 +137,7 @@ if (invokedDirectly) {
     // emits its machine-readable report on stdout — anything we print there
     // would corrupt it for the `release:verify-pack` preflight that parses it.
     console.error(
-      `copy-cli-runtime-assets: copied ${networkJsonFiles.length} network overlay(s) + project.json into ${relTarget}/`,
+      `copy-cli-runtime-assets: copied ${networkJsonFiles.length} network overlay(s) + project.json + blazegraph-image.json into ${relTarget}/`,
     );
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));

@@ -24,13 +24,13 @@
  * (PR 1) it's allowed to `DROP ALL` instead of running a scoped DELETE
  * — Docker-provisioned namespaces are owned end-to-end by this CLI.
  *
- * The provisioner does NOT modify `scripts/devnet.sh`. The devnet
- * loop orchestrates multiple containers across nodes 3-4 with
- * different concerns; the namespace XML body is the only shared
- * artifact and is exported as `BLAZEGRAPH_NAMESPACE_XML_TEMPLATE`.
+ * The image reference is shared with `scripts/devnet.sh` through the
+ * machine-readable repo-root `blazegraph-image.json` runtime asset.
  */
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import * as net from 'node:net';
+import { runtimeAssetPaths } from '../runtime-assets.js';
 
 /**
  * Shared XML template for a Blazegraph namespace tuned for DKG V10
@@ -51,11 +51,44 @@ export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="
   <entry key="com.bigdata.rdf.store.AbstractTripleStore.axiomsClass">com.bigdata.rdf.axioms.NoAxioms</entry>
 </properties>`;
 
-/** Pinned image tag — matches devnet.sh and Blazegraph mainnet. */
-export const BLAZEGRAPH_IMAGE = 'lyrasis/blazegraph:2.1.5';
+/**
+ * Pinned multi-architecture image index — matches the deployed mainnet fleet.
+ * `lyrasis/blazegraph:2.1.5` is amd64-only and fails with `exec format error`
+ * when the provisioner runs on an arm64 Linux node.
+ *
+ * Keep the OCI-index digest immutable: CI reads the same metadata file and
+ * requires both linux/amd64 and linux/arm64 manifests.
+ */
+interface BlazegraphImageMetadata {
+  image: string;
+  containerPort: number;
+}
 
-/** Default container port that lyrasis/blazegraph exposes. */
-const BLAZEGRAPH_CONTAINER_PORT = 8080;
+interface BlazegraphImageMetadataParser {
+  readBlazegraphImageMetadata(path: string): BlazegraphImageMetadata;
+}
+
+const require = createRequire(import.meta.url);
+const { readBlazegraphImageMetadata } = require(
+  '../../blazegraph-image-metadata.cjs',
+) as BlazegraphImageMetadataParser;
+
+function loadBlazegraphImageMetadata(): BlazegraphImageMetadata {
+  for (const path of runtimeAssetPaths('blazegraph-image.json')) {
+    try {
+      return readBlazegraphImageMetadata(path);
+    } catch { /* try the packaged runtime asset */ }
+  }
+  throw new Error('Could not load the pinned Blazegraph image metadata from blazegraph-image.json');
+}
+
+const BLAZEGRAPH_IMAGE_METADATA = loadBlazegraphImageMetadata();
+
+/** Immutable multi-architecture image reference selected for provisioning. */
+export const BLAZEGRAPH_IMAGE = BLAZEGRAPH_IMAGE_METADATA.image;
+
+/** Container HTTP port declared alongside the selected image. */
+export const BLAZEGRAPH_CONTAINER_PORT = BLAZEGRAPH_IMAGE_METADATA.containerPort;
 
 /** Default starting host port, matches devnet.sh and Blazegraph defaults. */
 const DEFAULT_HOST_PORT_START = 9999;
@@ -251,7 +284,13 @@ async function inspectContainer(
     const info = Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
     if (!info) return { exists: true, running: false };
     const running = info.State?.Running === true;
-    const portBinding = info.NetworkSettings?.Ports?.[`${BLAZEGRAPH_CONTAINER_PORT}/tcp`];
+    const ports = info.NetworkSettings?.Ports;
+    // Containers provisioned before the islandora image migration expose the
+    // old image's 8080/tcp port. Prefer the current image contract, but retain
+    // the real host mapping for an already-created legacy container instead of
+    // silently falling back to 9999 and potentially targeting another store.
+    const portBinding = ports?.[`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]
+      ?? (BLAZEGRAPH_CONTAINER_PORT === 8080 ? undefined : ports?.['8080/tcp']);
     const hostPort = Array.isArray(portBinding) && portBinding.length > 0
       ? Number(portBinding[0].HostPort)
       : undefined;
@@ -431,7 +470,9 @@ export async function provisionBlazegraphDocker(
     '-d',
     '--restart', 'unless-stopped',
     '--name', containerName,
-    '-p', `${chosenPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
+    // Blazegraph is an implementation detail of the local node. Do not publish
+    // its unauthenticated SPARQL/update endpoint on every host interface.
+    '-p', `127.0.0.1:${chosenPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
     BLAZEGRAPH_IMAGE,
   ]);
   if (runResult.exitCode !== 0) {

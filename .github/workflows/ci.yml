@@ -477,8 +477,21 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Verify provisioned Blazegraph image contract"
+        run: bash scripts/ci/verify-blazegraph-image-contract.sh
       - name: "CLI tests"
         run: pnpm --filter @origintrail-official/dkg test
+
+  bura-blazegraph-arm64:
+    name: "Bura: Blazegraph arm64 image (native)"
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Verify provisioned Blazegraph image contract on arm64"
+        run: bash scripts/ci/verify-blazegraph-image-contract.sh
 
   bura-supporting:
     name: "Bura: query"

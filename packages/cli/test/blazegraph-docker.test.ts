@@ -24,13 +24,63 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runtimeAssetPaths } from '../src/runtime-assets.js';
+import {
   provisionBlazegraphDocker,
   normaliseBlazegraphNamespace,
   isDockerAvailable,
+  BLAZEGRAPH_IMAGE,
+  BLAZEGRAPH_CONTAINER_PORT,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   type DockerRunner,
   type DockerCommandResult,
 } from '../src/daemon/blazegraph-docker.js';
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+
+function runDevnetBlazegraphSmoke(metadata: string): {
+  status: number | null;
+  stderr: string;
+  dockerArgs: string[] | null;
+} {
+  const root = mkdtempSync(join(tmpdir(), 'dkg-devnet-blazegraph-'));
+  const capture = join(root, 'docker-run.args');
+  const parserDir = join(root, 'packages', 'cli');
+  mkdirSync(parserDir, { recursive: true });
+  copyFileSync(
+    resolve(REPO_ROOT, 'packages/cli/blazegraph-image-metadata.cjs'),
+    join(parserDir, 'blazegraph-image-metadata.cjs'),
+  );
+  writeFileSync(join(root, 'blazegraph-image.json'), metadata);
+  try {
+    const result = spawnSync('bash', [
+      resolve(REPO_ROOT, 'packages/cli/test/fixtures/devnet-blazegraph-smoke.sh'),
+      root,
+      capture,
+    ], { encoding: 'utf-8' });
+    return {
+      status: result.status,
+      stderr: result.stderr,
+      dockerArgs: existsSync(capture)
+        ? readFileSync(capture, 'utf-8').trim().split('\n')
+        : null,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 interface MockDockerScript {
   /**
@@ -81,7 +131,7 @@ function dockerInspectRunning(hostPort = 9999): DockerCommandResult {
         State: { Running: true },
         NetworkSettings: {
           Ports: {
-            '8080/tcp': [{ HostIp: '0.0.0.0', HostPort: String(hostPort) }],
+            [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: String(hostPort) }],
           },
         },
       },
@@ -97,7 +147,9 @@ function dockerInspectStopped(): DockerCommandResult {
       {
         State: { Running: false },
         NetworkSettings: {
-          Ports: { '8080/tcp': [{ HostIp: '0.0.0.0', HostPort: '9999' }] },
+          Ports: {
+            [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: '9999' }],
+          },
         },
       },
     ]),
@@ -172,6 +224,44 @@ describe('provisionBlazegraphDocker', () => {
     expect(result.url).toBe('http://127.0.0.1:9999/bigdata/namespace/mynode/sparql');
     expect(calls.some((c) => c[0] === 'run')).toBe(false);
     expect(httpCalls.some((c) => c.url.endsWith('/bigdata/status'))).toBe(true);
+  });
+
+  it('reuses the mapped host port from a legacy 8080/tcp container', async () => {
+    const legacyHostPort = 10001;
+    const legacyInspect: DockerCommandResult = {
+      stdout: JSON.stringify([{
+        State: { Running: true },
+        NetworkSettings: {
+          Ports: {
+            '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: String(legacyHostPort) }],
+          },
+        },
+      }]),
+      stderr: '',
+      exitCode: 0,
+    };
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: () => legacyInspect },
+      ],
+    });
+    const { fn, calls: httpCalls } = mockFetch(() => new Response('ok', { status: 200 }));
+
+    const result = await provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: fn,
+      log: () => {},
+    });
+
+    expect(result.reused).toBe(true);
+    expect(result.port).toBe(legacyHostPort);
+    expect(result.url).toBe(
+      `http://127.0.0.1:${legacyHostPort}/bigdata/namespace/mynode/sparql`,
+    );
+    expect(httpCalls[0]?.url).toBe(`http://127.0.0.1:${legacyHostPort}/bigdata/status`);
+    expect(calls.some((call) => call[0] === 'run')).toBe(false);
   });
 
   it('creates the namespace when reusing a container with no existing namespace', async () => {
@@ -261,7 +351,7 @@ describe('provisionBlazegraphDocker', () => {
     expect(calls.some((c) => c[0] === 'run')).toBe(true);
   });
 
-  it('auto-bumps to the next free port when 9999 is taken', async () => {
+  it('auto-bumps to the next free loopback port and uses the multi-architecture image', async () => {
     const takenPorts = new Set([9999, 10000]);
     const { runner, calls } = mockDocker({
       matchers: [
@@ -284,7 +374,39 @@ describe('provisionBlazegraphDocker', () => {
     expect(result.port).toBe(10001);
     const runCall = calls.find((c) => c[0] === 'run');
     expect(runCall).toBeDefined();
-    expect(runCall?.join(' ')).toContain('10001:8080');
+    expect(runCall).toContain(`127.0.0.1:10001:${BLAZEGRAPH_CONTAINER_PORT}`);
+    expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
+    const metadata = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, 'blazegraph-image.json'), 'utf-8'),
+    ) as { image: string; containerPort: number };
+    expect(BLAZEGRAPH_IMAGE).toBe(metadata.image);
+    expect(BLAZEGRAPH_CONTAINER_PORT).toBe(metadata.containerPort);
+    expect(runtimeAssetPaths('blazegraph-image.json')[0]).toBe(
+      resolve(REPO_ROOT, 'blazegraph-image.json'),
+    );
+  });
+
+  it('executes the devnet Docker path with the exact shared image and loopback port mapping', () => {
+    const image = 'example/blazegraph@sha256:smoke';
+    const result = runDevnetBlazegraphSmoke(JSON.stringify({ image, containerPort: 80 }));
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.dockerArgs).toEqual([
+      'run',
+      '-d',
+      '--name',
+      'devnet-blazegraph-smoke',
+      '-p',
+      '127.0.0.1:19099:80',
+      image,
+    ]);
+  });
+
+  it('fails closed before docker run when devnet image metadata is invalid', () => {
+    const result = runDevnetBlazegraphSmoke(JSON.stringify({ image: 'example/blazegraph' }));
+
+    expect(result.status).toBe(42);
+    expect(result.dockerArgs).toBeNull();
   });
 
   it('throws when every port in the scan range is taken', async () => {
