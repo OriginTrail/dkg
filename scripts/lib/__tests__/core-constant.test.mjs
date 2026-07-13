@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import {
   requireStringExport,
@@ -25,6 +27,19 @@ test('resolveCoreStringConstant imports a real module export', async () => {
       '/dkg/test/storage-ack',
     );
   });
+});
+
+test('default resolver and CLI read the canonical built core export', async () => {
+  const expected = '/dkg/10.0.1/storage-ack';
+  assert.equal(await resolveCoreStringConstant('PROTOCOL_STORAGE_ACK'), expected);
+
+  const scriptPath = fileURLToPath(new URL('../core-constant.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [scriptPath, 'PROTOCOL_STORAGE_ACK'], {
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  assert.equal(result.stdout, expected);
 });
 
 test('missing and non-string exports fail loudly', () => {

@@ -239,6 +239,37 @@ describe('Messenger.sendRequestOwned', () => {
       vi.useRealTimers();
     }
   });
+
+  it('preserves the transport failure when awaited peer recovery also fails', async () => {
+    const transportError = new Error('no valid addresses for peer');
+    const recoveryError = new Error('DHT walk timed out');
+    const router = makeRouter(async () => {
+      throw transportError;
+    });
+    const resolvePeer = recorder(
+      async (_peerId: string, _opts: { signal: AbortSignal }): Promise<void> => {
+        throw recoveryError;
+      },
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const { messenger, outboxStore } = makeSubstrate({ router, resolvePeer });
+
+      await expect(messenger.sendRequestOwned(
+        PEER_A,
+        PROTO,
+        new Uint8Array([1]),
+        { messageId: FIXED_MSG_ID },
+      )).rejects.toBe(transportError);
+
+      expect(resolvePeer.calls).toHaveLength(1);
+      expect(outboxStore.size()).toBe(0);
+      expect((messenger as any).firstAttemptAt.size).toBe(0);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('DHT walk timed out'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('Messenger.sendReliable (sender-side idempotency)', () => {

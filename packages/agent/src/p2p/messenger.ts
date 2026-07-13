@@ -273,10 +273,6 @@ export type ThrowingReliableSendResult = Exclude<
 /** Internal ownership policy; public callers use distinct named methods. */
 type FramedFailurePolicy = 'durable-outbox' | 'request-owned';
 
-type DhtWalkTrigger =
-  | { kind: 'outbox'; attempts: number }
-  | { kind: 'request-owned' };
-
 /** Handler signature for `Messenger.register`. */
 export type ReliableHandler = (
   payload: Uint8Array,
@@ -747,35 +743,16 @@ export class Messenger {
         throw err;
       }
       if (failurePolicy === 'request-owned') {
-        // No durable row can later deliver or expire this request, so its SLO
-        // start marker has no future owner. Clear it before returning control
-        // to the request-scoped retry loop.
-        this.firstAttemptAt.delete(sloK);
-        // ACKCollector owns the retry schedule, but address refresh still
-        // belongs to Messenger. Wait for the refresh (or its bounded failure)
-        // before returning control so the collector cannot exhaust its short
-        // retry window against the same stale peerStore state.
-        await this.scheduleDhtWalk(peerId, { kind: 'request-owned' }, errMsg);
+        await this.handleRequestOwnedRecoverableFailure(peerId, errMsg, sloK);
         throw err;
       }
-      const entry = outbox.enqueueFailure(
+      return this.handleDurableRecoverableFailure({
         peerId,
         protocolId,
         messageId,
-        envelope,
+        payload: envelope,
         errMsg,
-        this.clock(),
-      );
-      this.noteQueuedForSlo(protocolId);
-      void this.scheduleDhtWalk(peerId, { kind: 'outbox', attempts: entry.attempts }, errMsg);
-      return {
-        delivered: false,
-        queued: true,
-        attempts: entry.attempts,
-        messageId,
-        error: errMsg,
-        nextAttemptAtMs: entry.nextAttemptAt,
-      };
+      });
     } finally {
       outbox.endAttempt(peerId, protocolId, messageId);
     }
@@ -938,11 +915,7 @@ export class Messenger {
         this.clock(),
       );
       if (isRecoverableMessengerSendError(err, errMsg)) {
-        void this.scheduleDhtWalk(
-          entry.peer,
-          { kind: 'outbox', attempts: updated.attempts },
-          errMsg,
-        );
+        this.scheduleOutboxPeerRecovery(entry.peer, updated.attempts, errMsg);
       }
       // A non-recoverable retry remains visible for operator intervention, but
       // advances on the backoff ladder so it cannot permanently occupy the
@@ -952,37 +925,67 @@ export class Messenger {
     }
   }
 
-  /**
-   * DHT-walk-on-stall recovery primitive (rc.9 PR-5). Durable outbox callers
-   * fire it in the background after `OUTBOX_STALL_THRESHOLD`; request-owned
-   * callers await it so their external retry loop observes refreshed routing.
-   *
-   * The current wire attempt has already failed. Resolution only prepares the
-   * next attempt, whether that is a periodic outbox tick or an ACKCollector
-   * retry. Concurrent request-owned callers share and await one per-peer walk.
-   *
-   * Guards:
-   *   1. No-op when `resolvePeer` not wired.
-   *   2. Durable outbox sends are a no-op below
-   *      `OUTBOX_STALL_THRESHOLD` attempts (don't spend a DHT walk on a
-   *      transient blip). Request-owned sends recover immediately because
-   *      their external retry loop has no durable attempt counter here.
-   *   3. No-op for non-address-resolution errors (DHT walk
-   *      doesn't fix stream resets or NO_RESERVATION-after-handshake).
-   *   4. Per-peer rate limit (`DHT_WALK_RATE_LIMIT_MS`).
-   *   5. Time-bounded (`DHT_WALK_TIMEOUT_MS`) — failures logged,
-   *      never bubble.
-   */
-  private scheduleDhtWalk(
+  /** Request-owned failures never create a durable row or leave an SLO owner. */
+  private async handleRequestOwnedRecoverableFailure(
     peerId: string,
-    trigger: DhtWalkTrigger,
     errMsg: string,
+    sloK: string,
+  ): Promise<void> {
+    this.firstAttemptAt.delete(sloK);
+    if (!shouldTriggerDhtWalk(errMsg)) return;
+    await this.resolvePeerOnce(peerId, 'after a request-owned address failure');
+  }
+
+  /** Durable failures enqueue first, then optionally schedule threshold recovery. */
+  private handleDurableRecoverableFailure(args: {
+    peerId: string;
+    protocolId: string;
+    messageId: string;
+    payload: Uint8Array;
+    errMsg: string;
+  }): Extract<ReliableSendResult, { delivered: false; queued: true }> {
+    const entry = this.outbox!.enqueueFailure(
+      args.peerId,
+      args.protocolId,
+      args.messageId,
+      args.payload,
+      args.errMsg,
+      this.clock(),
+    );
+    this.noteQueuedForSlo(args.protocolId);
+    this.scheduleOutboxPeerRecovery(args.peerId, entry.attempts, args.errMsg);
+    return {
+      delivered: false,
+      queued: true,
+      attempts: entry.attempts,
+      messageId: args.messageId,
+      error: args.errMsg,
+      nextAttemptAtMs: entry.nextAttemptAt,
+    };
+  }
+
+  /** Durable outbox recovery is thresholded and always background-owned. */
+  private scheduleOutboxPeerRecovery(
+    peerId: string,
+    attempts: number,
+    errMsg: string,
+  ): void {
+    if (attempts < OUTBOX_STALL_THRESHOLD || !shouldTriggerDhtWalk(errMsg)) return;
+    void this.resolvePeerOnce(peerId, `after ${attempts} stalled outbox attempts`);
+  }
+
+  /**
+   * One de-duplicated, rate-limited, bounded peer-resolution attempt. Ownership
+   * stays with the named caller: request-owned sends await this promise, while
+   * durable outbox paths deliberately discard it after attaching handlers.
+   * Resolver errors are logged and swallowed so they never replace the original
+   * transport error.
+   */
+  private resolvePeerOnce(
+    peerId: string,
+    reason: string,
   ): Promise<void> {
     if (!this.resolvePeer) return Promise.resolve();
-    if (trigger.kind === 'outbox' && trigger.attempts < OUTBOX_STALL_THRESHOLD) {
-      return Promise.resolve();
-    }
-    if (!shouldTriggerDhtWalk(errMsg)) return Promise.resolve();
 
     const activeWalk = this.dhtWalksInFlight.get(peerId);
     if (activeWalk) return activeWalk;
@@ -995,9 +998,6 @@ export class Messenger {
 
     this.lastDhtWalkAt.set(peerId, now);
     const signal = AbortSignal.timeout(DHT_WALK_TIMEOUT_MS);
-    const reason = trigger.kind === 'outbox'
-      ? `after ${trigger.attempts} stalled outbox attempts`
-      : 'after a request-owned address failure';
     // Errors are swallowed after logging so a request-owned caller still
     // receives the original transport failure, not a secondary DHT error.
     const walk = this.resolvePeer(peerId, { signal })

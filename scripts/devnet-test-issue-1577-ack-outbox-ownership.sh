@@ -33,11 +33,13 @@ done
 [[ -f "$DB" ]] || fail "publisher database missing: $DB"
 
 count_ack_rows() {
-  DB="$DB" \
-    PROTOCOL_STORAGE_ACK="$PROTOCOL_STORAGE_ACK" \
-    PROTOCOL_STORAGE_ACK_V2="$PROTOCOL_STORAGE_ACK_V2" \
-    PROTOCOL_STORAGE_UPDATE_ACK="$PROTOCOL_STORAGE_UPDATE_ACK" \
-    node --input-type=module <<'NODE'
+  (
+    cd "$ROOT/packages/cli"
+    DB="$DB" \
+      PROTOCOL_STORAGE_ACK="$PROTOCOL_STORAGE_ACK" \
+      PROTOCOL_STORAGE_ACK_V2="$PROTOCOL_STORAGE_ACK_V2" \
+      PROTOCOL_STORAGE_UPDATE_ACK="$PROTOCOL_STORAGE_UPDATE_ACK" \
+      node --input-type=module <<'NODE'
 import Database from 'better-sqlite3';
 const db = new Database(process.env.DB, { readonly: true });
 const row = db.prepare(`SELECT COUNT(*) AS n FROM protocol_outbox
@@ -48,6 +50,7 @@ const row = db.prepare(`SELECT COUNT(*) AS n FROM protocol_outbox
   );
 process.stdout.write(String(row.n)); db.close();
 NODE
+  )
 }
 baseline="$(count_ack_rows)"
 
