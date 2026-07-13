@@ -8,11 +8,11 @@ import {
   slotEntryPoint,
 } from './config.js';
 
-/** Canonical Node command prefix used to start or probe this daemon entrypoint. */
-export interface DaemonRestartCommand {
-  nodeExecutable: string;
-  nodeExecArgv: readonly string[];
-  restartEntryPoint: string;
+/** Fully assembled Node command used to start or probe this daemon entrypoint. */
+export interface DaemonNodeCommand {
+  executable: string;
+  args: readonly string[];
+  entryPoint: string;
 }
 
 /**
@@ -44,22 +44,16 @@ export function resolveDaemonEntryPoint(): string {
 }
 
 /**
- * Resolve the complete command prefix shared by supervisor restarts and the
- * Edge post-install executable probe. Keeping both consumers on this model
- * prevents the verifier from drifting from the process the supervisor starts.
+ * Resolve one complete daemon command. Every launch and executable probe goes
+ * through this boundary so Node executable/exec-argv/entrypoint policy has one
+ * owner. The selected entrypoint is retained for diagnostics and tests only;
+ * callers execute `executable` with `args` without rebuilding the shape.
  */
-export function resolveDaemonRestartCommand(): DaemonRestartCommand {
+export function resolveDaemonNodeCommand(...args: string[]): DaemonNodeCommand {
+  const entryPoint = resolveDaemonEntryPoint();
   return {
-    nodeExecutable: process.execPath,
-    nodeExecArgv: [...process.execArgv],
-    restartEntryPoint: resolveDaemonEntryPoint(),
+    executable: process.execPath,
+    args: [...process.execArgv, entryPoint, ...args],
+    entryPoint,
   };
-}
-
-/** Append daemon/CLI arguments to a canonical restart command. */
-export function daemonRestartCommandArgs(
-  command: DaemonRestartCommand,
-  ...args: string[]
-): string[] {
-  return [...command.nodeExecArgv, command.restartEntryPoint, ...args];
 }

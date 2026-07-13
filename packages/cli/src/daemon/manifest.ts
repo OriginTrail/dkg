@@ -31,7 +31,7 @@ import {
   swapSlot,
   type AutoUpdateConfig,
 } from '../config.js';
-import { resolveDaemonRestartCommand } from '../daemon-entrypoint.js';
+import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
   readCliPackageVersion,
@@ -553,8 +553,8 @@ export const _autoUpdateIo = {
   exec: execAsync as (...args: any[]) => Promise<any>,
   execFile: execFileAsync as (...args: any[]) => Promise<any>,
   execSync: execSync as (...args: any[]) => any,
-  // Dependency reference only; restart policy lives in daemon-entrypoint.ts.
-  resolveDaemonRestartCommand,
+  // Dependency reference only; daemon command policy lives in daemon-entrypoint.ts.
+  resolveDaemonNodeCommand,
   dkgDir,
   releasesDir,
   activeSlot: activeSlot as () => Promise<'a' | 'b'>,

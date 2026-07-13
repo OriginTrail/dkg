@@ -15,7 +15,7 @@ import { performNpmUpdateEdge } from "../src/daemon/auto-update.js";
 import { _autoUpdateIo } from "../src/daemon/manifest.js";
 
 describe("Edge auto-update restart-entry self-check (real child processes)", () => {
-  const originalRestartCommandResolver = _autoUpdateIo.resolveDaemonRestartCommand;
+  const originalDaemonCommandResolver = _autoUpdateIo.resolveDaemonNodeCommand;
   const originalEnv = {
     DKG_HOME: process.env.DKG_HOME,
     PATH: process.env.PATH,
@@ -24,7 +24,7 @@ describe("Edge auto-update restart-entry self-check (real child processes)", () 
   let root: string | undefined;
 
   afterEach(async () => {
-    _autoUpdateIo.resolveDaemonRestartCommand = originalRestartCommandResolver;
+    _autoUpdateIo.resolveDaemonNodeCommand = originalDaemonCommandResolver;
     for (const [name, value] of Object.entries(originalEnv)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -74,12 +74,12 @@ describe("Edge auto-update restart-entry self-check (real child processes)", () 
     expect(
       execFileSync(pathDkg, ["--version"], { encoding: "utf8" }).trim(),
     ).toBe("dkg 10.0.0-rc.1");
-    const restartCommand = {
-      nodeExecutable: process.execPath,
-      nodeExecArgv: [],
-      restartEntryPoint: restartEntry,
+    const verificationCommand = {
+      executable: process.execPath,
+      args: [restartEntry, '--version'],
+      entryPoint: restartEntry,
     };
-    _autoUpdateIo.resolveDaemonRestartCommand = () => restartCommand;
+    _autoUpdateIo.resolveDaemonNodeCommand = () => verificationCommand;
 
     const logs: string[] = [];
     const result = await performNpmUpdateEdge(

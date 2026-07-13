@@ -11,10 +11,7 @@ import {
 import {
   sleep, withSelectedDkgHome, selectedDkgHomeForEnv, probeHostForApiHost,
 } from './cli-helpers.js';
-import {
-  daemonRestartCommandArgs,
-  resolveDaemonRestartCommand,
-} from './daemon-entrypoint.js';
+import { resolveDaemonNodeCommand } from './daemon-entrypoint.js';
 
 async function appendSupervisorLog(message: string): Promise<void> {
   await ensureDkgDir();
@@ -103,10 +100,10 @@ async function runDaemonSupervisor(): Promise<void> {
         `[supervisor] could not clear stale api.port before spawn: ${err?.message ?? String(err)}`,
       );
     });
-    const restartCommand = resolveDaemonRestartCommand();
+    const daemonCommand = resolveDaemonNodeCommand('daemon-worker');
     const child = spawn(
-      restartCommand.nodeExecutable,
-      daemonRestartCommandArgs(restartCommand, 'daemon-worker'),
+      daemonCommand.executable,
+      daemonCommand.args,
       {
         stdio: ['ignore', 'ignore', 'ignore'],
         env: withSelectedDkgHome(process.env),
@@ -169,10 +166,10 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
       );
     });
 
-    const restartCommand = resolveDaemonRestartCommand();
+    const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
     currentChild = spawn(
-      restartCommand.nodeExecutable,
-      daemonRestartCommandArgs(restartCommand, 'daemon-foreground-worker'),
+      daemonCommand.executable,
+      daemonCommand.args,
       {
         stdio: 'inherit',
         env: childEnv,

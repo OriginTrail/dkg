@@ -25,9 +25,8 @@ import { ensureStablePluginRoot } from '../src/daemon/plugin-loader.js';
 import { performNpmUpdateEdge } from '../src/daemon/auto-update.js';
 import { _autoUpdateIo } from '../src/daemon/manifest.js';
 import {
-  daemonRestartCommandArgs,
-  resolveDaemonRestartCommand,
-  type DaemonRestartCommand,
+  resolveDaemonNodeCommand,
+  type DaemonNodeCommand,
 } from '../src/daemon-entrypoint.js';
 
 let tmpDir: string;
@@ -216,11 +215,15 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
   // a real subprocess. Other IO (readFile, writeFile, mkdir, …) we let
   // the real fs handle against the per-test DKG_HOME.
   const origIo = { ..._autoUpdateIo };
-  const restartCommand = {
-    nodeExecutable: '/usr/local/bin/node',
-    nodeExecArgv: ['--enable-source-maps'],
-    restartEntryPoint: '/npm-global/lib/node_modules/@origintrail-official/dkg/dist/cli.js',
-  } satisfies DaemonRestartCommand;
+  const verificationCommand = {
+    executable: '/usr/local/bin/node',
+    args: [
+      '--enable-source-maps',
+      '/npm-global/lib/node_modules/@origintrail-official/dkg/dist/cli.js',
+      '--version',
+    ],
+    entryPoint: '/npm-global/lib/node_modules/@origintrail-official/dkg/dist/cli.js',
+  } satisfies DaemonNodeCommand;
   let execCalls: { cmd: string; opts?: any }[] = [];
   let execFileCalls: { file: string; args: string[]; opts?: any }[] = [];
   let operations: string[] = [];
@@ -243,7 +246,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       operations.push(`${file} ${args.join(' ')}`);
       return Promise.resolve({ stdout: 'dkg 10.0.0-rc.12', stderr: '' });
     }) as any;
-    _autoUpdateIo.resolveDaemonRestartCommand = () => restartCommand;
+    _autoUpdateIo.resolveDaemonNodeCommand = () => verificationCommand;
   });
 
   afterEach(() => {
@@ -263,12 +266,8 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
     expect(execCalls).toHaveLength(1);
     expect(execCalls[0].cmd).toBe('npm install -g @origintrail-official/dkg@10.0.0-rc.12');
     expect(execFileCalls).toEqual([{
-      file: restartCommand.nodeExecutable,
-      args: [
-        ...restartCommand.nodeExecArgv,
-        restartCommand.restartEntryPoint,
-        '--version',
-      ],
+      file: verificationCommand.executable,
+      args: verificationCommand.args,
       opts: { encoding: 'utf-8', timeout: 30_000 },
     }]);
     expect(execCalls.some(({ cmd }) => cmd === 'dkg --version')).toBe(false);
@@ -329,7 +328,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       log.fn,
     );
     expect(result).toBe('failed');
-    const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
+    const restartProbe = `${verificationCommand.executable} ${verificationCommand.args.join(' ')}`;
     expect(operations).toEqual([
       'npm install -g @origintrail-official/dkg@10.0.0-rc.12',
       restartProbe,
@@ -352,7 +351,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       null,
       log.fn,
     );
-    const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
+    const restartProbe = `${verificationCommand.executable} ${verificationCommand.args.join(' ')}`;
 
     expect(result).toBe('failed');
     expect(operations).toEqual([
@@ -381,7 +380,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.11',
       log.fn,
     );
-    const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
+    const restartProbe = `${verificationCommand.executable} ${verificationCommand.args.join(' ')}`;
 
     expect(result).toBe('failed');
     expect(operations).toEqual([
@@ -412,7 +411,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       log.fn,
     );
     expect(result).toBe('failed');
-    const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
+    const restartProbe = `${verificationCommand.executable} ${verificationCommand.args.join(' ')}`;
     expect(operations).toEqual([
       'npm install -g @origintrail-official/dkg@10.0.0-rc.1',
       restartProbe,
@@ -441,18 +440,32 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
     expect(log.calls.some((m) => m.includes('npm config set prefix'))).toBe(true);
   });
 
-  it('derives the default self-check from the canonical supervisor command', async () => {
-    process.env.DKG_NO_BLUE_GREEN = '1';
-    _autoUpdateIo.resolveDaemonRestartCommand = origIo.resolveDaemonRestartCommand;
-    const canonicalCommand = resolveDaemonRestartCommand();
+  it('probes the installed Edge CLI even when a legacy current slot remains', async () => {
+    delete process.env.DKG_NO_BLUE_GREEN;
+    await writeFile(join(dkgHome, 'config.json'), JSON.stringify({ nodeRole: 'edge' }));
+    const legacyEntry = join(
+      dkgHome,
+      'releases',
+      'current',
+      'packages',
+      'cli',
+      'dist',
+      'cli.js',
+    );
+    await mkdir(join(legacyEntry, '..'), { recursive: true });
+    await writeFile(legacyEntry, '// stale Core-era slot');
+    _autoUpdateIo.resolveDaemonNodeCommand = origIo.resolveDaemonNodeCommand;
+    const canonicalCommand = resolveDaemonNodeCommand('--version');
+    expect(canonicalCommand.entryPoint).not.toBe(legacyEntry);
+    expect(canonicalCommand.entryPoint).toMatch(/cli\.(ts|js)$/);
     const log = makeLog();
 
     const result = await performNpmUpdateEdge('10.0.0-rc.12', '10.0.0-rc.11', log.fn);
 
     expect(result).toBe('updated');
     expect(execFileCalls).toEqual([{
-      file: canonicalCommand.nodeExecutable,
-      args: daemonRestartCommandArgs(canonicalCommand, '--version'),
+      file: canonicalCommand.executable,
+      args: canonicalCommand.args,
       opts: { encoding: 'utf-8', timeout: 30_000 },
     }]);
   });

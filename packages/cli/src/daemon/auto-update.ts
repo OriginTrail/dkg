@@ -44,10 +44,7 @@ import {
   type DkgConfig,
   type ResolvedAutoUpdateConfig,
 } from '../config.js';
-import {
-  daemonRestartCommandArgs,
-  type DaemonRestartCommand,
-} from '../daemon-entrypoint.js';
+import type { DaemonNodeCommand } from '../daemon-entrypoint.js';
 import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan, type AutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
   _autoUpdateIo,
@@ -1578,12 +1575,12 @@ export async function performNpmUpdateEdge(
     return "failed";
   }
   try {
-    const restartCommand = _autoUpdateIo.resolveDaemonRestartCommand();
+    const verificationCommand = _autoUpdateIo.resolveDaemonNodeCommand('--version');
     return await _performNpmUpdateInnerEdge(
       targetVersion,
       currentVersion,
       log,
-      restartCommand,
+      verificationCommand,
     );
   } finally {
     await releaseUpdateLock();
@@ -1595,7 +1592,7 @@ async function _performNpmUpdateInnerEdge(
   targetVersion: string,
   currentVersion: string | null,
   log: (msg: string) => void,
-  restartCommand: DaemonRestartCommand,
+  verificationCommand: DaemonNodeCommand,
 ): Promise<UpdateStatus> {
   // Destructure from `_autoUpdateIo` so unit tests can stub each
   // dependency — matches the existing `_performNpmUpdateInner`
@@ -1648,7 +1645,7 @@ async function _performNpmUpdateInnerEdge(
     execFileIo: execFileAsyncIo,
     targetVersion,
     currentVersion,
-    restartCommand,
+    verificationCommand,
     log,
   });
   switch (verificationOutcome.kind) {
@@ -1697,13 +1694,13 @@ function parseReportedDkgVersion(output: string): string | undefined {
 
 async function verifyGlobalDkgVersion(
   execFileIo: EdgeExecFile,
-  restartCommand: DaemonRestartCommand,
+  verificationCommand: DaemonNodeCommand,
   expectedVersion: string,
   context: 'self-check' | 'rollback',
 ): Promise<string> {
   const { stdout, stderr } = await execFileIo(
-    restartCommand.nodeExecutable,
-    daemonRestartCommandArgs(restartCommand, '--version'),
+    verificationCommand.executable,
+    verificationCommand.args,
     {
       encoding: 'utf-8',
       timeout: 30_000,
@@ -1722,14 +1719,14 @@ async function verifyInstalledCliOrRollback(options: {
   execFileIo: EdgeExecFile;
   targetVersion: string;
   currentVersion: string | null;
-  restartCommand: DaemonRestartCommand;
+  verificationCommand: DaemonNodeCommand;
   log: (msg: string) => void;
 }): Promise<InstalledCliVerificationOutcome> {
-  const { execIo, execFileIo, targetVersion, currentVersion, restartCommand, log } = options;
+  const { execIo, execFileIo, targetVersion, currentVersion, verificationCommand, log } = options;
   try {
     const reported = await verifyGlobalDkgVersion(
       execFileIo,
-      restartCommand,
+      verificationCommand,
       targetVersion,
       'self-check',
     );
@@ -1748,7 +1745,7 @@ async function verifyInstalledCliOrRollback(options: {
     await installGlobalCliVersion(execIo, currentVersion);
     const reported = await verifyGlobalDkgVersion(
       execFileIo,
-      restartCommand,
+      verificationCommand,
       currentVersion,
       'rollback',
     );
