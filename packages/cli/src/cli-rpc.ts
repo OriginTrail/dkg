@@ -7,6 +7,7 @@ import {
   noteRpcExhaustion,
   ChainRpcTransportError,
   createRpcTimeoutError,
+  RPC_RECEIPT_TIMEOUT_MS,
   resolveReceiptTimeoutMs,
 } from '@origintrail-official/dkg-chain';
 import { cliSleep, cliErrorMessage } from './cli-helpers.js';
@@ -15,7 +16,10 @@ const CLI_RPC_READ_STALL_TIMEOUT_MS = 4_000;
 const CLI_RPC_BROADCAST_TIMEOUT_MS = 10_000;
 const CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS = 5_000;
 const CLI_RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
-const CLI_RPC_RECEIPT_TIMEOUT_MS = 180_000;
+// Backwards-compatible export for command modules that already import the CLI
+// name. The chain package owns the default so direct CLI writes cannot drift
+// from adapter-backed writes when chain.receiptTimeoutMs is omitted.
+const CLI_RPC_RECEIPT_TIMEOUT_MS = RPC_RECEIPT_TIMEOUT_MS;
 
 function cliWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -158,9 +162,7 @@ async function sendCliRawTransactionWithFailover(
     );
   }
 
-  const receiptTimeoutMs = options.receiptTimeoutMs === undefined
-    ? CLI_RPC_RECEIPT_TIMEOUT_MS
-    : resolveReceiptTimeoutMs(options.receiptTimeoutMs);
+  const receiptTimeoutMs = resolveReceiptTimeoutMs(options.receiptTimeoutMs);
   const deadline = Date.now() + receiptTimeoutMs;
   let lastReceiptError: unknown;
   while (Date.now() < deadline) {

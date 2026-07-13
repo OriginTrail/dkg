@@ -154,7 +154,11 @@ describe('cli-rpc classifier consolidation (W4)', () => {
         '0xdefault-deadline',
       ).catch((err) => err);
 
-      await vi.advanceTimersByTimeAsync(CLI_RPC_RECEIPT_TIMEOUT_MS + 1);
+      // Pin the documented/canonical ten-minute contract independently of the
+      // production constant so a drift back to the old three-minute CLI value
+      // fails this regression test.
+      expect(CLI_RPC_RECEIPT_TIMEOUT_MS).toBe(600_000);
+      await vi.advanceTimersByTimeAsync(600_001);
       await expect(result).resolves.toMatchObject({
         code: 'RPC_TIMEOUT',
         txHash: '0xdefault-deadline',
