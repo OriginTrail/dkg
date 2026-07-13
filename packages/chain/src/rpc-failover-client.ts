@@ -57,9 +57,10 @@ import {
 } from './evm-adapter-constants.js';
 
 /**
- * Write-phase timeout policy. These named values are consumed by both the live
- * RPC calls below and the signer-lane budget helpers, so changing a phase cap
- * cannot silently leave a detached step-count model behind.
+ * Local write-phase timeout policy. Every named value is consumed directly by
+ * a live RPC/signing deadline below. Signer-lane admission deliberately uses a
+ * separate coarse operation envelope rather than duplicating these per-attempt
+ * caps in an exact-budget model.
  */
 const POPULATE_AND_SIGN_PHASE_TIMEOUT_MS = {
   endpointValidation: RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
@@ -75,42 +76,6 @@ const RECEIPT_LOOKUP_PHASE_TIMEOUT_MS = {
   endpointValidation: RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
   transactionReceiptLookup: RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
 } as const;
-
-function normalizedEndpointCount(endpointCount: number): number {
-  return Number.isFinite(endpointCount) ? Math.max(1, Math.floor(endpointCount)) : 1;
-}
-
-function phaseTimeoutTotalMs(phases: Readonly<Record<string, number>>): number {
-  return Object.values(phases).reduce((total, timeoutMs) => total + timeoutMs, 0);
-}
-
-/** Worst-case bound owned beside the populate/sign endpoint loop below. */
-export function rpcPopulateAndSignExecutionBudgetMs(endpointCount: number): number {
-  return normalizedEndpointCount(endpointCount)
-    * phaseTimeoutTotalMs(POPULATE_AND_SIGN_PHASE_TIMEOUT_MS);
-}
-
-/** Worst-case bound for one pass through the broadcast endpoint loop below. */
-export function rpcBroadcastPassExecutionBudgetMs(endpointCount: number): number {
-  return normalizedEndpointCount(endpointCount)
-    * phaseTimeoutTotalMs(BROADCAST_PHASE_TIMEOUT_MS);
-}
-
-/** Worst-case bound for one pass through the receipt lookup endpoint loop. */
-export function rpcReceiptLookupPassExecutionBudgetMs(endpointCount: number): number {
-  return normalizedEndpointCount(endpointCount)
-    * phaseTimeoutTotalMs(RECEIPT_LOOKUP_PHASE_TIMEOUT_MS);
-}
-
-/** Worst-case bound for one canonical capped point-read pass across live endpoints. */
-export function rpcCappedPointReadExecutionBudgetMs(endpointCount: number): number {
-  const count = normalizedEndpointCount(endpointCount);
-  const perEndpointCapMs = resolveCapMs('cappedPointRead', count);
-  if (perEndpointCapMs == null) {
-    throw new Error('cappedPointRead must always define a per-endpoint timeout');
-  }
-  return count * perEndpointCapMs;
-}
 
 /**
  * One RPC endpoint as a SINGLE boundary: the bare per-endpoint provider paired

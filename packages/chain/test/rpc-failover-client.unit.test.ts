@@ -35,7 +35,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   resolveCapMs,
-  rpcCappedPointReadExecutionBudgetMs,
   type SignPopulatedFn,
 } from '../src/rpc-failover-client.js';
 import {
@@ -80,8 +79,6 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
     expect(resolveCapMs('cappedPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('cappedWideLogScan', 1)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
     expect(resolveCapMs('cappedWideLogScan', 2)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
-    expect(rpcCappedPointReadExecutionBudgetMs(1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
-    expect(rpcCappedPointReadExecutionBudgetMs(2)).toBe(2 * RPC_READ_STALL_TIMEOUT_MS);
   });
 });
 
