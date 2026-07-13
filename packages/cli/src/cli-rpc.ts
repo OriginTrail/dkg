@@ -128,6 +128,10 @@ async function sendCliRawTransactionWithFailover(
   urls?: string[],
   options: { receiptTimeoutMs?: number } = {},
 ): Promise<ethers.TransactionReceipt> {
+  // Validate every caller-supplied option before broadcasting. A configuration
+  // error must never report command failure after the signed transaction has
+  // already reached the chain.
+  const receiptTimeoutMs = resolveReceiptTimeoutMs(options.receiptTimeoutMs);
   let lastError: unknown;
   for (let i = 0; i < providers.length; i += 1) {
     try {
@@ -162,7 +166,6 @@ async function sendCliRawTransactionWithFailover(
     );
   }
 
-  const receiptTimeoutMs = resolveReceiptTimeoutMs(options.receiptTimeoutMs);
   const deadline = Date.now() + receiptTimeoutMs;
   let lastReceiptError: unknown;
   while (Date.now() < deadline) {

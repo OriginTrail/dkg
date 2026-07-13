@@ -80,6 +80,24 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     expect(calls).toBe(1);
   });
 
+  it('rejects an invalid receipt deadline before broadcasting', async () => {
+    const broadcastTransaction = vi.fn(async () => ({ hash: '0xside-effect' }));
+    const provider = {
+      broadcastTransaction,
+      getTransactionReceipt: async () => null,
+    } as any;
+
+    await expect(sendCliRawTransactionWithFailover(
+      [provider],
+      '0xsigned',
+      '0xhash',
+      ['https://rpc.example'],
+      { receiptTimeoutMs: 999 },
+    )).rejects.toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+
+    expect(broadcastTransaction).not.toHaveBeenCalled();
+  });
+
   it('emits a structured RPC_RECEIPT_LOOKUP_FAILED (with the original txHash) when receipt lookup fails on every provider after a successful broadcast', async () => {
     // #1332 review: drives the REAL CLI receipt emitter end-to-end (broadcast OK,
     // then retryable receipt failures on all providers) so a regression that drops
