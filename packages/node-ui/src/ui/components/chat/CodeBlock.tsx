@@ -6,8 +6,9 @@ type Highlighter = {
   codeToHtml: (code: string, opts: { lang: string; theme: string }) => string;
 };
 
-// Curated allow-list — kept narrow so the lazy-loaded shiki bundle stays
-// small. Includes languages this monorepo actually uses in fenced blocks:
+// Curated allow-list mirrored by the fine-grained lazy bundle in
+// shikiHighlighter.ts. Includes languages this monorepo actually uses in
+// fenced blocks:
 // Solidity contracts, Rust/Go adapters, SPARQL, TOML configs, diffs in
 // review threads, and Dockerfiles for deployment notes.
 const SUPPORTED_LANGS = [
@@ -22,11 +23,8 @@ let highlighterPromise: Promise<Highlighter> | null = null;
 
 function loadHighlighter(): Promise<Highlighter> {
   if (highlighterPromise) return highlighterPromise;
-  highlighterPromise = import('shiki').then((shiki) =>
-    shiki.createHighlighter({
-      themes: ['github-dark', 'github-light'],
-      langs: [...SUPPORTED_LANGS],
-    }) as Promise<Highlighter>,
+  highlighterPromise = import('./shikiHighlighter.js').then((shiki) =>
+    shiki.createHighlighter() as Promise<Highlighter>,
   ).catch((err) => {
     // Reset so the next code block retries instead of holding a dead promise.
     highlighterPromise = null;
