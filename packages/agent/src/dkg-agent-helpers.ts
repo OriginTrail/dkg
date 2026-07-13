@@ -403,6 +403,7 @@ export function applyDefaultLargeLiteralStorage(
 
 export function isLocalOxigraphConfig(storeConfig: TripleStoreConfig): boolean {
   return storeConfig.backend === 'oxigraph'
+    || storeConfig.backend === 'oxigraph-worker'
     || storeConfig.backend === 'oxigraph-persistent';
 }
 

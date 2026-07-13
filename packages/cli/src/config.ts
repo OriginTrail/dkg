@@ -19,12 +19,6 @@ import {
   STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
-import {
-  getStoreBackendPolicy,
-  isExternalStoreBackend,
-  isRetiredStoreBackend,
-  configBackendList,
-} from './store-backends.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -580,7 +574,7 @@ export interface DkgConfig {
   llm?: LlmConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
-  /** Triple store backend override (default: daemon-managed oxigraph-server). */
+  /** Triple store backend override (default: oxigraph-worker with file persistence). */
   store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean };
   /**
    * Intentional cap on how many persisted context-graph subscriptions a node
@@ -1837,31 +1831,34 @@ export interface StoreConfigValidationError {
 export function validateStoreConfig(config: DkgConfig): StoreConfigValidationError[] {
   const errors: StoreConfigValidationError[] = [];
   const backend = config.store?.backend;
-  if (isRetiredStoreBackend(backend)) {
-    return [{
-      field: 'store.backend',
-      message:
-        `${EXTERNAL_VALIDATION_PREFIX} "${backend}" is no longer supported. ` +
-        `Use one of: ${configBackendList()}.`,
-    }];
-  }
-  if (!isExternalStoreBackend(backend)) return errors;
+  // Mirror of `isExternalBackend` from @origintrail-official/dkg-storage.
+  // Duplicated here to keep config.ts free of upward dependencies on the
+  // storage package (config.ts is leaf-imported by many other modules).
+  const isExternal = backend === 'blazegraph' || backend === 'sparql-http';
+  if (!isExternal) return errors;
 
   const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-  const policy = getStoreBackendPolicy(backend);
-  if (!policy || policy.kind !== 'external') {
-    throw new Error(`Missing external-store policy for "${backend}"`);
-  }
-  const queryOption = policy.queryEndpointOption;
-  const queryEndpoint = opts[queryOption];
-  if (typeof queryEndpoint !== 'string' || !queryEndpoint.trim()) {
-    errors.push({
-      field: `store.options.${queryOption}`,
-      message:
-        `${EXTERNAL_VALIDATION_PREFIX} is "${backend}" but ` +
-        `store.options.${queryOption} is missing. Set it to the SPARQL query endpoint URL ` +
-        `or switch backend to oxigraph-server.`,
-    });
+
+  if (backend === 'blazegraph') {
+    if (typeof opts.url !== 'string' || !opts.url.trim()) {
+      errors.push({
+        field: 'store.options.url',
+        message:
+          `${EXTERNAL_VALIDATION_PREFIX} is "blazegraph" but ` +
+          `store.options.url is missing. Set it to the SPARQL endpoint URL ` +
+          `(e.g. http://127.0.0.1:9999/bigdata/namespace/mynode/sparql) or ` +
+          `switch backend to oxigraph-worker.`,
+      });
+    }
+  } else if (backend === 'sparql-http') {
+    if (typeof opts.queryEndpoint !== 'string' || !opts.queryEndpoint.trim()) {
+      errors.push({
+        field: 'store.options.queryEndpoint',
+        message:
+          `${EXTERNAL_VALIDATION_PREFIX} is "sparql-http" but ` +
+          `store.options.queryEndpoint is missing. Set it to the SPARQL query URL.`,
+      });
+    }
   }
 
   if (config.largeLiteralStorage?.enabled === true) {

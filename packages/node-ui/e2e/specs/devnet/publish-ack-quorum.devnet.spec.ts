@@ -17,7 +17,7 @@
  * slow-RPC fault legs those PRs also fixed cannot be induced against a healthy
  * black-box devnet — they are pinned by the unit/integration suites shipped in
  * #1404 (publisher-runner-ack-readiness, policy-retry) and #1408
- * (storage-ack-core-unavailable and related store-outage scenarios).
+ * (storage-ack-core-unavailable, oxigraph-worker-respawn).
  */
 import { test, expect } from '../../fixtures/base.js';
 import { requireDevnetNode, requireDevnetPrecondition, waitForDevnetStatus } from '../../helpers/devnet.js';

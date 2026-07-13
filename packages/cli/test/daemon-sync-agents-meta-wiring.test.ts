@@ -114,7 +114,6 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
       nodeRole: 'core',
-      store: { backend: 'oxigraph' },
       chain: {
         type: 'evm',
         rpcUrl: 'https://private-rpc.example',

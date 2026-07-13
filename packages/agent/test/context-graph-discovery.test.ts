@@ -1303,10 +1303,8 @@ describe('listContextGraphs merge', () => {
   }, 15000);
 
   it('bypasses list cache for unknown configured store backends', async () => {
-    const backend = registerTripleStoreAdapter(
-      'test-remote-list-cache-backend',
-      async () => new OxigraphStore(),
-    );
+    const backend = 'test-remote-list-cache-backend';
+    registerTripleStoreAdapter(backend, async () => new OxigraphStore());
     const created = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'ContextGraphTestAgent',

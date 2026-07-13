@@ -727,10 +727,8 @@ describe('GraphSetIndexStore', () => {
   });
 
   it('leaves custom backends uncached unless explicitly enabled', async () => {
-    const backend = registerTripleStoreAdapter(
-      'custom-remote-graph-set-index-test',
-      async () => new OxigraphStore(),
-    );
+    const backend = 'custom-remote-graph-set-index-test';
+    registerTripleStoreAdapter(backend, async () => new OxigraphStore());
 
     const defaultStore = await createTripleStore({ backend });
     expect(defaultStore.listGraphsByPrefix).toBeUndefined();

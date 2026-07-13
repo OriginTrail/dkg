@@ -32,7 +32,6 @@ import {
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
-import { storeFlagBackendList } from '../store-backends.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
@@ -190,7 +189,7 @@ hermesCmd
   )
   .option(
     '--store <backend>',
-    `Triple-store backend (${storeFlagBackendList(' | ')}). Validates the URL and persists the store block after setup.`,
+    'Triple-store backend (oxigraph | blazegraph | sparql-http). Validates the URL and persists the store block after setup.',
   )
   .option(
     '--store-url <url>',
