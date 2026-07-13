@@ -236,23 +236,11 @@ interface ProtocolOutboxStoreBase {
    */
   dropExpired(now: number): ProtocolOutboxEntry[];
 
-  /**
-   * Optional cleanup fast path that deletes the same rows as
-   * `dropExpired` but returns metadata without payload bytes.
-   */
-  dropExpiredMetadata?(now: number): ProtocolOutboxMetadata[];
-
   /** Total entries currently queued. For diagnostics + tests. */
   size(): number;
 
   /** Snapshot of every full entry, including payload bytes. */
   list(): ProtocolOutboxEntry[];
-
-  /**
-   * Optional storage-level diagnostics fast path that omits payload bytes.
-   * Implementations must preserve the same ordering as `list()`.
-   */
-  listMetadata?(): ProtocolOutboxMetadata[];
 
   /**
    * Look up a specific entry by `(peer, protocol, messageId)`.
@@ -272,6 +260,12 @@ interface ProtocolOutboxStoreBase {
  * do not need to materialize full payload-bearing peer snapshots.
  */
 export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
+  /** Delete expired rows without reading or returning payload bytes. */
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[];
+
+  /** Read diagnostics metadata without materializing payload bytes. */
+  listMetadata(): ProtocolOutboxMetadata[];
+
   /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
   hasPendingFor(peer: string): boolean;
 
@@ -287,6 +281,12 @@ export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
  * Legacy stores exposed the full peer snapshot instead of a boolean fast path.
  */
 export interface LegacyProtocolOutboxStore extends ProtocolOutboxStoreBase {
+  /** Optional forward-compatible cleanup path that omits payload bytes. */
+  dropExpiredMetadata?(now: number): ProtocolOutboxMetadata[];
+
+  /** Optional forward-compatible diagnostics path that omits payload bytes. */
+  listMetadata?(): ProtocolOutboxMetadata[];
+
   /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
   pendingFor(peer: string): ProtocolOutboxEntry[];
 

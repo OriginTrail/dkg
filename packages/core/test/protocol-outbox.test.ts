@@ -231,11 +231,13 @@ describe('ProtocolOutbox.due / peer presence', () => {
       hasPendingFor: (peer) => peer === PEER_A,
       due: backing.due.bind(backing),
       dropExpired: backing.dropExpired.bind(backing),
+      dropExpiredMetadata: backing.dropExpiredMetadata.bind(backing),
       size: backing.size.bind(backing),
       list: () => {
         listCalls += 1;
         return [newer, otherPeer, older];
       },
+      listMetadata: backing.listMetadata.bind(backing),
       getEntry: backing.getEntry.bind(backing),
     };
     const outbox = new ProtocolOutbox(currentStore);
@@ -390,6 +392,55 @@ describe('ProtocolOutbox.listMetadata', () => {
       metadataListReads: 1,
       metadataExpirationReads: 1,
     });
+  });
+
+  it('strips payloads accidentally returned by metadata fast paths', () => {
+    const backing = new InMemoryProtocolOutboxStore();
+    const entry: ProtocolOutboxEntry = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: MSG_1,
+      payload: PAYLOAD,
+      attempts: 1,
+      firstFailureAt: 1_000,
+      lastAttemptAt: 1_000,
+      nextAttemptAt: 6_000,
+      lastError: 'offline',
+    };
+    const store: ProtocolOutboxStore = {
+      enqueue: backing.enqueue.bind(backing),
+      markDelivered: backing.markDelivered.bind(backing),
+      hasEntry: backing.hasEntry.bind(backing),
+      hasPendingFor: backing.hasPendingFor.bind(backing),
+      due: backing.due.bind(backing),
+      dropExpired: backing.dropExpired.bind(backing),
+      dropExpiredMetadata: () => [entry],
+      size: backing.size.bind(backing),
+      list: backing.list.bind(backing),
+      listMetadata: () => [entry],
+      getEntry: backing.getEntry.bind(backing),
+    };
+    const outbox = new ProtocolOutbox(store);
+
+    expect(outbox.listMetadata()[0]).not.toHaveProperty('payload');
+    expect(outbox.dropExpiredMetadata(10_000)[0]).not.toHaveProperty('payload');
+  });
+
+  it('uses the in-memory metadata paths without calling full-entry methods', () => {
+    const store = new InMemoryProtocolOutboxStore();
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'offline', 0);
+    Object.assign(store, {
+      list: () => {
+        throw new Error('metadata listing materialized payloads');
+      },
+      dropExpired: () => {
+        throw new Error('metadata expiration materialized payloads');
+      },
+    });
+    const outbox = new ProtocolOutbox(store, { maxAgeMs: 60_000 });
+
+    expect(outbox.listMetadata()).toHaveLength(1);
+    expect(outbox.dropExpiredMetadata(60_001)).toHaveLength(1);
   });
 });
 

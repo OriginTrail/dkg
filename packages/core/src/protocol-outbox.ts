@@ -144,30 +144,31 @@ type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
 
 /**
  * Keep compatibility at the constructor boundary. Internally the outbox only
- * sees the current boolean peer-presence contract, while a legacy snapshot
- * store is adapted once with all method receivers preserved.
+ * sees the current metadata + boolean peer-presence contract, while legacy
+ * stores are adapted once with all method receivers preserved.
  */
 function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOutboxStore {
-  if (typeof store.hasPendingFor === 'function') return store as ProtocolOutboxStore;
-
-  const legacy = store as LegacyProtocolOutboxStore;
   const normalized: ProtocolOutboxStore = {
-    enqueue: legacy.enqueue.bind(legacy),
-    markDelivered: legacy.markDelivered.bind(legacy),
-    hasEntry: legacy.hasEntry.bind(legacy),
-    due: legacy.due.bind(legacy),
-    dropExpired: legacy.dropExpired.bind(legacy),
-    size: legacy.size.bind(legacy),
-    list: legacy.list.bind(legacy),
-    getEntry: legacy.getEntry.bind(legacy),
-    hasPendingFor: (peer) => legacy.pendingFor(peer).length > 0,
-    pendingFor: legacy.pendingFor.bind(legacy),
+    enqueue: store.enqueue.bind(store),
+    markDelivered: store.markDelivered.bind(store),
+    hasEntry: store.hasEntry.bind(store),
+    due: store.due.bind(store),
+    dropExpired: store.dropExpired.bind(store),
+    dropExpiredMetadata: store.dropExpiredMetadata
+      ? store.dropExpiredMetadata.bind(store)
+      : (now) => store.dropExpired(now).map(cloneOutboxMetadata),
+    size: store.size.bind(store),
+    list: store.list.bind(store),
+    listMetadata: store.listMetadata
+      ? store.listMetadata.bind(store)
+      : () => store.list().map(cloneOutboxMetadata),
+    getEntry: store.getEntry.bind(store),
+    hasPendingFor: store.hasPendingFor
+      ? store.hasPendingFor.bind(store)
+      : (peer) => (store as LegacyProtocolOutboxStore).pendingFor(peer).length > 0,
   };
-  if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
-  if (legacy.dropExpiredMetadata) {
-    normalized.dropExpiredMetadata = legacy.dropExpiredMetadata.bind(legacy);
-  }
-  if (legacy.listMetadata) normalized.listMetadata = legacy.listMetadata.bind(legacy);
+  if (store.duePage) normalized.duePage = store.duePage.bind(store);
+  if (store.pendingFor) normalized.pendingFor = store.pendingFor.bind(store);
   return normalized;
 }
 
@@ -311,8 +312,7 @@ export class ProtocolOutbox {
 
   /** Metadata-only expiration, with a compatibility fallback for legacy stores. */
   dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    if (this.store.dropExpiredMetadata) return this.store.dropExpiredMetadata(now);
-    return this.store.dropExpired(now).map(cloneOutboxMetadata);
+    return this.store.dropExpiredMetadata(now).map(cloneOutboxMetadata);
   }
 
   /** Total entries currently queued. */
@@ -331,8 +331,7 @@ export class ProtocolOutbox {
 
   /** Metadata-only diagnostics snapshot, with a compatibility fallback. */
   listMetadata(): ProtocolOutboxMetadata[] {
-    if (this.store.listMetadata) return this.store.listMetadata();
-    return this.store.list().map(cloneOutboxMetadata);
+    return this.store.listMetadata().map(cloneOutboxMetadata);
   }
 
   /**
@@ -460,12 +459,27 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     return dropped;
   }
 
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    const dropped: ProtocolOutboxMetadata[] = [];
+    for (const [key, entry] of this.entries) {
+      if (now - entry.firstFailureAt > this.maxAgeMs) {
+        dropped.push(cloneOutboxMetadata(entry));
+        this.entries.delete(key);
+      }
+    }
+    return dropped;
+  }
+
   size(): number {
     return this.entries.size;
   }
 
   list(): ProtocolOutboxEntry[] {
     return Array.from(this.entries.values()).map(cloneOutboxEntry);
+  }
+
+  listMetadata(): ProtocolOutboxMetadata[] {
+    return Array.from(this.entries.values()).map(cloneOutboxMetadata);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
