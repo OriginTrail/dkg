@@ -2057,25 +2057,29 @@ export class EVMChainAdapterBase {
    * then max TRAC) so the write still attempts and the contract gives the real
    * verdict.
    */
-  private async _scanSignerFunding(
-    candidates: Wallet[],
-    funding: FundingMode,
+  private async _scanCandidateFunding<T extends { address: string }>(
+    candidates: T[],
+    fundingFor: (candidate: T) => FundingMode,
     forceRefresh = false,
   ): Promise<{
     fundings: Array<{ native: bigint | null; trac: bigint | null }>;
     fundableIdx: number[];
   }> {
+    const fundingModes = candidates.map(fundingFor);
     const fundings = await Promise.all(
-      candidates.map((signer) => this.getWalletFunding(signer.address, {
-        forceRefresh,
-        metrics: funding.kind,
-      })),
+      candidates.map((candidate, index) => {
+        const funding = fundingModes[index];
+        return this.getWalletFunding(candidate.address, {
+          forceRefresh,
+          metrics: funding.kind,
+        });
+      }),
     );
     const fundable = await Promise.all(
-      candidates.map((signer, index) => this.isWalletFundable(
-        signer.address,
+      candidates.map((candidate, index) => this.isWalletFundable(
+        candidate.address,
         fundings[index],
-        funding,
+        fundingModes[index],
       )),
     );
     const fundableIdx: number[] = [];
@@ -2085,11 +2089,11 @@ export class EVMChainAdapterBase {
     return { fundings, fundableIdx };
   }
 
-  private _preferredFundableSigner(
-    candidates: Wallet[],
+  private _preferredFundableCandidate<T extends { address: string }>(
+    candidates: T[],
     fundableIdx: number[],
     preferIdle: boolean,
-  ): Wallet {
+  ): T {
     if (preferIdle && !this.idleAwareSelectionDisabled) {
       const idle = fundableIdx.find((index) =>
         !this.signerTxSerializer.isActive(candidates[index].address));
@@ -2105,14 +2109,17 @@ export class EVMChainAdapterBase {
   ): Promise<Wallet> {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
-    const { fundings, fundableIdx } = await this._scanSignerFunding(candidates, funding);
+    const { fundings, fundableIdx } = await this._scanCandidateFunding(
+      candidates,
+      () => funding,
+    );
     if (fundableIdx.length > 0) {
       // Idle preference is a SOFT, fail-open bias: among funded candidates,
       // prefer one whose per-wallet send lock is currently free so a
       // deadline-bound write doesn't queue behind a slow in-flight send. Falls
       // straight through to the first funded candidate when none is idle or the
       // preference is off — so it can never EXCLUDE a wallet, only reorder.
-      return this._preferredFundableSigner(candidates, fundableIdx, policy.preferIdle);
+      return this._preferredFundableCandidate(candidates, fundableIdx, policy.preferIdle);
     }
     let bestIdx = 0;
     for (let i = 1; i < candidates.length; i += 1) {
@@ -2135,21 +2142,34 @@ export class EVMChainAdapterBase {
     funding: NativeAndTracFundingMode,
     policy: { preferIdle: boolean },
   ): Promise<Wallet> {
-    const initial = await this._scanSignerFunding(candidates, funding);
+    return this._selectFundedCandidateOrThrow(candidates, () => funding, policy);
+  }
+
+  /**
+   * Canonical fail-closed funded-candidate selector. Ordinary strict signer
+   * reservation and publish-plan candidates share the same cached scan, fresh
+   * terminal recheck, idle preference, diagnostics, and typed failure.
+   */
+  private async _selectFundedCandidateOrThrow<T extends { address: string }>(
+    candidates: T[],
+    fundingFor: (candidate: T) => NativeAndTracFundingMode,
+    policy: { preferIdle: boolean },
+  ): Promise<T> {
+    const initial = await this._scanCandidateFunding(candidates, fundingFor);
     if (initial.fundableIdx.length > 0) {
-      return this._preferredFundableSigner(candidates, initial.fundableIdx, policy.preferIdle);
+      return this._preferredFundableCandidate(candidates, initial.fundableIdx, policy.preferIdle);
     }
 
     // Cached balances are appropriate for soft routing, but a terminal
     // whole-pool claim must be based on a fresh snapshot. Operators commonly
     // fund a wallet and retry immediately, inside the advisory cache TTL.
-    const refreshed = await this._scanSignerFunding(candidates, funding, true);
+    const refreshed = await this._scanCandidateFunding(candidates, fundingFor, true);
     if (refreshed.fundableIdx.length > 0) {
-      return this._preferredFundableSigner(candidates, refreshed.fundableIdx, policy.preferIdle);
+      return this._preferredFundableCandidate(candidates, refreshed.fundableIdx, policy.preferIdle);
     }
 
-    const diagnostics = candidates.map((signer, index) => ({
-      address: signer.address,
+    const diagnostics = candidates.map((candidate, index) => ({
+      address: candidate.address,
       nativeWei: refreshed.fundings[index].native,
       tracWei: refreshed.fundings[index].trac,
     }));
@@ -2221,34 +2241,6 @@ export class EVMChainAdapterBase {
     };
   }
 
-  private async _scanPublisherCandidatePlans(
-    plans: PublisherCandidatePlan[],
-    forceRefresh = false,
-  ): Promise<{
-    fundings: Array<{ native: bigint | null; trac: bigint | null }>;
-    fundableIdx: number[];
-  }> {
-    const fundings = await Promise.all(plans.map((plan) => this.getWalletFunding(
-      plan.publisherAddress,
-      { forceRefresh, metrics: 'native+trac' },
-    )));
-    const fundable = await Promise.all(plans.map((plan, index) => this.isWalletFundable(
-      plan.publisherAddress,
-      fundings[index],
-      {
-        kind: 'native+trac',
-        nativeFloorWei: this.minPublisherNativeWei,
-        tracFloorWei: this.minPublisherTracWei,
-        requiredTracWei: plan.tokenAmount,
-        pca: { kind: 'publish', epochs: plan.publishEpochs },
-      },
-    )));
-    return {
-      fundings,
-      fundableIdx: fundable.flatMap((isFundable, index) => isFundable ? [index] : []),
-    };
-  }
-
   /**
    * Adapter-owned publish planning state machine. Candidate discovery, PCA
    * lifetime selection, exact quote validation, strict funding, and cursor
@@ -2301,26 +2293,16 @@ export class EVMChainAdapterBase {
       const plans = await Promise.all(
         authorized.map((signer) => this._publisherCandidatePlan(signer, request, quote)),
       );
-      const initial = await this._scanPublisherCandidatePlans(plans);
-      if (initial.fundableIdx.length > 0) {
-        const plan = plans[initial.fundableIdx[0]];
-        return plan;
-      }
-
-      // A terminal pool-wide decision must not use stale advisory balances.
-      const refreshed = await this._scanPublisherCandidatePlans(plans, true);
-      if (refreshed.fundableIdx.length > 0) {
-        return plans[refreshed.fundableIdx[0]];
-      }
-
-      const diagnostics = plans.map((plan, index) => ({
-        address: plan.publisherAddress,
-        nativeWei: refreshed.fundings[index].native,
-        tracWei: refreshed.fundings[index].trac,
-      }));
-      throw new InsufficientPublisherFundsError(
-        formatNoFundedPublisherWalletMessage(diagnostics),
-        diagnostics,
+      return this._selectFundedCandidateOrThrow(
+        plans,
+        (plan) => ({
+          kind: 'native+trac',
+          nativeFloorWei: this.minPublisherNativeWei,
+          tracFloorWei: this.minPublisherTracWei,
+          requiredTracWei: plan.tokenAmount,
+          pca: { kind: 'publish', epochs: plan.publishEpochs },
+        }),
+        { preferIdle: false },
       );
     });
     // Do not expose the internal Wallet carried only for cursor advancement.
