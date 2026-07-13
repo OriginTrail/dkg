@@ -138,6 +138,12 @@ export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = { mode: 'per-publish' };
 export const DEFAULT_REPLENISH_TARGET_ALLOWANCE: bigint = 1000n * (10n ** 18n);
 export const DEFAULT_REFILL_BELOW_FRACTION: number = 0.1;
 
+/**
+ * Maximum time the EVM adapter awaits a V10 pre-broadcast write-ahead hook.
+ * Exceeding this deadline fails closed: the signed transaction is not sent.
+ */
+export const V10_WRITE_AHEAD_HOOK_TIMEOUT_MS = 30_000;
+
 /** Canonical greenfield UAL: did:dkg:{chainId}/{DKGKnowledgeAssets}/{kaId} */
 export function buildKnowledgeAssetUal(
   chainId: string,
@@ -660,11 +666,12 @@ export interface V10PublishParams {
    * in `packages/publisher/src/dkg-publisher.ts`.
    *
    * Return type is `Promise<void> | void` so async WAL writes
-   * (disk flush, remote gossip) can run to completion before the
-   * adapter proceeds to `eth_sendRawTransaction`. Adapters MUST
-   * `await` the hook — `() => void` alone does not force synchronous
-   * callers in TypeScript, so an `async () => ...` hook passed in
-   * here would otherwise race the broadcast.
+   * (disk flush, remote gossip) can complete before the adapter proceeds to
+   * `eth_sendRawTransaction`. Adapters MUST await the hook — `() => void`
+   * alone does not force synchronous callers in TypeScript, so an async hook
+   * would otherwise race the broadcast. The EVM adapter enforces
+   * {@link V10_WRITE_AHEAD_HOOK_TIMEOUT_MS}; a hook that misses that deadline
+   * rejects the operation and the transaction remains unbroadcast.
    */
   onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
 }

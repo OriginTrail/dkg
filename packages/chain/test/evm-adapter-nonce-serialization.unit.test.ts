@@ -25,8 +25,8 @@ import {
   RPC_ENDPOINT_SET_RETRY_BACKOFF_MS,
   RPC_RECEIPT_POLL_INTERVAL_MS,
   RPC_RECEIPT_TIMEOUT_MS,
-  V10_WRITE_AHEAD_HOOK_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
+import { V10_WRITE_AHEAD_HOOK_TIMEOUT_MS } from '../src/chain-adapter.js';
 import { SignerWriteOperation } from '../src/signer-write-lane.js';
 import { connectable } from './connectable.js';
 
