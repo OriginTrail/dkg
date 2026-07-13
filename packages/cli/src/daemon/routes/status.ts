@@ -1070,8 +1070,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // GET /api/random-sampling/status — V10 RandomSampling prover snapshot.
   // Read-only; no chain calls. Cheap enough to call every few seconds
-  // from a dashboard or watch loop. Disabled-handle nodes (edge / no
-  // identity) return enabled:false with the reason in role / identityId.
+  // from a dashboard or watch loop. Disabled nodes return enabled:false
+  // with an explicit reason (edge, no identity, awaiting admission, etc.).
   if (req.method === 'GET' && path === '/api/random-sampling/status') {
     const status = agent.getRandomSamplingStatus();
     return jsonResponse(res, 200, status);

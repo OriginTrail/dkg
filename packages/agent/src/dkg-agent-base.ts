@@ -146,7 +146,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
-import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
+import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
@@ -907,6 +907,8 @@ export class DKGAgentBase {
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingHandle: RandomSamplingHandle | null = null;
+  protected randomSamplingIdentityId = 0n;
+  protected randomSamplingDisabledReason: RandomSamplingDisabledReason = 'not_started';
   protected randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingBindRetryInFlight = false;
   protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;

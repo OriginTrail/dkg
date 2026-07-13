@@ -15,43 +15,71 @@ afterAll(async () => {
 });
 
 describe('Random Sampling lifecycle gating', () => {
+  it('reports a profiled core as waiting until sharding-table admission', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 52n);
+    let sharded = false;
+    const membership = vi.spyOn(chain, 'isShardingTableMember')
+      .mockImplementation(async (identityId) => identityId === 52n && sharded);
+    const agent = await DKGAgent.create({
+      name: 'RsWaitsForStake',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+      randomSamplingTickIntervalMs: 60_000,
+    });
+    const realSetInterval = globalThis.setInterval;
+    const intervalCallbacks = new Map<
+      ReturnType<typeof setInterval>,
+      (...args: unknown[]) => void
+    >();
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((
+      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+        const handle = realSetInterval(callback, delay, ...args);
+        intervalCallbacks.set(handle, callback);
+        return handle;
+      }
+    ) as typeof setInterval);
 
-    it('defers Random Sampling until a profiled core enters the sharding table, then starts without restart', async () => {
-      const primary = ethers.Wallet.createRandom();
-      const chain = new MockChainAdapter('mock:31337', primary.address);
-      chain.seedIdentity(primary.address, 52n);
-      let sharded = false;
-      const membership = vi.spyOn(chain, 'isShardingTableMember')
-        .mockImplementation(async (identityId) => identityId === 52n && sharded);
-      const agent = await DKGAgent.create({
-        name: 'RsWaitsForStake',
-        listenHost: '127.0.0.1',
-        listenPort: 0,
-        chainAdapter: chain,
-        nodeRole: 'core',
-        randomSamplingUseWorkerThread: false,
-        randomSamplingTickIntervalMs: 60_000,
+    try {
+      await agent.start();
+      intervalSpy.mockRestore();
+
+      expect(membership).toHaveBeenCalledWith(52n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        role: 'core',
+        identityId: '52',
+        disabledReason: 'awaiting_sharding_table',
+        loop: null,
       });
 
-      try {
-        await agent.start();
-        expect(membership).toHaveBeenCalledWith(52n);
-        expect(agent.getRandomSamplingStatus().enabled).toBe(false);
+      const retryTimer = (agent as unknown as {
+        randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null;
+      }).randomSamplingBindRetryTimer;
+      expect(retryTimer).not.toBeNull();
+      const retryTick = retryTimer ? intervalCallbacks.get(retryTimer) : undefined;
+      expect(retryTick).toBeTypeOf('function');
 
-        sharded = true;
-        const result = await agent.tryStartRandomSamplingProver(
-          { operationId: 'rs-stake-recovery', operationName: 'system' },
-          false,
-        );
-        expect(result).toBe('started');
-        expect(agent.getRandomSamplingStatus()).toMatchObject({
-          enabled: true,
-          identityId: '52',
-        });
-      } finally {
-        await agent.stop().catch(() => {});
-      }
-    });
+      sharded = true;
+      retryTick?.();
+      await vi.waitFor(
+        () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
+        { timeout: 2_000, interval: 10 },
+      );
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: true,
+        identityId: '52',
+        disabledReason: null,
+      });
+    } finally {
+      intervalSpy.mockRestore();
+      await agent.stop().catch(() => {});
+    }
+  });
 });
 
 describe('DKGAgent ACK signer gating', () => {

@@ -161,6 +161,7 @@ export {
 export {
   bindRandomSampling,
   type RandomSamplingBindOptions,
+  type RandomSamplingDisabledReason,
   type RandomSamplingHandle,
   type RandomSamplingStatus,
   type AgentRole,

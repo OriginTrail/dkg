@@ -2681,12 +2681,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<RandomSamplingStartResult> {
     if (!this.started) return 'disabled';
     const rsRole: 'core' | 'edge' = (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge';
-    if (rsRole !== 'core' || this.chain.chainId === 'none') return 'disabled';
+    if (rsRole !== 'core') {
+      this.randomSamplingIdentityId = 0n;
+      this.randomSamplingDisabledReason = 'edge_node';
+      return 'disabled';
+    }
+    if (this.chain.chainId === 'none') {
+      this.randomSamplingDisabledReason = 'unsupported_chain';
+      return 'disabled';
+    }
 
     let rsIdentityId = 0n;
     try {
       rsIdentityId = await this.chain.getIdentityId();
     } catch (err) {
+      this.randomSamplingDisabledReason = 'identity_lookup_failed';
       this.log.warn(
         ctx,
         `V10 Random Sampling identity lookup failed; prover bind will retry: ${
@@ -2695,8 +2704,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       return 'retryable';
     }
+    this.randomSamplingIdentityId = rsIdentityId;
 
     if (rsIdentityId === 0n) {
+      this.randomSamplingDisabledReason = 'no_identity';
       if (logDisabled) {
         this.log.info(ctx, `V10 Random Sampling prover not started (identity=0, chain=${this.chain.chainId}); will retry`);
       }
@@ -2705,6 +2716,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const membershipProbe = this.chain.isShardingTableMember?.bind(this.chain);
     if (!membershipProbe) {
+      this.randomSamplingDisabledReason = 'unsupported_chain';
       this.log.warn(
         ctx,
         'V10 Random Sampling requires isShardingTableMember(); disabling for this adapter',
@@ -2714,6 +2726,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     try {
       if (!(await membershipProbe(rsIdentityId))) {
+        this.randomSamplingDisabledReason = 'awaiting_sharding_table';
         if (logDisabled) {
           this.log.info(
             ctx,
@@ -2724,6 +2737,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return 'retryable';
       }
     } catch (err) {
+      this.randomSamplingDisabledReason = 'eligibility_lookup_failed';
       this.log.warn(
         ctx,
         `V10 Random Sampling eligibility lookup failed; prover bind will retry: ${
@@ -2754,16 +2768,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           try { await handle.stop(); } catch { /* swallow shutdown race cleanup */ }
           return 'disabled';
         }
+        this.randomSamplingDisabledReason = 'not_started';
         handle.start();
         this.clearRandomSamplingBindRetry();
         this.log.info(ctx, `V10 Random Sampling prover started (identityId=${rsIdentityId})`);
         return 'started';
       }
+      this.randomSamplingDisabledReason = handle.getStatus().disabledReason ?? 'bind_failed';
       if (logDisabled) {
         this.log.info(ctx, `V10 Random Sampling prover not started (identity=${rsIdentityId}, chain=${this.chain.chainId})`);
       }
       return 'disabled';
     } catch (err) {
+      this.randomSamplingDisabledReason = 'bind_failed';
       this.log.warn(ctx, `Failed to bind V10 Random Sampling prover: ${err instanceof Error ? err.message : String(err)}`);
       return 'retryable';
     }
