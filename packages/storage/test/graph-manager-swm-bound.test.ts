@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as storageIndex from '../src/index.js';
 import {
   createTripleStore,
+  canonicalNamedLifecycleSharedMemoryGraphUri,
   loadSharedMemoryQuadsForScope,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
@@ -260,6 +261,9 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
         scope,
       );
       expect(quads.map((quad) => quad.object)).toEqual(['"exact"']);
+      expect(canonicalNamedLifecycleSharedMemoryGraphUri(swm, scope.identity)).toBe(
+        `${swm}/${AUTHOR_A}/7`,
+      );
       expect(await resolveSharedMemoryScopeWriteGraph(store, swm, scope)).toBe(
         `${swm}/${AUTHOR_A}/7`,
       );

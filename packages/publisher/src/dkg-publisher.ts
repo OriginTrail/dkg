@@ -3,7 +3,7 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, resolveSharedMemoryScopeWriteGraph } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, canonicalNamedLifecycleSharedMemoryGraphUri, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, resolveSharedMemoryScopeWriteGraph } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -5438,14 +5438,21 @@ export class DKGPublisher implements Publisher {
   /** A promoted KA's SWM graph URI: per-KA `…/_shared_memory/{addr}/{number}` (resolved from the assertion), else the legacy bucket. */
   private async swmGraphUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): Promise<string> {
     const num = await this.resolveKaNumber(contextGraphId, agentAddress, name, subGraphName);
+    const bucketGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     return num !== null
-      ? contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, agentAddress.toLowerCase(), num, subGraphName)
-      : this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+      ? canonicalNamedLifecycleSharedMemoryGraphUri(
+          bucketGraph,
+          { agentAddress, kaNumber: num },
+        )
+      : bucketGraph;
   }
 
   /** SWM graph URI from an explicit `{author, number}` (receiver-side / freshly-allocated generic share). */
   private swmGraphUriFor(contextGraphId: string, agentAddress: string, kaNumber: bigint, subGraphName?: string): string {
-    return contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, agentAddress.toLowerCase(), kaNumber, subGraphName);
+    return canonicalNamedLifecycleSharedMemoryGraphUri(
+      this.graphManager.sharedMemoryUri(contextGraphId, subGraphName),
+      { agentAddress, kaNumber },
+    );
   }
 
   /**

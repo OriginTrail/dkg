@@ -308,7 +308,7 @@ interface NamedLifecycleGraphResolution {
  * of historical store contents and enumeration order. Read resolution below
  * separately discovers checksum-cased aliases written by older versions.
  */
-function canonicalNamedLifecycleGraph(
+export function canonicalNamedLifecycleSharedMemoryGraphUri(
   bucketGraph: string,
   identity: NamedKnowledgeAssetGraphIdentity,
 ): string {
@@ -333,7 +333,7 @@ async function resolveNamedLifecycleReadPolicy(
   identity: NamedKnowledgeAssetGraphIdentity,
   options?: QueryOptions,
 ): Promise<NamedLifecycleGraphResolution> {
-  const canonicalGraph = canonicalNamedLifecycleGraph(bucketGraph, identity);
+  const canonicalGraph = canonicalNamedLifecycleSharedMemoryGraphUri(bucketGraph, identity);
   const legacyCompatibleReadGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
     .filter((graph) => {
       const child = parseBoundableSwmChildGraph(bucketGraph, graph);
@@ -376,7 +376,7 @@ export async function resolveSharedMemoryScopeWriteGraph(
 ): Promise<string> {
   assertSafeIri(bucketGraph);
   if (scope.kind === 'complete-family') return bucketGraph;
-  return canonicalNamedLifecycleGraph(bucketGraph, scope.identity);
+  return canonicalNamedLifecycleSharedMemoryGraphUri(bucketGraph, scope.identity);
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */

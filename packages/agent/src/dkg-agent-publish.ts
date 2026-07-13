@@ -4306,20 +4306,25 @@ export class PublishMethods extends DKGAgentBase {
       seal.authorAddress,
       seal.reservedKaId ?? packedKaId,
     );
+    const finalizedLifecycleSelection = { rootEntities: seal.rootEntities };
     const loadFinalizedLifecycleSwmQuads = async (): Promise<Quad[]> => {
-      const selection = { rootEntities: seal.rootEntities };
-      let quads = await this._loadSelectedSWMQuads(
+      return this._loadSelectedSWMQuads(
         contextGraphId,
-        selection,
+        finalizedLifecycleSelection,
         opts?.subGraphName,
         sharedMemoryScope,
       );
-      if (quads.length > 0 || sharedMemoryScope.kind !== 'named-lifecycle') return quads;
+    };
+
+    const ensureFinalizedLifecycleSwmRoots = async (): Promise<void> => {
+      const existingQuads = await loadFinalizedLifecycleSwmQuads();
+      if (existingQuads.length > 0 || sharedMemoryScope.kind !== 'named-lifecycle') return;
 
       // Compatibility for assets finalized from a full `skipSeal` share by an
       // older process: their payload can still be in the legacy SWM bucket.
-      // Move it to the deterministic named graph and retry the exact read. New
-      // finalize(layer:"swm") calls already migrate eagerly in dkg-agent.ts.
+      // This explicitly state-changing preflight moves it to the deterministic
+      // named graph before either publish branch performs its pure exact read.
+      // New finalize(layer:"swm") calls already migrate eagerly in dkg-agent.ts.
       try {
         await publisher.migrateLegacyBucketRootsToNamedLifecycle(
           contextGraphId,
@@ -4332,18 +4337,33 @@ export class PublishMethods extends DKGAgentBase {
         );
       } catch (err) {
         if ((err as { code?: string })?.code !== 'SWM_MIGRATION_SOURCE_EMPTY') throw err;
-        return quads;
       }
-      quads = await this._loadSelectedSWMQuads(
-        contextGraphId,
-        selection,
-        opts?.subGraphName,
-        sharedMemoryScope,
-      );
-      return quads;
     };
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
+    const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
+    const isExistingVmLifecycle = Boolean(vmCurrent && packedKaId !== undefined);
+    // FAIL FAST when this is an on-chain-capable daemon: a new mint below will
+    // submit the precomputed attestation, and a missing packed id would revert.
+    // Keep this validation before the compatibility preflight so an invalid
+    // legacy mint cannot mutate SWM while it is already known to be unusable.
+    const onChainCapable =
+      typeof this.chain.getEvmChainId === 'function' &&
+      typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
+    if (!isExistingVmLifecycle && recoveredReservedKaId === undefined && onChainCapable) {
+      throw new Error(
+        `publishFromFinalizedAssertion: cannot recover the §F2 reservedKaId for ` +
+          `<${assertionUri}> — the seal has neither a persisted reservedKaId nor a ` +
+          `stamped lifecycle kaId (legacy pre-OT-RFC-43-§F2 finalize). Minting with a ` +
+          `0n placeholder id would revert on-chain with KaIdNamespaceMismatch. ` +
+          `Re-finalize the assertion (POST /api/knowledge-assets/${name}/wm/finalize) ` +
+          `so the AuthorAttestation binds a valid packed kaId before publishing.`,
+      );
+    }
+
+    // The compatibility mutation is explicit and occurs once before routing;
+    // the loaders inside the update and mint branches remain read-only.
+    await ensureFinalizedLifecycleSwmRoots();
 
     let result: PublishResult;
     if (vmCurrent && packedKaId !== undefined) {
@@ -4436,28 +4456,6 @@ export class PublishMethods extends DKGAgentBase {
       // lifecycle-URN kaId re-packed above. Both are undefined only for a
       // legacy seal that predates the §F2 binding AND was never stamped with a
       // lifecycle kaId.
-      const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
-      // FAIL FAST when this is an on-chain-capable daemon: the mint below will
-      // submit `precomputedAttestation` on-chain and a 0n placeholder packs to
-      // an id outside the author's namespace → guaranteed KaIdNamespaceMismatch
-      // revert. Require re-finalization instead of signing/persisting an
-      // unusable id. The same chain-capability probe gates the seal/chain
-      // cross-check above, so on mock/no-chain runs (no V10 adapter) packedKaId
-      // is legitimately undefined, the publish never goes on-chain, and the
-      // historical 0n placeholder is harmless — keep it there.
-      const onChainCapable =
-        typeof this.chain.getEvmChainId === 'function' &&
-        typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
-      if (recoveredReservedKaId === undefined && onChainCapable) {
-        throw new Error(
-          `publishFromFinalizedAssertion: cannot recover the §F2 reservedKaId for ` +
-            `<${assertionUri}> — the seal has neither a persisted reservedKaId nor a ` +
-            `stamped lifecycle kaId (legacy pre-OT-RFC-43-§F2 finalize). Minting with a ` +
-            `0n placeholder id would revert on-chain with KaIdNamespaceMismatch. ` +
-            `Re-finalize the assertion (POST /api/knowledge-assets/${name}/wm/finalize) ` +
-            `so the AuthorAttestation binds a valid packed kaId before publishing.`,
-        );
-      }
       // #1116 (round 5) — no-data preflight BEFORE the inner publisher's
       // CG-not-registered guard. `publishFromSharedMemory` checks registration
       // (throws CG_NOT_REGISTERED) BEFORE its own no-quads check, so an

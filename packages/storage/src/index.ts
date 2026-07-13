@@ -74,6 +74,7 @@ export {
   loadSelectedSharedMemoryQuads,
   loadSharedMemoryQuadsForScope,
   loadSharedMemorySliceWithKaBoundFallback,
+  canonicalNamedLifecycleSharedMemoryGraphUri,
   resolveSharedMemoryScopeGraphs,
   resolveSharedMemoryScopeWriteGraph,
   loadSelectedVerifiableMemoryQuads,
