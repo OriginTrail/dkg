@@ -32,6 +32,7 @@ import type {
   IdempotencyCheckResult,
   MessageDirection,
   MessageIdempotencyStore,
+  LegacyProtocolOutboxStore,
   ProtocolOutboxEntry,
   ProtocolOutboxStore,
 } from './messenger-types.js';
@@ -117,8 +118,33 @@ type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
   configurePolicy?: (policy: ProtocolOutboxStorePolicy) => void;
 };
 
+/**
+ * Keep compatibility at the constructor boundary. Internally the outbox only
+ * sees the current boolean peer-presence contract, while a legacy snapshot
+ * store is adapted once with all method receivers preserved.
+ */
+function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOutboxStore {
+  if (typeof store.hasPendingFor === 'function') return store as ProtocolOutboxStore;
+
+  const legacy = store as LegacyProtocolOutboxStore;
+  const normalized: ProtocolOutboxStore = {
+    enqueue: legacy.enqueue.bind(legacy),
+    markDelivered: legacy.markDelivered.bind(legacy),
+    hasEntry: legacy.hasEntry.bind(legacy),
+    due: legacy.due.bind(legacy),
+    dropExpired: legacy.dropExpired.bind(legacy),
+    size: legacy.size.bind(legacy),
+    list: legacy.list.bind(legacy),
+    getEntry: legacy.getEntry.bind(legacy),
+    hasPendingFor: (peer) => legacy.pendingFor(peer).length > 0,
+    pendingFor: legacy.pendingFor.bind(legacy),
+  };
+  if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
+  return normalized;
+}
+
 export class ProtocolOutbox {
-  private readonly store: CompatibleProtocolOutboxStore;
+  private readonly store: ProtocolOutboxStore;
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
@@ -141,13 +167,13 @@ export class ProtocolOutbox {
     if (backoffs.length === 0) {
       throw new Error('ProtocolOutbox: backoffs must be non-empty');
     }
-    this.store = store;
     this.backoffs = backoffs;
-    (this.store as PolicyAwareProtocolOutboxStore).configurePolicy?.({
+    (store as PolicyAwareProtocolOutboxStore).configurePolicy?.({
       backoffs,
       maxAgeMs: options.maxAgeMs ?? DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
       backoffFor: (attempts) => this.backoffFor(attempts),
     });
+    this.store = normalizeOutboxStore(store);
   }
 
   /**
@@ -235,12 +261,7 @@ export class ProtocolOutbox {
   }
 
   hasPendingFor(peer: string): boolean {
-    const hasPendingFor = this.store.hasPendingFor;
-    if (hasPendingFor) return hasPendingFor.call(this.store, peer);
-    const pendingFor = this.store.pendingFor;
-    return pendingFor
-      ? pendingFor.call(this.store, peer).length > 0
-      : this.store.list().some((entry) => entry.peer === peer);
+    return this.store.hasPendingFor(peer);
   }
 
   /**
