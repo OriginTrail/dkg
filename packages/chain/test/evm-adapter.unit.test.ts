@@ -1453,6 +1453,64 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }
   });
 
+  it('enforces the ten-minute receipt deadline when adapter config omits it', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = new EVMChainAdapter(minimalConfig());
+      const signedTx = '0xdeadbeef';
+      const txHash = '0x' + '67'.repeat(32);
+      const provider = {
+        name: 'primary',
+        broadcastTransaction: recorder(async () => ({ hash: txHash })),
+        getTransactionReceipt: recorder(async () => null),
+      };
+      const signer = new ethers.Wallet(DEPLOYER_PK, provider as any);
+      const populated = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };
+      const populateTransaction = recorder(async () => populated);
+      const contract = {
+        connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
+      };
+      (a as any).providers = [provider];
+      const signPopulatedTransaction = recorder(async () => ({ signedTx, txHash }));
+      (a as any).signPopulatedTransaction = signPopulatedTransaction;
+
+      const outcome = (a as any).sendContractTransaction(
+        contract,
+        'createContextGraph',
+        [],
+        signer,
+        'create on-chain context graph',
+      ).then(
+        (value: unknown) => ({ status: 'fulfilled' as const, value }),
+        (reason: unknown) => ({ status: 'rejected' as const, reason }),
+      );
+      let settled = false;
+      void outcome.finally(() => { settled = true; });
+
+      // Pin the adapter's observable boundary without consulting the production
+      // timeout constant: the old three-minute default must remain pending.
+      await vi.advanceTimersByTimeAsync(180_001);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(419_998);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+
+      const result = await outcome;
+      expect(result).toMatchObject({
+        status: 'rejected',
+        reason: { code: 'RPC_TIMEOUT', txHash },
+      });
+      expect(result.status === 'rejected' ? (result.reason as Error).message : '')
+        .toContain('after 600000ms');
+      expect(populateTransaction.calls).toHaveLength(1);
+      expect(signPopulatedTransaction.calls).toHaveLength(1);
+      expect(provider.broadcastTransaction.calls).toContainEqual([signedTx]);
+      expect(provider.getTransactionReceipt.calls.length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('treats already-known transaction responses as accepted and polls receipts', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',

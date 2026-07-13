@@ -362,7 +362,7 @@ export function projectRuntimeEvmChainConfig(
     tokenAddress: chain.tokenAddress,
     chainId: chain.chainId,
     receiptTimeoutMs: chain.receiptTimeoutMs,
-    approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy) as ApprovalPolicy | undefined,
+    approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy),
     cgRegistryScanPageSize: chain.cgRegistryScanPageSize,
     minPublisherNativeWei: chain.minPublisherNativeWei,
     minPublisherTracWei: chain.minPublisherTracWei,
@@ -1042,7 +1042,7 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
  */
 export function resolveApprovalPolicy(
   policy: ApprovalPolicyConfig | undefined,
-): { mode: ApprovalPolicyMode; targetAllowance?: bigint; refillBelowFraction?: number } | undefined {
+): ApprovalPolicy | undefined {
   if (!policy) return undefined;
   const mode = policy.mode ?? 'per-publish';
   if (mode !== 'per-publish' && mode !== 'replenishing' && mode !== 'unlimited') {
