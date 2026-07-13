@@ -76,7 +76,7 @@ import { DKGPublisher, TripleStoreAsyncLiftPublisher } from '@origintrail-offici
 const dkgHome = process.env.DKG_HOME;
 const privateKey = process.env.SMOKE_PRIVATE_KEY;
 const store = await createTripleStore({
-  backend: 'oxigraph-worker',
+  backend: 'oxigraph-persistent',
   options: { path: join(dkgHome, 'store.nq') },
 });
 

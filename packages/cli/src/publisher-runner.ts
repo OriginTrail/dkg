@@ -6,6 +6,7 @@ import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapsho
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
+import { isManagedLocalBackend, isRetiredStoreBackend } from './store-backends.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
 
@@ -588,6 +589,18 @@ function createChainRecoveryResolver(
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
   if (config.store) {
+    if (isManagedLocalBackend(config.store.backend)) {
+      throw new Error(
+        `Publisher commands for daemon-managed store "${config.store.backend}" require a running DKG daemon. ` +
+        'Start the daemon and retry; daemon-down direct inspection cannot safely materialize the managed store.',
+      );
+    }
+    if (isRetiredStoreBackend(config.store.backend)) {
+      throw new Error(
+        `Publisher commands cannot open retired store backend "${config.store.backend}" directly. ` +
+        'Start the daemon to complete the acknowledged store migration, then retry.',
+      );
+    }
     const storeConfig = config.store as any;
     return await createTripleStore({
       ...storeConfig,
@@ -606,7 +619,7 @@ async function createPublisherStore(dataDir: string, config: DkgConfig): Promise
   }
 
   return await createTripleStore({
-    backend: 'oxigraph-worker',
+    backend: 'oxigraph-persistent',
     options: { path: join(dataDir, 'store.nq') },
     largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
   });
@@ -633,7 +646,6 @@ export function createPublicSnapshotStore(
 
 function isLocalOxigraphStoreConfig(storeConfig: { backend?: unknown }): boolean {
   return storeConfig.backend === 'oxigraph'
-    || storeConfig.backend === 'oxigraph-worker'
     || storeConfig.backend === 'oxigraph-persistent';
 }
 

@@ -36,6 +36,7 @@ import {
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
+import { storeFlagBackendList } from '../store-backends.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
@@ -216,7 +217,7 @@ program
   )
   .option(
     '--store <backend>',
-    'Pre-fill the triple-store backend prompt (oxigraph | blazegraph | sparql-http).',
+    `Pre-fill the triple-store backend prompt (${storeFlagBackendList(' | ')}).`,
   )
   .option(
     '--store-url <url>',
@@ -534,9 +535,8 @@ program
       chain: isNetworkSwitch ? chainSection : (chainSection ?? existing.chain),
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
       // Persist the chosen backend. `storeBlock === null` from the
-      // wizard means "use the local default" — we explicitly clear any
-      // existing block so re-running `dkg init` to switch from
-      // blazegraph back to oxigraph actually applies.
+      // wizard means "leave the store block omitted"; daemon boot treats
+      // that as the managed `oxigraph-server` default.
       store: storeBlock ?? undefined,
     };
     await saveConfig(config);
@@ -573,7 +573,7 @@ program
               const endpoint = o?.url ?? o?.queryEndpoint;
               return `${storeBlock.backend}${endpoint ? ` (${endpoint})` : ''}`;
             })()
-          : 'oxigraph (local default)'
+          : 'oxigraph-server (default)'
       }`,
     );
     {

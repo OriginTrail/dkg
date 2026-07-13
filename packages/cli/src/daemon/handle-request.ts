@@ -311,7 +311,12 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
+import {
+  createRequestStoreContext,
+  type MemoryGraphChangedEvent,
+  type NotificationSseEvent,
+  type RequestContext,
+} from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -330,6 +335,7 @@ import { handleOperationalWalletRoutes } from './routes/operational-wallets.js';
 import { handleNotificationRoutes } from './routes/notifications.js';
 import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
+import type { StoreRuntimeContext } from './store-runtime.js';
 
 
 export async function handleRequest(
@@ -338,7 +344,7 @@ export async function handleRequest(
   agent: DKGAgent,
   publisherControl: ReturnType<typeof createPublisherControlFromStore>,
   publisherRuntime: PublisherRuntime | null,
-  config: DkgConfig,
+  storeRuntime: StoreRuntimeContext,
   startedAt: number,
   dashDb: DashboardDB,
   opWallets: import("@origintrail-official/dkg-agent").OpWalletsConfig,
@@ -383,7 +389,7 @@ export async function handleRequest(
     publisherControl,
     publisherRuntime,
     publisherAvailability,
-    config,
+    ...createRequestStoreContext(storeRuntime),
     startedAt,
     dashDb,
     opWallets,

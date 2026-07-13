@@ -290,7 +290,7 @@ program
       // remote store. Quad count = null is rare in practice (cached
       // every 30 s on the daemon side) so when it shows up the
       // operator should treat it as an alert, not a no-op.
-      const backend = s.storeBackend ?? 'oxigraph-worker';
+      const backend = s.storeBackend ?? 'oxigraph-server';
       if (s.storeUrl) {
         const quads = s.storeQuads == null ? 'UNREACHABLE' : `${s.storeQuads.toLocaleString()} quads`;
         console.log(`  Store:     ${backend} (${s.storeUrl}) — ${quads}`);

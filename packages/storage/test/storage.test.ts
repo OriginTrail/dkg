@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, expectTypeOf, beforeEach, beforeAll, afterAll } from 'vitest';
 import {
   OxigraphStore,
   BlazegraphStore,
@@ -6,6 +6,8 @@ import {
   GraphManager,
   PrivateContentStore,
   createTripleStore,
+  classifyTripleStoreBackend,
+  customTripleStoreBackend,
   loadSelectedSharedMemoryQuads,
   loadSelectedVerifiableMemoryQuads,
   registerTripleStoreAdapter,
@@ -13,6 +15,7 @@ import {
   resolveVerifiableMemoryReadGraphs,
   type Quad,
   type TripleStore,
+  type TripleStoreBackend,
 } from '../src/index.js';
 import {
   contextGraphDataGraphUri,
@@ -252,12 +255,17 @@ if (blazeUrl) {
 // ---------------------------------------------------------------------------
 
 describe('createTripleStore factory', () => {
+  it('keeps managed and retired daemon names out of the constructible backend type', () => {
+    expectTypeOf<'oxigraph'>().toMatchTypeOf<TripleStoreBackend>();
+    expectTypeOf<'oxigraph-server'>().not.toMatchTypeOf<TripleStoreBackend>();
+    expectTypeOf<'oxigraph-worker'>().not.toMatchTypeOf<TripleStoreBackend>();
+  });
+
   it('all built-in backends are registered (factory throws something other than "Unknown TripleStore backend")', async () => {
     // The *registry* contract being tested here is: every built-in
     // backend name is recognized. The construction itself may require
-    // options (blazegraph needs `url`, sparql-http needs `queryEndpoint`)
-    // or worker artifacts (oxigraph-worker needs the compiled worker
-    // impl). So a backend passes this test iff calling `createTripleStore`
+    // options (blazegraph needs `url`, sparql-http needs `queryEndpoint`).
+    // So a backend passes this test iff calling `createTripleStore`
     // either succeeds OR throws a *non*-"Unknown TripleStore backend"
     // error.
     //
@@ -266,7 +274,7 @@ describe('createTripleStore factory', () => {
     // effectively assert "a promise settled" — noise. This version
     // asserts the positive contract explicitly and points at the
     // specific failing backend if the registry regresses.
-    const backends = ['oxigraph', 'oxigraph-worker', 'blazegraph', 'sparql-http'];
+    const backends = ['oxigraph', 'blazegraph', 'sparql-http'];
     for (const backend of backends) {
       let outcome: 'constructed' | Error;
       try {
@@ -312,56 +320,43 @@ describe('createTripleStore factory', () => {
     ).rejects.toThrow('queryEndpoint');
   });
 
-  it('oxigraph-worker adapter is registered and round-trips an insert', async () => {
-    // The worker adapter resolves `./oxigraph-worker-impl.js` relative to
-    // the module loaded at runtime. When vitest runs against raw source
-    // without a prior `pnpm build`, that URL lands in `src/adapters/` where
-    // only the .ts files live, so the Worker constructor throws
-    // "Cannot find module … oxigraph-worker-impl.js".
-    //
-    // This used to be caught and converted to `ctx.skip()`, which meant a
-    // green CI run even when the worker artifact was missing — i.e. a
-    // broken build never triggered a test failure. We now FAIL LOUDLY in
-    // that case with a remediation hint, so:
-    //   • locally, the developer sees "run pnpm build first" instead of a
-    //     silent skip;
-    //   • in CI, if `pnpm build` was not wired into the lane (or the build
-    //     regresses), this test surfaces it as a red failure.
-    let store: Awaited<ReturnType<typeof createTripleStore>>;
-    try {
-      store = await createTripleStore({ backend: 'oxigraph-worker' });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('Cannot find module') && msg.includes('oxigraph-worker-impl')) {
-        throw new Error(
-          `oxigraph-worker adapter is not runnable — the compiled ` +
-          `oxigraph-worker-impl.js artifact is missing from ` +
-          `packages/storage/dist/adapters/. Run ` +
-          `\`pnpm --filter @origintrail-official/dkg-storage build\` ` +
-          `before running this test. Underlying error: ${msg}`,
-        );
-      }
-      throw err;
-    }
-    await store.insert([{
-      subject: 'http://ex.org/s',
-      predicate: 'http://ex.org/p',
-      object: '"hi"',
-      graph: 'http://ex.org/g',
-    }]);
-    expect(await store.countQuads()).toBe(1);
-    await store.close();
+  it('throws on unknown backend', async () => {
+    await expect(createTripleStore({ backend: customTripleStoreBackend('unknown') })).rejects.toThrow(
+      'Unknown TripleStore backend',
+    );
   });
 
-  it('throws on unknown backend', async () => {
-    await expect(createTripleStore({ backend: 'unknown' })).rejects.toThrow(
-      'Unknown TripleStore backend',
+  it('gives runtime migration guidance to legacy oxigraph-worker callers', async () => {
+    await expect(createTripleStore({
+      backend: 'oxigraph-worker' as any,
+    })).rejects.toThrow(
+      /oxigraph-worker.*no longer supported.*sparql-http.*oxigraph-persistent/,
+    );
+  });
+
+  it('classifies only factory adapters and leaves daemon policy names outside storage', async () => {
+    expect(classifyTripleStoreBackend('oxigraph')).toEqual({
+      kind: 'adapter',
+      backend: 'oxigraph',
+    });
+    expect(classifyTripleStoreBackend('oxigraph-server')).toEqual({
+      kind: 'custom',
+      backend: 'oxigraph-server',
+    });
+    expect(classifyTripleStoreBackend('oxigraph-worker')).toEqual({
+      kind: 'custom',
+      backend: 'oxigraph-worker',
+    });
+    await expect(createTripleStore({
+      backend: customTripleStoreBackend('oxigraph-server'),
+    })).rejects.toThrow(
+      /Unknown TripleStore backend/,
     );
   });
 
   it('custom adapter can be registered and used', async () => {
     const calls: string[] = [];
-    registerTripleStoreAdapter('test-custom', async () => ({
+    const backend = registerTripleStoreAdapter('test-custom', async () => ({
       insert: async () => { calls.push('insert'); },
       delete: async () => {},
       deleteByPattern: async () => 0,
@@ -375,7 +370,7 @@ describe('createTripleStore factory', () => {
       close: async () => {},
     }));
 
-    const store = await createTripleStore({ backend: 'test-custom' });
+    const store = await createTripleStore({ backend });
     await store.insert([]);
     expect(calls).toEqual(['insert']);
     expect(await store.countQuads()).toBe(1);

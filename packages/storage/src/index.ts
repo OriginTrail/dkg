@@ -10,16 +10,35 @@ export {
   type AskResult,
   type TripleStoreConfig,
   type TripleStoreBackend,
+  type TripleStoreFactoryConfig,
   type TripleStoreQueryOptions,
   type UpdateOptions,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,
+  toTripleStoreBackend,
   tryUpdateWithTouchedGraphs,
-  isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
+  type SparqlEndpointStoreConfig,
 } from './triple-store.js';
+export {
+  STORAGE_ADAPTERS,
+  classifyTripleStoreBackend,
+  customTripleStoreBackend,
+  getStorageAdapterPolicy,
+  isExternalBackend,
+  isStorageAdapterBackend,
+  storageAdapterNames,
+  type ClassifiedTripleStoreBackend,
+  type CustomTripleStoreBackend,
+  type ExternalStoreBackend,
+  type LocalStoreBackend,
+  type StorageAdapterBackend,
+  type StorageAdapterKind,
+  type StorageAdapterOfKind,
+  type StorageAdapterPolicy,
+} from './store-backends.js';
 export {
   StorePriorityScheduler,
   externalStorePriorityScheduler,
@@ -60,7 +79,6 @@ export {
 } from './graph-write-gen.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
-export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export { BlazegraphStore } from './adapters/blazegraph.js';
 export {
   SparqlHttpStore,
@@ -92,6 +110,5 @@ export { PrivateContentStore } from './private-store.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';
-import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';

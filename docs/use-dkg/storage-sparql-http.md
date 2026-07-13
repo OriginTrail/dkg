@@ -7,7 +7,7 @@ doc_type: how-to
 
 # Using an external SPARQL store (Oxigraph server, etc.)
 
-The DKG node can use any **SPARQL 1.1 Protocol**–compliant store you run yourself, instead of its default daemon-managed local Oxigraph server (or the embedded `oxigraph-worker` fallback). That gives you:
+The DKG node can use any **SPARQL 1.1 Protocol**–compliant store you run yourself, instead of its default daemon-managed local Oxigraph server. That gives you:
 
 - **Real on-disk persistence** (e.g. Oxigraph server with RocksDB)
 - **Larger graphs** without holding everything in the Node process
@@ -118,4 +118,4 @@ await agent.start();
 
 New installs default to a **daemon-managed local Oxigraph server** (`store.backend: "oxigraph-server"`): `dkg init`, `dkg openclaw/hermes/mcp setup`, or accepting the wizard default writes this block. The daemon fetches the pinned `oxigraph` binary on first boot and runs it on loopback, giving MVCC concurrent reads and incremental RocksDB persistence.
 
-If a config has **no** `store` block at all, the runtime falls back to the embedded in-process **`oxigraph-worker`** (a single-writer store that rewrites its on-disk N-Quads dump under `dataDir` on every flush) — fine for development and small nodes. For very large graphs or existing infrastructure, use `sparql-http` with an external store.
+If a config has **no** `store` block at all, the runtime now uses the same daemon-managed **`oxigraph-server`** default. The old embedded **`oxigraph-worker`** backend has been retired; configs that still name it fail fast with a migration message. For very large graphs or existing infrastructure, use `sparql-http` with an external store.
