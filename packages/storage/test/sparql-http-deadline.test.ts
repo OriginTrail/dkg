@@ -177,6 +177,54 @@ describe('SparqlHttpStore deadlines and cancellation', () => {
     expect(fetchCallsAfterRelease).toBe(saturation.normalSlots);
   });
 
+  it.each([
+    {
+      operation: 'SELECT',
+      run: (store: SparqlHttpStore) => store.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      writeGraph: undefined,
+    },
+    {
+      operation: 'UPDATE',
+      run: (store: SparqlHttpStore) => store.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/in-flight-timeout',
+      }]),
+      writeGraph: 'http://ex.org/in-flight-timeout',
+    },
+  ])('expires an in-flight $operation request and aborts its fetch signal', async ({ run, writeGraph }) => {
+    const originalFetch = globalThis.fetch;
+    const seenSignals: AbortSignal[] = [];
+    let fetchCalls = 0;
+    globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      if (init?.signal instanceof AbortSignal) seenSignals.push(init.signal);
+      return new Promise<Response>(() => {});
+    }) as typeof fetch;
+
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://deadline.test/query',
+        updateEndpoint: 'http://deadline.test/update',
+        timeout: 10,
+      });
+      const request = run(store);
+      await waitForCondition(
+        () => seenSignals.length === 1,
+        `in-flight request did not reach fetch; seen=${seenSignals.length}`,
+      );
+
+      const outcome = await outcomeWithin(request, 100);
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+      expect(seenSignals[0].aborted).toBe(true);
+      expect(fetchCalls).toBe(1);
+      if (writeGraph) expect(store.getWriteGen(writeGraph)).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('keeps the UPDATE deadline active while reading an error response body', async () => {
     const originalFetch = globalThis.fetch;
     let rejectBody!: (reason?: unknown) => void;

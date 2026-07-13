@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
+import { abortReason, throwIfAborted } from './abort-utils.js';
 import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
@@ -100,10 +101,7 @@ export class StorePriorityScheduler {
     signal?: AbortSignal,
   ): Promise<T> {
     const normalizedPriority = priority ?? 'normal';
-    if (signal?.aborted) {
-      const reason = signal.reason;
-      throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-    }
+    throwIfAborted(signal);
     return new Promise<T>((resolve, reject) => {
       const entry: QueueEntry<T> = {
         priority: normalizedPriority,
@@ -116,8 +114,7 @@ export class StorePriorityScheduler {
       };
       const onAbort = () => {
         if (this.removeQueued(entry as QueueEntry<unknown>)) {
-          const reason = signal?.reason;
-          reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
+          reject(abortReason(signal));
           this.observeDepths();
         }
       };

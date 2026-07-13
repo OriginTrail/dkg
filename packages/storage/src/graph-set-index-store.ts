@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
+import { raceAgainstAbort, throwIfAborted } from './abort-utils.js';
 import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore, UpdateOptions } from './triple-store.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
@@ -423,25 +424,4 @@ function normalizeGraphUris(graphs: readonly string[]): string[] {
 function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
   const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
   return readOptions;
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  const reason = signal.reason;
-  throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }
