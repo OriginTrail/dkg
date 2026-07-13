@@ -4145,6 +4145,42 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(chosenSigner?.address).toBe(walletB.address);
   });
 
+  it('discovers a shorter-lock PCA from its own quote without probing the default lifetime first', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } =
+      makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE);
+    nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n);
+    tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (address: string) =>
+      address.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 6);
+    const coverageCosts: bigint[] = [];
+    (a as any).convictionAccountCanCover = recorder(async (_accountId: bigint, cost: bigint) => {
+      coverageCosts.push(cost);
+      return cost <= 6n;
+    });
+    const quotedEpochs: number[] = [];
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async (_bytes: bigint, epochs: number) => {
+      quotedEpochs.push(epochs);
+      return BigInt(epochs);
+    });
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      defaultPublishEpochs: 12,
+    })).resolves.toMatchObject({
+      publisherAddress: walletA.address,
+      publishEpochs: 6,
+      tokenAmount: 6n,
+    });
+    expect(coverageCosts.length).toBeGreaterThan(0);
+    expect(coverageCosts.every((cost) => cost === 6n)).toBe(true);
+    expect(quotedEpochs).toContain(6);
+  });
+
   it('resolves weak-candidate retry and a non-default PCA lock inside one publish-plan operation', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);

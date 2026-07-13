@@ -1,6 +1,6 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
-import { enrichEvmError, resolvePublisherCandidatePricing } from '@origintrail-official/dkg-chain';
+import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs } from '@origintrail-official/dkg-storage';
@@ -71,6 +71,12 @@ import {
 } from './errors.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
+import {
+  PublisherPlanner,
+  coercePublisherAddress,
+  type PublisherAddressResolution,
+  type PublisherSigner,
+} from './publisher-planning.js';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -187,12 +193,6 @@ interface PublisherAddressResolutionOptions {
   includeGenericSignMessageProbe?: boolean;
 }
 
-interface PublisherAddressResolution {
-  address?: string;
-  planningPin?: string;
-  planningPinLabel?: 'publisherPrivateKey' | 'configured publisherAddress' | 'publisherAddressResolver';
-}
-
 function normalizePublisherAddress(address: string | undefined): string | undefined {
   if (address === undefined) return undefined;
   if (!ethers.isAddress(address)) {
@@ -252,12 +252,6 @@ async function invokeV10ACKProvider(
     params.ackMode.kind === 'curated-catalog' ? true : undefined,
     catalogCommitment,
   );
-}
-
-function coercePublisherAddress(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !ethers.isAddress(value)) return undefined;
-  const normalized = ethers.getAddress(value);
-  return normalized === ethers.ZeroAddress ? undefined : normalized;
 }
 
 function publisherAddressFromUal(ual: string | undefined): string | undefined {
@@ -377,60 +371,6 @@ type InternalPublishOptions = PublishOptions & {
   [TRUSTED_CATALOG_ORIGIN_TOKEN]?: true;
   [PUBLIC_ACK_STAGING_MODE_TOKEN]?: PublicACKStagingMode;
 };
-
-interface PublisherSigner {
-  address: string;
-  source: 'publisherPrivateKey' | 'chainAdapter';
-  signMessage(message: Uint8Array): Promise<string>;
-  /**
-   * Sign EIP-712 typed data. Required for RFC-001 author attestations
-   * which use `\x19\x01` framing rather than the EIP-191 prefix that
-   * `signMessage` applies. Native on `ethers.Wallet`; chain-adapter
-   * fallbacks throw because the adapter's `signMessage` / `signMessageAs`
-   * surface only handles EIP-191 hashes.
-   */
-  signTypedData(
-    domain: ethers.TypedDataDomain,
-    types: Record<string, Array<{ name: string; type: string }>>,
-    value: Record<string, unknown>,
-  ): Promise<string>;
-}
-
-type PublisherPlanningState =
-  | {
-    kind: 'local';
-    contextGraphId?: bigint;
-    chainV10Ready: boolean;
-    publisherAddress: string;
-  }
-  | {
-    kind: 'legacy-on-chain';
-    contextGraphId: bigint;
-    chainV10Ready: true;
-    selection: PublisherAddressResolution;
-    initialSigner: PublisherSigner;
-  }
-  | {
-    kind: 'adapter-planned';
-    contextGraphId: bigint;
-    chainV10Ready: true;
-    selection: PublisherAddressResolution;
-  };
-
-type FinalizedPublisherPlan =
-  | {
-    kind: 'local';
-    publisherAddress: string;
-    publishEpochs: number;
-    tokenAmount: 0n;
-  }
-  | {
-    kind: 'on-chain';
-    signer: PublisherSigner;
-    publisherAddress: string;
-    publishEpochs: number;
-    tokenAmount: bigint;
-  };
 
 function isInternalOrigin(options: PublishOptions): boolean {
   return (options as InternalPublishOptions)[INTERNAL_ORIGIN_TOKEN] === true;
@@ -614,6 +554,7 @@ export class DKGPublisher implements Publisher {
   private readonly publisherAddress?: string;
   private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   private readonly publisherWallet?: ethers.Wallet;
+  private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
   private readonly adapterSignMessageProbeCache = new Map<string, boolean>();
   private workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
@@ -686,6 +627,17 @@ export class DKGPublisher implements Publisher {
     this.workspaceAgentRecipientResolver = config.workspaceAgentRecipientResolver;
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.publisherPlanner = new PublisherPlanner({
+      chain: this.chain,
+      resolvePublisherAddressSelection: (contextGraphId, options) =>
+        this.resolvePublisherAddressSelection(contextGraphId, options),
+      resolvePublisherSigner: (address) => this.getPublisherSigner(address),
+      localTentativePublisherAddress: () => this.localTentativePublisherAddress(),
+      log: {
+        info: (ctx, message) => this.log.info(ctx, message),
+        warn: (ctx, message) => this.log.warn(ctx, message),
+      },
+    });
   }
 
   setWorkspaceAgentRecipientResolver(resolver: WorkspaceAgentRecipientResolver | undefined): void {
@@ -1019,243 +971,6 @@ export class DKGPublisher implements Publisher {
     const digest = ethers.keccak256(this.keypair.publicKey);
     const address = ethers.getAddress(ethers.dataSlice(digest, 12));
     return address === ethers.ZeroAddress ? '0x0000000000000000000000000000000000000001' : address;
-  }
-
-  /** Compatibility planning for adapters without adapter-owned publish planning. */
-  private async resolveLegacyPublishPricing(input: {
-    publisherAddress: string;
-    explicitPublishEpochs: number | undefined;
-    effectiveByteSize: bigint;
-    ctx: OperationContext;
-  }): Promise<{ publishEpochs: number; precomputedTokenAmount: bigint }> {
-    const quote = typeof this.chain.getRequiredPublishTokenAmount === 'function'
-      ? (epochs: number) => this.chain.getRequiredPublishTokenAmount!(input.effectiveByteSize, epochs)
-      : undefined;
-    const conviction = quote
-      && typeof this.chain.getConvictionAgentAccountId === 'function'
-      && typeof this.chain.getConvictionAccountLockDurationEpochs === 'function'
-      && typeof this.chain.convictionAccountCanCover === 'function'
-      ? {
-        getAccountId: (address: string) => this.chain.getConvictionAgentAccountId!(address),
-        getLockDurationEpochs: (accountId: bigint) =>
-          this.chain.getConvictionAccountLockDurationEpochs!(accountId),
-        canCover: (accountId: bigint, baseCost: bigint) =>
-          this.chain.convictionAccountCanCover!(accountId, baseCost),
-      }
-      : undefined;
-    const pricing = await resolvePublisherCandidatePricing({
-      publisherAddress: input.publisherAddress,
-      explicitPublishEpochs: input.explicitPublishEpochs,
-      defaultPublishEpochs: DEFAULT_PUBLISH_EPOCHS,
-      quote,
-      conviction,
-    });
-
-    if (pricing.source === 'pca') {
-      this.log.info(
-        input.ctx,
-        `PCA-funded publish detected (signer=${input.publisherAddress}, accountId=${pricing.pca.accountId}) — ` +
-        `coercing publishEpochs to lockDurationEpochs=${pricing.publishEpochs}`,
-      );
-    } else if (pricing.diagnostics.pcaCandidate !== undefined) {
-      this.log.info(
-        input.ctx,
-        `Signer ${input.publisherAddress} is a registered PCA agent ` +
-        `(accountId=${pricing.diagnostics.pcaCandidate.accountId}) ` +
-        `but funding for this publish's discounted cost could not be confirmed — NOT coercing ` +
-        `publishEpochs; publishing at requested lifetime=${pricing.publishEpochs} via direct spend`,
-      );
-    }
-    const diagnostics = pricing.source === 'direct' ? pricing.diagnostics : undefined;
-    if (diagnostics?.pcaProbeError !== undefined) {
-      this.log.warn(
-        input.ctx,
-        `PCA epochs probe failed — falling back to publishEpochs=${pricing.publishEpochs}: ` +
-        `${diagnostics.pcaProbeError instanceof Error
-          ? diagnostics.pcaProbeError.message
-          : String(diagnostics.pcaProbeError)}`,
-      );
-    }
-    if (diagnostics?.quoteError !== undefined) {
-      this.log.warn(
-        input.ctx,
-        `getRequiredPublishTokenAmount failed — using protocol minimum ${pricing.tokenAmount}: ` +
-        `${diagnostics.quoteError instanceof Error
-          ? diagnostics.quoteError.message
-          : String(diagnostics.quoteError)}`,
-      );
-    }
-    return {
-      publishEpochs: pricing.publishEpochs,
-      precomputedTokenAmount: pricing.tokenAmount,
-    };
-  }
-
-  /**
-   * Resolve the one immutable planning mode used by the rest of publish().
-   * Adapter-owned planning deliberately skips the cursor-moving legacy address
-   * probe; legacy adapters still resolve a signer before payload preparation.
-   */
-  private async preparePublisherPlanning(
-    contextGraphId: bigint | undefined,
-  ): Promise<PublisherPlanningState> {
-    const chainV10Ready = await this.refreshChainV10Readiness();
-    if (contextGraphId === undefined || !chainV10Ready) {
-      const selection = await this.resolvePublisherAddressSelection(undefined, {
-        includeReservingPublisherProbe: false,
-        includeGenericSignMessageProbe: false,
-      });
-      return {
-        kind: 'local',
-        ...(contextGraphId === undefined ? {} : { contextGraphId }),
-        chainV10Ready,
-        publisherAddress: selection.address ?? this.localTentativePublisherAddress(),
-      };
-    }
-
-    const adapterOwnedPlanning = typeof this.chain.resolvePublisherPublishPlan === 'function';
-    const selection = await this.resolvePublisherAddressSelection(contextGraphId, {
-      includeReservingPublisherProbe: !adapterOwnedPlanning,
-    });
-
-    if (adapterOwnedPlanning) {
-      return {
-        kind: 'adapter-planned',
-        contextGraphId,
-        chainV10Ready: true,
-        selection,
-      };
-    }
-    const initialSigner = await this.getPublisherSigner(selection.address);
-    if (!initialSigner) throw new PublisherWalletRequiredError('publish');
-    return {
-      kind: 'legacy-on-chain',
-      contextGraphId,
-      chainV10Ready: true,
-      selection,
-      initialSigner,
-    };
-  }
-
-  /** Finalize signer, lifetime, and price before any ACK-bound identity is derived. */
-  private async resolveOnChainPublishPlan(input: {
-    contextGraphId: bigint;
-    initialSigner?: PublisherSigner;
-    pinnedPublisherAddress?: string;
-    pinnedPublisherLabel?: string;
-    explicitPublishEpochs: number | undefined;
-    effectiveByteSize: bigint;
-    ctx: OperationContext;
-  }): Promise<{
-    signer: PublisherSigner;
-    publisherAddress: string;
-    publishEpochs: number;
-    tokenAmount: bigint;
-  }> {
-    if (typeof this.chain.resolvePublisherPublishPlan !== 'function') {
-      if (!input.initialSigner) throw new PublisherWalletRequiredError('publish');
-      const initialPricing = await this.resolveLegacyPublishPricing({
-        publisherAddress: input.initialSigner.address,
-        explicitPublishEpochs: input.explicitPublishEpochs,
-        effectiveByteSize: input.effectiveByteSize,
-        ctx: input.ctx,
-      });
-      return {
-        signer: input.initialSigner,
-        publisherAddress: input.initialSigner.address,
-        publishEpochs: initialPricing.publishEpochs,
-        tokenAmount: initialPricing.precomputedTokenAmount,
-      };
-    }
-
-    // The adapter owns candidate iteration, PCA probing, exact pricing, strict
-    // funding validation, and cursor advancement as one operation. The
-    // publisher only binds the returned final signer to ACK/transaction data.
-    const pinnedPublisherAddress = input.pinnedPublisherAddress;
-    const pinnedPublisherLabel = input.pinnedPublisherLabel ?? 'publisher address';
-    const resolvedPlan = await this.chain.resolvePublisherPublishPlan({
-      contextGraphId: input.contextGraphId,
-      effectiveByteSize: input.effectiveByteSize,
-      explicitPublishEpochs: input.explicitPublishEpochs,
-      defaultPublishEpochs: DEFAULT_PUBLISH_EPOCHS,
-      publisherAddress: pinnedPublisherAddress,
-    });
-    const plannedAddress = coercePublisherAddress(resolvedPlan.publisherAddress);
-    if (!plannedAddress) {
-      throw new Error('Publisher publish plan returned no valid publisher address.');
-    }
-    if (
-      pinnedPublisherAddress
-      && plannedAddress.toLowerCase() !== pinnedPublisherAddress.toLowerCase()
-    ) {
-      throw new Error(
-        `Publisher signer reservation mismatch: ${pinnedPublisherLabel} pins ${pinnedPublisherAddress}, ` +
-        `but the chain adapter reserved/planned ${plannedAddress}.`,
-      );
-    }
-    const plannedSigner = await this.getPublisherSigner(plannedAddress);
-    if (!plannedSigner || plannedSigner.address.toLowerCase() !== plannedAddress.toLowerCase()) {
-      throw new Error(
-        `Publisher signer reservation mismatch: no signer for planned address ${plannedAddress}.`,
-      );
-    }
-    return {
-      signer: plannedSigner,
-      publisherAddress: plannedAddress,
-      publishEpochs: resolvedPlan.publishEpochs,
-      tokenAmount: resolvedPlan.tokenAmount,
-    };
-  }
-
-  /** Finalize the planning state once the exact public/catalog byte size exists. */
-  private async finalizePublisherPlanning(
-    state: PublisherPlanningState,
-    input: {
-      explicitPublishEpochs: number | undefined;
-      effectiveByteSize: bigint;
-      ctx: OperationContext;
-    },
-  ): Promise<FinalizedPublisherPlan> {
-    if (state.kind === 'local') {
-      return {
-        kind: 'local',
-        publisherAddress: state.publisherAddress,
-        publishEpochs: input.explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS,
-        tokenAmount: 0n,
-      };
-    }
-
-    const plan = await this.resolveOnChainPublishPlan({
-      contextGraphId: state.contextGraphId,
-      initialSigner: state.kind === 'legacy-on-chain' ? state.initialSigner : undefined,
-      pinnedPublisherAddress: state.selection.planningPin,
-      pinnedPublisherLabel: state.selection.planningPinLabel,
-      explicitPublishEpochs: input.explicitPublishEpochs,
-      effectiveByteSize: input.effectiveByteSize,
-      ctx: input.ctx,
-    });
-    return { kind: 'on-chain', ...plan };
-  }
-
-  private isChainV10Ready(): boolean {
-    return this.chain.chainId !== 'none' &&
-      typeof this.chain.isV10Ready === 'function' &&
-      this.chain.isV10Ready();
-  }
-
-  private async refreshChainV10Readiness(): Promise<boolean> {
-    if (this.isChainV10Ready()) return true;
-    if (this.chain.chainId === 'none') return false;
-    try {
-      const chainIdGetter = (this.chain as unknown as { getEvmChainId?: () => Promise<bigint> }).getEvmChainId;
-      const kavAddressGetter = (this.chain as unknown as { getKnowledgeAssetsLifecycleAddress?: () => Promise<string> })
-        .getKnowledgeAssetsLifecycleAddress;
-      if (typeof chainIdGetter === 'function') await chainIdGetter.call(this.chain);
-      if (typeof kavAddressGetter === 'function') await kavAddressGetter.call(this.chain);
-    } catch {
-      // V9-only or incompletely configured adapters stay off the V10 path.
-    }
-    return this.isChainV10Ready();
   }
 
   private async resolveKnownBatchPublisherAddress(
@@ -2323,9 +2038,9 @@ export class DKGPublisher implements Publisher {
     // can be resolved at all, the on-chain branch throws
     // `PublisherWalletRequiredError` instead of silently degrading.
     const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
-    const publisherPlanning = await this.preparePublisherPlanning(publisherContextGraphId);
+    const publisherPlanning = await this.publisherPlanner.prepare(publisherContextGraphId);
     const chainV10Ready = publisherPlanning.chainV10Ready;
-    const canAttemptOnChainPublish = publisherPlanning.kind !== 'local';
+    const canAttemptOnChainPublish = publisherPlanning.canAttemptOnChainPublish;
 
     // RFC-001 §9.x — sign-at-creation. The publisher is a pure
     // transport layer for the AuthorAttestation: the seal is built at
@@ -2661,7 +2376,7 @@ export class DKGPublisher implements Publisher {
       ? catalogByteSize
       : publicByteSize;
     const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
-    const finalizedPublisherPlan = await this.finalizePublisherPlanning(publisherPlanning, {
+    const finalizedPublisherPlan = await publisherPlanning.finalize({
       explicitPublishEpochs,
       effectiveByteSize,
       ctx,

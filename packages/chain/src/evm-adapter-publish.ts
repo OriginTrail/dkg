@@ -13,6 +13,13 @@ import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-
 import { ethers, Wallet, Contract } from 'ethers';
 import type { ReservedRange, BatchMintParams, BatchMintResult, KAUpdateVerification, OnChainPublishResult, V10UpdateKAParams, TxResult, PublisherPublishPlan, PublisherPublishPlanRequest } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import {
+  resolveQuotedPublisherCandidatePricing,
+  type PublisherConvictionPlanReader,
+} from './publisher-plan.js';
+import { errorMessage } from './evm-adapter-errors.js';
+
+type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
 
 export class PublishMethods extends EVMChainAdapterBase {
   async resolvePublisherPublishPlan(
@@ -20,6 +27,140 @@ export class PublishMethods extends EVMChainAdapterBase {
   ): Promise<PublisherPublishPlan> {
     await this.init();
     return this.resolveFundedPublisherPublishPlan(request);
+  }
+
+  /** AskStorage quote owned by the publish feature boundary. */
+  protected async quoteRequiredPublishTokenAmount(
+    publicByteSize: bigint,
+    epochs: number,
+  ): Promise<bigint> {
+    if (!this.contracts.askStorage) {
+      throw new Error('AskStorage not available');
+    }
+    const ask = await this.readContract(
+      this.contracts.askStorage,
+      'askStorage.getStakeWeightedAverageAsk',
+      'getStakeWeightedAverageAsk',
+    );
+    return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
+  }
+
+  /**
+   * Optional typed bridge supplied by the conviction mixin in the concrete
+   * adapter assembly. Publish planning owns the policy that consumes it.
+   */
+  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
+    return undefined;
+  }
+
+  private async _publisherCandidatePlan(
+    signer: Wallet,
+    request: PublisherPublishPlanRequest,
+    quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
+  ): Promise<PublisherCandidatePlan> {
+    const pricing = await resolveQuotedPublisherCandidatePricing({
+      publisherAddress: signer.address,
+      explicitPublishEpochs: request.explicitPublishEpochs,
+      defaultPublishEpochs: request.defaultPublishEpochs,
+      quote,
+      conviction: this.contracts.dkgPublishingConvictionNFT
+        ? this.publisherConvictionPlanReader()
+        : undefined,
+    });
+    const diagnostics = pricing.source === 'direct' ? pricing.diagnostics : undefined;
+    if (diagnostics?.pcaProbeError !== undefined) {
+      console.warn(
+        `[chain] PCA publish-plan probe failed for signer=${signer.address}; ` +
+        `using directly quoted lifetime=${pricing.publishEpochs}: ` +
+        `${errorMessage(diagnostics.pcaProbeError)}`,
+      );
+    }
+
+    return {
+      signer,
+      address: signer.address,
+      publisherAddress: signer.address,
+      publishEpochs: pricing.publishEpochs,
+      tokenAmount: pricing.tokenAmount,
+    };
+  }
+
+  /**
+   * Publish-owned planning state machine. It composes generic base primitives
+   * for authorization, serialized cursor advancement, and strict fundability
+   * with AskStorage/PCA policy local to this feature module.
+   */
+  protected async resolveFundedPublisherPublishPlan(
+    request: PublisherPublishPlanRequest,
+  ): Promise<PublisherPublishPlan> {
+    const quoteCache = new Map<string, Promise<bigint>>();
+    const quote = (epochs: number, purpose: 'pca' | 'direct'): Promise<bigint> => {
+      const cacheKey = `${purpose}:${epochs}`;
+      const cached = quoteCache.get(cacheKey);
+      if (cached) return cached;
+      const pending = this.quoteRequiredPublishTokenAmount(request.effectiveByteSize, epochs)
+        .catch((error) => {
+          // A transient PCA-lock quote failure must not poison the fallback
+          // direct-spend quote for the same numeric lifetime.
+          quoteCache.delete(cacheKey);
+          throw error;
+        });
+      quoteCache.set(cacheKey, pending);
+      return pending;
+    };
+
+    if (request.publisherAddress) {
+      const signer = await this.resolvePinnedPublisherSigner(
+        request.contextGraphId,
+        request.publisherAddress,
+      );
+      const plan = await this._publisherCandidatePlan(signer, request, quote);
+      await this.selectFundedSignerOrThrow(
+        [signer],
+        {
+          kind: 'native+trac',
+          nativeFloorWei: this.minPublisherNativeWei,
+          tracFloorWei: this.minPublisherTracWei,
+          requiredTracWei: plan.tokenAmount,
+          pca: { kind: 'publish', epochs: plan.publishEpochs },
+        },
+        { preferIdle: false },
+      );
+      return {
+        publisherAddress: plan.publisherAddress,
+        publishEpochs: plan.publishEpochs,
+        tokenAmount: plan.tokenAmount,
+      };
+    }
+
+    const selectedPlan = await this._withSignerSelection(async (ordered) => {
+      const authorized = await this._authorizedPublisherSigners(ordered, request.contextGraphId);
+      // Resolve in cursor order so one candidate's transient PCA quote can be
+      // retried through its direct-spend phase before another candidate consumes
+      // the same lifetime. The shared quote cache still avoids duplicate reads
+      // after the first successful quote.
+      const plans: PublisherCandidatePlan[] = [];
+      for (const signer of authorized) {
+        plans.push(await this._publisherCandidatePlan(signer, request, quote));
+      }
+      return this._selectFundedCandidateOrThrow(
+        plans,
+        (plan) => ({
+          kind: 'native+trac',
+          nativeFloorWei: this.minPublisherNativeWei,
+          tracFloorWei: this.minPublisherTracWei,
+          requiredTracWei: plan.tokenAmount,
+          pca: { kind: 'publish', epochs: plan.publishEpochs },
+        }),
+        { preferIdle: false },
+      );
+    });
+    // Do not expose the internal Wallet carried only for cursor advancement.
+    return {
+      publisherAddress: selectedPlan.publisherAddress,
+      publishEpochs: selectedPlan.publishEpochs,
+      tokenAmount: selectedPlan.tokenAmount,
+    };
   }
 
   // =====================================================================

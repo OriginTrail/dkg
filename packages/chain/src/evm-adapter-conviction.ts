@@ -104,7 +104,7 @@ export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNod
 }
 
 export class ConvictionMethods extends EVMChainAdapterBase implements ConvictionReader {
-  protected override publisherConvictionPlanReader(): PublisherConvictionPlanReader {
+  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader {
     return {
       getAccountId: (publisherAddress) => withTimeout(
         this.getConvictionAgentAccountId(publisherAddress),

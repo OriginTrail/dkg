@@ -25,6 +25,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { DKGPublisher } from '../src/dkg-publisher.js';
+import { PublisherPlanner } from '../src/publisher-planning.js';
 import { DEFAULT_PUBLISH_EPOCHS, type V10ACKProvider, type V10ACKProviderParams } from '../src/publisher.js';
 import { generateConfirmedFullMetadata } from '../src/metadata.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -737,6 +738,13 @@ class ReservingUpdateChain extends AdapterManagedUpdateChain {
 }
 
 describe('DKGPublisher: no random publisher wallet without explicit key', () => {
+  it('keeps publish planning behind the dedicated planner boundary', () => {
+    expect(Object.hasOwn(PublisherPlanner.prototype, 'prepare')).toBe(true);
+    expect(Object.hasOwn(DKGPublisher.prototype, 'preparePublisherPlanning')).toBe(false);
+    expect(Object.hasOwn(DKGPublisher.prototype, 'finalizePublisherPlanning')).toBe(false);
+    expect(Object.hasOwn(DKGPublisher.prototype, 'resolveLegacyPublishPricing')).toBe(false);
+  });
+
   it('leaves publisherWallet and publisherAddress undefined when no key or address is supplied', async () => {
     const keypair = await generateEd25519Keypair();
     const publisher = new DKGPublisher({
@@ -1274,6 +1282,34 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     const result = await publisher.publish({
       contextGraphId: '1',
       quads: epochTestQuads('legacy-pca-default-publish-epochs'),
+      v10ACKProvider: captureACKInputs(ack),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(ack).toMatchObject({ epochs: 24, tokenAmount: 24n });
+    expect(chain.capturedCreateParams).toMatchObject({
+      publisherAddress: wallet.address,
+      epochs: 24,
+      tokenAmount: 24n,
+    });
+  });
+
+  it('preserves legacy PCA lock planning when the adapter predates the coverage probe', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new LegacyEpochCapturingChain(wallet);
+    chain.pcaLockDurationEpochs = 24;
+    const { accountId } = await chain.createPublishingConvictionAccount(ethers.parseEther('10000'));
+    await chain.registerPublishingConvictionAgent(accountId, wallet.address);
+    Object.defineProperty(chain, 'convictionAccountCanCover', {
+      configurable: true,
+      value: undefined,
+    });
+    const publisher = await makeEpochPublisher(chain, wallet);
+    const ack: AckEpochCapture = {};
+
+    const result = await publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('legacy-pca-without-coverage-probe'),
       v10ACKProvider: captureACKInputs(ack),
     });
 

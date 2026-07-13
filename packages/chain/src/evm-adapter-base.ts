@@ -19,13 +19,7 @@ import type {
   ApprovalPolicy,
   V10PublishParams,
   OnChainPublishResult,
-  PublisherPublishPlan,
-  PublisherPublishPlanRequest,
 } from './chain-adapter.js';
-import {
-  resolvePublisherCandidatePricing,
-  type PublisherConvictionPlanReader,
-} from './publisher-plan.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -568,8 +562,6 @@ export type FundingMode =
 
 export type NativeOnlyFundingMode = Extract<FundingMode, { kind: 'native-only' }>;
 export type NativeAndTracFundingMode = Extract<FundingMode, { kind: 'native+trac' }>;
-
-type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
 
 /**
  * Generalized operational-wallet selection request. The discriminant fixes the
@@ -1887,7 +1879,7 @@ export class EVMChainAdapterBase {
    * `nextAuthorizedSigner` is the thin publish wrapper over this; RS / update /
    * relay route through it with their own `txClass` + `FundingMode` in later phases.
    */
-  private async _withSignerSelection<T extends { address: string }>(
+  protected async _withSignerSelection<T extends { address: string }>(
     select: (ordered: Wallet[]) => Promise<T>,
   ): Promise<T> {
     const previousSelection = this.signerSelectionQueue;
@@ -1909,7 +1901,7 @@ export class EVMChainAdapterBase {
     }
   }
 
-  private async _authorizedPublisherSigners(
+  protected async _authorizedPublisherSigners(
     ordered: Wallet[],
     contextGraphId: bigint,
   ): Promise<Wallet[]> {
@@ -2150,7 +2142,7 @@ export class EVMChainAdapterBase {
    * reservation and publish-plan candidates share the same cached scan, fresh
    * terminal recheck, idle preference, diagnostics, and typed failure.
    */
-  private async _selectFundedCandidateOrThrow<T extends { address: string }>(
+  protected async _selectFundedCandidateOrThrow<T extends { address: string }>(
     candidates: T[],
     fundingFor: (candidate: T) => NativeAndTracFundingMode,
     policy: { preferIdle: boolean },
@@ -2177,140 +2169,6 @@ export class EVMChainAdapterBase {
       formatNoFundedPublisherWalletMessage(diagnostics),
       diagnostics,
     );
-  }
-
-  /** Shared AskStorage quote used by both the public read and publish planning. */
-  protected async quoteRequiredPublishTokenAmount(
-    publicByteSize: bigint,
-    epochs: number,
-  ): Promise<bigint> {
-    if (!this.contracts.askStorage) {
-      throw new Error('AskStorage not available');
-    }
-    const ask = await this.readContract(
-      this.contracts.askStorage,
-      'askStorage.getStakeWeightedAverageAsk',
-      'getStakeWeightedAverageAsk',
-    );
-    return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
-  }
-
-  /**
-   * Optional typed PCA planning capability. The conviction mixin overrides
-   * this hook; adapter assemblies without that mixin safely stay direct-spend.
-   */
-  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
-    return undefined;
-  }
-
-  private async _publisherCandidatePlan(
-    signer: Wallet,
-    request: PublisherPublishPlanRequest,
-    quote: (epochs: number) => Promise<bigint>,
-  ): Promise<PublisherCandidatePlan> {
-    const pricing = await resolvePublisherCandidatePricing({
-      publisherAddress: signer.address,
-      explicitPublishEpochs: request.explicitPublishEpochs,
-      defaultPublishEpochs: request.defaultPublishEpochs,
-      quote,
-      conviction: this.contracts.dkgPublishingConvictionNFT
-        ? this.publisherConvictionPlanReader()
-        : undefined,
-    });
-    const diagnostics = pricing.source === 'direct' ? pricing.diagnostics : undefined;
-    if (diagnostics?.pcaProbeError !== undefined) {
-      console.warn(
-        `[chain] PCA publish-plan probe failed for signer=${signer.address}; ` +
-        `using direct-spend lifetime=${pricing.publishEpochs}: ${errorMessage(diagnostics.pcaProbeError)}`,
-      );
-    }
-    if (diagnostics?.quoteError !== undefined) {
-      console.warn(
-        `[chain] Publish-plan quote failed for byteSize=${request.effectiveByteSize}, ` +
-        `epochs=${pricing.publishEpochs}; using protocol minimum ${pricing.tokenAmount}: ` +
-        `${errorMessage(diagnostics.quoteError)}`,
-      );
-    }
-
-    return {
-      signer,
-      address: signer.address,
-      publisherAddress: signer.address,
-      publishEpochs: pricing.publishEpochs,
-      tokenAmount: pricing.tokenAmount,
-    };
-  }
-
-  /**
-   * Adapter-owned publish planning state machine. Candidate discovery, PCA
-   * lifetime selection, exact quote validation, strict funding, and cursor
-   * advancement happen atomically behind this boundary.
-   */
-  protected async resolveFundedPublisherPublishPlan(
-    request: PublisherPublishPlanRequest,
-  ): Promise<PublisherPublishPlan> {
-    const quoteCache = new Map<number, Promise<bigint>>();
-    const quote = (epochs: number): Promise<bigint> => {
-      const cached = quoteCache.get(epochs);
-      if (cached) return cached;
-      const pending = this.quoteRequiredPublishTokenAmount(request.effectiveByteSize, epochs)
-        .catch((error) => {
-          // A transient PCA-lock quote failure must not poison the fallback
-          // direct-spend quote for the same numeric lifetime.
-          quoteCache.delete(epochs);
-          throw error;
-        });
-      quoteCache.set(epochs, pending);
-      return pending;
-    };
-
-    if (request.publisherAddress) {
-      const signer = await this.resolvePinnedPublisherSigner(
-        request.contextGraphId,
-        request.publisherAddress,
-      );
-      const plan = await this._publisherCandidatePlan(signer, request, quote);
-      await this.selectFundedSignerOrThrow(
-        [signer],
-        {
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        },
-        { preferIdle: false },
-      );
-      return {
-        publisherAddress: plan.publisherAddress,
-        publishEpochs: plan.publishEpochs,
-        tokenAmount: plan.tokenAmount,
-      };
-    }
-
-    const selectedPlan = await this._withSignerSelection(async (ordered) => {
-      const authorized = await this._authorizedPublisherSigners(ordered, request.contextGraphId);
-      const plans = await Promise.all(
-        authorized.map((signer) => this._publisherCandidatePlan(signer, request, quote)),
-      );
-      return this._selectFundedCandidateOrThrow(
-        plans,
-        (plan) => ({
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        }),
-        { preferIdle: false },
-      );
-    });
-    // Do not expose the internal Wallet carried only for cursor advancement.
-    return {
-      publisherAddress: selectedPlan.publisherAddress,
-      publishEpochs: selectedPlan.publishEpochs,
-      tokenAmount: selectedPlan.tokenAmount,
-    };
   }
 
   /**
