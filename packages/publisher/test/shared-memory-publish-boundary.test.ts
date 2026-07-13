@@ -4,6 +4,7 @@ import {
   TRUST_LEVEL_PREDICATE,
   TrustLevel,
   TypedEventBus,
+  createOperationContext,
   encodeWorkspacePublishRequest,
   generateEd25519Keypair,
   DKG_ENTITY,
@@ -23,6 +24,8 @@ const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const SWM_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/1`;
+const SAME_AUTHOR_SIBLING_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/2`;
+const FOREIGN_PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x2222222222222222222222222222222222222222/9`;
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const ON_CHAIN_ID_PREDICATE = 'https://dkg.network/ontology#ContextGraphOnChainId';
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
@@ -66,7 +69,7 @@ async function makeRealPublisher(chain = new NoChainAdapter()) {
   return { publisher, store };
 }
 
-async function makePublisher(chain = new NoChainAdapter()) {
+async function makePublisher(chain = new NoChainAdapter(), status: PublishResult['status'] = 'tentative') {
   const { publisher, store } = await makeRealPublisher(chain);
   const publishResult: PublishResult = {
     kaId: 1n,
@@ -79,7 +82,7 @@ async function makePublisher(chain = new NoChainAdapter()) {
         privateTripleCount: 0,
       },
     ],
-    status: 'tentative',
+    status,
     publicQuads: [],
   };
   const publishSpy = recorder(async (..._args: Parameters<DKGPublisher['publish']>) => publishResult);
@@ -204,6 +207,152 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(publishSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
     ]);
+  });
+
+  it('named-KA scope excludes a foreign share with the same subject IRI', async () => {
+    const { publisher, store, publishSpy } = await makePublisher();
+    await store.insert([
+      q('urn:test:root:one', 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q('urn:test:root:one', 'http://schema.org/name', '"same-author-sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
+      q('urn:test:root:one', 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
+      q('urn:test:root:one', 'http://schema.org/name', '"legacy-bucket"', SWM_GRAPH),
+    ]);
+
+    await publisher.publishFromSharedMemory(
+      CONTEXT_GRAPH,
+      { rootEntities: ['urn:test:root:one'] },
+      {
+        sharedMemoryScope: {
+          kind: 'named-lifecycle',
+          identity: {
+            agentAddress: '0x1111111111111111111111111111111111111111',
+            kaNumber: 1n,
+          },
+        },
+      },
+    );
+
+    expect(publishSpy.calls[0][0].quads).toEqual([
+      { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"local"', graph: '' },
+    ]);
+  });
+
+  it('confirmed exact cleanup removes stale ownership when the local KA was the last share', async () => {
+    const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    const root = 'urn:test:root:one';
+    await store.insert([
+      q(root, 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q(root, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
+    ]);
+
+    await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [root] }, {
+      sharedMemoryScope: {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+        },
+      },
+    });
+
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(0);
+    const owners = await (publisher as any).sharedMemoryOwnersForPromotion(
+      CONTEXT_GRAPH, undefined, CONTEXT_GRAPH, [root],
+    );
+    expect(owners.size).toBe(0);
+  });
+
+  it('confirmed exact cleanup drains only local data and preserves foreign share ownership', async () => {
+    const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    const root = 'urn:test:root:one';
+    await store.insert([
+      q(root, 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q(root, 'http://schema.org/name', '"same-author-sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
+      q(root, 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
+      q(root, WORKSPACE_OWNER_PREDICATE, '"peer-foreign"', SWM_META_GRAPH),
+    ]);
+
+    await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [root] }, {
+      sharedMemoryScope: {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+        },
+      },
+    });
+
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteByPattern({ graph: SAME_AUTHOR_SIBLING_SWM_GRAPH, subject: root })).toBe(1);
+    expect(await store.deleteByPattern({ graph: FOREIGN_PER_KA_SWM_GRAPH, subject: root })).toBe(1);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(1);
+  });
+
+  it('batches multi-root exact-cleanup metadata reconciliation into one family read', async () => {
+    const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    const consumedOnly = 'urn:test:root:consumed-only';
+    const stillShared = 'urn:test:root:still-shared';
+    await store.insert([
+      q(consumedOnly, 'http://schema.org/name', '"local-one"', PER_KA_SWM_GRAPH),
+      q(stillShared, 'http://schema.org/name', '"local-two"', PER_KA_SWM_GRAPH),
+      q(`${stillShared}/.well-known/genid/1`, 'http://schema.org/name', '"sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
+      q(consumedOnly, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
+      q(stillShared, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
+    ]);
+    const originalQuery = store.query.bind(store);
+    let familyReads = 0;
+    store.query = async (...args) => {
+      if (args[1]?.source === 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership') {
+        familyReads += 1;
+      }
+      return originalQuery(...args);
+    };
+
+    await publisher.clearPublishedSwmRoots(
+      CONTEXT_GRAPH,
+      [consumedOnly, stillShared],
+      undefined,
+      createOperationContext('test'),
+      {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+        },
+      },
+    );
+
+    expect(familyReads).toBe(1);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: consumedOnly })).toBe(0);
+    expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: stillShared })).toBe(1);
+  });
+
+  it('rejects a family-wide remaining clear for an exact named lifecycle', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    await store.insert([
+      q('urn:test:root:one', 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q('urn:test:root:two', 'http://schema.org/name', '"sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(
+      CONTEXT_GRAPH,
+      { rootEntities: ['urn:test:root:one'] },
+      {
+        clearSharedMemoryAfter: true,
+        sharedMemoryScope: {
+          kind: 'named-lifecycle',
+          identity: {
+            agentAddress: '0x1111111111111111111111111111111111111111',
+            kaNumber: 1n,
+          },
+        },
+      },
+    )).rejects.toThrow(/cannot be combined with a named-lifecycle/);
+
+    expect(publishSpy.calls).toHaveLength(0);
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH })).toBe(1);
+    expect(await store.deleteByPattern({ graph: SAME_AUTHOR_SIBLING_SWM_GRAPH })).toBe(1);
   });
 
   it('loads selected data root plus generated private-CG catalog root and threads trusted floor', async () => {

@@ -25,6 +25,7 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@libp2p/autonat": "^3.0.20",
     "@libp2p/bootstrap": "^12.0.22",
     "@libp2p/circuit-relay-v2": "^4.2.5",

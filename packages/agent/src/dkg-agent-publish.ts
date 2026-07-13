@@ -101,7 +101,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadSelectedSharedMemoryQuads, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, resolveSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -146,6 +146,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { unpackKnowledgeAssetId } from './ka-identity.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -424,6 +425,28 @@ export type ResolveCuratedChainKeyContextOptions = {
 function normalizeOptionalContextGraphId(value: string | null | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function sharedMemoryScopeForFinalizedLifecycle(
+  authorAddress: string,
+  packedKaId: bigint | undefined,
+): SharedMemoryGraphScope {
+  if (packedKaId === undefined) return { kind: 'complete-family' };
+  const unpacked = unpackKnowledgeAssetId(packedKaId);
+  const sealedAuthor = ethers.getAddress(authorAddress);
+  const packedAuthor = BigInt(unpacked.agentAddress);
+  // Legacy/mock seals may carry only the low 96-bit KA number. Preserve that
+  // compatibility by binding a zero packed namespace to the sealed author;
+  // a real nonzero namespace must still match exactly.
+  if (packedAuthor !== 0n && ethers.getAddress(unpacked.agentAddress) !== sealedAuthor) {
+    throw new Error(
+      `Finalized lifecycle KA id ${packedKaId} is not in author ${sealedAuthor}'s namespace`,
+    );
+  }
+  return {
+    kind: 'named-lifecycle',
+    identity: { agentAddress: sealedAuthor, kaNumber: unpacked.kaNumber },
+  };
 }
 
 function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): void {
@@ -3317,18 +3340,20 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     subGraphName?: string,
+    scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<Quad[]> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-    return loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
+    const options = {
       querySource: 'agent.resolveLiftWorkspaceSlice',
-      rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
+      rootEntitiesErrorMessage: ({ inputCount, hadInput }: { inputCount: number; hadInput: boolean }) => (
         hadInput
           ? `_loadSelectedSWMQuads: no valid rootEntities provided ` +
               `(all ${inputCount} entries failed IRI validation) ` +
               `for context graph ${contextGraphId}`
           : `_loadSelectedSWMQuads: no rootEntities supplied for context graph ${contextGraphId}`
       ),
-    });
+    } as const;
+    return loadSharedMemoryQuadsForScope(this.store, swmGraph, selection, scope, options);
   }
 
   /**
@@ -3805,6 +3830,10 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
+    const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
+      seal.authorAddress,
+      seal.reservedKaId ?? packedKaId,
+    );
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
@@ -3815,6 +3844,7 @@ export class PublishMethods extends DKGAgentBase {
           [...request.roots],
           request.subGraphName,
           ctx,
+          sharedMemoryScope,
         );
       } catch (err) {
         this.log.warn(
@@ -4264,6 +4294,10 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
+    const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
+      seal.authorAddress,
+      seal.reservedKaId ?? packedKaId,
+    );
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
 
@@ -4279,6 +4313,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         { rootEntities: seal.rootEntities },
         opts?.subGraphName,
+        sharedMemoryScope,
       );
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
@@ -4311,6 +4346,7 @@ export class PublishMethods extends DKGAgentBase {
             seal.rootEntities,
             opts?.subGraphName,
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+            sharedMemoryScope,
           );
         } catch (err) {
           this.log.warn(
@@ -4397,6 +4433,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         { rootEntities: seal.rootEntities },
         opts?.subGraphName,
+        sharedMemoryScope,
       );
       if (sealedSwmQuads.length === 0) {
         throw new Error(
@@ -4412,8 +4449,8 @@ export class PublishMethods extends DKGAgentBase {
           subGraphName: opts?.subGraphName,
           publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
           publishEpochs: opts?.publishEpochs,
-          clearSharedMemoryAfter: opts?.clearSharedMemoryAfter,
           reservedKaId: recoveredReservedKaId,
+          sharedMemoryScope,
           // Wired through to the inner publisher.publish() via
           // publishFromSharedMemory's `precomputedAttestation` option.
           // Skips the publisher's signing entirely.
@@ -4451,6 +4488,17 @@ export class PublishMethods extends DKGAgentBase {
           );
         }
       }
+    }
+
+    // Exact scope owns published-root cleanup. A caller's explicit request to
+    // clear every remaining share is a separate family-wide destructive action
+    // that runs only after a confirmed publish/update.
+    if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true) {
+      await publisher.clearRemainingSharedMemory(
+        contextGraphId,
+        opts?.subGraphName,
+        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      );
     }
 
     // OT-RFC-43 A2 (decision 2) — stamp the VM pointer on the lifecycle URN
@@ -4769,17 +4817,30 @@ export class PublishMethods extends DKGAgentBase {
    * CG-DID catalog subject is appended so it is in scope for BOTH the author seal
    * (`_loadSelectedSWMQuads`) and the publisher's reload — which scope identically.
    * For `selection: 'all'` the selection is returned unchanged (both already read
-   * the whole SWM graph).
+   * the whole SWM graph). The generated floor is written into the same explicit
+   * graph scope as the publish; otherwise an exact named-lifecycle read would
+   * correctly exclude a floor left in the legacy bucket.
    */
   async _ensureCuratedCatalogInSwm(this: DKGAgent,
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     subGraphName: string | undefined,
     ctx: OperationContext,
+    scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<'all' | { rootEntities: string[] }> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
+    const catalogTargetGraph = await resolveSharedMemoryScopeWriteGraph(
+      this.store,
+      swmGraph,
+      scope,
+      { source: 'agent.ensureCuratedCatalogInSwm' },
+    );
     const cgDid = contextGraphDataUri(contextGraphId);
-    const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: swmGraph });
+    const catalogQuads = buildPublicProjection({
+      ual: cgDid,
+      accessPolicy: 'private',
+      graph: catalogTargetGraph,
+    });
     await this.store.insert(catalogQuads);
     this.log.info(
       ctx,
@@ -4844,6 +4905,7 @@ export class PublishMethods extends DKGAgentBase {
        * publisher then keeps its existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
+      sharedMemoryScope?: SharedMemoryGraphScope;
       /**
        * RFC-001 §9.x — pre-computed attestation captured by
        * `agent.assertion.finalize()`. When the caller has already
@@ -4919,7 +4981,13 @@ export class PublishMethods extends DKGAgentBase {
       ? generatedPrivateCatalogTripleKeys(contextGraphId)
       : undefined;
     if (hasGeneratedPrivateCatalog) {
-      selection = await this._ensureCuratedCatalogInSwm(contextGraphId, selection, options?.subGraphName, ctx);
+      selection = await this._ensureCuratedCatalogInSwm(
+        contextGraphId,
+        selection,
+        options?.subGraphName,
+        ctx,
+        options?.sharedMemoryScope,
+      );
     }
 
     // RFC-001 §9.x — selection-based publish bridge. If the caller
@@ -4940,6 +5008,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         selection,
         options?.subGraphName,
+        options?.sharedMemoryScope,
       );
       if (swmQuads.length > 0) {
         resolvedSeal = await this._buildPrecomputedAttestationForSelection(
@@ -5019,6 +5088,7 @@ export class PublishMethods extends DKGAgentBase {
       precomputedAttestation: resolvedSeal,
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
+      sharedMemoryScope: options?.sharedMemoryScope,
       encryptInlinePayload,
       encryptInlineChunked,
     });

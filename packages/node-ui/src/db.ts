@@ -2774,12 +2774,19 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     return row !== undefined;
   }
 
-  pendingFor(peer: string): ProtocolOutboxEntry[] {
+  hasPendingFor(peer: string): boolean {
+    return this.db.prepare('SELECT 1 FROM protocol_outbox WHERE peer_id = ? LIMIT 1').get(peer) !== undefined;
+  }
+
+  due(now: number): ProtocolOutboxEntry[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM protocol_outbox WHERE peer_id = ? ORDER BY first_failure_at ASC`,
+        `SELECT * FROM protocol_outbox
+         WHERE next_attempt_at <= ?
+         ORDER BY next_attempt_at ASC, first_failure_at ASC,
+                  peer_id ASC, protocol ASC, message_id ASC`,
       )
-      .all(peer) as Array<{
+      .all(now) as Array<{
       peer_id: string;
       protocol: string;
       message_id: string;
@@ -2793,12 +2800,16 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     return rows.map(SqliteProtocolOutboxStore.rowToEntry);
   }
 
-  due(now: number): ProtocolOutboxEntry[] {
+  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM protocol_outbox WHERE next_attempt_at <= ?`,
+        `SELECT * FROM protocol_outbox
+         WHERE next_attempt_at <= ?
+         ORDER BY next_attempt_at ASC, first_failure_at ASC,
+                  peer_id ASC, protocol ASC, message_id ASC
+         LIMIT ?`,
       )
-      .all(now) as Array<{
+      .all(now, limit) as Array<{
       peer_id: string;
       protocol: string;
       message_id: string;

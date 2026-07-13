@@ -618,7 +618,7 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): ResolvedDKGAgentConf
 }
 
 interface ACKReliableMessenger {
-  sendReliable(
+  sendRequestOwned(
     peerId: string,
     protocol: string,
     data: Uint8Array,
@@ -631,11 +631,11 @@ function createACKSendP2P(input: {
   timeoutMs: number;
 }): ACKCollectorDeps['sendP2P'] {
   return async (peerId: string, protocol: string, data: Uint8Array) => {
-    const sendResult = await input.messenger.sendReliable(peerId, protocol, data, {
+    const sendResult = await input.messenger.sendRequestOwned(peerId, protocol, data, {
       timeoutMs: input.timeoutMs,
     });
     if (!sendResult.delivered) {
-      throw new Error(`substrate queued (transport): ${sendResult.error}`);
+      throw new Error(`substrate send already in flight (transport): ${sendResult.error}`);
     }
     if (!sendResult.response) {
       throw new Error('substrate delivered (transport) without response');
@@ -1547,6 +1547,14 @@ export class DKGAgent extends DKGAgentBase {
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
+    }
+    try {
+      await this.messenger.stopOutboxDrain();
+    } catch (error) {
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: outbox retry drain failed during shutdown: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     if (this.swmAckQuorumTimer) {
       clearInterval(this.swmAckQuorumTimer);

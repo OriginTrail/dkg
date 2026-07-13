@@ -41,7 +41,7 @@
 
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
-import { withTimeout, isRetryableRpcError, isKnownTransactionError } from './evm-adapter-rpc.js';
+import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, sleep } from './evm-adapter-rpc.js';
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
@@ -117,6 +117,21 @@ export interface ReadOpts {
    * sentinel polluting stickiness or telemetry.
    */
   isEmptyResult?: (value: unknown) => boolean;
+  /** Retry a complete endpoint pass only when every failure was a throttle. */
+  endpointSetRetry?: 'all-throttled';
+}
+
+type ProviderSetExhaustionKind = 'all-throttled' | 'mixed';
+
+/** Internal exhaustion detail used only while deciding whether to retry a pass. */
+class ProviderSetExhaustedError extends ChainRpcTransportError {
+  constructor(
+    message: string,
+    readonly exhaustionKind: ProviderSetExhaustionKind,
+    opts: { cause: unknown; rpcUrls: readonly string[] },
+  ) {
+    super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
+  }
 }
 
 /**
@@ -142,6 +157,9 @@ export interface RpcFailoverClientOptions {
   validateEndpoint?: ValidateEndpointFn;
   /** Endpoint-stickiness configuration (Mechanism B). */
   stickiness?: StickinessOptions;
+  /** Full-pool retries after every endpoint reports a transient throttle. */
+  readThrottleRetries?: number;
+  readThrottleBackoffMs?: number;
 }
 
 export interface StickinessOptions {
@@ -205,6 +223,8 @@ export class RpcFailoverClient {
   private readonly stickiness: EndpointStickiness;
   /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
   private readonly validateEndpoint?: ValidateEndpointFn;
+  private readonly readThrottleRetries: number;
+  private readonly readThrottleBackoffMs: number;
 
   constructor(
     private readonly getEndpoints: () => RpcEndpoint[],
@@ -219,6 +239,8 @@ export class RpcFailoverClient {
     options?: RpcFailoverClientOptions,
   ) {
     this.validateEndpoint = options?.validateEndpoint;
+    this.readThrottleRetries = options?.readThrottleRetries ?? 2;
+    this.readThrottleBackoffMs = options?.readThrottleBackoffMs ?? 250;
     const stickiness = options?.stickiness;
     const isEnabled = stickiness?.isEnabled
       ?? (stickiness?.enabled !== undefined ? () => stickiness.enabled as boolean : () => true);
@@ -288,7 +310,7 @@ export class RpcFailoverClient {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    const run = () => this.runAcrossProviders(
+    const runPass = () => this.runAcrossProviders(
       label,
       fn,
       opts?.isRetryable ?? isRetryableRpcError,
@@ -296,6 +318,9 @@ export class RpcFailoverClient {
       opts?.skipPreferred ?? false,
       opts?.isEmptyResult,
     );
+    const run = opts?.endpointSetRetry === 'all-throttled'
+      ? () => this.withThrottleRetries(runPass)
+      : runPass;
     return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
@@ -666,6 +691,7 @@ export class RpcFailoverClient {
     const attempts = this.stickiness.attempts(canonical, intent);
     const capMs = resolveCapMs(policy, canonical.length);
     let lastRetryable: unknown;
+    let allEndpointsThrottled = true;
     let sawEmpty = false;
     let lastEmpty: T | undefined;
     for (let i = 0; i < attempts.length; i += 1) {
@@ -691,6 +717,7 @@ export class RpcFailoverClient {
           // telemetry. Try the next endpoint; if EVERY endpoint is empty (and none
           // errored) the empty value itself is the honest answer.
           sawEmpty = true;
+          allEndpointsThrottled = false;
           lastEmpty = out;
           continue;
         }
@@ -700,6 +727,7 @@ export class RpcFailoverClient {
       } catch (err) {
         if (!isRetryable(err)) throw err;
         lastRetryable = err;
+        if (!isThrottleRpcError(err)) allEndpointsThrottled = false;
         attempt.recordFailure(); // de-prefer a failed backend
         if (!isLast) {
           noteRpcFailover(label, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
@@ -725,7 +753,7 @@ export class RpcFailoverClient {
         ? errorMessage(lastRetryable)
         : `${label} read failed on all configured RPC endpoints ` +
           `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
-      throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
+      throw new ProviderSetExhaustedError(message, allEndpointsThrottled ? 'all-throttled' : 'mixed', {
         cause: lastRetryable,
         rpcUrls: canonical.map((e) => e.rpcUrl),
       });
@@ -741,6 +769,22 @@ export class RpcFailoverClient {
       `${label} read failed: no configured RPC endpoints`,
       { rpcUrls: [] },
     );
+  }
+
+  private async withThrottleRetries<T>(run: () => Promise<T>): Promise<T> {
+    for (let retry = 0; ; retry += 1) {
+      try {
+        return await run();
+      } catch (error) {
+        // A raw 429 from a caller-supplied non-retryable classifier must retain
+        // its no-failover/no-retry contract. Only retry a typed FULL-POOL
+        // exhaustion produced by runAcrossProviders.
+        if (!(error instanceof ProviderSetExhaustedError)
+          || error.exhaustionKind !== 'all-throttled'
+          || retry >= this.readThrottleRetries) throw error;
+        await sleep(this.readThrottleBackoffMs * (2 ** retry));
+      }
+    }
   }
 
   /**

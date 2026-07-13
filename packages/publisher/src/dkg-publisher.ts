@@ -1,9 +1,9 @@
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, loadSelectedSharedMemoryQuads } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -1556,9 +1556,19 @@ export class DKGPublisher implements Publisher {
        * the existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
+      /** Explicit graph-family boundary; named lifecycles exclude bucket and siblings. */
+      sharedMemoryScope?: SharedMemoryGraphScope;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
+    const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
+      ?? { kind: 'complete-family' };
+    if (sharedMemoryScope.kind === 'named-lifecycle' && options?.clearSharedMemoryAfter === true) {
+      throw new Error(
+        'clearSharedMemoryAfter cannot be combined with a named-lifecycle shared-memory scope; ' +
+        'use complete-family scope for an explicit family-wide clear',
+      );
+    }
 
     // Guard: VM publishing requires an on-chain registered context graph.
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
@@ -1601,14 +1611,21 @@ export class DKGPublisher implements Publisher {
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
 
-    const quads = await loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
-      quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
-      rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
+    const loadOptions = {
+      quadFilter: (q: Quad) => !isSwmMerkleExcludedQuad(q),
+      rootEntitiesErrorMessage: ({ inputCount, hadInput }: { inputCount: number; hadInput: boolean }) => (
         hadInput
           ? `No valid rootEntities provided (all ${inputCount} entries failed IRI validation)`
           : `No rootEntities provided for context graph ${contextGraphId}`
       ),
-    });
+    };
+    const quads = await loadSharedMemoryQuadsForScope(
+      this.store,
+      swmGraph,
+      selection,
+      sharedMemoryScope,
+      loadOptions,
+    );
 
     if (quads.length === 0) {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
@@ -1712,58 +1729,17 @@ export class DKGPublisher implements Publisher {
     // `ctxGraphId ?? chainCgId`.
     const targetCgId = ctxGraphId ?? chainCgId;
     if (targetCgId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
-      // V10 publishDirect already registers the KC to the context graph
-      // via an internal call to ContextGraphs.registerKnowledgeAsset
-      // (Hub-authorized only — EOAs cannot call it directly). The legacy
-      // V9 flow required a separate addBatchToContextGraph tx; that path
-      // is no longer available. Attempt the explicit verify call as a
-      // fallback for non-V10 chains, but treat "Only Contracts in Hub"
-      // rejections as success (V10 already handled it).
-      let registered = false;
-      if (typeof this.chain.verify === 'function') {
-        let participantSigs = options?.contextGraphSignatures ?? [];
-        if (participantSigs.length === 0 && typeof this.chain.signMessage === 'function') {
-          const identityId = this.publisherNodeIdentityId;
-          if (identityId > 0n) {
-            const digest = ethers.solidityPackedKeccak256(
-              ['uint256', 'bytes32'],
-              [BigInt(targetCgId), ethers.hexlify(publishResult.merkleRoot)],
-            );
-            const sig = await this.chain.signMessage(ethers.getBytes(digest));
-            participantSigs = [{ identityId, ...sig }];
-          }
-        }
+      // V10 publishDirect already registered the KC to the context graph
+      // inside publishDirect, via a Hub-authorized internal call to
+      // ContextGraphs.registerKnowledgeAsset (EOAs cannot call it directly),
+      // which emits KnowledgeAssetRegisteredToContextGraph. The legacy V9
+      // explicit chain.verify() fallback that used to run here always reverted
+      // on V10 ("Only Contracts in Hub" / CALL_EXCEPTION) — i.e. a doomed
+      // on-chain call plus an estimateGas round-trip, and serializer occupancy,
+      // on EVERY confirmed publish (#1575). Registration is already done, so
+      // skip the verify attempt entirely and proceed to the data promotion.
+      this.log.debug(ctx, `V10 auto-registered KC to context graph ${targetCgId}; explicit verify skipped`);
 
-        const sortedSigs = [...participantSigs]
-          .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
-          .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
-
-        try {
-          const txResult = await this.chain.verify({
-            contextGraphId: BigInt(targetCgId),
-            batchId: publishResult.onChainResult.batchId,
-            merkleRoot: publishResult.merkleRoot,
-            signerSignatures: sortedSigs,
-          });
-          if (txResult && typeof txResult === 'object' && 'success' in txResult && txResult.success) {
-            registered = true;
-            this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} verified on context graph ${targetCgId}`);
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // V10 publishDirect handles registration internally via a
-          // Hub-authorized call. Any revert here (typically
-          // "Only Contracts in Hub" / CALL_EXCEPTION) means the
-          // explicit verify path is not applicable — treat as success.
-          registered = true;
-          this.log.info(ctx, `Explicit verify not needed (V10 auto-registered): ${msg.slice(0, 120)}`);
-        }
-      } else {
-        registered = true;
-        this.log.info(ctx, `No verify function on chain adapter — assuming V10 auto-registration for context graph ${targetCgId}`);
-      }
-
-      if (registered) {
         const ctxDataGraph = contextGraphDataUri(contextGraphId, targetCgId);
         const ctxMetaGraph = contextGraphMetaUri(contextGraphId, targetCgId);
         const defaultDataGraph = this.graphManager.dataGraphUri(contextGraphId);
@@ -1883,7 +1859,6 @@ export class DKGPublisher implements Publisher {
         this.log.info(ctx, `Promoted ${publishResult.kaManifest.length} KAs from default graph to context graph ${targetCgId}`);
         }
         });
-      }
     }
 
     // SWM cleanup: ALWAYS remove published triples from SWM after chain confirmation.
@@ -1891,7 +1866,13 @@ export class DKGPublisher implements Publisher {
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
       const kaMap = skolemizeByEntity(quads);
-      await this.clearPublishedSwmRoots(contextGraphId, [...kaMap.keys()], options?.subGraphName, ctx);
+      await this.clearPublishedSwmRoots(
+        contextGraphId,
+        [...kaMap.keys()],
+        options?.subGraphName,
+        ctx,
+        sharedMemoryScope,
+      );
       // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
       // Default is false: unpublished entities stay in SWM for future publishes.
       if (options?.clearSharedMemoryAfter === true) {
@@ -5490,12 +5471,31 @@ export class DKGPublisher implements Publisher {
     rootEntities: string[],
     subGraphName: string | undefined,
     ctx: OperationContext,
+    scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<void> {
     if (rootEntities.length === 0) return;
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+    await this.clearPublishedSwmRootsInGraphs(
+      contextGraphId,
+      rootEntities,
+      subGraphName,
+      ctx,
+      await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope),
+      scope.kind === 'complete-family' ? 'always' : 'when-no-share-remains',
+    );
+  }
+
+  private async clearPublishedSwmRootsInGraphs(
+    contextGraphId: string,
+    rootEntities: string[],
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+    swmGraphsForClear: string[],
+    metadataPolicy: 'always' | 'when-no-share-remains',
+  ): Promise<void> {
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
     const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-    const swmGraphsForClear = await this.swmGraphsUnder(swmGraph);
     let ownerDeletedTotal = 0;
     for (const rootEntity of rootEntities) {
       for (const g of swmGraphsForClear) {
@@ -5505,12 +5505,40 @@ export class DKGPublisher implements Publisher {
           graph: g, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
         });
       }
-      const ownerDeleted = await this.store.deleteByPattern({
-        graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
-      });
-      ownerDeletedTotal += ownerDeleted;
-      await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
-      this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
+    }
+    // A root-keyed owner row can only remain live while some SWM family graph
+    // still contains that root. Reconcile the complete selected root set with
+    // one family-wide read rather than one independent scan per root.
+    const rootsWithRemainingShares = new Set<string>();
+    if (metadataPolicy === 'when-no-share-remains') {
+      const remaining = await loadSelectedSharedMemoryQuads(
+        this.store,
+        swmGraph,
+        { rootEntities },
+        { querySource: 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership' },
+      );
+      for (const quad of remaining) {
+        for (const rootEntity of rootEntities) {
+          if (
+            quad.subject === rootEntity
+            || quad.subject.startsWith(`${rootEntity}/.well-known/genid/`)
+          ) {
+            rootsWithRemainingShares.add(rootEntity);
+          }
+        }
+      }
+    }
+    for (const rootEntity of rootEntities) {
+      const shouldClearRootMetadata = metadataPolicy === 'always'
+        || !rootsWithRemainingShares.has(rootEntity);
+      if (shouldClearRootMetadata) {
+        const ownerDeleted = await this.store.deleteByPattern({
+          graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
+        });
+        ownerDeletedTotal += ownerDeleted;
+        await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
+        this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
+      }
     }
     if (ownerDeletedTotal > 0) {
       this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);

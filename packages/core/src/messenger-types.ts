@@ -197,29 +197,36 @@ export interface ProtocolOutboxStore {
 
   /**
    * Whether an entry exists for `(peer, protocol, messageId)`. Used
-   * by the stale-snapshot guard in `Messenger.processOutboxOnConnect`
-   * — between `tryBeginAttempt` (inflight lock) and the wire send,
+   * by the scheduled drain's stale-snapshot guard — between
+   * `tryBeginAttempt` (inflight lock) and the wire send,
    * a sibling flush may have already delivered + removed the entry,
    * and we must not double-send. The rc9 #538 fix lifted into the
    * generic substrate.
    */
   hasEntry(peer: string, protocol: string, messageId: string): boolean;
 
-  /**
-   * All entries for a specific peer, regardless of `nextAttemptAt`.
-   * Used by `processOutboxOnConnect`: a reconnection is the signal
-   * we were waiting for, so attempt now even if backoff isn't due
-   * yet. Sorted by `firstFailureAt` ascending for FIFO per-peer
-   * drain.
-   */
-  pendingFor(peer: string): ProtocolOutboxEntry[];
+  /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
+  hasPendingFor(peer: string): boolean;
 
   /**
-   * All entries whose `nextAttemptAt <= now`. Used by the periodic
-   * tick to find what's due for retry, regardless of peer
-   * reachability.
+   * All entries whose `nextAttemptAt <= now`.
+   *
+   * This remains the required public store contract for compatibility with
+   * existing/custom stores. `ProtocolOutbox` applies canonical ordering when
+   * it turns this snapshot into a bounded retry page.
    */
   due(now: number): ProtocolOutboxEntry[];
+
+  /**
+   * Optional storage-level fast path for an ordered bounded retry page.
+   *
+   * `ProtocolOutbox` only calls this with a normalized non-negative integer
+   * limit. Implementations that opt in MUST select the first `limit` rows in
+   * ascending `nextAttemptAt`, `firstFailureAt`, then
+   * `(peer, protocol, messageId)` order. Stores that only implement the legacy
+   * `due(now)` API remain fully supported through the wrapper fallback.
+   */
+  duePage?(now: number, limit: number): ProtocolOutboxEntry[];
 
   /**
    * Drop entries whose `firstFailureAt` is older than the
@@ -249,6 +256,7 @@ export interface ProtocolOutboxStore {
    */
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
 }
+
 
 /**
  * Durable per-author KA-number allocator (OT-RFC-43 Option-1
