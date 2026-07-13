@@ -2518,8 +2518,33 @@ export class DKGPublisher implements Publisher {
         'but not both in one publish without a mixed ACK mode that preserves curated confidentiality.',
       );
     }
+    // Funding/signer selection must finish before either encryption hook runs:
+    // the chunked hook persists and gossips member ciphertext, so invoking it
+    // for an unfundable publish would leave remote staging artifacts behind.
+    // Curated ACK pricing is known from the public catalog commitment without
+    // running member-side encryption, which lets us finalize the whole plan at
+    // this fail-fast boundary.
+    const stagingByteSize = useEncryptedInline && useCuratedCatalog
+      ? catalogByteSize
+      : publicByteSize;
+    const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
+    const publishPlan = canAttemptOnChainPublish && publisherSigner && publisherContextGraphId !== undefined
+      ? await this.resolveOnChainPublishPlan({
+        contextGraphId: publisherContextGraphId,
+        initialSigner: publisherSigner,
+        explicitPublishEpochs,
+        effectiveByteSize,
+        ctx,
+      })
+      : undefined;
+    if (publishPlan) {
+      publisherSigner = publishPlan.signer;
+      publisherAddress = publishPlan.publisherAddress;
+    }
+    const publishEpochs = publishPlan?.publishEpochs ?? explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
+    const precomputedTokenAmount = publishPlan?.tokenAmount ?? 0n;
+
     let stagingQuads: Uint8Array | undefined;
-    let stagingByteSize = publicByteSize;
     if (useEncryptedInline) {
       // MEMBER-SIDE ENCRYPTION STAYS. The private (non-catalog) data is still
       // AEAD-encrypted and distributed to CG members — via the chunked SWM
@@ -2549,12 +2574,10 @@ export class DKGPublisher implements Publisher {
       // footprint, derived from the SAME committed leaf-set as the root.
       if (useCuratedCatalog) {
         stagingQuads = new TextEncoder().encode(catalogNquadsStr);
-        stagingByteSize = catalogByteSize;
       } else {
         // Curated CG with no catalog entry — nothing public to commit/serve.
         // Leave staging empty; this publish carries a zero catalog commitment.
         stagingQuads = undefined;
-        stagingByteSize = publicByteSize;
       }
     } else {
       // A2 (§1.1 fix): internal public-CG VM publishes ship small plaintext
@@ -2602,23 +2625,6 @@ export class DKGPublisher implements Publisher {
     // chain byteSize); for public CGs it stays plaintext bytes. Single source
     // of truth so ACK pricing == chain tx pricing. Resolved BEFORE the PCA
     // coercion below so the fundability probe can price the lock-lifetime publish.
-    const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
-    const publishPlan = canAttemptOnChainPublish && publisherSigner && publisherContextGraphId !== undefined
-      ? await this.resolveOnChainPublishPlan({
-        contextGraphId: publisherContextGraphId,
-        initialSigner: publisherSigner,
-        explicitPublishEpochs,
-        effectiveByteSize,
-        ctx,
-      })
-      : undefined;
-    if (publishPlan) {
-      publisherSigner = publishPlan.signer;
-      publisherAddress = publishPlan.publisherAddress;
-    }
-    const publishEpochs = publishPlan?.publishEpochs ?? explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
-    const precomputedTokenAmount = publishPlan?.tokenAmount ?? 0n;
-
     // Identifier split for V10 publishes.
     //
     //   `contextGraphId` (outer) = the SWM graph id the publisher reads

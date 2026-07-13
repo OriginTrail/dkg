@@ -1120,6 +1120,28 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(ackProvider).not.toHaveBeenCalled();
   });
 
+  it('rejects an unfundable curated publish before chunked remote staging', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new NoFundedReservationChain(wallet);
+    const publisher = await makeEpochPublisher(chain, wallet);
+    const encryptInlineChunked = vi.fn(async () => ({
+      ciphertextRoot: new Uint8Array(32),
+      byteSize: 1n,
+    }));
+    const ackProvider = vi.fn(mockChainStubACKProvider());
+
+    await expect(publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('no-funded-wallet-before-remote-staging'),
+      encryptInlinePayload: async (plaintext) => plaintext,
+      encryptInlineChunked,
+      v10ACKProvider: ackProvider,
+    })).rejects.toMatchObject({ code: 'NO_FUNDED_PUBLISHER_WALLET' });
+
+    expect(encryptInlineChunked).not.toHaveBeenCalled();
+    expect(ackProvider).not.toHaveBeenCalled();
+  });
+
   it('keeps explicit publishEpochs when the publisher is also a PCA agent', async () => {
     const wallet = new ethers.Wallet(TEST_KEY);
     const chain = new EpochCapturingChain(wallet);
