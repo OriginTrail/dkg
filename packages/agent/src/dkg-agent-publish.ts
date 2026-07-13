@@ -432,13 +432,21 @@ function sharedMemoryScopeForFinalizedLifecycle(
   packedKaId: bigint | undefined,
 ): SharedMemoryGraphScope {
   if (packedKaId === undefined) return { kind: 'complete-family' };
-  const identity = unpackKnowledgeAssetId(packedKaId);
-  if (ethers.getAddress(identity.agentAddress) !== ethers.getAddress(authorAddress)) {
+  const unpacked = unpackKnowledgeAssetId(packedKaId);
+  const sealedAuthor = ethers.getAddress(authorAddress);
+  const packedAuthor = BigInt(unpacked.agentAddress);
+  // Legacy/mock seals may carry only the low 96-bit KA number. Preserve that
+  // compatibility by binding a zero packed namespace to the sealed author;
+  // a real nonzero namespace must still match exactly.
+  if (packedAuthor !== 0n && ethers.getAddress(unpacked.agentAddress) !== sealedAuthor) {
     throw new Error(
-      `Finalized lifecycle KA id ${packedKaId} is not in author ${ethers.getAddress(authorAddress)}'s namespace`,
+      `Finalized lifecycle KA id ${packedKaId} is not in author ${sealedAuthor}'s namespace`,
     );
   }
-  return { kind: 'named-lifecycle', identity };
+  return {
+    kind: 'named-lifecycle',
+    identity: { agentAddress: sealedAuthor, kaNumber: unpacked.kaNumber },
+  };
 }
 
 function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): void {
