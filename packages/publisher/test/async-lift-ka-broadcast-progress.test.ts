@@ -81,10 +81,12 @@ describe('KA async VM publish broadcast progress', () => {
     let jobId = '';
     let statusDuringExecutor: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
     const publisher = createPublisher({
-      knowledgeAssetVmPublishExecutor: async (input) => {
-        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'start');
-        statusDuringExecutor = await publisher.getStatus(jobId);
-        throw new Error('process crashed after tx submit');
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'start');
+          statusDuringExecutor = await publisher.getStatus(jobId);
+          throw new Error('process crashed after tx submit');
+        },
       },
     });
     await stageShareSnapshot();
@@ -162,11 +164,14 @@ describe('KA async VM publish broadcast progress', () => {
           publisherAddress: '0x4444444444444444444444444444444444444444',
         },
       }),
-      knowledgeAssetVmPublishRecoveryFinalizer: async (input) => {
-        expect(input.job.broadcast.txHash).toBe(txHash);
-        expect(input.request.intentKey).toBe(request.intentKey);
-        expect(input.recovery.finalization.ual).toBe(ual);
-        finalized.push({ jobId: input.job.jobId, status: input.job.status });
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => { throw new Error('not used'); },
+        finalizeRecovered: async (input) => {
+          expect(input.job.broadcast.txHash).toBe(txHash);
+          expect(input.request.intentKey).toBe(request.intentKey);
+          expect(input.recovery.finalization.ual).toBe(ual);
+          finalized.push({ jobId: input.job.jobId, status: input.job.status });
+        },
       },
     });
 
@@ -243,9 +248,12 @@ describe('KA async VM publish broadcast progress', () => {
           publisherAddress: '0x4444444444444444444444444444444444444444',
         },
       }),
-      knowledgeAssetVmPublishRecoveryFinalizer: async () => {
-        attempts += 1;
-        throw new Error('SWM snapshot is still catching up');
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => { throw new Error('not used'); },
+        finalizeRecovered: async () => {
+          attempts += 1;
+          throw new Error('SWM snapshot is still catching up');
+        },
       },
     });
 

@@ -5,6 +5,7 @@ import type {
   LiftJobFinalizationMetadata,
   LiftJobIncluded,
   LiftJobInclusionMetadata,
+  LiftJobHex,
   LiftJobState,
   LiftJobValidationMetadata,
   LiftPublishRequestMetadata,
@@ -52,6 +53,11 @@ export interface AsyncLiftPublisher {
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationMetadata;
+  /** Immutable evidence emitted by the exact transaction being recovered. */
+  publishProof?: {
+    readonly merkleRoot: LiftJobHex;
+    readonly authorAddress?: LiftJobHex;
+  };
 }
 
 export interface AsyncLiftPublishExecutionInput {
@@ -98,6 +104,15 @@ export type AsyncKnowledgeAssetVmPublishPreflightResult =
   | { readonly action: 'execute' }
   | { readonly action: 'noop'; readonly reason?: string };
 
+/** Cohesive lifecycle boundary for one named-KA async queue job. */
+export interface AsyncKnowledgeAssetVmPublishJobHandler {
+  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<PublishResult>;
+  preflight?(
+    input: AsyncKnowledgeAssetVmPublishPreflightInput,
+  ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
+  finalizeRecovered?(input: AsyncKnowledgeAssetVmPublishRecoveryInput): Promise<void>;
+}
+
 export type AsyncLiftPublisherRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
 ) => Promise<AsyncLiftPublisherRecoveryResult | null>;
@@ -112,13 +127,7 @@ export interface AsyncLiftPublisherConfig {
   idGenerator?: () => string;
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
-  knowledgeAssetVmPublishExecutor?: (input: AsyncKnowledgeAssetVmPublishExecutionInput) => Promise<PublishResult>;
-  knowledgeAssetVmPublishPreflight?: (
-    input: AsyncKnowledgeAssetVmPublishPreflightInput,
-  ) => Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
-  knowledgeAssetVmPublishRecoveryFinalizer?: (
-    input: AsyncKnowledgeAssetVmPublishRecoveryInput,
-  ) => Promise<void>;
+  knowledgeAssetVmPublishHandler?: AsyncKnowledgeAssetVmPublishJobHandler;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }

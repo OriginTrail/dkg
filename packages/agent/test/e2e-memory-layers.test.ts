@@ -540,9 +540,11 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
     );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishPreflight: preflight,
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      knowledgeAssetVmPublishHandler: {
+        preflight,
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -647,6 +649,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
           endKAId: kaId.toString(),
           publisherAddress: onChain.publisherAddress as `0x${string}`,
         },
+        publishProof: {
+          merkleRoot: intent.sealMerkleRoot,
+          authorAddress: intent.seal.authorAddress,
+        },
       },
       publisher: (agent as any).publisher,
     } as const;
@@ -663,26 +669,28 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
     expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
 
-    const merkleRootSpy = vi.spyOn((agent as any).chain, 'getLatestMerkleRoot')
-      .mockResolvedValue(ethers.getBytes(`0x${'ff'.repeat(32)}`));
-    try {
-      await expect(
-        agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any),
-      ).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
-    } finally {
-      merkleRootSpy.mockRestore();
-    }
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      recovery: {
+        ...recoveryInput.recovery,
+        publishProof: {
+          ...recoveryInput.recovery.publishProof,
+          merkleRoot: `0x${'ff'.repeat(32)}`,
+        },
+      },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
     expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
 
-    const merkleAuthorSpy = vi.spyOn((agent as any).chain, 'getLatestMerkleRootAuthor')
-      .mockResolvedValue('0x0000000000000000000000000000000000000001');
-    try {
-      await expect(
-        agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any),
-      ).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
-    } finally {
-      merkleAuthorSpy.mockRestore();
-    }
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      recovery: {
+        ...recoveryInput.recovery,
+        publishProof: {
+          ...recoveryInput.recovery.publishProof,
+          authorAddress: '0x0000000000000000000000000000000000000001',
+        },
+      },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
     expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
 
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
@@ -704,6 +712,23 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       action: 'noop',
       reason: 'already-published',
     });
+
+    // A later update must not invalidate recovery of the original confirmed
+    // transaction, and replaying that recovery must not regress the VM pointer.
+    await agent.assertion.pullFrom(CG_ID, name, 'vm', { onConflict: 'replace' });
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Recovered Async VM v2"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.promote(CG_ID, name);
+    const updateIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const updated = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(updated.status).toBe('confirmed');
+    expect(updateIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
+
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    const afterSupersededRecovery = await agent.assertion.history(CG_ID, name);
+    expect(afterSupersededRecovery?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
   }, 90_000);
 
   it('async VM publish no-ops when the queued seal is already current in VM', async () => {
@@ -728,8 +753,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
     );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishPreflight: preflight,
-      knowledgeAssetVmPublishExecutor: executor,
+      knowledgeAssetVmPublishHandler: { preflight, execute: executor },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
 
@@ -766,8 +790,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
     );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishPreflight: preflight,
-      knowledgeAssetVmPublishExecutor: executor,
+      knowledgeAssetVmPublishHandler: { preflight, execute: executor },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(staleIntent);
 
@@ -905,8 +928,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       clearSharedMemoryAfter: false,
     });
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      knowledgeAssetVmPublishHandler: {
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -1019,10 +1044,12 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       clearSharedMemoryAfter: true,
     });
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishPreflight: async ({ request }) =>
-        agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      knowledgeAssetVmPublishHandler: {
+        preflight: async ({ request }) =>
+          agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -1069,10 +1096,12 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       clearRemainingSharedMemory: vi.fn(),
     };
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions, {
-          publisherOverride: fakePublisher as any,
-        }),
+      knowledgeAssetVmPublishHandler: {
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions, {
+            publisherOverride: fakePublisher as any,
+          }),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -1121,8 +1150,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name, { subGraphName });
     expect(intent.vmCurrentAssertion).toBeDefined();
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      knowledgeAssetVmPublishHandler: {
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');

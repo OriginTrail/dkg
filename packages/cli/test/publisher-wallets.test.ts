@@ -11,7 +11,7 @@ import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { DKGPublisher, type PublishOptions } from '@origintrail-official/dkg-publisher';
-import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
+import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, createPublisherWalletChain, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
 import { parseOptionalPositiveInteger, parsePositiveIntegerOption, parsePositiveMsOption } from '../src/cli-option-parsers.js';
@@ -342,8 +342,8 @@ describe('publisher wallets', () => {
 
     try {
       const publishCalls: PublishOptions[] = [];
-      const realExecutor = createKnowledgeAssetVmPublishExecutor(agent);
-      type KnowledgeAssetVmPublishExecutorInput = Parameters<typeof realExecutor>[0];
+      const realHandler = createKnowledgeAssetVmPublishHandler(agent);
+      type KnowledgeAssetVmPublishExecutorInput = Parameters<typeof realHandler.execute>[0];
       runtime = await createPublisherRuntimeFromAgent({
         dataDir,
         store,
@@ -351,36 +351,38 @@ describe('publisher wallets', () => {
         chainBase: { rpcUrl, hubAddress },
         pollIntervalMs: 10,
         errorBackoffMs: 10,
-        knowledgeAssetVmPublishExecutor: async (input: KnowledgeAssetVmPublishExecutorInput) => {
-          const publisher = input.publisher;
-          if (!publisher) {
-            throw new Error('identityless queued publish test expected a publisher override');
-          }
-          const originalPublish = publisher.publish.bind(publisher);
-          publisher.publish = async (opts: PublishOptions) => {
-            const publisherAddress = await publisher.publisherFallbackAuthorAddress();
-            expect(publisherAddress?.toLowerCase()).toBe(wallet.address.toLowerCase());
-            expect(publisher.getIdentityId()).toBe(0n);
-            publishCalls.push(opts);
-            return {
-              status: 'tentative' as const,
-              ual: 'did:dkg:test/identityless-runtime',
-              merkleRoot: ethers.getBytes(opts.precomputedAttestation?.expectedMerkleRoot ?? `0x${'12'.repeat(32)}`),
-              kaManifest: [],
+        knowledgeAssetVmPublishHandler: {
+          execute: async (input: KnowledgeAssetVmPublishExecutorInput) => {
+            const publisher = input.publisher;
+            if (!publisher) {
+              throw new Error('identityless queued publish test expected a publisher override');
+            }
+            const originalPublish = publisher.publish.bind(publisher);
+            publisher.publish = async (opts: PublishOptions) => {
+              const publisherAddress = await publisher.publisherFallbackAuthorAddress();
+              expect(publisherAddress?.toLowerCase()).toBe(wallet.address.toLowerCase());
+              expect(publisher.getIdentityId()).toBe(0n);
+              publishCalls.push(opts);
+              return {
+                status: 'tentative' as const,
+                ual: 'did:dkg:test/identityless-runtime',
+                merkleRoot: ethers.getBytes(opts.precomputedAttestation?.expectedMerkleRoot ?? `0x${'12'.repeat(32)}`),
+                kaManifest: [],
+              };
             };
-          };
-          try {
-            return await realExecutor({
-              ...input,
-              publishOptions: {
-                ...input.publishOptions,
-                publisherPeerId: 'peer-identityless-runtime',
-                publishContextGraphId: '1',
-              },
-            });
-          } finally {
-            publisher.publish = originalPublish;
-          }
+            try {
+              return await realHandler.execute({
+                ...input,
+                publishOptions: {
+                  ...input.publishOptions,
+                  publisherPeerId: 'peer-identityless-runtime',
+                  publishContextGraphId: '1',
+                },
+              });
+            } finally {
+              publisher.publish = originalPublish;
+            }
+          },
         },
       });
 

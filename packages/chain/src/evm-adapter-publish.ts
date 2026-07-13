@@ -423,6 +423,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     let kaId = 0n;
     let startKAId = 0n;
     let endKAId = 0n;
+    let merkleRoot: Uint8Array | undefined;
     let publisherAddress = '';
     let authorAddress: string | undefined;
     let foundCreated = false;
@@ -433,9 +434,12 @@ export class PublishMethods extends EVMChainAdapterBase {
       if (logAddr !== storageAddress) continue;
       try {
         const parsed = kas.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (parsed?.name === 'KnowledgeAssetCreated' || parsed?.name === 'KnowledgeAssetCreated') {
+        if (parsed?.name === 'KnowledgeAssetCreated') {
           kaId = BigInt(parsed.args.id);
           authorAddress = String(parsed.args.author);
+          if (parsed.args.merkleRoot != null) {
+            merkleRoot = ethers.getBytes(parsed.args.merkleRoot);
+          }
           startKAId = kaId;
           endKAId = kaId;
           foundCreated = true;
@@ -463,6 +467,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       batchId: kaId,
       kaId: kaId,
       knowledgeAssetsContract: String(kas.target),
+      merkleRoot,
       startKAId,
       endKAId,
       txHash: receipt.hash,

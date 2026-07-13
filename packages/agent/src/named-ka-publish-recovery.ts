@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { ethers } from 'ethers';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type {
+  AsyncLiftPublisherRecoveryResult,
+  KnowledgeAssetVmPublishRequest,
+  LiftJobBroadcast,
+  LiftJobIncluded,
+} from '@origintrail-official/dkg-publisher';
+
+export interface RecoveredNamedKaPublish {
+  readonly reservedKaId: bigint;
+  readonly ual: string;
+  readonly txHash: string;
+  readonly receiptBlockNumber: number;
+  readonly transaction: {
+    readonly merkleRoot: string;
+    readonly authorAddress: string;
+    readonly publisherAddress: string;
+  };
+  readonly materialization: {
+    readonly merkleRoot: string;
+    readonly authorAddress: string;
+    readonly publisherAddress: string;
+    readonly versionBlock: number;
+    readonly superseded: boolean;
+  };
+}
+
+function recoveryInconsistent(name: string, message: string): Error {
+  return Object.assign(new Error(`Named KA recovery rejected for "${name}": ${message}`), {
+    code: 'KA_VM_RECOVERY_INCONSISTENT',
+  });
+}
+
+/**
+ * Validate immutable transaction evidence, then separately resolve the chain's
+ * current version for local materialization. A later update must never make the
+ * original confirmed publish unrecoverable or regress the VM pointer.
+ */
+export async function normalizeRecoveredNamedKaPublish(input: {
+  readonly request: KnowledgeAssetVmPublishRequest;
+  readonly job: LiftJobBroadcast | LiftJobIncluded;
+  readonly recovery: AsyncLiftPublisherRecoveryResult;
+  readonly chain: ChainAdapter;
+}): Promise<RecoveredNamedKaPublish> {
+  const { request, job, recovery, chain } = input;
+  const inconsistent = (message: string): Error => recoveryInconsistent(request.name, message);
+  const sameHex = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase();
+
+  if (!sameHex(job.broadcast.txHash, recovery.inclusion.txHash)) {
+    throw inconsistent(
+      `resolved inclusion tx ${recovery.inclusion.txHash} does not match queued tx ${job.broadcast.txHash}`,
+    );
+  }
+  if (!recovery.finalization.txHash || !sameHex(job.broadcast.txHash, recovery.finalization.txHash)) {
+    throw inconsistent('resolved finalization is not bound to the queued transaction hash');
+  }
+  if (job.broadcast.merkleRoot && !sameHex(job.broadcast.merkleRoot, request.sealMerkleRoot)) {
+    throw inconsistent(
+      `queued broadcast merkle root ${job.broadcast.merkleRoot} does not match seal ${request.sealMerkleRoot}`,
+    );
+  }
+
+  let reservedKaId: bigint;
+  try {
+    if (request.seal.reservedKaId !== undefined) {
+      reservedKaId = BigInt(request.seal.reservedKaId);
+    } else if (request.kaNumber !== undefined) {
+      reservedKaId = (BigInt(ethers.getAddress(request.seal.authorAddress)) << 96n) | BigInt(request.kaNumber);
+    } else {
+      throw inconsistent('the immutable request has no reserved KA id');
+    }
+  } catch (error) {
+    if ((error as { code?: unknown })?.code === 'KA_VM_RECOVERY_INCONSISTENT') throw error;
+    throw inconsistent(`invalid reserved KA identity: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const sealedAuthor = ethers.getAddress(request.seal.authorAddress);
+  if ((reservedKaId >> 96n) !== BigInt(sealedAuthor)) {
+    throw inconsistent('reserved KA id author bits do not match the signed author address');
+  }
+
+  const { batchId, startKAId, endKAId, ual, publisherAddress } = recovery.finalization;
+  if (!batchId || !startKAId || !endKAId) {
+    throw inconsistent('chain recovery did not return a singleton V10 KA range');
+  }
+  for (const [field, value] of [
+    ['batchId', batchId],
+    ['startKAId', startKAId],
+    ['endKAId', endKAId],
+  ] as const) {
+    if (BigInt(value) !== reservedKaId) {
+      throw inconsistent(`${field} ${value} does not match reserved KA id ${reservedKaId.toString()}`);
+    }
+  }
+  if (!ual) throw inconsistent('chain recovery did not return the published UAL');
+  const ualMatch = ual.match(/^did:dkg:(.+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)$/);
+  if (!ualMatch || BigInt(ualMatch[3]) !== reservedKaId) {
+    throw inconsistent(`published UAL ${ual} does not identify reserved KA id ${reservedKaId.toString()}`);
+  }
+  if (ualMatch[1] !== chain.chainId) {
+    throw inconsistent('published UAL is not bound to the sealed chain');
+  }
+  if (!publisherAddress || !ethers.isAddress(publisherAddress)) {
+    throw inconsistent('chain recovery did not return a valid publisher address');
+  }
+  const transactionPublisher = ethers.getAddress(publisherAddress);
+
+  const proof = recovery.publishProof;
+  if (!proof?.merkleRoot || !sameHex(proof.merkleRoot, request.sealMerkleRoot)) {
+    throw inconsistent(
+      `transaction merkle root ${proof?.merkleRoot ?? 'missing'} does not match queued seal ${request.sealMerkleRoot}`,
+    );
+  }
+  if (!proof.authorAddress || !ethers.isAddress(proof.authorAddress)) {
+    throw inconsistent('chain recovery did not return the transaction author');
+  }
+  const transactionAuthor = ethers.getAddress(proof.authorAddress);
+  if (transactionAuthor === ethers.ZeroAddress || transactionAuthor.toLowerCase() !== sealedAuthor.toLowerCase()) {
+    throw inconsistent(
+      `transaction author ${transactionAuthor} does not match sealed author ${sealedAuthor}`,
+    );
+  }
+
+  if (!chain.getLatestMerkleRoot) {
+    throw inconsistent('the configured chain adapter cannot resolve the current KA merkle root');
+  }
+  const latestMerkleRoot = ethers.hexlify(await chain.getLatestMerkleRoot(reservedKaId));
+  const superseded = !sameHex(latestMerkleRoot, proof.merkleRoot);
+  let materializationAuthor = transactionAuthor;
+  let materializationPublisher = transactionPublisher;
+  let versionBlock = recovery.inclusion.blockNumber;
+
+  if (superseded) {
+    if (!chain.getLatestMerkleRootAuthor || !chain.getLatestMerkleRootPublisher || !chain.getBlockNumber) {
+      throw inconsistent('the configured chain adapter cannot safely materialize a superseding KA version');
+    }
+    materializationAuthor = ethers.getAddress(await chain.getLatestMerkleRootAuthor(reservedKaId));
+    materializationPublisher = ethers.getAddress(await chain.getLatestMerkleRootPublisher(reservedKaId));
+    versionBlock = await chain.getBlockNumber();
+    if (materializationAuthor === ethers.ZeroAddress || materializationPublisher === ethers.ZeroAddress) {
+      throw inconsistent('the superseding KA version has an invalid author or publisher');
+    }
+  }
+
+  return {
+    reservedKaId,
+    ual,
+    txHash: recovery.inclusion.txHash,
+    receiptBlockNumber: recovery.inclusion.blockNumber,
+    transaction: {
+      merkleRoot: ethers.hexlify(proof.merkleRoot),
+      authorAddress: transactionAuthor,
+      publisherAddress: transactionPublisher,
+    },
+    materialization: {
+      merkleRoot: latestMerkleRoot,
+      authorAddress: materializationAuthor,
+      publisherAddress: materializationPublisher,
+      versionBlock,
+      superseded,
+    },
+  };
+}

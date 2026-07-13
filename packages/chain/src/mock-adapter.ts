@@ -283,12 +283,19 @@ export class MockChainAdapter implements ChainAdapter {
 
     return {
       batchId: BigInt(String(created.data.kaId ?? created.data.batchId ?? '0')),
+      kaId: created.data.kaId != null ? BigInt(String(created.data.kaId)) : undefined,
+      merkleRoot: created.data.merkleRoot != null ? fromHex(String(created.data.merkleRoot)) : undefined,
       startKAId: created.data.startKAId != null ? BigInt(String(created.data.startKAId)) : undefined,
       endKAId: created.data.endKAId != null ? BigInt(String(created.data.endKAId)) : undefined,
       txHash,
       blockNumber: created.blockNumber,
       blockTimestamp: Math.floor(Date.now() / 1000),
       publisherAddress: String(created.data.publisherAddress ?? this.signerAddress),
+      authorAddress: created.data.authorAddress != null
+        ? String(created.data.authorAddress)
+        : created.data.publisherAddress != null
+          ? String(created.data.publisherAddress)
+          : undefined,
       tokenAmount: created.data.tokenAmount != null ? BigInt(String(created.data.tokenAmount)) : undefined,
     };
   }

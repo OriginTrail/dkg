@@ -96,9 +96,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly idGenerator: () => string;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
-  private readonly knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
-  private readonly knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
-  private readonly knowledgeAssetVmPublishRecoveryFinalizer?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishRecoveryFinalizer'];
+  private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
@@ -146,9 +144,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
-    this.knowledgeAssetVmPublishExecutor = config.knowledgeAssetVmPublishExecutor;
-    this.knowledgeAssetVmPublishPreflight = config.knowledgeAssetVmPublishPreflight;
-    this.knowledgeAssetVmPublishRecoveryFinalizer = config.knowledgeAssetVmPublishRecoveryFinalizer;
+    this.knowledgeAssetVmPublishHandler = config.knowledgeAssetVmPublishHandler;
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
     this.graphManager = new GraphManager(store);
@@ -435,8 +431,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   private async processKnowledgeAssetVmPublish(claimed: LiftJob, walletId: string): Promise<LiftJob> {
-    if (!this.knowledgeAssetVmPublishExecutor) {
-      throw new Error('Async knowledge asset VM publish requires a configured knowledgeAssetVmPublishExecutor');
+    if (!this.knowledgeAssetVmPublishHandler) {
+      throw new Error('Async knowledge asset VM publish requires a configured knowledgeAssetVmPublishHandler');
     }
     if (!isKnowledgeAssetVmPublishJobRequest(claimed.request)) {
       throw new Error(`LiftJob ${claimed.jobId} is not a knowledge asset VM publish job`);
@@ -448,7 +444,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     let executorReturned = false;
     try {
-      const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
+      const preflight = await this.knowledgeAssetVmPublishHandler.preflight?.(preflightInput);
       if (preflight?.action === 'noop') {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
@@ -487,7 +483,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     }
 
     try {
-      const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
+      const preflight = await this.knowledgeAssetVmPublishHandler.preflight?.(preflightInput);
       if (preflight?.action === 'noop') {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
@@ -511,7 +507,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           onPhase,
         },
       };
-      const publishResult = await this.knowledgeAssetVmPublishExecutor(executionInput);
+      const publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
       executorReturned = true;
       return await this.recordPublishResult(claimed.jobId, publishResult, {
         publicByteSize,
@@ -566,11 +562,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       const resolved = await this.chainRecoveryResolver(recoverable);
       if (resolved) {
         if (
-          this.knowledgeAssetVmPublishRecoveryFinalizer &&
+          this.knowledgeAssetVmPublishHandler?.finalizeRecovered &&
           isKnowledgeAssetVmPublishJobRequest(recoverable.request)
         ) {
           try {
-            await this.knowledgeAssetVmPublishRecoveryFinalizer({
+            await this.knowledgeAssetVmPublishHandler.finalizeRecovered({
               walletId: recoverable.broadcast.walletId,
               request: recoverable.request.knowledgeAssetVmPublish,
               job: recoverable,
