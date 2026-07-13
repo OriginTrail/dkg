@@ -385,17 +385,30 @@ export function canonicalSharedMemoryScopeWriteGraph(
 }
 
 /**
- * @deprecated Use the synchronous `canonicalSharedMemoryScopeWriteGraph`.
- * Retained for integrations compiled against the original public async
- * `(store, bucketGraph, scope, options?)` contract.
+ * @deprecated New canonical-only writers should use the synchronous
+ * `canonicalSharedMemoryScopeWriteGraph` after explicitly converging aliases.
+ * This compatibility resolver deliberately retains its original store-aware
+ * behavior: prefer the canonical graph when it exists, otherwise keep writing
+ * to the stable existing alias chosen by the old API.
  */
 export async function resolveSharedMemoryScopeWriteGraph(
-  _store: TripleStore,
+  store: TripleStore,
   bucketGraph: string,
   scope: SharedMemoryGraphScope,
-  _options?: QueryOptions,
+  options?: QueryOptions,
 ): Promise<string> {
-  return canonicalSharedMemoryScopeWriteGraph(bucketGraph, scope);
+  if (scope.kind === 'complete-family') {
+    return canonicalSharedMemoryScopeWriteGraph(bucketGraph, scope);
+  }
+  const { canonicalGraph, legacyCompatibleReadGraphs } = await resolveNamedLifecycleReadPolicy(
+    store,
+    bucketGraph,
+    scope.identity,
+    options,
+  );
+  return legacyCompatibleReadGraphs.find((graph) => graph === canonicalGraph)
+    ?? legacyCompatibleReadGraphs.slice().sort()[0]
+    ?? canonicalGraph;
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */
@@ -498,7 +511,7 @@ function sharedMemorySelectionGraphPattern(
  * semantics. One CONSTRUCT is issued per graph because CONSTRUCT results are a
  * default-graph dataset and otherwise lose their source graph identity.
  */
-export async function loadGraphQualifiedSharedMemoryQuads(
+async function loadGraphQualifiedSharedMemoryQuads(
   store: TripleStore,
   graphs: readonly string[],
   selection: SharedMemoryReadSelection,
@@ -524,9 +537,16 @@ export async function loadGraphQualifiedSharedMemoryQuads(
 
 /**
  * Converge a selected legacy-bucket / checksum-alias root closure into the
- * canonical named lifecycle graph. Storage owns graph discovery, graph-qualified
- * loading, and insert-before-delete migration; lifecycle metadata repair remains
- * the publisher's responsibility.
+ * canonical named lifecycle graph. Storage owns graph discovery and
+ * graph-qualified loading; lifecycle metadata repair remains the publisher's
+ * responsibility.
+ *
+ * Checksum aliases are safe to delete after canonical insertion because they
+ * identify this exact lifecycle. The bare legacy bucket is different: it
+ * predates KA-number scoping and one root closure may be the only SWM copy for
+ * multiple not-yet-finalized lifecycles. Keep that compatibility copy until a
+ * higher-level owner can prove no sibling lifecycle references it. Exact named
+ * reads exclude the bucket, so retaining it cannot contaminate the migrated KA.
  */
 export async function migrateSharedMemoryRootClosureToNamedLifecycle(
   store: TripleStore,
@@ -575,7 +595,6 @@ export async function migrateSharedMemoryRootClosureToNamedLifecycle(
 
   const legacyAliasQuads = namedQuads.filter((quad) => quad.graph !== targetGraph);
   if (legacyAliasQuads.length > 0) await store.delete(legacyAliasQuads);
-  if (legacyBucketQuads.length > 0) await store.delete(legacyBucketQuads);
 
   return {
     sourceEmpty: false,

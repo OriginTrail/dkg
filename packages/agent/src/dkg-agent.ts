@@ -399,7 +399,7 @@ import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,
 } from './dkg-agent-publish.js';
-import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-swm.js';
+import { placeFinalizedLifecycleSwm } from './finalized-lifecycle-swm.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';
@@ -2526,41 +2526,23 @@ export class DKGAgent extends DKGAgentBase {
           preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
           schemeVersion: opts?.schemeVersion,
         });
-        // A full `skipSeal` share predates KA-number allocation and therefore
-        // lives in the legacy SWM bucket. Finalize has now allocated the packed
-        // id bound by the seal; migrate that exact root closure into its
-        // canonical named lifecycle before publish starts using exact-scope
-        // reads. This is also idempotent, so retrying a finalize that failed
-        // after the data move repairs the lifecycle pointer safely.
-        const finalizedScope = sharedMemoryScopeForFinalizedLifecycle(
-          swmSeal.authorAddress,
-          swmSeal.reservedKaId,
-        );
-        if (finalizedScope.kind !== 'named-lifecycle') {
-          throw new Error('seal-in-SWM finalized without a named lifecycle identity');
-        }
-        const placement = await agent.publisher.ensureFinalizedLifecycleSwmPlacement(
-          {
-            lifecycle: {
-              contextGraphId,
-              assertionName: name,
-              assertionLifecycleAgentAddress: finalizeAgentAddress,
-              subGraphName: opts?.subGraphName,
-            },
-            sealAuthorScope: finalizedScope.identity,
-            rootEntities: swmSeal.rootEntities,
-          },
-          createOperationContext('share'),
-        );
-        if (placement.sourceEmpty) {
-          throw Object.assign(
-            new Error(
-              `No shared-memory quads remain for finalized lifecycle "${name}" ` +
-              `in context graph "${contextGraphId}"`,
-            ),
-            { code: 'SWM_MIGRATION_SOURCE_EMPTY' },
-          );
-        }
+        // Upgraded full `skipSeal` shares may predate KA-number allocation and
+        // still live in the legacy SWM bucket. Finalize has now allocated the
+        // packed id bound by the seal; ensure that exact root closure also exists
+        // in its canonical named lifecycle before publish uses exact-scope reads.
+        // This is idempotent, so retrying after placement repairs the lifecycle
+        // pointer safely.
+        await placeFinalizedLifecycleSwm({
+          publisher: agent.publisher,
+          operationContext: createOperationContext('share'),
+          authorAddress: swmSeal.authorAddress,
+          packedKaId: swmSeal.reservedKaId,
+          contextGraphId,
+          assertionName: name,
+          assertionLifecycleAgentAddress: finalizeAgentAddress,
+          subGraphName: opts?.subGraphName,
+          rootEntities: swmSeal.rootEntities,
+        });
         // #1116 FIX 2 — make the SWM-resident position observable. The original
         // (possibly skipSeal) promote had no seal yet, so `_stampSwmPointer` ran a
         // no-op then; now that the seal EXISTS, stamp dkg:swmCurrentAssertion to it

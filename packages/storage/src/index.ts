@@ -73,7 +73,6 @@ export {
   GraphManager,
   loadSelectedSharedMemoryQuads,
   loadSharedMemoryQuadsForScope,
-  loadGraphQualifiedSharedMemoryQuads,
   migrateSharedMemoryRootClosureToNamedLifecycle,
   loadSharedMemorySliceWithKaBoundFallback,
   canonicalSharedMemoryScopeWriteGraph,

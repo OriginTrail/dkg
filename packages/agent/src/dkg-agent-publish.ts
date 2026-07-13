@@ -146,7 +146,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-swm.js';
+import {
+  prepareFinalizedLifecycleSwmForPublish,
+  sharedMemoryScopeForFinalizedLifecycle,
+} from './finalized-lifecycle-swm.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -426,10 +429,6 @@ function normalizeOptionalContextGraphId(value: string | null | undefined): stri
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
 }
-
-type FinalizedLifecycleSwmLoadResult =
-  | { sourceEmpty: true; quads: [] }
-  | { sourceEmpty: false; quads: Quad[] };
 
 function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): void {
   if (!quads || quads.length === 0) return;
@@ -4284,10 +4283,6 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
-    const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
-      seal.authorAddress,
-      seal.reservedKaId ?? packedKaId,
-    );
     const finalizedLifecycleSelection = { rootEntities: seal.rootEntities };
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
@@ -4311,46 +4306,24 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // Keep state-changing compatibility recovery explicit and separate from
-    // the pure scoped load below. Finalize invokes only the placement operation;
-    // publish pays for the load because it consumes the returned payload.
-    let finalizedLifecycleSwm: FinalizedLifecycleSwmLoadResult;
-    if (sharedMemoryScope.kind === 'named-lifecycle') {
-      const placement = await publisher.ensureFinalizedLifecycleSwmPlacement(
-        {
-          lifecycle: {
-            contextGraphId,
-            assertionName: name,
-            assertionLifecycleAgentAddress: agentAddress,
-            subGraphName: opts?.subGraphName,
-          },
-          sealAuthorScope: sharedMemoryScope.identity,
-          rootEntities: seal.rootEntities,
-        },
-        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-      );
-      finalizedLifecycleSwm = placement.sourceEmpty
-        ? { quads: [], sourceEmpty: true }
-        : {
-            quads: await this._loadSelectedSWMQuads(
-              contextGraphId,
-              finalizedLifecycleSelection,
-              opts?.subGraphName,
-              sharedMemoryScope,
-            ),
-            sourceEmpty: false,
-          };
-    } else {
-      finalizedLifecycleSwm = {
-        quads: await this._loadSelectedSWMQuads(
-          contextGraphId,
-          finalizedLifecycleSelection,
-          opts?.subGraphName,
-          sharedMemoryScope,
-        ),
-        sourceEmpty: false,
-      };
-    }
+    const finalizedLifecycleSwm = await prepareFinalizedLifecycleSwmForPublish({
+      publisher,
+      operationContext: opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      authorAddress: seal.authorAddress,
+      packedKaId: recoveredReservedKaId,
+      contextGraphId,
+      assertionName: name,
+      assertionLifecycleAgentAddress: agentAddress,
+      subGraphName: opts?.subGraphName,
+      rootEntities: seal.rootEntities,
+      load: (scope) => this._loadSelectedSWMQuads(
+        contextGraphId,
+        finalizedLifecycleSelection,
+        opts?.subGraphName,
+        scope,
+      ),
+    });
+    const sharedMemoryScope = finalizedLifecycleSwm.scope;
 
     let result: PublishResult;
     if (vmCurrent && packedKaId !== undefined) {
@@ -4453,12 +4426,6 @@ export class PublishMethods extends DKGAgentBase {
       // it here so the no-data precondition fires for ALL callers regardless of
       // registration. Match the publisher's wording so the route's existing 409
       // mapping (/No quads in shared memory/) still applies.
-      const sealedSwmQuads = finalizedLifecycleSwm.quads;
-      if (finalizedLifecycleSwm.sourceEmpty || sealedSwmQuads.length === 0) {
-        throw new Error(
-          `No quads in shared memory for context graph ${contextGraphId} matching selection`,
-        );
-      }
       result = await this.publishFromSharedMemory(
         contextGraphId,
         { rootEntities: seal.rootEntities },

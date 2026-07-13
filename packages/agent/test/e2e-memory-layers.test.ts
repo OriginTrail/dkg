@@ -1093,9 +1093,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(seal.merkleRoot).toBeDefined();
     expect(seal.authorAddress).toBeDefined();
 
-    // skipSeal wrote before a KA number existed, so it used the legacy bucket.
-    // Finalize must relocate the exact root closure into the deterministic named
-    // lifecycle graph rather than making publish widen back to that bucket.
+    // Current D1 creates already allocate a KA number, so this fresh skipSeal
+    // share starts in the deterministic named lifecycle graph and never needs
+    // the legacy bucket. Separate storage migration regressions cover upgraded
+    // pre-D1 bucket data, including two lifecycles that share one root.
     const historyAfterSeal = await agent.assertion.history(CG_ID, name);
     expect(historyAfterSeal?.kaNumber).toBeDefined();
     const legacySwmGraph = `did:dkg:context-graph:${CG_ID}/_shared_memory`;

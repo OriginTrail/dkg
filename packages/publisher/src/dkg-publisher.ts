@@ -5562,8 +5562,8 @@ export class DKGPublisher implements Publisher {
     if (migration.migratedLegacyQuadCount > 0) {
       this.log.info(
         ctx,
-        `Migrated ${migration.migratedLegacyQuadCount} legacy SWM triple(s) ` +
-        `for <${lifecycleUri}> to <${migration.targetGraph}>`,
+        `Copied ${migration.migratedLegacyQuadCount} legacy SWM triple(s) ` +
+        `for <${lifecycleUri}> to <${migration.targetGraph}> while retaining the compatibility source`,
       );
     }
     return migration;

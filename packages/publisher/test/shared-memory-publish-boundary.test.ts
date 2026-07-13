@@ -279,8 +279,14 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(ensured.targetGraph).toBe(canonicalGraph);
     expect(ensured).not.toHaveProperty('quads');
     expect(querySources.some((source) => source?.endsWith('.result'))).toBe(false);
-    expect(await store.deleteByPattern({ graph: SWM_GRAPH, subject: root })).toBe(0);
-    expect(await store.deleteByPattern({ graph: SWM_GRAPH, subject: child })).toBe(0);
+    const legacyRoot = await store.query(
+      `ASK { GRAPH <${SWM_GRAPH}> { <${root}> ?p ?o } }`,
+    );
+    const legacyChild = await store.query(
+      `ASK { GRAPH <${SWM_GRAPH}> { <${child}> ?p ?o } }`,
+    );
+    expect(legacyRoot).toMatchObject({ type: 'boolean', value: true });
+    expect(legacyChild).toMatchObject({ type: 'boolean', value: true });
     expect(await store.deleteByPattern({ graph: canonicalGraph, subject: root })).toBe(1);
     expect(await store.deleteByPattern({ graph: canonicalGraph, subject: child })).toBe(1);
     const pointer = await store.query(
@@ -289,6 +295,79 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     );
     expect(pointer.type).toBe('bindings');
     expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(canonicalGraph);
+  });
+
+  it('preserves a same-root legacy copy so a sibling can migrate after the first lifecycle publishes', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(
+      new NoChainAdapter(),
+      'confirmed',
+    );
+    const root = 'urn:test:root:legacy-siblings';
+    const firstAuthor = '0x1111111111111111111111111111111111111111';
+    const secondAuthor = '0x2222222222222222222222222222222222222222';
+    const firstGraph = `${SWM_GRAPH}/${firstAuthor}/7`;
+    const secondGraph = `${SWM_GRAPH}/${secondAuthor}/9`;
+    await store.insert([q(root, 'http://schema.org/name', '"shared legacy root"', SWM_GRAPH)]);
+
+    const first = await publisher.ensureFinalizedLifecycleSwmPlacement(
+      {
+        lifecycle: {
+          contextGraphId: CONTEXT_GRAPH,
+          assertionName: 'legacy-sibling-a',
+          assertionLifecycleAgentAddress: firstAuthor,
+        },
+        sealAuthorScope: { agentAddress: firstAuthor, kaNumber: 7n },
+        rootEntities: [root],
+      },
+      createOperationContext('test'),
+    );
+    await publisher.publishFromSharedMemory(
+      CONTEXT_GRAPH,
+      { rootEntities: [root] },
+      {
+        sharedMemoryScope: {
+          kind: 'named-lifecycle',
+          identity: { agentAddress: firstAuthor, kaNumber: 7n },
+        },
+      },
+    );
+    const second = await publisher.ensureFinalizedLifecycleSwmPlacement(
+      {
+        lifecycle: {
+          contextGraphId: CONTEXT_GRAPH,
+          assertionName: 'legacy-sibling-b',
+          assertionLifecycleAgentAddress: secondAuthor,
+        },
+        sealAuthorScope: { agentAddress: secondAuthor, kaNumber: 9n },
+        rootEntities: [root],
+      },
+      createOperationContext('test'),
+    );
+    await publisher.publishFromSharedMemory(
+      CONTEXT_GRAPH,
+      { rootEntities: [root] },
+      {
+        sharedMemoryScope: {
+          kind: 'named-lifecycle',
+          identity: { agentAddress: secondAuthor, kaNumber: 9n },
+        },
+      },
+    );
+
+    const legacy = await store.query(`ASK { GRAPH <${SWM_GRAPH}> { <${root}> ?p ?o } }`);
+    const firstNamed = await store.query(`ASK { GRAPH <${firstGraph}> { <${root}> ?p ?o } }`);
+    const secondNamed = await store.query(`ASK { GRAPH <${secondGraph}> { <${root}> ?p ?o } }`);
+    expect(first).toMatchObject({ sourceEmpty: false, migratedLegacyQuadCount: 1 });
+    expect(second).toMatchObject({ sourceEmpty: false, migratedLegacyQuadCount: 1 });
+    expect(legacy).toMatchObject({ type: 'boolean', value: true });
+    expect(firstNamed).toMatchObject({ type: 'boolean', value: false });
+    expect(secondNamed).toMatchObject({ type: 'boolean', value: false });
+    expect(publishSpy.calls).toHaveLength(2);
+    for (const [input] of publishSpy.calls) {
+      expect(input.quads).toEqual([
+        { subject: root, predicate: 'http://schema.org/name', object: '"shared legacy root"', graph: '' },
+      ]);
+    }
   });
 
   it('repairs the lifecycle pointer when a retry finds only the canonical copy', async () => {

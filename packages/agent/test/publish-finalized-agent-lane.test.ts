@@ -11,7 +11,11 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { KA_ID_PRED, VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { sharedMemoryScopeForFinalizedLifecycle } from '../src/finalized-lifecycle-swm.js';
+import {
+  namedSharedMemoryScopeForFinalizedLifecycle,
+  placeFinalizedLifecycleSwm,
+  sharedMemoryScopeForFinalizedLifecycle,
+} from '../src/finalized-lifecycle-swm.js';
 
 const CG = 'publish-agent-lane';
 const NAME = 'asset';
@@ -43,8 +47,34 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       kind: 'named-lifecycle',
       identity: { agentAddress: AGENT_B, kaNumber: 1n },
     });
+    expect(namedSharedMemoryScopeForFinalizedLifecycle(AGENT_B, RESERVED_KA_ID)).toEqual({
+      kind: 'named-lifecycle',
+      identity: { agentAddress: AGENT_B, kaNumber: 1n },
+    });
     expect(() => sharedMemoryScopeForFinalizedLifecycle(DEFAULT_AGENT, RESERVED_KA_ID))
       .toThrow(/not in author .* namespace/);
+  });
+
+  it('owns the strict finalize source-empty contract inside the lifecycle boundary', async () => {
+    const error = await placeFinalizedLifecycleSwm({
+      publisher: {
+        ensureFinalizedLifecycleSwmPlacement: async () => ({
+          sourceEmpty: true,
+          migratedLegacyQuadCount: 0,
+          targetGraph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
+        }),
+      } as any,
+      operationContext: createOperationContext('test'),
+      authorAddress: AGENT_B,
+      packedKaId: RESERVED_KA_ID,
+      contextGraphId: CG,
+      assertionName: NAME,
+      assertionLifecycleAgentAddress: AGENT_B,
+      rootEntities: [ROOT],
+    }).catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: 'SWM_MIGRATION_SOURCE_EMPTY' });
+    expect(error.message).toMatch(/No shared-memory quads remain/);
   });
 
   it('injects the curated catalog floor into the exact named lifecycle graph', async () => {
@@ -293,7 +323,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       ensureFinalizedLifecycleSwmPlacement: async (descriptor: any) => {
         ensureCalls.push(descriptor);
         await store.insert([{ ...legacyQuad, graph: namedGraph }]);
-        await store.deleteByPattern({ graph: swmGraph, subject: ROOT });
         return {
           sourceEmpty: false,
           migratedLegacyQuadCount: 1,
@@ -335,7 +364,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     });
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
-    expect(legacy).toMatchObject({ type: 'boolean', value: false });
+    expect(legacy).toMatchObject({ type: 'boolean', value: true });
     expect(canonical).toMatchObject({ type: 'boolean', value: true });
   });
 
@@ -387,7 +416,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         ensureCalls.push(descriptor);
         const canonicalQuad = { ...legacyQuad, graph: namedGraph };
         await store.insert([canonicalQuad]);
-        await store.delete([legacyQuad]);
         return {
           sourceEmpty: false,
           migratedLegacyQuadCount: 1,
@@ -444,7 +472,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     });
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
-    expect(legacy).toMatchObject({ type: 'boolean', value: false });
+    expect(legacy).toMatchObject({ type: 'boolean', value: true });
     expect(canonical).toMatchObject({ type: 'boolean', value: true });
   });
 
