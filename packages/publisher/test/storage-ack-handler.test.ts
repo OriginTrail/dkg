@@ -11,7 +11,7 @@ import {
   isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot, Logger,
 } from '@origintrail-official/dkg-core';
 import { TypedEventBus, rebuildMetrics } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { GraphSetIndexStore, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { metrics } from '@opentelemetry/api';
@@ -1105,6 +1105,86 @@ describe('StorageACKHandler', () => {
 
       expect(isStorageACKDecline(decoded)).toBe(false);
       expect(deleteByPatternCalls).toBe(1);
+    });
+
+    it('falls back through a decorator whose inner store does not support update()', async () => {
+      const base = new OxigraphStore();
+      let deleteByPatternCalls = 0;
+      const innerWithoutUpdate = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') return undefined;
+          if (prop === 'deleteByPattern') {
+            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+              deleteByPatternCalls += 1;
+              return target.deleteByPattern.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const decoratedStore = new GraphSetIndexStore(innerWithoutUpdate);
+      expect(typeof decoratedStore.update).toBe('function');
+      const handler = curatedHandlerWithStore(decoratedStore);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(deleteByPatternCalls).toBe(1);
+      await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(catalogTriples.length);
+    });
+
+    it('skips targeted update and deletes by pattern for a blank-node catalog subject', async () => {
+      const blankCatalogTriples = [{
+        subject: '_:catalog',
+        predicate: 'urn:test:catalog-predicate',
+        object: '"blank-subject"',
+      }];
+      const blankCatalogNquads = '_:catalog <urn:test:catalog-predicate> "blank-subject" .';
+      const blankCatalogBytes = new TextEncoder().encode(blankCatalogNquads);
+      const blankCatalogRoot = computeCatalogRoot(blankCatalogTriples);
+      const base = new OxigraphStore();
+      let updateCalls = 0;
+      const deletedPatterns: Array<Partial<Quad>> = [];
+      const store = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') {
+            return async (...args: Parameters<NonNullable<TripleStore['update']>>) => {
+              updateCalls += 1;
+              return target.update!.call(target, ...args);
+            };
+          }
+          if (prop === 'deleteByPattern') {
+            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+              deletedPatterns.push(args[0]);
+              // This regression targets the ACK routing policy. Blank-node
+              // labels are operation-local, so the spy records the requested
+              // legacy delete without asking the embedded backend to resolve
+              // that label in a separate operation.
+              if (args[0].subject?.startsWith('_:')) return 0;
+              return target.deleteByPattern.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent({
+        stagingQuads: blankCatalogBytes,
+        publicByteSize: blankCatalogBytes.length,
+        catalogRoot: blankCatalogRoot.root,
+        catalogLeafCount: blankCatalogRoot.leafCount,
+      }), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(updateCalls).toBe(0);
+      expect(deletedPatterns).toEqual([{
+        graph: `${cgDid}/_catalog`,
+        subject: '_:catalog',
+      }]);
+      await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(1);
     });
 
     it('curated catalog persist / targeted update throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {

@@ -8,6 +8,7 @@ import type {
   UpdateOptions,
   StorePressureSnapshot,
 } from './triple-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -325,7 +326,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
-      throw new Error('ChangelogStore: inner store does not support update()');
+      throw new UnsupportedTripleStoreCapabilityError('update', 'ChangelogStore');
     }
     if (!this.enabled) return this.inner.update(sparql, options);
     // Reject BEFORE the mutation runs so it never touches the reserved plane.

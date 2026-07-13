@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore, UpdateOptions } from './triple-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 
@@ -145,7 +146,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
-      throw new Error('GraphSetIndexStore: inner store does not support update()');
+      throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
     }
     if (!this.enabled) {
       await this.inner.update(sparql, options);
