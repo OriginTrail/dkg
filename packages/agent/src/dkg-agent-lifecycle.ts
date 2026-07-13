@@ -564,6 +564,16 @@ function asSyncFetchAbortError(reason: unknown): Error {
   return err;
 }
 
+function isMissingShardingTableContractError(error: unknown): boolean {
+  // The EVM adapter normalizes a missing Hub binding onto these markers.
+  // Keep every other membership failure retryable because it may be a
+  // transient RPC outage.
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('ShardingTableStorage') && (
+    message.includes('not found in Hub') || message.includes('not resolvable')
+  );
+}
+
 function waitForSyncPageFetch(
   entry: InFlightSyncPageFetch,
   signal: AbortSignal | undefined,
@@ -2714,6 +2724,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return 'retryable';
     }
 
+    const readiness = this.chain.isRandomSamplingReady;
+    if (typeof readiness === 'function') {
+      try {
+        if (!readiness.call(this.chain)) {
+          this.randomSamplingDisabledReason = 'contracts_not_deployed';
+          this.log.warn(
+            ctx,
+            'V10 Random Sampling contracts are unavailable on this chain; disabling prover',
+          );
+          return 'disabled';
+        }
+      } catch (err) {
+        this.randomSamplingDisabledReason = 'bind_failed';
+        this.log.warn(
+          ctx,
+          `V10 Random Sampling readiness probe failed; prover bind will retry: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return 'retryable';
+      }
+    }
+
     const membershipProbe = this.chain.isShardingTableMember?.bind(this.chain);
     if (!membershipProbe) {
       this.randomSamplingDisabledReason = 'unsupported_chain';
@@ -2737,6 +2770,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return 'retryable';
       }
     } catch (err) {
+      if (isMissingShardingTableContractError(err)) {
+        this.randomSamplingDisabledReason = 'contracts_not_deployed';
+        this.log.warn(
+          ctx,
+          `V10 Random Sampling sharding-table contract is unavailable; disabling prover: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return 'disabled';
+      }
       this.randomSamplingDisabledReason = 'eligibility_lookup_failed';
       this.log.warn(
         ctx,
