@@ -394,6 +394,34 @@ describe('SparqlHttpStore (test server)', () => {
     expect(fetchCallsAfterRelease).toBe(saturation.normalSlots);
   });
 
+  it('removes a caller-cancelled SELECT from the queue without dispatching it later', async () => {
+    const saturation = await saturateNormalStoreLanes('select-caller-abort');
+    const caller = new AbortController();
+    const reason = new Error('caller cancelled while queued');
+    let queuedQuery: Promise<unknown> | undefined;
+    let fetchCallsAfterRelease = 0;
+
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://deadline.test/query',
+        timeout: 30_000,
+      });
+      queuedQuery = store.query(
+        'SELECT ?s WHERE { # caller-cancelled-in-queue\n?s ?p ?o }',
+        { priority: 'normal', signal: caller.signal },
+      );
+
+      caller.abort(reason);
+      const outcome = await outcomeWithin(queuedQuery, 100);
+
+      expect(outcome).toBe(reason);
+    } finally {
+      await saturation.cleanup(queuedQuery ? [queuedQuery] : []);
+      fetchCallsAfterRelease = saturation.fetchCalls();
+    }
+    expect(fetchCallsAfterRelease).toBe(saturation.normalSlots);
+  });
+
   it('expires an UPDATE while it is queued without dispatching it later', async () => {
     const saturation = await saturateNormalStoreLanes('update-deadline');
     let queuedUpdate: Promise<unknown> | undefined;
