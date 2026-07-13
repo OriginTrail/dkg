@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   reconcileContextGraph,
-  ReconcileCoalescer,
   VmReconcileScheduler,
   RecentUalSet,
   type ChainReconcilerDeps,
@@ -13,7 +12,7 @@ import { createCursorState } from '../src/reconcile-cursor.js';
  * Phase B — sweep + cursor orchestration (B.2/B.4). The cursor math itself is
  * covered by reconcile-cursor.test.ts; here we pin the sweep driver:
  * gap-fill, watermark-persist-only-on-move, reorg depth, pending-retry, plus
- * the coalescer and UAL dedupe.
+ * the VM scheduler and UAL dedupe.
  */
 
 function makeDeps(overrides: Partial<ChainReconcilerDeps> = {}): {
@@ -153,44 +152,6 @@ describe('reconcileContextGraph — sweep', () => {
   });
 });
 
-describe('ReconcileCoalescer', () => {
-  it('collapses a burst into one run plus a single trailing run', async () => {
-    let runs = 0;
-    let resolveCurrent!: () => void;
-    const coalescer = new ReconcileCoalescer(async () => {
-      runs += 1;
-      await new Promise<void>((r) => { resolveCurrent = r; });
-    });
-
-    // First trigger starts a run (now in flight, awaiting resolveCurrent).
-    void coalescer.trigger('cg');
-    // 4 more triggers while in flight → mark "again", do NOT start new runs.
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
-    expect(runs).toBe(1);
-
-    // Finish the first run → exactly one trailing run starts.
-    const r1 = resolveCurrent;
-    r1();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(runs).toBe(2);
-
-    // Finish the trailing run → no further runs (no triggers landed during it).
-    resolveCurrent();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(runs).toBe(2);
-  });
-
-  it('runs independently per key', async () => {
-    const ran: string[] = [];
-    const coalescer = new ReconcileCoalescer(async (key) => { ran.push(key); });
-    await Promise.all([coalescer.trigger('a'), coalescer.trigger('b')]);
-    expect(ran.sort()).toEqual(['a', 'b']);
-  });
-});
-
 describe('VmReconcileScheduler', () => {
   it('suppresses queued/live retries after failure but retries on the periodic path', async () => {
     let runs = 0;
@@ -224,6 +185,11 @@ describe('VmReconcileScheduler', () => {
     expect(runs).toBe(2); // the periodic reliability path retries normally
     resolveCurrent();
     await retry;
+
+    const resumedLive = scheduler.triggerLive('cg');
+    expect(runs).toBe(3); // successful periodic recovery releases the live hold
+    resolveCurrent();
+    await resumedLive;
   });
 
   it('preserves a periodic retry queued behind a failing live pass', async () => {

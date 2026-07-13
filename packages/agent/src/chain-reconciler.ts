@@ -152,51 +152,17 @@ export async function reconcileContextGraph(
 }
 
 /**
- * Per-key single-flight coalescer: a burst of triggers for the same key runs
- * the action ONCE, with a single trailing re-run if new triggers arrive while
- * a run is in flight (so events that land mid-sweep aren't lost). Used so N
- * KACG events for one CG cause one sweep (+ at most one trailing sweep), not N.
- */
-export class ReconcileCoalescer {
-  private readonly inFlight = new Map<string, Promise<void>>();
-  private readonly again = new Set<string>();
-
-  constructor(private readonly run: (key: string) => Promise<void>) {}
-
-  trigger(key: string): Promise<void> {
-    const existing = this.inFlight.get(key);
-    if (existing) {
-      // A run is in flight — mark that one more pass is needed after it.
-      this.again.add(key);
-      return existing;
-    }
-    const promise = this.run(key)
-      .catch(() => { /* run is responsible for its own logging */ })
-      .finally(() => {
-        this.inFlight.delete(key);
-        if (this.again.delete(key)) void this.trigger(key);
-      });
-    this.inFlight.set(key, promise);
-    return promise;
-  }
-
-  /** True if a run for `key` is currently in flight. */
-  isInFlight(key: string): boolean {
-    return this.inFlight.has(key);
-  }
-}
-
-/**
- * VM-specific, source-aware single-flight scheduling policy.
+ * Per-CG, source-aware single-flight scheduling policy for VM reconciliation.
  *
  * Live chain events are latency nudges, while the periodic sweep is the
  * reliability path. After a failed VM pass, live nudges for that CG are held so
  * they cannot hot-loop the same expensive store/RPC work. The next periodic
  * sweep explicitly releases the hold and retries. Failure logging also lives at
  * this scheduling boundary; the domain operation remains a normal rejecting
- * async function and the generic coalescer remains policy-free. Pending live
- * and periodic triggers are tracked separately so a periodic reliability pass
- * can never be consumed by the live-failure hold.
+ * async function. Pending live and periodic triggers are tracked separately so
+ * a periodic reliability pass can never be consumed by the live-failure hold.
+ * This is the single owner of per-key coalescing semantics: a burst produces at
+ * most one trailing pass, with periodic work taking priority over live nudges.
  */
 interface VmReconcileScheduleState {
   inFlight?: Promise<void>;
