@@ -20,6 +20,7 @@ export default defineConfig({
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           'test/status-route-store-quads.test.ts',
+          'test/status-command-store.test.ts',
           'test/memory-graph-events.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',
