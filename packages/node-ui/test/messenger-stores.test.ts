@@ -184,7 +184,7 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(Array.from(pending[0].payload)).toEqual([1, 2, 3]);
 
     pending[0].payload[2] = 7;
-    expect(Array.from(store.duePage(6000)[0].payload)).toEqual([1, 2, 3]);
+    expect(Array.from(store.due(6000)[0].payload)).toEqual([1, 2, 3]);
   });
 
   it('enqueue bumps attempts and reschedules on repeat failure for the same key', () => {
@@ -220,8 +220,8 @@ describe('SqliteProtocolOutboxStore', () => {
   it('due returns entries with nextAttemptAt <= now', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000_000);
-    expect(store.duePage(1_004_999)).toHaveLength(0);
-    expect(store.duePage(1_005_000)).toHaveLength(1);
+    expect(store.due(1_004_999)).toHaveLength(0);
+    expect(store.due(1_005_000)).toHaveLength(1);
   });
 
   it('due applies a stable database-level batch limit', () => {
@@ -243,6 +243,23 @@ describe('SqliteProtocolOutboxStore', () => {
       [PEER_A, MSG_1],
       [PEER_A, MSG_2],
     ]);
+  });
+
+  it('uses firstFailureAt before key ordering when nextAttemptAt ties', () => {
+    const store = new SqliteProtocolOutboxStore(db, {
+      backoffFor: (attempts) => attempts === 1 ? 50 : 10,
+    });
+    store.enqueue(PEER_A, PROTO, 'z-older-failure', PAYLOAD, 'first', 0);
+    store.enqueue(PEER_A, PROTO, 'z-older-failure', PAYLOAD, 'second', 90);
+    store.enqueue(PEER_A, PROTO, 'a-newer-failure', PAYLOAD, 'first', 50);
+
+    const due = store.duePage(100, 1);
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({
+      messageId: 'z-older-failure',
+      firstFailureAt: 0,
+      nextAttemptAt: 100,
+    });
   });
 
   it('dropExpired removes entries older than maxAgeMs and returns them', () => {

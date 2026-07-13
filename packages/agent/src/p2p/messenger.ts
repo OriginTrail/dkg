@@ -11,7 +11,15 @@ import {
   type ProtocolOutboxEntry,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
-import { OutboxDrainer } from './outbox-drainer.js';
+import {
+  OutboxDrainer,
+  type OutboxDrainerOptions,
+} from './outbox-drainer.js';
+export {
+  DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+  DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
+  type OutboxDrainerOptions,
+} from './outbox-drainer.js';
 
 /** Bytes payload the substrate uses to signal `RESPONSE_GONE` on the wire. */
 const RESPONSE_GONE_BYTES = new TextEncoder().encode(RESPONSE_GONE_MARKER);
@@ -159,6 +167,11 @@ export interface MessengerDeps {
    * production uses the default `Date.now`.
    */
   clock?: () => number;
+  /**
+   * Periodic retry scheduler bounds. Defaults and validation are owned by
+   * `OutboxDrainer` (`batchSize: 100`, `concurrency: 4`).
+   */
+  outboxDrain?: OutboxDrainerOptions;
 }
 
 export interface SendOpts {
@@ -331,17 +344,6 @@ export interface SloProtocolStats {
  * via `sloWindowSamples` in `MessengerDeps`.
  */
 export const DEFAULT_SLO_WINDOW_SAMPLES = 1000;
-export const DEFAULT_OUTBOX_DRAIN_BATCH_SIZE = 100;
-export const DEFAULT_OUTBOX_DRAIN_CONCURRENCY = 4;
-
-function positiveInteger(value: number | undefined, fallback: number, name: string): number {
-  const resolved = value ?? fallback;
-  if (!Number.isInteger(resolved) || resolved <= 0) {
-    throw new Error(`Messenger: ${name} must be a positive integer`);
-  }
-  return resolved;
-}
-
 export class Messenger {
   private readonly router: ProtocolRouter;
   private readonly idempotencyStore?: MessageIdempotencyStore;
@@ -420,11 +422,7 @@ export class Messenger {
    */
   private readonly deliveredResponseClassifiers = new Map<string, (response: Uint8Array) => boolean>();
 
-  constructor(deps: MessengerDeps & {
-    sloWindowSamples?: number;
-    outboxDrainBatchSize?: number;
-    outboxDrainConcurrency?: number;
-  }) {
+  constructor(deps: MessengerDeps & { sloWindowSamples?: number }) {
     this.router = deps.router;
     this.idempotencyStore = deps.idempotencyStore;
     if (deps.outboxStore) {
@@ -436,21 +434,11 @@ export class Messenger {
     this.clock = deps.clock ?? (() => Date.now());
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
-    const outboxDrainBatchSize = positiveInteger(
-      deps.outboxDrainBatchSize,
-      DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
-      'outboxDrainBatchSize',
-    );
-    const outboxDrainConcurrency = positiveInteger(
-      deps.outboxDrainConcurrency,
-      DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
-      'outboxDrainConcurrency',
-    );
     if (this.outbox) {
       this.outboxDrainer = new OutboxDrainer(
         (now, limit) => this.outbox!.duePage(now, limit),
         (entry) => this.retryOutboxEntry(entry),
-        { batchSize: outboxDrainBatchSize, concurrency: outboxDrainConcurrency },
+        deps.outboxDrain,
       );
     }
   }

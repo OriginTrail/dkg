@@ -89,6 +89,19 @@ function cloneOutboxEntry(entry: ProtocolOutboxEntry): ProtocolOutboxEntry {
   return { ...entry, payload: cloneBytes(entry.payload) };
 }
 
+function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
+  return a.nextAttemptAt - b.nextAttemptAt
+    || a.firstFailureAt - b.firstFailureAt
+    || a.peer.localeCompare(b.peer)
+    || a.protocol.localeCompare(b.protocol)
+    || a.messageId.localeCompare(b.messageId);
+}
+
+function normalizeDuePageLimit(limit: number | undefined): number | undefined {
+  if (limit === undefined || !Number.isFinite(limit)) return undefined;
+  return Math.max(0, Math.floor(limit));
+}
+
 interface ProtocolOutboxStorePolicy extends ProtocolOutboxOptions {
   backoffFor: (attempts: number) => number;
 }
@@ -198,12 +211,20 @@ export class ProtocolOutbox {
     return this.duePage(now);
   }
 
-  /** Normalize caller input, then delegate ordered page selection to storage. */
+  /**
+   * Return a canonical retry page while preserving legacy `due(now)` stores.
+   * Stores may opt into the bounded fast path; the fallback sorts before it
+   * caps so an older store cannot bypass either the order or the batch bound.
+   */
   duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
-    const normalizedLimit = limit === undefined || !Number.isFinite(limit)
-      ? undefined
-      : Math.max(0, Math.floor(limit));
-    return this.store.duePage(now, normalizedLimit);
+    const normalizedLimit = normalizeDuePageLimit(limit);
+    if (normalizedLimit === 0) return [];
+
+    const snapshot = normalizedLimit !== undefined && this.store.duePage
+      ? this.store.duePage(now, normalizedLimit)
+      : this.store.due(now);
+    const ordered = [...snapshot].sort(compareDueEntries);
+    return normalizedLimit === undefined ? ordered : ordered.slice(0, normalizedLimit);
   }
 
   hasPendingFor(peer: string): boolean {
@@ -326,16 +347,15 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     return Array.from(this.entries.values()).some((entry) => entry.peer === peer);
   }
 
-  duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
-    const entries = Array.from(this.entries.values())
+  due(now: number): ProtocolOutboxEntry[] {
+    return Array.from(this.entries.values())
       .filter((e) => e.nextAttemptAt <= now)
-      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt
-        || a.firstFailureAt - b.firstFailureAt
-        || a.peer.localeCompare(b.peer)
-        || a.protocol.localeCompare(b.protocol)
-        || a.messageId.localeCompare(b.messageId));
-    return (limit === undefined ? entries : entries.slice(0, limit))
+      .sort(compareDueEntries)
       .map(cloneOutboxEntry);
+  }
+
+  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
+    return this.due(now).slice(0, limit);
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {

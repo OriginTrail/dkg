@@ -5,7 +5,11 @@ import {
   InMemoryProtocolOutboxStore,
   ProtocolOutbox,
 } from '../src/protocol-outbox.js';
-import { RESPONSE_CACHE_BYTES } from '../src/messenger-types.js';
+import {
+  RESPONSE_CACHE_BYTES,
+  type ProtocolOutboxEntry,
+  type ProtocolOutboxStore,
+} from '../src/messenger-types.js';
 
 const PEER_A = '12D3KooWMilesPlaceholder';
 const PEER_B = '12D3KooWLexPlaceholder';
@@ -154,6 +158,59 @@ describe('ProtocolOutbox.due / peer presence', () => {
 
     expect(outbox.duePage(now, 1.9).map((entry) => entry.messageId)).toEqual(['a-first']);
     expect(outbox.duePage(now, Number.NaN).map((entry) => entry.messageId)).toEqual(['a-first', 'z-last']);
+  });
+
+  it('keeps legacy due-only stores compatible and sorts before applying the cap', () => {
+    const backing = new InMemoryProtocolOutboxStore();
+    const entry = (
+      messageId: string,
+      firstFailureAt: number,
+    ): ProtocolOutboxEntry => ({
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId,
+      payload: PAYLOAD,
+      attempts: 1,
+      firstFailureAt,
+      lastAttemptAt: firstFailureAt,
+      nextAttemptAt: 100,
+      lastError: 'offline',
+    });
+    const newer = entry('a-newer-failure', 20);
+    const older = entry('z-older-failure', 10);
+    const legacyStore: ProtocolOutboxStore = {
+      enqueue: backing.enqueue.bind(backing),
+      markDelivered: backing.markDelivered.bind(backing),
+      hasEntry: backing.hasEntry.bind(backing),
+      hasPendingFor: backing.hasPendingFor.bind(backing),
+      due: () => [newer, older],
+      dropExpired: backing.dropExpired.bind(backing),
+      size: backing.size.bind(backing),
+      list: backing.list.bind(backing),
+      getEntry: backing.getEntry.bind(backing),
+    };
+    const outbox = new ProtocolOutbox(legacyStore);
+
+    expect(outbox.duePage(100, 1).map((candidate) => candidate.messageId))
+      .toEqual(['z-older-failure']);
+    expect(outbox.due(100).map((candidate) => candidate.messageId))
+      .toEqual(['z-older-failure', 'a-newer-failure']);
+  });
+
+  it('uses firstFailureAt before key ordering when nextAttemptAt ties', () => {
+    const store = new InMemoryProtocolOutboxStore({ backoffs: [50, 10] });
+    const outbox = new ProtocolOutbox(store, { backoffs: [50, 10] });
+    outbox.enqueueFailure(PEER_A, PROTO, 'z-older-failure', PAYLOAD, 'first', 0);
+    outbox.enqueueFailure(PEER_A, PROTO, 'z-older-failure', PAYLOAD, 'second', 90);
+    outbox.enqueueFailure(PEER_A, PROTO, 'a-newer-failure', PAYLOAD, 'first', 50);
+
+    const due = outbox.duePage(100, 1);
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({
+      messageId: 'z-older-failure',
+      firstFailureAt: 0,
+      nextAttemptAt: 100,
+    });
   });
 
   it('hasPendingFor tracks peer rows without exposing a reconnect drain snapshot', () => {

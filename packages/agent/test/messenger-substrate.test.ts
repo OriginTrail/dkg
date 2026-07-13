@@ -388,7 +388,7 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
     // Backoff is 10ms (configured in makeSubstrate); advance the
     // injected clock and let router.send succeed this time.
     shouldFail = false;
-    const due = outboxStore.duePage(clock() + 100);
+    const due = outboxStore.due(clock() + 100);
     expect(due).toHaveLength(1);
 
     await messenger.processOutboxTick(clock() + 100);
@@ -439,8 +439,7 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
       idempotencyStore,
       outboxStore,
       backoffs: [10],
-      outboxDrainBatchSize: 3,
-      outboxDrainConcurrency: 2,
+      outboxDrain: { batchSize: 3, concurrency: 2 },
     });
 
     const first = messenger.processOutboxTick(100);
@@ -492,8 +491,7 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
       outboxStore,
       backoffs: [10],
       clock: () => 100,
-      outboxDrainBatchSize: 2,
-      outboxDrainConcurrency: 1,
+      outboxDrain: { batchSize: 2, concurrency: 1 },
     });
 
     await messenger.processOutboxTick(100);
