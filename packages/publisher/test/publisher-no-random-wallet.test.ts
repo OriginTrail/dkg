@@ -407,6 +407,7 @@ class CostAwareRepinChain extends MockChainAdapter {
     private readonly weakPcaWallet?: ethers.Wallet,
     private readonly fundedPcaLockEpochs = 24,
     private readonly fundedPcaMaxCover = 24n,
+    private readonly ignoreExcludedCandidates = false,
   ) {
     super('mock:31337', initialWallet.address);
     this.seedIdentity(initialWallet.address, 7n);
@@ -428,7 +429,9 @@ class CostAwareRepinChain extends MockChainAdapter {
   }): Promise<string> {
     this.reserveRequests.push(request);
     const excluded = new Set(
-      (request.excludedPublisherAddresses ?? []).map((address) => address.toLowerCase()),
+      this.ignoreExcludedCandidates
+        ? []
+        : (request.excludedPublisherAddresses ?? []).map((address) => address.toLowerCase()),
     );
     if (
       !request.publisherAddress
@@ -1329,6 +1332,43 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       tokenAmount: 24n,
     });
     expect(result.onChainResult?.publisherAddress.toLowerCase()).toBe(fundedPca.address.toLowerCase());
+  });
+
+  it('terminates before ACK collection when an adapter repeats an explicitly excluded candidate', async () => {
+    const initial = new ethers.Wallet(TEST_KEY);
+    const weakPca = new ethers.Wallet(TEST_KEY_ALT);
+    const fundedPca = new ethers.Wallet(TEST_KEY_THIRD);
+    const chain = new CostAwareRepinChain(initial, fundedPca, weakPca, 24, 24n, true);
+    const keypair = await generateEd25519Keypair();
+    const publisher = await sealForWallet(new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherNodeIdentityId: 7n,
+    }), fundedPca, chain);
+    let ackCalls = 0;
+
+    await expect(publisher.publish({
+      contextGraphId: '1',
+      quads: epochTestQuads('non-advancing-reservation-adapter'),
+      v10ACKProvider: async () => {
+        ackCalls += 1;
+        return [];
+      },
+    })).rejects.toMatchObject({
+      code: 'NO_FUNDED_PUBLISHER_WALLET',
+      message: 'Provisional PCA signer cannot fund its exact plan',
+    });
+
+    expect(chain.reserveRequests).toHaveLength(3);
+    expect(chain.reserveRequests[2]).toMatchObject({
+      requiredTracWei: 0n,
+      publishEpochs: undefined,
+      excludedPublisherAddresses: [weakPca.address.toLowerCase()],
+    });
+    expect(ackCalls).toBe(0);
+    expect(chain.capturedCreateParams).toBeUndefined();
   });
 
   it('rejects an adapter re-pin that disagrees with publisherPrivateKey before ACK collection', async () => {
