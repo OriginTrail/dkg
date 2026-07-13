@@ -1,6 +1,28 @@
+import { canonicalPeerIdString, tryCanonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import {
+  NetworkAdmissionProbeRetryState,
+  type NetworkAdmissionProbeBackoff,
+  type NetworkAdmissionProbeBackoffKind,
+  type NetworkAdmissionProbeBackoffOptions,
+} from './network-admission-probe-retry.js';
+
+export type {
+  NetworkAdmissionProbeBackoff,
+  NetworkAdmissionProbeBackoffKind,
+  NetworkAdmissionProbeBackoffOptions,
+};
+
+type NetworkAdmissionQuarantineEntry =
+  | { kind: 'indefinite' }
+  | { kind: 'cooldown'; untilMs: number };
+
 export interface NetworkAdmissionOptions {
   networkId?: string;
   selfPeerId?: string;
+  now?: () => number;
+  probeBackoff?: Partial<NetworkAdmissionProbeBackoffOptions>;
+  maxProbeBackoffEntries?: number;
+  quarantineCooldownMs?: number;
 }
 
 export interface NetworkAdmissionSnapshot {
@@ -9,48 +31,39 @@ export interface NetworkAdmissionSnapshot {
   quarantinedPeerIds: string[];
 }
 
-export function peerIdsFromMultiaddr(addr: string): string[] {
-  const peerIds: string[] = [];
-  const matches = addr.matchAll(/\/p2p\/([^/]+)/g);
-  for (const match of matches) {
-    const peerId = match[1]?.trim();
-    if (peerId) peerIds.push(peerId);
-  }
-  return peerIds;
-}
-
-export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
-  return peerIdsFromMultiaddr(addr).at(-1);
-}
-
-export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set<string> {
-  const peerIds = new Set<string>();
-  for (const addr of addrs ?? []) {
-    for (const peerId of peerIdsFromMultiaddr(addr)) peerIds.add(peerId);
-  }
-  return peerIds;
-}
-
 /**
  * Process-local admission registry for active-network peers.
  *
  * The core overlay isolation keeps accidental cross-network peers out of the
  * normal DHT/GossipSub path. This registry is the application boundary: it
- * admits only peers promoted by the signed same-network verifier and self.
- * Configured relays/bootstrap peers are retained as transport/probe seeds, but
- * do not become app/ACK eligible until verification succeeds. Unknown peers
- * fail closed when `networkId` is known; legacy/in-process tests without
- * network identity keep the previous allow-all behavior.
+ * owns the complete admission state (verified, quarantined, and retry-later)
+ * behind one canonical peer-id and clock boundary. Unknown peers fail closed
+ * when a network identity is active; disabled legacy/in-process use stays
+ * allow-all.
  */
 export class NetworkAdmissionService {
   private readonly networkId?: string;
-  private readonly selfPeerId?: string;
-  private readonly verifiedPeerIds = new Set<string>();
-  private readonly quarantinedPeerIds = new Set<string>();
+  private readonly selfPeerId?: CanonicalPeerId;
+  private readonly now: () => number;
+  private readonly probeRetry: NetworkAdmissionProbeRetryState;
+  private readonly quarantineCooldownMs: number;
+  private readonly verifiedPeerIds = new Set<CanonicalPeerId>();
+  private readonly quarantinedPeers = new Map<CanonicalPeerId, NetworkAdmissionQuarantineEntry>();
 
   constructor(options: NetworkAdmissionOptions = {}) {
     this.networkId = options.networkId;
-    this.selfPeerId = options.selfPeerId;
+    this.selfPeerId = options.networkId && options.selfPeerId
+      ? canonicalAdmissionServicePeerId(options.selfPeerId)
+      : undefined;
+    this.now = options.now ?? Date.now;
+    this.probeRetry = new NetworkAdmissionProbeRetryState({
+      now: this.now,
+      ...(options.probeBackoff !== undefined ? { backoff: options.probeBackoff } : {}),
+      ...(options.maxProbeBackoffEntries !== undefined
+        ? { maxEntries: options.maxProbeBackoffEntries }
+        : {}),
+    });
+    this.quarantineCooldownMs = options.quarantineCooldownMs ?? 300_000;
   }
 
   get enabled(): boolean {
@@ -58,40 +71,59 @@ export class NetworkAdmissionService {
   }
 
   markVerifiedSameNetwork(peerId: string): void {
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return;
-    this.verifiedPeerIds.add(normalized);
-    this.quarantinedPeerIds.delete(normalized);
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    this.verifiedPeerIds.add(canonicalPeerId);
+    this.quarantinedPeers.delete(canonicalPeerId);
+    this.probeRetry.clear(canonicalPeerId);
   }
 
+  /** Preserve the existing public operation as an explicit indefinite quarantine. */
   quarantinePeer(peerId: string): void {
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return;
-    this.quarantinedPeerIds.add(normalized);
-    this.verifiedPeerIds.delete(normalized);
+    this.setQuarantine(peerId, { kind: 'indefinite' });
+  }
+
+  /** Apply the coordinator's bounded recovery cooldown using this service's clock. */
+  quarantinePeerForCooldown(peerId: string): void {
+    this.setQuarantine(peerId, {
+      kind: 'cooldown',
+      untilMs: this.now() + this.quarantineCooldownMs,
+    });
+  }
+
+  getRetryableProbeBackoff(peerId: string): NetworkAdmissionProbeBackoff | undefined {
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    return this.probeRetry.getActiveSuppression(canonicalPeerId);
+  }
+
+  rememberRetryableProbeFailure(
+    peerId: string,
+    reason: string,
+    kind: NetworkAdmissionProbeBackoffKind,
+  ): void {
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    this.probeRetry.recordFailure(canonicalPeerId, reason, kind);
   }
 
   isAcceptedPeer(peerId: string): boolean {
     if (!this.enabled) return true;
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return false;
-    if (normalized === this.selfPeerId) return true;
-    if (this.quarantinedPeerIds.has(normalized)) return false;
-    return this.verifiedPeerIds.has(normalized);
+    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    if (!canonicalPeerId) return false;
+    if (canonicalPeerId === this.selfPeerId) return true;
+    if (this.isQuarantined(canonicalPeerId)) return false;
+    return this.verifiedPeerIds.has(canonicalPeerId);
   }
 
   isRejectedPeer(peerId: string): boolean {
     if (!this.enabled) return false;
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return true;
-    return this.quarantinedPeerIds.has(normalized);
+    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    return canonicalPeerId ? this.isQuarantined(canonicalPeerId) : true;
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
     if (!this.enabled) return new Set();
     return new Set(
       [...this.verifiedPeerIds]
-        .filter((peerId) => !this.quarantinedPeerIds.has(peerId)),
+        .filter((peerId) => !this.isQuarantined(peerId)),
     );
   }
 
@@ -99,12 +131,35 @@ export class NetworkAdmissionService {
     return {
       enabled: this.enabled,
       verifiedPeerIds: [...this.verifiedPeerIds].sort(),
-      quarantinedPeerIds: [...this.quarantinedPeerIds].sort(),
+      quarantinedPeerIds: [...this.quarantinedPeers.keys()]
+        .filter((peerId) => this.isQuarantined(peerId))
+        .sort(),
     };
+  }
+
+  private isQuarantined(peerId: CanonicalPeerId): boolean {
+    const entry = this.quarantinedPeers.get(peerId);
+    if (!entry) return false;
+    if (entry.kind === 'indefinite') return true;
+    if (entry.untilMs <= this.now()) {
+      this.quarantinedPeers.delete(peerId);
+      return false;
+    }
+    return true;
+  }
+
+  private setQuarantine(peerId: string, entry: NetworkAdmissionQuarantineEntry): void {
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    this.quarantinedPeers.set(canonicalPeerId, entry);
+    this.verifiedPeerIds.delete(canonicalPeerId);
+    this.probeRetry.clear(canonicalPeerId);
   }
 }
 
-function normalizePeerId(peerId: string): string | null {
-  const normalized = peerId.trim();
-  return normalized.length > 0 ? normalized : null;
+function canonicalAdmissionServicePeerId(peerId: string): CanonicalPeerId {
+  try {
+    return canonicalPeerIdString(peerId);
+  } catch (err) {
+    throw new Error(`Invalid peer id ${peerId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }

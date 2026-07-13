@@ -22,7 +22,7 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
+  loadNetworkConfig, loadResolvedNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
@@ -86,14 +86,9 @@ import {
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
 } from '../cli-rpc.js';
 import {
   appendSupervisorLog,
@@ -123,7 +118,7 @@ program
   .option('--no-verify-tag', 'Skip signed-tag verification for version/tag updates')
   .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
     const config = await loadConfig();
-    const net = await loadNetworkConfig(config.networkConfig);
+    const { network: net } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
     // Resolve field-by-field across local/network/project so defaults flow
     // through even when the local config omits repo/branch.
     const au = resolveAutoUpdateConfig(config, net) ?? (() => {

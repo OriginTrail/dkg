@@ -1,10 +1,17 @@
 import { describe, it, expect } from 'vitest';
+import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
 import { buildInitAutoUpdate, isInitNetworkSwitch } from '../src/commands/init.js';
+import {
+  loadNetworkConfig,
+  resolveChainConfig,
+  resolveKnownNetworkConfigName,
+  resolveNetworkConfigName,
+} from '../src/config.js';
 
 // Guards the network-SWITCH decision that drives whether `dkg init` discards
 // the existing chain block (new-network/old-chain Frankenstein prevention) or
-// preserves it (operator RPC override). Only an EXPLICIT prior networkConfig
-// that differs counts as a switch.
+// preserves it (operator RPC override). The prior effective network may be
+// explicit or inferred from a legacy chain ID.
 describe('isInitNetworkSwitch', () => {
   it('is NOT a switch for a fresh node (no networkConfig)', () => {
     expect(isInitNetworkSwitch(undefined, 'mainnet-gnosis')).toBe(false);
@@ -17,15 +24,64 @@ describe('isInitNetworkSwitch', () => {
     expect(isInitNetworkSwitch('  mainnet-base  ', 'mainnet-base')).toBe(false);
   });
 
-  it('IS a switch when an explicit prior networkConfig differs from the selection', () => {
+  it('IS a switch when the effective prior network differs from the selection', () => {
     expect(isInitNetworkSwitch('mainnet-base', 'testnet')).toBe(true);
     expect(isInitNetworkSwitch('testnet', 'mainnet-gnosis')).toBe(true);
   });
 
-  it('a legacy node (no networkConfig) re-inited to a real network is NOT a switch — its chain override is preserved', () => {
-    // The legacy node never persisted networkConfig, so its true network is
-    // unknown; treat as same-network so resolveChainConfig keeps existing.chain.
-    expect(isInitNetworkSwitch(undefined, 'mainnet-gnosis')).toBe(false);
+  it('does not treat the fallback as switch evidence for an unknown legacy chain', async () => {
+    const existing = {
+      chain: {
+        type: 'evm' as const,
+        chainId: 'evm:100',
+        rpcUrl: 'https://operator-rpc.invalid',
+        hubAddress: '0x0000000000000000000000000000000000000042',
+      },
+    };
+    const knownExistingNetwork = resolveKnownNetworkConfigName(existing);
+    const selectedNetwork = 'mainnet-gnosis';
+    const network = await loadNetworkConfig(selectedNetwork);
+    const switching = isInitNetworkSwitch(knownExistingNetwork, selectedNetwork);
+    const persistedChain = resolveChainConfig(switching ? undefined : existing, network);
+
+    expect(knownExistingNetwork).toBeUndefined();
+    expect(switching).toBe(false);
+    expect(persistedChain?.chainId).toBe('evm:100');
+    expect(persistedChain?.rpcUrl).toBe('https://operator-rpc.invalid');
+    expect(persistedChain?.hubAddress).toBe('0x0000000000000000000000000000000000000042');
+  });
+
+  it('keeps legacy Base/Gnosis setup defaults and persisted chain fields consistent', async () => {
+    for (const [chainId, expectedNetwork] of [
+      ['base:8453', 'mainnet-base'],
+      ['gnosis:100', 'mainnet-gnosis'],
+    ] as const) {
+      const existing = {
+        chain: {
+          type: 'evm' as const,
+          chainId,
+          rpcUrl: `https://operator-${expectedNetwork}.invalid`,
+          hubAddress: '0x0000000000000000000000000000000000000042',
+        },
+      };
+      const existingNetwork = resolveNetworkConfigName(existing);
+      const selectedNetwork = resolveSetupNetworkName({
+        existingNetworkConfig: existingNetwork,
+        configExisted: true,
+      });
+      const network = await loadNetworkConfig(selectedNetwork);
+      const switching = isInitNetworkSwitch(existingNetwork, selectedNetwork);
+      const persisted = {
+        ...existing,
+        networkConfig: selectedNetwork,
+        chain: resolveChainConfig(switching ? undefined : existing, network),
+      };
+
+      expect(persisted.networkConfig).toBe(expectedNetwork);
+      expect(persisted.chain?.chainId).toBe(chainId);
+      expect(persisted.chain?.rpcUrl).toBe(`https://operator-${expectedNetwork}.invalid`);
+      expect(switching).toBe(false);
+    }
   });
 });
 
@@ -62,6 +118,18 @@ describe('buildInitAutoUpdate', () => {
     expect(r.enabled).toBe(false);
     expect(r.channel).toBe('staging');
     expect(r.checkIntervalMinutes).toBe(10);
+  });
+
+  it('enable preserves an explicit updateJitterMinutes override across reruns (incl. 0 = disabled)', () => {
+    const r = buildInitAutoUpdate({
+      enableAutoUpdate: true,
+      // Operator disabled rollout jitter on this node; a rerun must not drop it.
+      existingAutoUpdate: { enabled: true, source: 'npm', updateJitterMinutes: 0 },
+      networkAutoUpdate: net,
+      ...proj,
+      answers: { allowPrerelease: true, interval: 5 },
+    });
+    expect(r.updateJitterMinutes).toBe(0);
   });
 
   it('enable preserves npm fields but drops git-only fields when forcing npm mode', () => {

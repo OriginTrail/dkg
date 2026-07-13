@@ -32,6 +32,8 @@ export interface EVMAdapterBaseConfig {
    * wants dynamic provider network detection.
    */
   staticNetwork?: boolean;
+  /** Overall submitted-transaction receipt deadline. Defaults to 10 minutes. */
+  receiptTimeoutMs?: number;
   /**
    * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
    * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are

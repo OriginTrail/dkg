@@ -1,4 +1,14 @@
 export * from './chain-adapter.js';
+export {
+  resolveQuotedPublisherCandidatePricing,
+  resolveLegacyPublisherCandidatePricing,
+  type QuotedPublisherCandidatePricing,
+  type QuotedPublisherCandidatePricingRequest,
+  type LegacyPublisherCandidatePricing,
+  type LegacyPublisherCandidatePricingRequest,
+  type PublisherConvictionPlanReader,
+  type LegacyPublisherConvictionPlanReader,
+} from './publisher-plan.js';
 // RPC-usage accounting: ONLY the typed window contract is public API (consumed
 // by the ChainAdapter.drainRpcUsage capability, the agent boundary, and the
 // daemon's rpc_usage log emission). The parsing/label-bounding helpers stay
@@ -40,18 +50,29 @@ export {
 } from './chain-rpc-transport-error.js';
 export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.
-  // Test-only hooks (_reset*/_set*Clock) and internal helpers
-  // (classifyRpcFailoverError/rpcHost) are intentionally NOT re-exported from
-  // the package barrel — import them directly from rpc-failover-log.js in tests
-  // so process-wide-singleton test hooks don't become public API.
+  // Test-only hook exported so cross-package route tests can reset the exact
+  // package singleton that production code reads. Internal helpers
+  // (classifyRpcFailoverError/rpcHost) stay private.
   getRpcFailoverStats,
   type RpcFailoverStatsSnapshot,
+  _resetRpcFailoverStatsForTest,
   noteRpcFailover,
   noteRpcExhaustion,
   notePreferredEndpoint,
+  noteRpcServed,
 } from './rpc-failover-log.js';
 export {
   HubResolutionCache,
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
+export {
+  MIN_RPC_RECEIPT_TIMEOUT_MS,
+  RPC_RECEIPT_TIMEOUT_MS,
+  resolveReceiptTimeoutMs,
+} from './evm-adapter-constants.js';
+export {
+  waitForTransactionReceiptWithFailover,
+  type TransactionReceiptEndpoint,
+  type TransactionReceiptWaitOptions,
+} from './rpc-failover-client.js';

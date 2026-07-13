@@ -396,7 +396,11 @@ import { QueryMethods } from './dkg-agent-query.js';
 import { AgentRegistryMethods } from './dkg-agent-registry.js';
 import { WorkspaceCryptoMethods } from './dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
-import { PublishMethods, SEAL_CAPABILITY_GAP_CODE } from './dkg-agent-publish.js';
+import {
+  PublishMethods,
+  SEAL_CAPABILITY_GAP_CODE,
+} from './dkg-agent-publish.js';
+import { placeFinalizedLifecycleSwm } from './finalized-lifecycle-swm.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';
@@ -619,7 +623,7 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): ResolvedDKGAgentConf
 }
 
 interface ACKReliableMessenger {
-  sendReliable(
+  sendRequestOwned(
     peerId: string,
     protocol: string,
     data: Uint8Array,
@@ -632,11 +636,11 @@ function createACKSendP2P(input: {
   timeoutMs: number;
 }): ACKCollectorDeps['sendP2P'] {
   return async (peerId: string, protocol: string, data: Uint8Array) => {
-    const sendResult = await input.messenger.sendReliable(peerId, protocol, data, {
+    const sendResult = await input.messenger.sendRequestOwned(peerId, protocol, data, {
       timeoutMs: input.timeoutMs,
     });
     if (!sendResult.delivered) {
-      throw new Error(`substrate queued (transport): ${sendResult.error}`);
+      throw new Error(`substrate send already in flight (transport): ${sendResult.error}`);
     }
     if (!sendResult.response) {
       throw new Error('substrate delivered (transport) without response');
@@ -714,6 +718,7 @@ export class DKGAgent extends DKGAgentBase {
         hubAddress: config.chainConfig.hubAddress,
         tokenAddress: config.chainConfig.tokenAddress,
         chainId: config.chainConfig.chainId,
+        receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
         approvalPolicy: config.chainConfig.approvalPolicy,
         cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
         minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
@@ -1487,7 +1492,7 @@ export class DKGAgent extends DKGAgentBase {
   /**
    * Snapshot of the V10 Random Sampling prover's recent activity.
    * Returns a disabled-handle status when the prover never started
-   * (edge node, no identity, missing chain methods). Used by the
+   * (edge node, no identity, awaiting admission, missing chain methods). Used by the
    * daemon's `/api/random-sampling/status` route + the CLI's
    * `random-sampling status` subcommand.
    */
@@ -1496,7 +1501,8 @@ export class DKGAgent extends DKGAgentBase {
     return {
       enabled: false,
       role: (this.config.nodeRole ?? 'edge') as 'core' | 'edge',
-      identityId: '0',
+      identityId: this.randomSamplingIdentityId.toString(),
+      disabledReason: this.randomSamplingDisabledReason,
       loop: null,
     };
   }
@@ -1548,6 +1554,14 @@ export class DKGAgent extends DKGAgentBase {
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
+    }
+    try {
+      await this.messenger.stopOutboxDrain();
+    } catch (error) {
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: outbox retry drain failed during shutdown: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     if (this.swmAckQuorumTimer) {
       clearInterval(this.swmAckQuorumTimer);
@@ -1731,10 +1745,16 @@ export class DKGAgent extends DKGAgentBase {
    * validation remain authoritative.
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
-    const peers = this.node.libp2p.getPeers();
+    const connectedPeerIds = new Set<string>();
+    for (const peer of this.node.libp2p.getPeers()) {
+      connectedPeerIds.add(peer.toString());
+    }
+    for (const connection of this.node.libp2p.getConnections()) {
+      connectedPeerIds.add(connection.remotePeer.toString());
+    }
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selection = selectACKCandidatePeersWithDiagnostics({
-      connectedPeers: peers.map(p => p.toString()),
+      connectedPeers: [...connectedPeerIds],
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
@@ -2509,6 +2529,23 @@ export class DKGAgent extends DKGAgentBase {
           preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
           schemeVersion: opts?.schemeVersion,
         });
+        // Upgraded full `skipSeal` shares may predate KA-number allocation and
+        // still live in the legacy SWM bucket. Finalize has now allocated the
+        // packed id bound by the seal; ensure that exact root closure also exists
+        // in its canonical named lifecycle before publish uses exact-scope reads.
+        // This is idempotent, so retrying after placement repairs the lifecycle
+        // pointer safely.
+        await placeFinalizedLifecycleSwm({
+          publisher: agent.publisher,
+          operationContext: createOperationContext('share'),
+          authorAddress: swmSeal.authorAddress,
+          packedKaId: swmSeal.reservedKaId,
+          contextGraphId,
+          assertionName: name,
+          assertionLifecycleAgentAddress: finalizeAgentAddress,
+          subGraphName: opts?.subGraphName,
+          rootEntities: swmSeal.rootEntities,
+        });
         // #1116 FIX 2 — make the SWM-resident position observable. The original
         // (possibly skipSeal) promote had no seal yet, so `_stampSwmPointer` ran a
         // no-op then; now that the seal EXISTS, stamp dkg:swmCurrentAssertion to it
@@ -2534,33 +2571,62 @@ export class DKGAgent extends DKGAgentBase {
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionHistoryDescriptor | null> {
         const addr = opts?.agentAddress ?? agentAddress;
-        const lifecycleUri = assertionLifecycleUri(contextGraphId, addr, name, opts?.subGraphName);
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
         const PROV_NS = 'http://www.w3.org/ns/prov#';
 
         const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"\^\^<.*>$/, '') ?? undefined;
 
-        // Query assertion entity (current state + layer + OT-RFC-43 A2 pointers).
-        const entityResult = await agent.store.query(
-          `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal WHERE {
-            GRAPH <${metaGraph}> {
-              <${lifecycleUri}> <${DKG_NS}state> ?state .
-              OPTIONAL { <${lifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
-              OPTIONAL { <${lifecycleUri}> <${DKG_NS}assertionGraph> ?assertionGraph }
-              OPTIONAL { <${lifecycleUri}> <${WM_CURRENT_ASSERTION_PRED}> ?wm }
-              OPTIONAL { <${lifecycleUri}> <${SWM_CURRENT_ASSERTION_PRED}> ?swm }
-              OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
-              OPTIONAL { <${lifecycleUri}> <${DKG_NS}shareOperationId> ?currentShareOpId }
-              OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
-              OPTIONAL { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?reservedUal }
-              OPTIONAL { <${lifecycleUri}> <${DKG_NS}publishedUal> ?publishedUal }
-            }
-          } LIMIT 1`,
-        );
-        if (entityResult.type !== 'bindings' || entityResult.bindings.length === 0) return null;
+        // Lifecycle URNs predate the canonical lowercase per-layer graph layout
+        // and therefore preserve the address spelling used by their writer.
+        // An explicit author-scoped read may supply the same EVM identity in a
+        // different case (notably an address copied from the now-canonical WM
+        // graph URI). Try the caller spelling first for exact legacy semantics,
+        // then its EIP-55 and lowercase equivalents. The resolved subject must
+        // be carried into the event/root queries below; rebuilding it from the
+        // caller spelling would silently split one lifecycle into two.
+        const lifecycleAddresses = [addr];
+        if (/^0x[0-9a-fA-F]{40}$/.test(addr)) {
+          const lowercase = addr.toLowerCase();
+          const checksummed = ethers.getAddress(lowercase);
+          for (const candidate of [checksummed, lowercase]) {
+            if (!lifecycleAddresses.includes(candidate)) lifecycleAddresses.push(candidate);
+          }
+        }
 
-        const row = entityResult.bindings[0];
+        let lifecycleUri: string | undefined;
+        let row: Record<string, string> | undefined;
+        for (const lifecycleAddress of lifecycleAddresses) {
+          const candidateLifecycleUri = assertionLifecycleUri(
+            contextGraphId,
+            lifecycleAddress,
+            name,
+            opts?.subGraphName,
+          );
+          const entityResult = await agent.store.query(
+            `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal WHERE {
+              GRAPH <${metaGraph}> {
+                <${candidateLifecycleUri}> <${DKG_NS}state> ?state .
+                OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
+                OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}assertionGraph> ?assertionGraph }
+                OPTIONAL { <${candidateLifecycleUri}> <${WM_CURRENT_ASSERTION_PRED}> ?wm }
+                OPTIONAL { <${candidateLifecycleUri}> <${SWM_CURRENT_ASSERTION_PRED}> ?swm }
+                OPTIONAL { <${candidateLifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
+                OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}shareOperationId> ?currentShareOpId }
+                OPTIONAL { <${candidateLifecycleUri}> <${KA_ID_PRED}> ?kaNum }
+                OPTIONAL { <${candidateLifecycleUri}> <${RESERVED_UAL_PRED}> ?reservedUal }
+                OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}publishedUal> ?publishedUal }
+              }
+            } LIMIT 1`,
+          );
+          if (entityResult.type === 'bindings' && entityResult.bindings.length > 0) {
+            lifecycleUri = candidateLifecycleUri;
+            row = entityResult.bindings[0];
+            break;
+          }
+        }
+        if (!lifecycleUri || !row) return null;
+
         const stateStr = strip(row['state']) as AssertionState;
         const layerStr = strip(row['memoryLayer']);
         const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);

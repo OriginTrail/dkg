@@ -12,8 +12,10 @@ let server: Server;
 let queryUrl: string;
 let updateUrl: string;
 const insertedQuads: string[] = [];
-/** How many times the server received the `SELECT DISTINCT ?g` listGraphs scan. */
+/** How many times the server received a listGraphs enumeration query (old `SELECT DISTINCT ?g` scan or the new index-read `GRAPH ?g {} FILTER EXISTS`). */
 let listGraphsHits = 0;
+/** The most recent listGraphs enumeration query the server received — asserted on to guard the query SHAPE (index-read, not the O(#quads) scan; dkg #1597). */
+let lastListGraphsQuery = '';
 
 function respondSelect(res: ServerResponse): void {
   if (res.writableEnded) return;
@@ -73,8 +75,9 @@ function startTestServer(): Promise<void> {
             }));
             return;
           }
-          if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
+          if (decoded.includes('?g') && (decoded.includes('DISTINCT') || decoded.includes('GRAPH ?g {}'))) {
             listGraphsHits++;
+            lastListGraphsQuery = decoded;
             respondListGraphs(res);
             return;
           }
@@ -126,6 +129,40 @@ describe('SparqlHttpStore (test server)', () => {
     }]);
     expect(insertedQuads.length).toBeGreaterThan(0);
     expect(insertedQuads.some(q => q.includes('INSERT'))).toBe(true);
+  });
+
+  it('sends charset=utf-8 on the query and update Content-Type (non-ASCII wire safety)', async () => {
+    // Regression guard: without an explicit charset, Jetty-backed stores
+    // (Blazegraph) decode the raw body as ISO-8859-1 and mojibake non-ASCII
+    // query/update literals. The SPARQL protocol prescribes UTF-8.
+    const originalFetch = globalThis.fetch;
+    const seen: Array<{ url: string; contentType: string }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      seen.push({ url, contentType: headers['Content-Type'] ?? '' });
+      const isQuery = url.includes('/query');
+      return new Response(
+        isQuery ? JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }) : '',
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const charsetStore = new SparqlHttpStore({
+        queryEndpoint: 'http://charset.test/query',
+        updateEndpoint: 'http://charset.test/update',
+      });
+      await charsetStore.query('SELECT * WHERE { ?s ?p "café" }');
+      await charsetStore.insert([
+        { subject: 'http://ex.org/s', predicate: 'http://schema.org/name', object: '"café"', graph: '' },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    const queryReq = seen.find((r) => r.url.includes('/query'));
+    const updateReq = seen.find((r) => r.url.includes('/update'));
+    expect(queryReq?.contentType).toBe('application/sparql-query; charset=utf-8');
+    expect(updateReq?.contentType).toBe('application/sparql-update; charset=utf-8');
   });
 
   it('rejects RDF literals above the Java MUTF-8 hard limit before update POST', async () => {
@@ -181,7 +218,7 @@ describe('SparqlHttpStore (test server)', () => {
             respondSelect(res);
             return;
           }
-          if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
+          if (decoded.includes('?g') && (decoded.includes('DISTINCT') || decoded.includes('GRAPH ?g {}'))) {
             arrivals.push('listGraphs');
             listGraphRequests++;
             if (listGraphRequests <= backgroundSlots) {
@@ -429,9 +466,16 @@ describe('SparqlHttpStore (test server)', () => {
     expect(has).toBe(true);
   });
 
-  it('listGraphs returns graph URIs from SELECT DISTINCT ?g', async () => {
+  it('listGraphs returns graph URIs from the graph-index enumeration query', async () => {
+    lastListGraphsQuery = '';
     const graphs = await store.listGraphs();
     expect(graphs).toContain('http://ex.org/g1');
+    // Query SHAPE guard (dkg #1597 review): the adapter MUST issue the index-read
+    // form, not the O(#quads) scan and not bare `GRAPH ?g {}` (which over-lists
+    // emptied graphs). Fails if listGraphsDirect is reverted to the legacy query.
+    expect(lastListGraphsQuery).toContain('GRAPH ?g {}');
+    expect(lastListGraphsQuery).toMatch(/FILTER\s+EXISTS/i);
+    expect(lastListGraphsQuery).not.toMatch(/DISTINCT/i);
   });
 
   it('dropGraph sends DROP SILENT GRAPH to update endpoint', async () => {

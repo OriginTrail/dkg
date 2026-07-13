@@ -131,12 +131,20 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   }
 
   async getStatus(jobId: string): Promise<PromoteJob | null> {
-    await this.ensureGraph();
-    return this.readJob(jobId);
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      return this.readJob(jobId);
+    });
   }
 
   async list(filter: PromoteListFilter = {}): Promise<PromoteJob[]> {
-    await this.ensureGraph();
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      return this.listUnlocked(filter);
+    });
+  }
+
+  private async listUnlocked(filter: PromoteListFilter = {}): Promise<PromoteJob[]> {
     const filters: string[] = [];
     if (filter.state && filter.state.length > 0) {
       const literals = filter.state.map((s) => literal(s)).join(', ');
@@ -227,7 +235,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
 
       const now = this.now();
       await this.reconcileExpiredRunning(now);
-      const candidates = (await this.list()).filter((j) => {
+      const candidates = (await this.listUnlocked()).filter((j) => {
         if (j.state === 'queued') return true;
         if (j.state === 'failed_retrying' && (j.attempt.nextRetryAt ?? 0) <= now) return true;
         return false;
@@ -238,7 +246,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
         claimableCandidates.push(candidate);
       }
 
-      const running = await this.list({ state: ['running'] });
+      const running = await this.listUnlocked({ state: ['running'] });
       const eligible = claimableCandidates.filter((candidate) =>
         !running.some((active) => active.jobId !== candidate.jobId && this.jobsShareClaimLane(active, candidate)),
       );
@@ -390,7 +398,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   }
 
   private async reconcileExpiredRunning(now: number): Promise<PromoteRecoverySummary> {
-    const running = await this.list({ state: ['running'] });
+    const running = await this.listUnlocked({ state: ['running'] });
 
     let reclaimed = 0;
     let abandoned = 0;
@@ -486,10 +494,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   }
 
   async getStats(): Promise<PromoteStats> {
-    await this.ensureGraph();
-    const stats = Object.fromEntries(PROMOTE_JOB_STATES.map((s) => [s, 0])) as PromoteStats;
-    for (const job of await this.list()) stats[job.state] += 1;
-    return stats;
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      const stats = Object.fromEntries(PROMOTE_JOB_STATES.map((s) => [s, 0])) as PromoteStats;
+      for (const job of await this.listUnlocked()) stats[job.state] += 1;
+      return stats;
+    });
   }
 
   // ===========================================================================

@@ -73,7 +73,11 @@ import { execSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import TOML from '@iarna/toml';
 import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
-import { assertSelectableNetwork } from './config.js';
+import {
+  assertSelectableNetwork,
+  resolveKnownNetworkConfigName,
+  type DkgConfig,
+} from './config.js';
 
 export interface McpSetupCliOptions {
   /** Refresh every detected client regardless of current registration state. */
@@ -154,6 +158,8 @@ export interface PlannedItem {
  */
 export interface McpSetupActionDeps {
   loadNetworkConfig: typeof import('@origintrail-official/dkg-adapter-openclaw').loadNetworkConfig;
+  /** Canonical persisted-config network resolver, injectable for tests. */
+  resolveKnownNetworkConfigName: typeof resolveKnownNetworkConfigName;
   /**
    * Codex Round-23 Fix 30: agent-agnostic config-write helper from
    * `dkg-core`. Pre-fix this dep was `adapter-openclaw`'s
@@ -1792,10 +1798,20 @@ export async function mcpSetupAction(
   // and reuse it for both the config write and the faucet gate, so the
   // persisted selector, the loaded network slice, and the faucet decision
   // (mainnet has no faucet) all agree.
-  const existingNetworkConfig = ((): string | undefined => {
-    const nc = readPersistedConfig(dkgDirPath)?.networkConfig;
-    return typeof nc === 'string' ? nc : undefined;
-  })();
+  type LoadedNetworkConfig = ReturnType<McpSetupActionDeps['loadNetworkConfig']>;
+  const loadedNetworks = new Map<string, LoadedNetworkConfig>();
+  const loadSetupNetworkConfig = (name: string): LoadedNetworkConfig => {
+    const cached = loadedNetworks.get(name);
+    if (cached !== undefined) return cached;
+    const network = deps.loadNetworkConfig(name);
+    loadedNetworks.set(name, network);
+    return network;
+  };
+
+  const persistedNodeConfig = readPersistedConfig(dkgDirPath) as
+    | Pick<DkgConfig, 'networkConfig' | 'chain'>
+    | undefined;
+  const existingNetworkConfig = deps.resolveKnownNetworkConfigName(persistedNodeConfig);
   // `--network` is honored only for a FRESH node (existing nodes keep their
   // current network; switch via `dkg init --network`). Dropping it on an
   // existing node keeps the faucet decision aligned with the booted network
@@ -1874,7 +1890,7 @@ export async function mcpSetupAction(
     console.log(`[setup] [dry-run] Would write ${tildify(jsonPath)} (port ${effectivePort}, name "${effectiveAgentName}")`);
   } else {
     try {
-      const network = deps.loadNetworkConfig(setupNetworkConfigName);
+      const network = loadSetupNetworkConfig(setupNetworkConfigName);
       // Codex Round-23 Fix 30: call the agent-agnostic
       // ensureDkgNodeConfig directly. The caller-loads-existing
       // contract means we pre-read the persisted config (yaml or
@@ -1955,7 +1971,7 @@ export async function mcpSetupAction(
     console.log('[setup] [dry-run] Would attempt wallet funding');
   } else {
     try {
-      const network = deps.loadNetworkConfig(setupNetworkConfigName);
+      const network = loadSetupNetworkConfig(setupNetworkConfigName);
       await deps.fundWalletsBestEffort({
         network,
         idempotencySeed: effectiveAgentName,

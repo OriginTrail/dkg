@@ -38,12 +38,14 @@ export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {
   NetworkAdmissionService,
-  peerIdsFromMultiaddr,
-  peerIdsFromMultiaddrs,
-  targetPeerIdFromMultiaddr,
   type NetworkAdmissionOptions,
   type NetworkAdmissionSnapshot,
 } from './p2p/network-admission.js';
+export {
+  peerIdsFromMultiaddr,
+  peerIdsFromMultiaddrs,
+  targetPeerIdFromMultiaddr,
+} from './p2p/multiaddr-peer-target.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
@@ -161,6 +163,7 @@ export {
 export {
   bindRandomSampling,
   type RandomSamplingBindOptions,
+  type RandomSamplingDisabledReason,
   type RandomSamplingHandle,
   type RandomSamplingStatus,
   type AgentRole,
@@ -228,7 +231,8 @@ export {
 // (`/api/context-graph/subscribe` → `catchup-runner-worker-impl`) runs the same
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
-export { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
+export { mapWithConcurrency } from './map-with-concurrency.js';
+export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.

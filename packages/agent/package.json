@@ -1,15 +1,17 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.5",
+  "version": "10.0.6",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && pnpm run test:types",
+    "benchmark:sync-responder-pages": "node --expose-gc scripts/sync-responder-page-benchmark.cjs",
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:types": "tsc --project tsconfig.type-tests.json",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },

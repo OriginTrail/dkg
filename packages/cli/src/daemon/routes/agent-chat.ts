@@ -218,8 +218,6 @@ import {
 } from '../http-utils.js';
 import {
   normalizeRepo,
-  parseTagName,
-  isValidRef,
   isValidRepoSpec,
   repoToFetchUrl,
   githubRepoForApi,
@@ -240,6 +238,7 @@ import {
   releaseUpdateLock,
   performNpmUpdate,
 } from '../auto-update.js';
+import { isValidRef, parseTagName } from '../../auto-update-ref.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -321,6 +320,7 @@ import {
 } from '../local-agents.js';
 
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
+import { classifyAgentConnectError } from './agent-connect-error.js';
 import type { RequestContext } from './context.js';
 import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
@@ -947,48 +947,8 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
         await agent.connectTo(addr);
       }
     } catch (err: any) {
-      const code = err?.code as string | undefined;
-      // Map agent-side error codes to HTTP semantics so the UI can
-      // distinguish "wrong peer id" (don't retry) from "network is sick"
-      // (retry in a moment). Codex review on PR #431 flagged that the
-      // earlier blanket-404 mapping made every transient DHT issue look
-      // like an input error.
-      let status: number;
-      switch (code) {
-        case 'INVALID_PEER_ID':
-        case 'SELF_DIAL':
-          status = 400; // client error, retrying with same input won't help
-          break;
-        case 'PEER_NOT_FOUND':
-          status = 404; // genuine negative lookup
-          break;
-        case 'DHT_TIMEOUT':
-        case 'CONNECT_TIMEOUT':
-          // CONNECT_TIMEOUT is the post-RFC-07 equivalent of DHT_TIMEOUT:
-          // the resolver swallows per-step errors so the agent now
-          // surfaces the timeout at the boundary of the abort signal
-          // rather than at the inline DHT walk. Same retriable semantic.
-          // Codex PR #499 round 5 — without this case, transient routing
-          // failures would fall through `default` and 400 the caller.
-          status = 504; // retriable: walk didn't complete in time
-          break;
-        case 'DHT_UNAVAILABLE':
-        case 'PEER_ROUTING_UNAVAILABLE':
-          status = 503; // retriable: routing layer can't help right now
-          break;
-        case 'DIAL_FAILED':
-          status = 502; // retriable: addrs known but transport failed
-          break;
-        case 'NETWORK_ADMISSION_REJECTED':
-          status = 403; // reachable peer, but not part of this active DKG network
-          break;
-        default:
-          status = 400;
-      }
-      return jsonResponse(res, status, {
-        error: err.message ?? "Failed to connect",
-        ...(code ? { code } : {}),
-      });
+      const classified = classifyAgentConnectError(err);
+      return jsonResponse(res, classified.status, classified.body);
     }
     return jsonResponse(res, 200, { connected: true });
   }

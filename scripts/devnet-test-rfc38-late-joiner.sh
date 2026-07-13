@@ -23,8 +23,8 @@
 #     • Asserts: N6 inserts 5 triples + can query them.
 #
 #   SCENARIO B — member-from-member catchup (curator offline):
-#     • Curator (N5) creates a SECOND curated CG with [N5, N6, N4]
-#       in allowlist. (N4 is a core, used as a third member here.)
+#     • Curator (N5) creates a SECOND curated CG with [N5, N6, N3]
+#       in allowlist. (N3 is a core, used as a third member here.)
 #     • Curator writes 7 SWM triples. N6 receives them via live
 #       gossip (live multi-member topology).
 #     • Curator goes OFFLINE (kill node 5).
@@ -35,7 +35,7 @@
 #
 #   SCENARIO C — outsider catchup (cores host ciphertext but
 #                outsider has no chain key, expected fail-soft):
-#     • Curator (N5) creates a THIRD curated CG with [N5, N4] in
+#     • Curator (N5) creates a THIRD curated CG with [N5, N3] in
 #       allowlist. (N6 is NOT a member.)
 #     • Curator writes 4 SWM triples.
 #     • Curator goes OFFLINE.
@@ -86,8 +86,9 @@ DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
 MEMBER_NODE=6
-THIRD_MEMBER_NODE=4
+THIRD_MEMBER_NODE=3
 OUTSIDER_NODE=1
+LEGACY_HOST_CORES=(1 2 3 4)
 
 log()  { echo "[lj] $*"; }
 warn() { echo "[lj] WARN: $*" >&2; }
@@ -96,6 +97,19 @@ act()  { echo ""; echo "[lj] === $1 ==="; }
 
 node_dir()    { echo "$DEVNET_DIR/node$1"; }
 node_token()  { tail -1 "$(node_dir "$1")/auth.token" 2>/dev/null | tr -d '\r\n'; }
+node_agent_token() {
+  local node="$1"
+  AGENT_KEYSTORE="$(node_dir "$node")/agent-keystore.json" node -e '
+    const fs = require("fs");
+    try {
+      const records = Object.values(JSON.parse(fs.readFileSync(process.env.AGENT_KEYSTORE, "utf8")));
+      const token = records.find((record) => typeof record?.authToken === "string")?.authToken ?? "";
+      process.stdout.write(token);
+    } catch {
+      process.stdout.write("");
+    }
+  '
+}
 node_port()   { echo $((API_PORT_BASE + $1 - 1)); }
 node_pidfile(){ echo "$(node_dir "$1")/daemon.pid"; }
 node_log()    { echo "$(node_dir "$1")/daemon.log"; }
@@ -103,11 +117,25 @@ node_log()    { echo "$(node_dir "$1")/daemon.log"; }
 api_call() {
   local node="$1" method="$2" path="$3" data="${4:-}"
   local port; port=$(node_port "$node")
-  local token; token=$(node_token "$node")
+  local token; token="${DEVNET_API_TOKEN_OVERRIDE:-$(node_token "$node")}"
   local -a curl_args=(-sS --max-time 180 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
   [ -n "$data" ] && curl_args+=(-d "$data")
   curl_args+=("http://127.0.0.1:${port}${path}")
   curl "${curl_args[@]}"
+}
+
+api_call_agent() {
+  local node="$1" method="$2" path="$3" data="${4:-}"
+  local token; token="$(node_agent_token "$node")"
+  [ -n "$token" ] || token="$(node_token "$node")"
+  DEVNET_API_TOKEN_OVERRIDE="$token" api_call "$node" "$method" "$path" "$data"
+}
+
+devnet_create_shared_ka_agent() {
+  local node="$1" payload="$2" name_prefix="${3:-devnet-ka}" extra_fields="${4:-}"
+  local token; token="$(node_agent_token "$node")"
+  [ -n "$token" ] || token="$(node_token "$node")"
+  DEVNET_API_TOKEN_OVERRIDE="$token" devnet_create_shared_ka "$node" "$payload" "$name_prefix" "$extra_fields"
 }
 
 parse_json() {
@@ -193,6 +221,52 @@ restart_node() {
   wait_for_node_up "$node"
 }
 
+republish_agent_profile() {
+  local node="$1" label="${2:-node $1}"
+  local resp ok
+  resp=$(api_call "$node" POST /api/agent/publish-profile '{}')
+  ok=$(parse_json "$resp" '.ok')
+  if [ "$ok" != "true" ]; then
+    fail "could not republish agent profile for $label: $resp"
+  fi
+  log "✓ republished current agent profile for $label"
+}
+
+LEGACY_HOST_CFG_BAK_DIR=""
+restore_legacy_host_custody_configs() {
+  [ -n "${LEGACY_HOST_CFG_BAK_DIR:-}" ] && [ -d "$LEGACY_HOST_CFG_BAK_DIR" ] || return 0
+  for node in "${LEGACY_HOST_CORES[@]}"; do
+    local cfg bak
+    cfg="$(node_dir "$node")/config.json"
+    bak="$LEGACY_HOST_CFG_BAK_DIR/node${node}.config.json"
+    [ -f "$bak" ] || continue
+    cp "$bak" "$cfg" 2>/dev/null || true
+    restart_node "$node" >/dev/null 2>&1 || true
+  done
+  rm -rf "$LEGACY_HOST_CFG_BAK_DIR"
+}
+
+configure_legacy_host_custody_cores() {
+  LEGACY_HOST_CFG_BAK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rfc38-lj-core-cfg-XXXXXX")"
+  trap restore_legacy_host_custody_configs EXIT INT TERM
+  for node in "${LEGACY_HOST_CORES[@]}"; do
+    local cfg bak
+    cfg="$(node_dir "$node")/config.json"
+    bak="$LEGACY_HOST_CFG_BAK_DIR/node${node}.config.json"
+    [ -f "$cfg" ] || fail "core config $cfg missing — bring up the devnet first"
+    cp "$cfg" "$bak"
+    node -e '
+      const fs = require("fs");
+      const file = process.argv[1];
+      const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+      cfg.swmHostMode = Object.assign({}, cfg.swmHostMode, { enabled: true, stripCiphertext: false });
+      fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+    ' "$cfg" || fail "could not edit core node $node config for legacy host custody"
+    restart_node "$node" >/dev/null 2>&1 || fail "core node $node did not restart after enabling legacy host custody"
+  done
+  log "✓ cores ${LEGACY_HOST_CORES[*]} running with swmHostMode.stripCiphertext=false for LU-6 legacy host-custody checks"
+}
+
 # Poll `/api/connections` on $node until $targetPeer is in the
 # connection list (direct OR relayed). The sender-key handshake send
 # has a 20s deadline; if libp2p hasn't converged after a restart, the
@@ -234,6 +308,8 @@ THIRD_AGENT=$(api_call "$THIRD_MEMBER_NODE"   GET /api/agent/identity | node -e 
 log "Curator:      $CURATOR_AGENT (node $CURATOR_NODE, peer=$CURATOR_PEER)"
 log "Member:       $MEMBER_AGENT  (node $MEMBER_NODE,  peer=$MEMBER_PEER)"
 log "Third member: $THIRD_AGENT  (node $THIRD_MEMBER_NODE, core daemon used as member)"
+republish_agent_profile "$THIRD_MEMBER_NODE" "third member"
+sleep 5
 
 STAMP=$(date +%s)
 
@@ -244,7 +320,7 @@ CG_A="${CURATOR_AGENT}/lj-A-${STAMP}"
 log "Create curated CG: $CG_A (allowlist=[curator, member])"
 
 for N in "$CURATOR_NODE" "$MEMBER_NODE"; do
-  CR=$(api_call "$N" POST /api/context-graph/create "$(cat <<EOF
+  CR=$(api_call_agent "$N" POST /api/context-graph/create "$(cat <<EOF
 { "id": "$CG_A", "name": "lj-A ${STAMP}",
   "accessPolicy": 1, "publishPolicy": 0,
   "allowedAgents": ["$CURATOR_AGENT","$MEMBER_AGENT"],
@@ -279,7 +355,7 @@ A_PAYLOAD=$(CG_ID="$CG_A" N=5 LABEL="A" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_A=$(devnet_create_shared_ka "$CURATOR_NODE" "$A_PAYLOAD")
+WROTE_A=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$A_PAYLOAD")
 TRIPLES_WROTE_A=$(parse_json "$WROTE_A" '.triplesWritten')
 [ "$TRIPLES_WROTE_A" = "5" ] || fail "expected 5 triplesWritten, got '$TRIPLES_WROTE_A' (response: $WROTE_A)"
 log "✓ curator wrote 5 triples"
@@ -288,7 +364,7 @@ log "✓ curator wrote 5 triples"
 sleep 3
 
 log "Member catches up from curator (peerId=$CURATOR_PEER)..."
-CATCHUP_A=$(api_call "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+CATCHUP_A=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_A", "peerId": "$CURATOR_PEER" }
 EOF
 )")
@@ -298,7 +374,7 @@ log "  catchup response (insertedTriples=$INSERTED_A)"
 
 # Validate the member can read the data via SPARQL regardless of how
 # it got there (live gossip vs catchup).
-Q_A=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+Q_A=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_A", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -314,7 +390,7 @@ CG_B="${CURATOR_AGENT}/lj-B-${STAMP}"
 log "Create curated CG: $CG_B (allowlist=[curator, member, third-member])"
 
 for N in "$CURATOR_NODE" "$MEMBER_NODE" "$THIRD_MEMBER_NODE"; do
-  CR=$(api_call "$N" POST /api/context-graph/create "$(cat <<EOF
+  CR=$(api_call_agent "$N" POST /api/context-graph/create "$(cat <<EOF
 { "id": "$CG_B", "name": "lj-B ${STAMP}",
   "accessPolicy": 1, "publishPolicy": 0,
   "allowedAgents": ["$CURATOR_AGENT","$MEMBER_AGENT","$THIRD_AGENT"],
@@ -357,7 +433,7 @@ B_PAYLOAD=$(CG_ID="$CG_B" N=7 LABEL="B" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_B=$(devnet_create_shared_ka "$CURATOR_NODE" "$B_PAYLOAD")
+WROTE_B=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$B_PAYLOAD")
 TRIPLES_WROTE_B=$(parse_json "$WROTE_B" '.triplesWritten')
 [ "$TRIPLES_WROTE_B" = "7" ] || fail "expected 7 triplesWritten, got '$TRIPLES_WROTE_B' (response: $WROTE_B)"
 log "✓ curator wrote 7 triples"
@@ -371,7 +447,7 @@ log "✓ curator wrote 7 triples"
 # there is incidental.
 N_B_PRE=""
 for _ in $(seq 1 30); do
-  Q_B_PRE=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+  Q_B_PRE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_B", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -383,11 +459,11 @@ done
 log "  member's CG_B live-gossip count BEFORE curator-down: $N_B_PRE"
 if [ "$N_B_PRE" != "7" ]; then
   log "  live gossip incomplete; running fallback explicit catchup against curator..."
-  api_call "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+  api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_B", "peerId": "$CURATOR_PEER" }
 EOF
 )" >/dev/null
-  Q_B_PRE=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+  Q_B_PRE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_B", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -405,7 +481,7 @@ log "✓ curator down"
 # because by default catchup fans out to all connected peers and
 # would also include cores that don't host curated SWM.
 log "Third-member ($THIRD_MEMBER_NODE) catchup against member ($MEMBER_NODE, peer=$MEMBER_PEER)..."
-CATCHUP_B=$(api_call "$THIRD_MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+CATCHUP_B=$(api_call_agent "$THIRD_MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_B", "peerId": "$MEMBER_PEER" }
 EOF
 )")
@@ -414,7 +490,7 @@ log "  catchup response (insertedTriples=$INSERTED_B)"
 [ -n "$INSERTED_B" ] || fail "third-member catchup returned no result: $CATCHUP_B"
 
 # Validate third member can read the data via SPARQL.
-Q_B=$(api_call "$THIRD_MEMBER_NODE" POST /api/query "$(cat <<EOF
+Q_B=$(api_call_agent "$THIRD_MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_B", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -438,7 +514,7 @@ CG_C="${CURATOR_AGENT}/lj-C-${STAMP}"
 log "Create curated CG: $CG_C (allowlist=[curator, third-member], member is OUTSIDER)"
 
 for N in "$CURATOR_NODE" "$THIRD_MEMBER_NODE"; do
-  CR=$(api_call "$N" POST /api/context-graph/create "$(cat <<EOF
+  CR=$(api_call_agent "$N" POST /api/context-graph/create "$(cat <<EOF
 { "id": "$CG_C", "name": "lj-C ${STAMP}",
   "accessPolicy": 1, "publishPolicy": 0,
   "allowedAgents": ["$CURATOR_AGENT","$THIRD_AGENT"],
@@ -478,7 +554,7 @@ C_PAYLOAD=$(CG_ID="$CG_C" N=4 LABEL="C" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_C=$(devnet_create_shared_ka "$CURATOR_NODE" "$C_PAYLOAD")
+WROTE_C=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$C_PAYLOAD")
 TRIPLES_WROTE_C=$(parse_json "$WROTE_C" '.triplesWritten')
 [ "$TRIPLES_WROTE_C" = "4" ] || fail "expected 4 triplesWritten, got '$TRIPLES_WROTE_C' (response: $WROTE_C)"
 log "✓ curator wrote 4 triples"
@@ -494,7 +570,7 @@ log "✓ curator down"
 # then catchup against the cores only — these don't host curated
 # CG SWM today (LU-6 gap), so we expect 0 triples and a clean response.
 log "Outsider (node $MEMBER_NODE) pre-creates CG_C locally to bypass the local read gate..."
-api_call "$MEMBER_NODE" POST /api/context-graph/create "$(cat <<EOF
+api_call_agent "$MEMBER_NODE" POST /api/context-graph/create "$(cat <<EOF
 { "id": "$CG_C", "name": "lj-C late ${STAMP}",
   "accessPolicy": 1, "publishPolicy": 0,
   "allowedAgents": ["$MEMBER_AGENT"] }
@@ -502,13 +578,27 @@ EOF
 )" >/dev/null || true
 
 log "Outsider catchup against all available peers (cores only — no live member)..."
-CATCHUP_C=$(api_call "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+CATCHUP_C=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_C" }
 EOF
 )")
 INSERTED_C=$(parse_json "$CATCHUP_C" '.totalInsertedTriples')
 PEERS_ATTEMPTED_C=$(parse_json "$CATCHUP_C" '.peersAttempted')
-log "  catchup response: peersAttempted=$PEERS_ATTEMPTED_C insertedTriples=$INSERTED_C"
+HOST_PEERS_ATTEMPTED_C=$(printf '%s' "$CATCHUP_C" | node -e '
+  let d = "";
+  process.stdin.on("data", c => d += c);
+  process.stdin.on("end", () => {
+    try {
+      const j = JSON.parse(d);
+      const total = (j.hostCatchup?.perContextGraph ?? [])
+        .reduce((sum, entry) => sum + (Array.isArray(entry.peers) ? entry.peers.length : 0), 0);
+      console.log(total);
+    } catch {
+      console.log(0);
+    }
+  });
+')
+log "  catchup response: peersAttempted=$PEERS_ATTEMPTED_C hostPeersAttempted=$HOST_PEERS_ATTEMPTED_C insertedTriples=$INSERTED_C"
 
 # Outsider (no chain key, no allowlist membership) MUST end with 0
 # applied triples even though cores serve ciphertext via LU-6 — the
@@ -517,8 +607,10 @@ log "  catchup response: peersAttempted=$PEERS_ATTEMPTED_C insertedTriples=$INSE
 [ "$INSERTED_C" = "0" ] \
   || fail "outsider applied $INSERTED_C triples from cores-only catchup — non-members must NOT be able to decrypt curated SWM ciphertext (LU-6 confidentiality invariant)"
 
-[ -n "$PEERS_ATTEMPTED_C" ] && [ "$PEERS_ATTEMPTED_C" -gt 0 ] \
-  || fail "EXPECTED-GAP endpoint regression: catchup endpoint did not attempt any peers (response: $CATCHUP_C)"
+if ! { [ -n "$PEERS_ATTEMPTED_C" ] && [ "$PEERS_ATTEMPTED_C" -gt 0 ]; } \
+  && ! { [ -n "$HOST_PEERS_ATTEMPTED_C" ] && [ "$HOST_PEERS_ATTEMPTED_C" -gt 0 ]; }; then
+  fail "EXPECTED-GAP endpoint regression: catchup endpoint did not attempt any standard or host-mode peers (response: $CATCHUP_C)"
+fi
 
 log "✓ SCENARIO C: outsider cores-only catchup returned 0 triples cleanly (LU-6 confidentiality invariant upheld)"
 
@@ -537,6 +629,8 @@ CG_D="${CURATOR_AGENT}/lj-D-${STAMP}"
 log "Create curated CG: $CG_D (allowlist=[curator, member])"
 log "  Pre-create on members only (cores get host-mode via explicit API call below)."
 
+configure_legacy_host_custody_cores
+
 # Only members pre-create the CG. Cores deliberately do NOT, because:
 #   (a) the curator's allowlist is exactly [curator, member] — adding
 #       cores into the on-the-wire DKG_ALLOWED_AGENT membership union
@@ -545,7 +639,7 @@ log "  Pre-create on members only (cores get host-mode via explicit API call bel
 #   (b) we want to prove the LU-6 path where cores host ciphertext
 #       without being CG members.
 for N in "$CURATOR_NODE" "$MEMBER_NODE"; do
-  CR=$(api_call "$N" POST /api/context-graph/create "$(cat <<EOF
+  CR=$(api_call_agent "$N" POST /api/context-graph/create "$(cat <<EOF
 { "id": "$CG_D", "name": "lj-D ${STAMP}",
   "accessPolicy": 1, "publishPolicy": 0,
   "allowedAgents": ["$CURATOR_AGENT","$MEMBER_AGENT"],
@@ -592,7 +686,7 @@ D0_PAYLOAD=$(CG_ID="$CG_D" node -e '
     }],
   }));
 ')
-WROTE_D0=$(devnet_create_shared_ka "$CURATOR_NODE" "$D0_PAYLOAD")
+WROTE_D0=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$D0_PAYLOAD")
 TRIPLES_WROTE_D0=$(parse_json "$WROTE_D0" '.triplesWritten')
 [ "$TRIPLES_WROTE_D0" = "1" ] || fail "expected 1 triplesWritten for handshake, got '$TRIPLES_WROTE_D0' (response: $WROTE_D0)"
 log "✓ handshake write OK"
@@ -603,7 +697,7 @@ log "✓ handshake write OK"
 log "Waiting for member to receive handshake + first triple..."
 N_D_HANDSHAKE=""
 for _ in $(seq 1 30); do
-  Q_D_HANDSHAKE=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+  Q_D_HANDSHAKE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_D", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -633,7 +727,7 @@ D5_PAYLOAD=$(CG_ID="$CG_D" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_D5=$(devnet_create_shared_ka "$CURATOR_NODE" "$D5_PAYLOAD")
+WROTE_D5=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$D5_PAYLOAD")
 TRIPLES_WROTE_D5=$(parse_json "$WROTE_D5" '.triplesWritten')
 [ "$TRIPLES_WROTE_D5" = "5" ] || fail "expected 5 triplesWritten, got '$TRIPLES_WROTE_D5' (response: $WROTE_D5)"
 log "✓ curator wrote 5 triples while member offline"
@@ -681,7 +775,7 @@ log "✓ member back online"
 # Sanity: confirm member still only has the 1 triple (the missed
 # 5 are not yet visible because gossip happened while member was
 # offline).
-Q_D_PRE=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+Q_D_PRE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_D", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -691,7 +785,7 @@ N_D_PRE=$(sparql_count "$Q_D_PRE")
 log "  pre-catchup count on member: $N_D_PRE (expected 1, confirms 5 still missing)"
 
 log "Member triggers /api/shared-memory/catchup — standard sync returns 0, LU-6 host-catchup fallback fires..."
-CATCHUP_D=$(api_call "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+CATCHUP_D=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_D" }
 EOF
 )")
@@ -709,7 +803,7 @@ log "  catchup hostCatchup.ranFallback=$HOST_RAN_D hostCatchup.appliedTotal=$HOS
 # Final SPARQL check: 1 (handshake) + 5 (host-catchup decrypted) = 6.
 N_D_POST=""
 for _ in $(seq 1 30); do
-  Q_D_POST=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+  Q_D_POST=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_D", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -758,7 +852,7 @@ CG_E="$CURATOR_AGENT/lj-E-${STAMP}"
 log "CG_E id: $CG_E"
 log "Creating CG_E on curator + member (member off-chain, curator registers on-chain)..."
 for N in "$CURATOR_NODE" "$MEMBER_NODE"; do
-  CR=$(api_call "$N" POST /api/context-graph/create "$(cat <<EOF
+  CR=$(api_call_agent "$N" POST /api/context-graph/create "$(cat <<EOF
 { "id": "$CG_E", "name": "lj-E ${STAMP}",
   "accessPolicy": 1, "publishPolicy": 0,
   "allowedAgents": ["$CURATOR_AGENT","$MEMBER_AGENT"],
@@ -794,7 +888,7 @@ E0_PAYLOAD=$(CG_ID="$CG_E" node -e '
     }],
   }));
 ')
-WROTE_E0=$(devnet_create_shared_ka "$CURATOR_NODE" "$E0_PAYLOAD")
+WROTE_E0=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$E0_PAYLOAD")
 TRIPLES_WROTE_E0=$(parse_json "$WROTE_E0" '.triplesWritten')
 [ "$TRIPLES_WROTE_E0" = "1" ] || fail "expected 1 triplesWritten for E handshake, got '$TRIPLES_WROTE_E0' (response: $WROTE_E0)"
 log "✓ CG_E handshake write OK"
@@ -802,7 +896,7 @@ log "✓ CG_E handshake write OK"
 log "Waiting for member to receive handshake + first triple..."
 N_E_HANDSHAKE=""
 for _ in $(seq 1 30); do
-  Q_E_HANDSHAKE=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+  Q_E_HANDSHAKE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_E", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -832,7 +926,7 @@ E5_PAYLOAD=$(CG_ID="$CG_E" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_E5=$(devnet_create_shared_ka "$CURATOR_NODE" "$E5_PAYLOAD")
+WROTE_E5=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$E5_PAYLOAD")
 TRIPLES_WROTE_E5=$(parse_json "$WROTE_E5" '.triplesWritten')
 [ "$TRIPLES_WROTE_E5" = "5" ] || fail "expected 5 triplesWritten on CG_E, got '$TRIPLES_WROTE_E5' (response: $WROTE_E5)"
 log "✓ curator wrote 5 triples to CG_E while member offline"
@@ -872,7 +966,7 @@ restart_node "$MEMBER_NODE"
 log "✓ member back online"
 
 # Sanity: member should still only have the handshake triple.
-Q_E_PRE=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+Q_E_PRE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_E", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
@@ -882,7 +976,7 @@ N_E_PRE=$(sparql_count "$Q_E_PRE")
 log "  pre-catchup count on member for CG_E: $N_E_PRE (expected 1)"
 
 log "Member triggers /api/shared-memory/catchup for CG_E — host-catchup fallback should fire..."
-CATCHUP_E=$(api_call "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+CATCHUP_E=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_E" }
 EOF
 )")
@@ -895,7 +989,7 @@ log "  catchup hostCatchup.ranFallback=$HOST_RAN_E hostCatchup.appliedTotal=$HOS
 
 N_E_POST=""
 for _ in $(seq 1 30); do
-  Q_E_POST=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+  Q_E_POST=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_E", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF

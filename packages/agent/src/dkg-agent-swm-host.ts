@@ -94,7 +94,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -540,7 +540,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           // authority check on every envelope ingest still catches
           // revocations even if curator state has changed since.
           try {
-            this.wireSwmHostModeHandler(cgId);
+            this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true);
             // Codex PR #620 R2: also re-probe registration state.
             // Without this, a host-only CG that was registered while
             // the node was offline stays on the 1MiB / 6h pre-reg
@@ -584,7 +584,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // local consumption; no need to also opaquely store.
       return;
     }
-    if (this.swmHostModeSubscribed.has(this.canonicalSwmHostModeKey(contextGraphId))) {
+    const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+    if (this.swmHostModeSubscribed.has(hostKey)) {
       // Codex PR #610 R2: idempotent re-entry on the periodic
       // reconcile path must still re-probe on-chain registration
       // state. Without this, a core that subscribed while the CG
@@ -597,6 +598,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // a reconcile call with cleartext finds an entry written by
       // the chain-event/beacon path with the hash form (and vice
       // versa). Codex PR #672 review `id=3302086589`.
+      if (
+        this.swmHostModeStripCiphertext() &&
+        this.swmHostModeCurated.get(hostKey) === false &&
+        await this.isCuratedForHostMode(contextGraphId)
+      ) {
+        // A manually hosted CG can become curated later. Upgrade the cached
+        // classification so the existing handler starts stripping immediately.
+        this.swmHostModeCurated.set(hostKey, true);
+      }
       await this.maybeMarkRegisteredForHostMode(contextGraphId);
       return;
     }
@@ -654,7 +664,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return;
     }
 
-    this.wireSwmHostModeHandler(contextGraphId, source);
+    this.wireSwmHostModeHandler(contextGraphId, source, true);
     await this.awaitHostModePersistence(contextGraphId);
 
     await this.maybeMarkRegisteredForHostMode(contextGraphId);
@@ -764,6 +774,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   wireSwmHostModeHandler(this: DKGAgent,
     contextGraphId: string,
     source: SubscriptionSource = SUBSCRIPTION_SOURCES.RECONCILER,
+    curated = true,
   ): void {
     // OT-RFC-38 / LU-6 Phase B — host-mode subscribes on the wire-form
     // topic. For chain-event-driven auto-subscribe, `contextGraphId`
@@ -788,8 +799,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
     this.swmHostModeSubscribed.set(wireCgId, source);
+    this.swmHostModeCurated.set(wireCgId, curated);
     this.gossip.subscribe(swmTopic);
     const handler = (_topic: string, data: Uint8Array, from: string) => {
+      // Fail closed when the classification is absent. Only an explicitly
+      // non-curated manual subscription retains the public host-mode hatch.
+      if (
+        this.swmHostModeStripCiphertext() &&
+        this.swmHostModeCurated.get(wireCgId) !== false
+      ) {
+        this.log.debug(
+          createOperationContext('share'),
+          `Dropping host-mode envelope on cg=${contextGraphId} from=${from}: ` +
+          `private-ciphertext strip is ON for a curated CG (OT-RFC-49 WS-A)`,
+        );
+        return;
+      }
       // OT-RFC-38 LU-11: peek envelope type and dispatch. Chunked
       // envelopes (`type='share-write-chunked'`) take the V2 chunk
       // persistence path; everything else flows through the legacy
@@ -856,6 +881,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.gossip.offMessage(swmTopic, handler);
     this.swmHostModeHandlers.delete(wireCgId);
     this.swmHostModeSubscribed.delete(wireCgId);
+    this.swmHostModeCurated.delete(wireCgId);
     // B3: clear the persisted host-mode designation so a restart
     // does NOT re-engage. Serialized via the per-CG persistence
     // queue (see `enqueueHostModePersistence` for the ordering
@@ -2729,9 +2755,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!sub.onChainId) return;
       // Server-side byte-safe copy is the ONLY safe relocation mechanism; if the
       // backend can't do SPARQL UPDATE we bail rather than risk a lossy JS round-trip.
-      const storeUpdate = this.store.update;
-      if (typeof storeUpdate !== 'function') return;
-      const update = (sparql: string): Promise<void> => storeUpdate.call(this.store, sparql);
+      if (typeof this.store.update !== 'function') return;
+      // #1549: every server-side INSERT in this RS-heal path has a statically-known
+      // target graph, so `touchedGraphs` is REQUIRED — the index then maintains
+      // itself incrementally (a bounded `hasGraph`) instead of marking the whole
+      // index dirty and forcing a full store scan on the next enumeration. Requiring
+      // it (not optional) closes the escape hatch: a future `update(sparql)` here that
+      // forgot to declare its graph would silently fall back to dirtying the index.
+      const update = async (sparql: string, touchedGraphs: readonly string[]): Promise<void> => {
+        const updated = await tryUpdateWithTouchedGraphs(
+          this.store,
+          sparql,
+          touchedGraphs,
+          { source: 'agent.swm.rsHeal.materialize' },
+        );
+        if (!updated) throw new Error('RS heal requires server-side update() support');
+      };
 
       const DKG = 'http://dkg.io/ontology/';
       const legacyMeta = contextGraphMetaUri(localCgId);
@@ -2873,6 +2912,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
                      }
                    }
                  }`,
+                [scopedData],
               );
             }
 
@@ -2886,6 +2926,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
                    FILTER(?s = <${ual}> || STRSTARTS(STR(?s), "${ual}/"))
                  }
                }`,
+              [scopedMeta],
             );
 
             // Stamp so a later stale writer can't clobber.
@@ -4145,7 +4186,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true, memberMode: true };
     }
-    if (this.swmHostModeSubscribed.has(this.canonicalSwmHostModeKey(contextGraphId))) {
+    const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+    const curated = await this.isCuratedForHostMode(contextGraphId);
+    if (this.swmHostModeSubscribed.has(hostKey)) {
       // Idempotent re-entry: even when the subscription is already
       // active, re-probe registration state. This handles the
       // legitimate "CG was unregistered when first subscribed,
@@ -4159,6 +4202,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // this canonicalisation the second subscribe would wire a
       // duplicate gossip handler on the same topic and double every
       // host-mode ingest/persistence.
+      // Never downgrade a positive classification on a transient policy-read
+      // failure. A false -> true transition closes both dispatch branches.
+      this.swmHostModeCurated.set(
+        hostKey,
+        this.swmHostModeCurated.get(hostKey) === true || curated,
+      );
       await this.maybeMarkRegisteredForHostMode(contextGraphId);
       return { subscribed: false, alreadySubscribed: true, hostingEnabled: true };
     }
@@ -4174,7 +4223,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // hatch open for exactly the case WS-A closes. PUBLIC / bare-uncurated CGs
     // are never affected (all three sources return not-curated → hatch stays
     // open).
-    if (this.swmHostModeStripCiphertext() && (await this.isCuratedForHostMode(contextGraphId))) {
+    if (this.swmHostModeStripCiphertext() && curated) {
       this.log.info(
         createOperationContext('system'),
         `SWM host-mode subscribe REFUSED for "${contextGraphId}": private-ciphertext strip is ON ` +
@@ -4182,7 +4231,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     }
-    this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL);
+    this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL, curated);
     await this.awaitHostModePersistence(contextGraphId);
     // Codex PR #610 R1 comment 5: a core that only knows the CG by
     // topic id (the explicit /host-mode/subscribe entrypoint) must

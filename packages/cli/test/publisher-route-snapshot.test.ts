@@ -91,7 +91,15 @@ function createContext(
     res: createResponse() as unknown as ServerResponse,
     agent: {} as RequestContext['agent'],
     publisherControl,
-    publisherRuntime: null,
+    publisherState: {
+      runtime: null,
+      availability: {
+        available: false,
+        reason: 'publisher_disabled',
+        retryable: false,
+        operatorActionRequired: true,
+      },
+    },
     config: {} as RequestContext['config'],
     startedAt: 0,
     dashDb: {} as RequestContext['dashDb'],

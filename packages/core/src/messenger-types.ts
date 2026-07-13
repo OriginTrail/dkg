@@ -169,7 +169,7 @@ export interface ProtocolOutboxEntry {
   lastError: string;
 }
 
-export interface ProtocolOutboxStore {
+interface ProtocolOutboxStoreBase {
   /**
    * Insert or update an outbox entry for `(peer, protocol, messageId)`.
    * First failure creates the entry with `attempts = 1`. Subsequent
@@ -197,8 +197,8 @@ export interface ProtocolOutboxStore {
 
   /**
    * Whether an entry exists for `(peer, protocol, messageId)`. Used
-   * by the stale-snapshot guard in `Messenger.processOutboxOnConnect`
-   * — between `tryBeginAttempt` (inflight lock) and the wire send,
+   * by the scheduled drain's stale-snapshot guard — between
+   * `tryBeginAttempt` (inflight lock) and the wire send,
    * a sibling flush may have already delivered + removed the entry,
    * and we must not double-send. The rc9 #538 fix lifted into the
    * generic substrate.
@@ -206,20 +206,24 @@ export interface ProtocolOutboxStore {
   hasEntry(peer: string, protocol: string, messageId: string): boolean;
 
   /**
-   * All entries for a specific peer, regardless of `nextAttemptAt`.
-   * Used by `processOutboxOnConnect`: a reconnection is the signal
-   * we were waiting for, so attempt now even if backoff isn't due
-   * yet. Sorted by `firstFailureAt` ascending for FIFO per-peer
-   * drain.
-   */
-  pendingFor(peer: string): ProtocolOutboxEntry[];
-
-  /**
-   * All entries whose `nextAttemptAt <= now`. Used by the periodic
-   * tick to find what's due for retry, regardless of peer
-   * reachability.
+   * All entries whose `nextAttemptAt <= now`.
+   *
+   * This remains the required public store contract for compatibility with
+   * existing/custom stores. `ProtocolOutbox` applies canonical ordering when
+   * it turns this snapshot into a bounded retry page.
    */
   due(now: number): ProtocolOutboxEntry[];
+
+  /**
+   * Optional storage-level fast path for an ordered bounded retry page.
+   *
+   * `ProtocolOutbox` only calls this with a normalized non-negative integer
+   * limit. Implementations that opt in MUST select the first `limit` rows in
+   * ascending `nextAttemptAt`, `firstFailureAt`, then
+   * `(peer, protocol, messageId)` order. Stores that only implement the legacy
+   * `due(now)` API remain fully supported through the wrapper fallback.
+   */
+  duePage?(now: number, limit: number): ProtocolOutboxEntry[];
 
   /**
    * Drop entries whose `firstFailureAt` is older than the
@@ -249,6 +253,40 @@ export interface ProtocolOutboxStore {
    */
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
 }
+
+/**
+ * Current sender-side outbox store contract. Peer bookkeeping uses a boolean
+ * fast path; retry selection remains exclusively `due`/`duePage`-driven.
+ *
+ * `pendingFor` is an optional compatibility/diagnostic capability. New stores
+ * do not need to materialize full payload-bearing peer snapshots.
+ */
+export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
+  /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
+  hasPendingFor(peer: string): boolean;
+
+  /**
+   * Optional snapshot of one peer's rows, ordered by `firstFailureAt`.
+   * Automatic retries MUST NOT select work from this diagnostic snapshot.
+   */
+  pendingFor?(peer: string): ProtocolOutboxEntry[];
+}
+
+/**
+ * Pre-#1579 custom-store shape retained at the `ProtocolOutbox` boundary.
+ * Legacy stores exposed the full peer snapshot instead of a boolean fast path.
+ */
+export interface LegacyProtocolOutboxStore extends ProtocolOutboxStoreBase {
+  /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
+  pendingFor(peer: string): ProtocolOutboxEntry[];
+
+  /** Optional forward-compatible peer-presence fast path. */
+  hasPendingFor?(peer: string): boolean;
+}
+
+/** Store input accepted by the compatibility-normalizing outbox wrapper. */
+export type CompatibleProtocolOutboxStore = ProtocolOutboxStore | LegacyProtocolOutboxStore;
+
 
 /**
  * Durable per-author KA-number allocator (OT-RFC-43 Option-1

@@ -37,21 +37,35 @@
  * crash-restart, and shutdown without launching a real binary.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { childOwnsListenPort } from './oxigraph-listen-port.js';
+import { findListenOwnerPid } from './oxigraph-listen-port.js';
+import {
+  createOxigraphLaunchStrategy,
+  type OxigraphMemoryLimits,
+} from './oxigraph-launch-strategy.js';
 import { invalidateExternalStoreQuadsCache } from './routes/status.js';
+import {
+  readCgroupOomSnapshot,
+  readCgroupOomKill,
+  type CgroupOomSnapshot,
+} from './oxigraph-memory.js';
 
 export interface OxigraphServerIo {
   spawn: typeof spawn;
   fetch: typeof globalThis.fetch;
   /**
-   * Verify the spawned child owns the listen socket (not merely that
-   * something on the port returns HTTP 200). Tests inject `async () => true`.
+   * Resolve the child/descendant PID that owns the listen socket (not merely
+   * that something on the port returns HTTP 200).
    */
-  childOwnsListenPort?: (
+  findListenOwnerPid: (
     child: ChildProcess,
     port: number,
     host: string,
-  ) => Promise<boolean>;
+    ownership?: 'child-only' | 'process-tree',
+  ) => Promise<number | null>;
+  /** Best-effort cgroup OOM snapshot (dir + oom_kill) for a live pid. Injectable for tests. */
+  readCgroupOomSnapshot: (pid: number) => CgroupOomSnapshot | null;
+  /** Best-effort exit-time re-read of oom_kill from a captured cgroup dir. */
+  readCgroupOomKill: (dir: string) => number | null;
 }
 
 export interface StartOxigraphServerOptions {
@@ -66,6 +80,8 @@ export interface StartOxigraphServerOptions {
   log?: (msg: string) => void;
   /** Total time to wait for the server to answer before failing start. */
   readyTimeoutMs?: number;
+  /** Native Oxigraph query timeout (`oxigraph serve --timeout-s`). */
+  queryTimeoutS?: number;
   /** Poll interval while waiting for readiness. */
   readyIntervalMs?: number;
   /** Grace period between SIGTERM and SIGKILL on stop. */
@@ -74,6 +90,10 @@ export interface StartOxigraphServerOptions {
   restartBackoffBaseMs?: number;
   /** Cap for restart backoff. */
   restartBackoffMaxMs?: number;
+  /** Optional finite limits for an isolated systemd user scope (Linux only). */
+  memoryLimits?: OxigraphMemoryLimits;
+  /** Runtime platform. Injectable so command construction is portable in tests. */
+  platform?: NodeJS.Platform;
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -103,6 +123,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
 }
 
+function normalizePositiveInteger(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
 /**
  * Spawn and health-check a local Oxigraph server. Resolves once the
  * server answers an `ASK` probe; rejects if it never becomes ready within
@@ -111,11 +137,19 @@ function sleep(ms: number): Promise<void> {
 export async function startOxigraphServer(
   opts: StartOxigraphServerOptions,
 ): Promise<OxigraphServerHandle> {
+  const launchStrategy = createOxigraphLaunchStrategy({
+    memoryLimits: opts.memoryLimits,
+    platform: opts.platform ?? process.platform,
+    parentPid: process.pid,
+    uid: typeof process.getuid === 'function' ? process.getuid() : -1,
+  });
+  const ioOverrides = opts.io ?? {};
   const io: OxigraphServerIo = {
-    spawn,
-    fetch: globalThis.fetch,
-    childOwnsListenPort,
-    ...opts.io,
+    spawn: ioOverrides.spawn ?? spawn,
+    fetch: ioOverrides.fetch ?? globalThis.fetch,
+    findListenOwnerPid: ioOverrides.findListenOwnerPid ?? findListenOwnerPid,
+    readCgroupOomSnapshot: ioOverrides.readCgroupOomSnapshot ?? readCgroupOomSnapshot,
+    readCgroupOomKill: ioOverrides.readCgroupOomKill ?? readCgroupOomKill,
   };
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
@@ -132,6 +166,7 @@ export async function startOxigraphServer(
   const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartBase = opts.restartBackoffBaseMs ?? DEFAULT_RESTART_BASE_MS;
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
+  const queryTimeoutS = normalizePositiveInteger(opts.queryTimeoutS);
 
   let stopping = false;
   let ready = false;
@@ -145,12 +180,21 @@ export async function startOxigraphServer(
   // childAlive() wrongly report it alive. Track them so childAlive() and the
   // ready/revive loops treat a spawn error as a dead child.
   const erroredChildren = new WeakSet<ChildProcess>();
+  const oomSnapshots = new WeakMap<ChildProcess, CgroupOomSnapshot>();
 
   const spawnChild = (): ChildProcess => {
+    const args = ['serve', '--location', opts.location, '--bind', bind];
+    if (queryTimeoutS !== undefined) args.push('--timeout-s', String(queryTimeoutS));
+    const spawnSpec = launchStrategy.nextSpawnSpec(opts.binaryPath, args);
     const c = io.spawn(
-      opts.binaryPath,
-      ['serve', '--location', opts.location, '--bind', bind],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
+      spawnSpec.command,
+      spawnSpec.args,
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        ...(spawnSpec.environment
+          ? { env: { ...process.env, ...spawnSpec.environment } }
+          : {}),
+      },
     );
     // Without this listener Node throws the `error` event as an uncaught
     // exception, killing the daemon. Route it through the normal
@@ -163,6 +207,7 @@ export async function startOxigraphServer(
     c.stderr?.on('data', (b) => {
       const line = b.toString('utf-8').trim();
       if (line) {
+        launchStrategy.observeStderr(c, line);
         lastStderr = `${lastStderr}${line}\n`.slice(-1_000);
         log(`[oxigraph] ${line}`);
       }
@@ -185,8 +230,23 @@ export async function startOxigraphServer(
       // restoring `ready`.
       ready = false;
       markStoreDown();
+      // Best-effort OOM classification: `oom_kill` is cgroup-scoped, not
+      // per-PID, so use an increment only as supporting evidence for a
+      // SIGKILL-compatible child death. This catches MemoryMax/host OOM kills
+      // without labelling unrelated non-SIGKILL exits as OOM.
+      let oomNote = '';
+      const oomSnapshot = oomSnapshots.get(c);
+      if (launchStrategy.classifyOomExit({
+        child: c,
+        code,
+        signal,
+        snapshot: oomSnapshot,
+        readOomKill: io.readCgroupOomKill,
+      })) {
+        oomNote = ', OOM-killed by cgroup memory cap (or host OOM)';
+      }
       scheduleRevive(
-        `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
+        `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}${oomNote})`,
       );
     });
     return c;
@@ -198,9 +258,15 @@ export async function startOxigraphServer(
     child.exitCode === null &&
     child.signalCode === null;
 
-  const probeReady = async (): Promise<boolean> => {
+  const captureOomSnapshotForListener = (c: ChildProcess, listenerPid: number): void => {
+    if (oomSnapshots.has(c)) return;
+    const snapshot = io.readCgroupOomSnapshot(listenerPid);
+    if (snapshot) oomSnapshots.set(c, snapshot);
+  };
+
+  const probeReady = async (): Promise<number | null> => {
     const c = child;
-    if (!c || !childAlive()) return false;
+    if (!c || !childAlive()) return null;
     try {
       const res = await io.fetch(queryEndpoint, {
         method: 'POST',
@@ -211,15 +277,16 @@ export async function startOxigraphServer(
         body: 'ASK { ?s ?p ?o }',
         signal: AbortSignal.timeout(readyIntervalMs + 1_000),
       });
-      if (!res.ok) return false;
-      const ownsPort = await (io.childOwnsListenPort ?? childOwnsListenPort)(
+      if (!res.ok) return null;
+      const listenerPid = await launchStrategy.resolveListenerPid(
         c,
         port,
         host,
+        io.findListenOwnerPid,
       );
-      return ownsPort && childAlive();
+      return listenerPid !== null && childAlive() ? listenerPid : null;
     } catch {
-      return false;
+      return null;
     }
   };
 
@@ -253,7 +320,9 @@ export async function startOxigraphServer(
       // because `ready` is false). Retry with backoff; never adopt whatever
       // may now be answering on the port.
       if (!childAlive()) break;
-      if ((await probeReady()) && childAlive()) {
+      const listenerPid = await probeReady();
+      if (listenerPid !== null && childAlive()) {
+        captureOomSnapshotForListener(child!, listenerPid);
         ready = true;
         restarts = 0;
         log(`[oxigraph] server restarted and healthy on ${bind}.`);
@@ -317,7 +386,13 @@ export async function startOxigraphServer(
     log('[oxigraph] server stopped');
   };
 
-  log(`Starting Oxigraph server on ${bind} (location: ${opts.location})…`);
+  log(
+    queryTimeoutS !== undefined
+      ? `Starting Oxigraph server on ${bind} (location: ${opts.location}, query timeout: ${queryTimeoutS}s)…`
+      : `Starting Oxigraph server on ${bind} (location: ${opts.location})…`,
+  );
+  const launchSummary = launchStrategy.logSummary();
+  if (launchSummary) log(launchSummary);
   child = spawnChild();
 
   const deadline = Date.now() + readyTimeoutMs;
@@ -332,11 +407,13 @@ export async function startOxigraphServer(
       childDied = true;
       break;
     }
-    if (await probeReady()) {
+    const listenerPid = await probeReady();
+    if (listenerPid !== null) {
       // Only trust a 200 if the child WE spawned is the one still alive
       // and bound — guards the race where a foreign server answers while
       // our child has just died on EADDRINUSE.
       if (childAlive()) {
+        captureOomSnapshotForListener(child!, listenerPid);
         ready = true;
         log(`Oxigraph server ready on ${bind} after ${attempt} probe(s).`);
         return { host, port, queryEndpoint, updateEndpoint, stop, killSync };

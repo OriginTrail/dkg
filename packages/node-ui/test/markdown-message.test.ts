@@ -5,19 +5,19 @@
 // react-markdown sanitization default (no raw HTML), remark-breaks soft-break
 // → <br>, fenced code blocks → <CodeBlock> with plain-text fallback for
 // unsupported languages, and the lazy-shiki gate (no fenced block → no
-// dynamic import of `shiki`).
+// dynamic import of the fine-grained shiki facade).
 
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 
-// IMPORTANT: this mock asserts the "shiki must not load when there are no
+// IMPORTANT: this mock asserts the highlighter must not load when there are no
 // fenced blocks" contract. Any markdown without a fenced code block that
-// triggers `import('shiki')` will throw and fail the test. The mock returns
+// triggers the lazy facade import will throw and fail the test. The mock returns
 // a benign `createHighlighter` stub for the cases that DO load shiki on
 // purpose (covered in code-block.test.ts).
 let shikiImportCount = 0;
-vi.mock('shiki', () => {
+vi.mock('../src/ui/components/chat/shikiHighlighter.js', () => {
   shikiImportCount += 1;
   return {
     createHighlighter: async () => ({
@@ -66,9 +66,9 @@ describe('MarkdownMessage rendering', () => {
     document.body.innerHTML = '';
     // Clear Vitest's module cache so every test re-imports MarkdownMessage
     // (and therefore CodeBlock) from a fresh state. Without this, the
-    // `vi.mock('shiki', ...)` factory above only runs once per test file:
-    // after the first fenced-block test imports shiki, the module is
-    // cached and any subsequent `import('shiki')` resolves without
+    // highlighter mock factory above only runs once per test file:
+    // after the first fenced-block test imports it, the module is
+    // cached and any subsequent facade import resolves without
     // re-invoking the factory, so the `lazy-shiki gate` assertion can
     // false-pass even if a real load happens. Codex CHMS6.
     vi.resetModules();
@@ -283,7 +283,7 @@ describe('MarkdownMessage rendering', () => {
     await unmount();
   });
 
-  it('lazy-shiki gate: rendering markdown with NO fenced blocks does not trigger import("shiki")', async () => {
+  it('lazy-shiki gate: rendering markdown with NO fenced blocks does not load the highlighter', async () => {
     const md = '# Heading\n\nSome **bold** text with `inline code` and a [link](https://x.test).\n\n- a\n- b\n';
     const { container, unmount } = await render(md);
     // Sanity: rich markdown rendered.

@@ -13,6 +13,11 @@ import {
   GraphSetIndexStore,
   type GraphSetIndexStoreOptions,
 } from './graph-set-index-store.js';
+import {
+  ChangelogStore,
+  type ChangelogStoreOptions,
+} from './changelog-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export interface Quad {
   subject: string;
@@ -70,6 +75,23 @@ export interface QueryOptions {
 
 export type TripleStoreQueryOptions = QueryOptions;
 
+/**
+ * Options for a server-side `update()`. A superset of {@link QueryOptions} with an
+ * index-maintenance hint — kept OFF the read-path `QueryOptions` so it can't be set
+ * on `listGraphs`/`query` reads where it is meaningless.
+ */
+export interface UpdateOptions extends QueryOptions {
+  /**
+   * The named graphs whose membership (existence) this UPDATE may change — the graphs
+   * it creates, or empties/drops. When supplied, a graph-set index can maintain itself
+   * INCREMENTALLY (a bounded `hasGraph` per graph) instead of marking the whole index
+   * dirty and forcing a full `SELECT DISTINCT ?g` rebuild on the next read. Omit it for
+   * opaque updates whose affected graphs are not derivable at the call site (those fall
+   * back to a lazy full rebuild).
+   */
+  touchedGraphs?: readonly string[];
+}
+
 export interface TripleStore {
   /**
    * Whether `query(..., { signal })` can reject while a query is already in
@@ -110,7 +132,7 @@ export interface TripleStore {
    * callers needing a byte-stable copy MUST guard on its presence and never
    * fall back to `insert(quads)` for already-stored terms.
    */
-  update?(sparql: string, options?: QueryOptions): Promise<void>;
+  update?(sparql: string, options?: UpdateOptions): Promise<void>;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
@@ -126,6 +148,35 @@ export interface TripleStore {
   flush?(options?: QueryOptions): Promise<void>;
 
   close(): Promise<void>;
+}
+
+/**
+ * Run a server-side update whose affected named graphs are known by the caller.
+ * Returns `false` when the store does not support `update()` directly, or when
+ * a decorator reports that its wrapped store lacks the capability. Genuine
+ * update execution errors propagate so feature code cannot mask an outage or
+ * partially executed mutation as a compatibility fallback.
+ */
+export async function tryUpdateWithTouchedGraphs(
+  store: TripleStore,
+  sparql: string,
+  touchedGraphs: readonly string[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const update = store.update;
+  if (typeof update !== 'function') return false;
+  try {
+    await update.call(store, sparql, { ...options, touchedGraphs });
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'update'
+    ) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
@@ -208,6 +259,14 @@ export interface TripleStoreConfig {
   options?: Record<string, unknown>;
   largeLiteralStorage?: LargeLiteralStorageConfig;
   graphSetIndex?: boolean | GraphSetIndexStoreOptions;
+  /**
+   * OT-RFC-59 append-only change log (write-side). **Default OFF** — opt-in per
+   * store, independent of backend (unlike `graphSetIndex`, which is gated to
+   * local Oxigraph): the changelog must work on Blazegraph too, and its cost is
+   * a few marker quads per write. Enable ONLY on a single-writer (daemon) store;
+   * see the {@link ChangelogStore} single-writer caveat.
+   */
+  changelog?: boolean | ChangelogStoreOptions;
 }
 
 type AdapterFactory = (
@@ -238,7 +297,19 @@ export async function createTripleStore(
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
     : store;
-  return wrapGraphSetIndex(withLargeLiteralStorage, config);
+  const withGraphSetIndex = wrapGraphSetIndex(withLargeLiteralStorage, config);
+  // Changelog is the OUTERMOST decorator: it observes logical mutations first,
+  // reuses the graph-set index's fast listGraphs() for reconcile, and hides its
+  // own reserved graph from everything above.
+  return wrapChangelog(withGraphSetIndex, config);
+}
+
+function wrapChangelog(store: TripleStore, config: TripleStoreConfig): TripleStore {
+  const changelog = config.changelog;
+  if (changelog == null || changelog === false) return store; // default OFF
+  if (typeof changelog === 'object' && changelog.enabled === false) return store;
+  const options = typeof changelog === 'object' ? changelog : undefined;
+  return new ChangelogStore(store, options);
 }
 
 function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknown> | undefined {

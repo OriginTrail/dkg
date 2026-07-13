@@ -2,6 +2,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
 import { markSyncPeerResponded } from '../error-tags.js';
+import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 import {
@@ -9,6 +10,9 @@ import {
   createSyncResponderSessionId,
   DURABLE_DATA_SYNC_SESSION_TTL_MS,
 } from '../durable-session.js';
+import {
+  createRequesterPhaseTelemetry,
+} from '../memory-telemetry.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -196,7 +200,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   } = params;
 
   const allQuads: Quad[] = [];
+  // Check for a pre-aborted signal BEFORE starting phase telemetry so a caller
+  // that passes an already-aborted signal never records a phase_start without a
+  // terminal outcome. Every started phase is guaranteed a finish() below.
   throwIfAborted(signal);
+  const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
   let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
@@ -270,6 +278,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       });
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
+      phaseTelemetry.recordPage();
 
       let parsed: { quads: Quad[]; totalQuads: number };
       let decodeDurationMs = 0;
@@ -293,6 +302,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         parsed = await parseAndFilter(nquadsText, graphUri, contextGraphId);
         throwIfAborted(signal);
         parseDurationMs = Date.now() - parseStartedAt;
+        phaseTelemetry.recordQuads(parsed.quads);
       } catch (error) {
         markSyncPeerResponded(error);
         throw error;
@@ -307,11 +317,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       }
 
       if (parsed.totalQuads === 0) {
-        if (parsed.quads.length > 0) allQuads.push(...parsed.quads);
+        if (parsed.quads.length > 0) appendInPlace(allQuads, parsed.quads);
         break;
       }
 
-      allQuads.push(...parsed.quads);
+      appendInPlace(allQuads, parsed.quads);
       offset += parsed.totalQuads;
 
       if (debugSyncProgress) {
@@ -362,6 +372,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
       }
     }
+    phaseTelemetry.finish('error', allQuads.length);
     throw err;
   }
 
@@ -385,6 +396,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       `Sync timeout for ${scope} ${phase} phase of "${contextGraphId}" (${allQuads.length} triples received so far for ${graphUri})`,
     );
   }
+
+  phaseTelemetry.finish(timedOut ? 'timed_out' : 'completed', allQuads.length);
 
   return {
     quads: allQuads,

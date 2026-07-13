@@ -303,6 +303,13 @@ describe('createTripleStore factory', () => {
     );
   });
 
+  it('passes the Blazegraph operation timeout through store.options', async () => {
+    await expect(createTripleStore({
+      backend: 'blazegraph',
+      options: { url: 'http://blaze.test/sparql', timeout: 0 },
+    })).rejects.toThrow(/timeout must be a positive integer/);
+  });
+
   it('sparql-http adapter is registered and requires queryEndpoint', async () => {
     await expect(createTripleStore({ backend: 'sparql-http' })).rejects.toThrow(
       'queryEndpoint',

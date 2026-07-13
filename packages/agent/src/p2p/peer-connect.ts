@@ -1,4 +1,7 @@
 import type { DiscoveryClient } from '../discovery.js';
+import {
+  type MultiaddrConnectTarget,
+} from './multiaddr-peer-target.js';
 
 interface Libp2pLike {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -30,32 +33,31 @@ async function waitForPeerConnection(
 
 export async function connectToMultiaddr(
   libp2p: Libp2pLike,
-  multiaddress: string,
+  connectTarget: MultiaddrConnectTarget,
   log?: (message: string) => void,
 ): Promise<void> {
   const debugLog = DEBUG_SYNC_TRACE ? log : undefined;
   const { multiaddr } = await import('@multiformats/multiaddr');
+  const { multiaddress } = connectTarget;
 
-  if (!multiaddress.includes('/p2p-circuit/p2p/')) {
+  if (connectTarget.kind === 'direct') {
     debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);
+    const directTargetPeerId = connectTarget.targetPeerId;
     await libp2p.dial(multiaddr(multiaddress));
-    const directPeerId = multiaddress.split('/p2p/').pop();
-    if (directPeerId) {
-      const connected = await waitForPeerConnection(libp2p, directPeerId);
-      debugLog?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directPeerId}`);
+    if (directTargetPeerId) {
+      const connected = await waitForPeerConnection(libp2p, directTargetPeerId);
+      debugLog?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directTargetPeerId}`);
       if (!connected) {
-        throw new Error(`Direct target peer ${directPeerId} not observed before timeout`);
+        throw new Error(`Direct target peer ${directTargetPeerId} not observed before timeout`);
       }
     }
     return;
   }
 
-  const circuitIndex = multiaddress.indexOf('/p2p-circuit/p2p/');
-  const relayMultiaddr = multiaddress.slice(0, circuitIndex);
-  const targetPeerId = multiaddress.slice(circuitIndex + '/p2p-circuit/p2p/'.length);
+  const { relayMultiaddress, targetPeerId } = connectTarget;
 
-  debugLog?.(`Dialing relay from circuit invite: relay=${relayMultiaddr} targetPeer=${targetPeerId}`);
-  await libp2p.dial(multiaddr(relayMultiaddr));
+  debugLog?.(`Dialing relay from circuit invite: relay=${relayMultiaddress} targetPeer=${targetPeerId}`);
+  await libp2p.dial(multiaddr(relayMultiaddress));
 
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const targetPid = peerIdFromString(targetPeerId);

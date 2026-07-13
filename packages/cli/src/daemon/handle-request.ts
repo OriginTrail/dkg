@@ -99,7 +99,6 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -211,8 +210,6 @@ import {
 } from './http-utils.js';
 import {
   normalizeRepo,
-  parseTagName,
-  isValidRef,
   isValidRepoSpec,
   repoToFetchUrl,
   githubRepoForApi,
@@ -233,6 +230,7 @@ import {
   releaseUpdateLock,
   performNpmUpdate,
 } from './auto-update.js';
+import { isValidRef, parseTagName } from '../auto-update-ref.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -334,40 +332,16 @@ import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
 
 
-export async function handleRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
-  agent: DKGAgent,
-  publisherControl: ReturnType<typeof createPublisherControlFromStore>,
-  publisherRuntime: PublisherRuntime | null,
-  config: DkgConfig,
-  startedAt: number,
-  dashDb: DashboardDB,
-  opWallets: import("@origintrail-official/dkg-agent").OpWalletsConfig,
-  network: Awaited<ReturnType<typeof loadNetworkConfig>>,
-  tracker: OperationTracker,
-  memoryManager: ChatMemoryManager,
-  bridgeAuthToken: string | undefined,
-  nodeVersion: string,
-  nodeCommit: string,
-  catchupTracker: CatchupTracker,
-  extractionRegistry: ExtractionPipelineRegistry,
-  fileStore: FileStore,
-  extractionStatus: Map<string, ExtractionStatusRecord>,
-  assertionImportLocks: Map<string, Promise<void>>,
-  vectorStore: VectorStore,
-  embeddingProvider: EmbeddingProvider | null,
-  validTokens: Set<string>,
-  // API socket identity — passed in from the outer daemon closure so
-  // `manifestSelfClient()` can build a self-pointing URL from trusted
-  // server state instead of request headers (SSRF defence).
-  apiHost: string,
-  apiPortRef: { value: number },
-  routePlugins: RoutePlugin[],
-  admission: AdmissionStatsView,
-  emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void,
-  emitNotification?: (event: NotificationSseEvent) => void,
-): Promise<void> {
+export type HandleRequestInput = Omit<
+  RequestContext,
+  | 'url'
+  | 'path'
+  | 'requestToken'
+  | 'requestAgentAddress'
+>;
+
+export async function handleRequest(input: HandleRequestInput): Promise<void> {
+  const { req, res, agent } = input;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
@@ -378,39 +352,11 @@ export async function handleRequest(
   const requestAgentAddress = agent.resolveAgentAddress(requestToken);
 
   const ctx: RequestContext = {
-    req,
-    res,
-    agent,
-    publisherControl,
-    publisherRuntime,
-    config,
-    startedAt,
-    dashDb,
-    opWallets,
-    network,
-    tracker,
-    memoryManager,
-    bridgeAuthToken,
-    nodeVersion,
-    nodeCommit,
-    catchupTracker,
-    extractionRegistry,
-    fileStore,
-    extractionStatus,
-    assertionImportLocks,
-    vectorStore,
-    embeddingProvider,
-    validTokens,
-    apiHost,
-    apiPortRef,
-    routePlugins,
-    admission,
+    ...input,
     url,
     path,
     requestToken,
     requestAgentAddress,
-    emitMemoryGraphChanged,
-    emitNotification,
   };
 
   await handleStatusRoutes(ctx);

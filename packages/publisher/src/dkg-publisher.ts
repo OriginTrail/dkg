@@ -1,9 +1,9 @@
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { NamedKnowledgeAssetGraphIdentity, Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, loadSelectedSharedMemoryQuads } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -71,6 +71,12 @@ import {
 } from './errors.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
+import {
+  PublisherPlanner,
+  coercePublisherAddress,
+  type PublisherAddressResolution,
+  type PublisherSigner,
+} from './publisher-planning.js';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -101,6 +107,25 @@ async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<s
   }
   return graphs;
 }
+
+type PublishedSwmCleanupPlan =
+  | { kind: 'complete-family'; dataGraphs: string[] }
+  | { kind: 'named-lifecycle'; dataGraphs: string[] };
+
+export interface FinalizedLifecycleSwmDescriptor {
+  /** Assertion metadata identity; may differ from the signing author. */
+  lifecycle: {
+    contextGraphId: string;
+    assertionName: string;
+    assertionLifecycleAgentAddress: string;
+    subGraphName?: string;
+  };
+  /** Canonical named-SWM identity derived from the validated finalized seal. */
+  sealAuthorScope: NamedKnowledgeAssetGraphIdentity;
+  rootEntities: readonly string[];
+}
+
+export type EnsuredFinalizedLifecycleSwmPlacement = NamedLifecycleSharedMemoryMigrationResult;
 
 /**
  * Minimal structural view of the OT-RFC-43 Option-1 KA-number allocator the
@@ -248,12 +273,6 @@ async function invokeV10ACKProvider(
   );
 }
 
-function coercePublisherAddress(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !ethers.isAddress(value)) return undefined;
-  const normalized = ethers.getAddress(value);
-  return normalized === ethers.ZeroAddress ? undefined : normalized;
-}
-
 function publisherAddressFromUal(ual: string | undefined): string | undefined {
   const prefix = 'did:dkg:';
   if (!ual?.startsWith(prefix)) return undefined;
@@ -371,24 +390,6 @@ type InternalPublishOptions = PublishOptions & {
   [TRUSTED_CATALOG_ORIGIN_TOKEN]?: true;
   [PUBLIC_ACK_STAGING_MODE_TOKEN]?: PublicACKStagingMode;
 };
-
-interface PublisherSigner {
-  address: string;
-  source: 'publisherPrivateKey' | 'chainAdapter';
-  signMessage(message: Uint8Array): Promise<string>;
-  /**
-   * Sign EIP-712 typed data. Required for RFC-001 author attestations
-   * which use `\x19\x01` framing rather than the EIP-191 prefix that
-   * `signMessage` applies. Native on `ethers.Wallet`; chain-adapter
-   * fallbacks throw because the adapter's `signMessage` / `signMessageAs`
-   * surface only handles EIP-191 hashes.
-   */
-  signTypedData(
-    domain: ethers.TypedDataDomain,
-    types: Record<string, Array<{ name: string; type: string }>>,
-    value: Record<string, unknown>,
-  ): Promise<string>;
-}
 
 function isInternalOrigin(options: PublishOptions): boolean {
   return (options as InternalPublishOptions)[INTERNAL_ORIGIN_TOKEN] === true;
@@ -572,6 +573,7 @@ export class DKGPublisher implements Publisher {
   private readonly publisherAddress?: string;
   private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   private readonly publisherWallet?: ethers.Wallet;
+  private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
   private readonly adapterSignMessageProbeCache = new Map<string, boolean>();
   private workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
@@ -644,6 +646,17 @@ export class DKGPublisher implements Publisher {
     this.workspaceAgentRecipientResolver = config.workspaceAgentRecipientResolver;
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.publisherPlanner = new PublisherPlanner({
+      chain: this.chain,
+      resolvePublisherAddressSelection: (contextGraphId, options) =>
+        this.resolvePublisherAddressSelection(contextGraphId, options),
+      resolvePublisherSigner: (address) => this.getPublisherSigner(address),
+      localTentativePublisherAddress: () => this.localTentativePublisherAddress(),
+      log: {
+        info: (ctx, message) => this.log.info(ctx, message),
+        warn: (ctx, message) => this.log.warn(ctx, message),
+      },
+    });
   }
 
   setWorkspaceAgentRecipientResolver(resolver: WorkspaceAgentRecipientResolver | undefined): void {
@@ -821,12 +834,33 @@ export class DKGPublisher implements Publisher {
     contextGraphId?: bigint,
     options: PublisherAddressResolutionOptions = {},
   ): Promise<string | undefined> {
-    if (this.publisherAddress) return this.publisherAddress;
+    return (await this.resolvePublisherAddressSelection(contextGraphId, options)).address;
+  }
+
+  private async resolvePublisherAddressSelection(
+    contextGraphId?: bigint,
+    options: PublisherAddressResolutionOptions = {},
+  ): Promise<PublisherAddressResolution> {
+    if (this.publisherAddress) {
+      return {
+        address: this.publisherAddress,
+        planningPin: this.publisherAddress,
+        planningPinLabel: this.publisherWallet
+          ? 'publisherPrivateKey'
+          : 'configured publisherAddress',
+      };
+    }
     if (this.publisherAddressResolver) {
       const resolved = normalizePublisherAddress(await this.publisherAddressResolver(contextGraphId));
-      if (resolved) return resolved;
+      if (resolved) {
+        return {
+          address: resolved,
+          planningPin: resolved,
+          planningPinLabel: 'publisherAddressResolver',
+        };
+      }
     }
-    return this.inferAdapterPublisherAddress(contextGraphId, options);
+    return { address: await this.inferAdapterPublisherAddress(contextGraphId, options) };
   }
 
   /** RFC-001 §9 fallback author when no agent override is supplied. Returns undefined if no signer configured. */
@@ -958,27 +992,6 @@ export class DKGPublisher implements Publisher {
     return address === ethers.ZeroAddress ? '0x0000000000000000000000000000000000000001' : address;
   }
 
-  private isChainV10Ready(): boolean {
-    return this.chain.chainId !== 'none' &&
-      typeof this.chain.isV10Ready === 'function' &&
-      this.chain.isV10Ready();
-  }
-
-  private async refreshChainV10Readiness(): Promise<boolean> {
-    if (this.isChainV10Ready()) return true;
-    if (this.chain.chainId === 'none') return false;
-    try {
-      const chainIdGetter = (this.chain as unknown as { getEvmChainId?: () => Promise<bigint> }).getEvmChainId;
-      const kavAddressGetter = (this.chain as unknown as { getKnowledgeAssetsLifecycleAddress?: () => Promise<string> })
-        .getKnowledgeAssetsLifecycleAddress;
-      if (typeof chainIdGetter === 'function') await chainIdGetter.call(this.chain);
-      if (typeof kavAddressGetter === 'function') await kavAddressGetter.call(this.chain);
-    } catch {
-      // V9-only or incompletely configured adapters stay off the V10 path.
-    }
-    return this.isChainV10Ready();
-  }
-
   private async resolveKnownBatchPublisherAddress(
     contextGraphId: string,
     kaId: bigint,
@@ -1018,6 +1031,7 @@ export class DKGPublisher implements Publisher {
 
   private async getPublisherSigner(address = this.publisherAddress): Promise<PublisherSigner | undefined> {
     if (this.publisherWallet && this.publisherAddress) {
+      if (address && address.toLowerCase() !== this.publisherAddress.toLowerCase()) return undefined;
       const wallet = this.publisherWallet;
       return {
         address: this.publisherAddress,
@@ -1556,9 +1570,19 @@ export class DKGPublisher implements Publisher {
        * the existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
+      /** Explicit graph-family boundary; named lifecycles exclude bucket and siblings. */
+      sharedMemoryScope?: SharedMemoryGraphScope;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
+    const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
+      ?? { kind: 'complete-family' };
+    if (sharedMemoryScope.kind === 'named-lifecycle' && options?.clearSharedMemoryAfter === true) {
+      throw new Error(
+        'clearSharedMemoryAfter cannot be combined with a named-lifecycle shared-memory scope; ' +
+        'use complete-family scope for an explicit family-wide clear',
+      );
+    }
 
     // Guard: VM publishing requires an on-chain registered context graph.
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
@@ -1601,14 +1625,21 @@ export class DKGPublisher implements Publisher {
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
 
-    const quads = await loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
-      quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
-      rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
+    const loadOptions = {
+      quadFilter: (q: Quad) => !isSwmMerkleExcludedQuad(q),
+      rootEntitiesErrorMessage: ({ inputCount, hadInput }: { inputCount: number; hadInput: boolean }) => (
         hadInput
           ? `No valid rootEntities provided (all ${inputCount} entries failed IRI validation)`
           : `No rootEntities provided for context graph ${contextGraphId}`
       ),
-    });
+    };
+    const quads = await loadSharedMemoryQuadsForScope(
+      this.store,
+      swmGraph,
+      selection,
+      sharedMemoryScope,
+      loadOptions,
+    );
 
     if (quads.length === 0) {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
@@ -1712,58 +1743,17 @@ export class DKGPublisher implements Publisher {
     // `ctxGraphId ?? chainCgId`.
     const targetCgId = ctxGraphId ?? chainCgId;
     if (targetCgId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
-      // V10 publishDirect already registers the KC to the context graph
-      // via an internal call to ContextGraphs.registerKnowledgeAsset
-      // (Hub-authorized only — EOAs cannot call it directly). The legacy
-      // V9 flow required a separate addBatchToContextGraph tx; that path
-      // is no longer available. Attempt the explicit verify call as a
-      // fallback for non-V10 chains, but treat "Only Contracts in Hub"
-      // rejections as success (V10 already handled it).
-      let registered = false;
-      if (typeof this.chain.verify === 'function') {
-        let participantSigs = options?.contextGraphSignatures ?? [];
-        if (participantSigs.length === 0 && typeof this.chain.signMessage === 'function') {
-          const identityId = this.publisherNodeIdentityId;
-          if (identityId > 0n) {
-            const digest = ethers.solidityPackedKeccak256(
-              ['uint256', 'bytes32'],
-              [BigInt(targetCgId), ethers.hexlify(publishResult.merkleRoot)],
-            );
-            const sig = await this.chain.signMessage(ethers.getBytes(digest));
-            participantSigs = [{ identityId, ...sig }];
-          }
-        }
+      // V10 publishDirect already registered the KC to the context graph
+      // inside publishDirect, via a Hub-authorized internal call to
+      // ContextGraphs.registerKnowledgeAsset (EOAs cannot call it directly),
+      // which emits KnowledgeAssetRegisteredToContextGraph. The legacy V9
+      // explicit chain.verify() fallback that used to run here always reverted
+      // on V10 ("Only Contracts in Hub" / CALL_EXCEPTION) — i.e. a doomed
+      // on-chain call plus an estimateGas round-trip, and serializer occupancy,
+      // on EVERY confirmed publish (#1575). Registration is already done, so
+      // skip the verify attempt entirely and proceed to the data promotion.
+      this.log.debug(ctx, `V10 auto-registered KC to context graph ${targetCgId}; explicit verify skipped`);
 
-        const sortedSigs = [...participantSigs]
-          .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
-          .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
-
-        try {
-          const txResult = await this.chain.verify({
-            contextGraphId: BigInt(targetCgId),
-            batchId: publishResult.onChainResult.batchId,
-            merkleRoot: publishResult.merkleRoot,
-            signerSignatures: sortedSigs,
-          });
-          if (txResult && typeof txResult === 'object' && 'success' in txResult && txResult.success) {
-            registered = true;
-            this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} verified on context graph ${targetCgId}`);
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // V10 publishDirect handles registration internally via a
-          // Hub-authorized call. Any revert here (typically
-          // "Only Contracts in Hub" / CALL_EXCEPTION) means the
-          // explicit verify path is not applicable — treat as success.
-          registered = true;
-          this.log.info(ctx, `Explicit verify not needed (V10 auto-registered): ${msg.slice(0, 120)}`);
-        }
-      } else {
-        registered = true;
-        this.log.info(ctx, `No verify function on chain adapter — assuming V10 auto-registration for context graph ${targetCgId}`);
-      }
-
-      if (registered) {
         const ctxDataGraph = contextGraphDataUri(contextGraphId, targetCgId);
         const ctxMetaGraph = contextGraphMetaUri(contextGraphId, targetCgId);
         const defaultDataGraph = this.graphManager.dataGraphUri(contextGraphId);
@@ -1883,7 +1873,6 @@ export class DKGPublisher implements Publisher {
         this.log.info(ctx, `Promoted ${publishResult.kaManifest.length} KAs from default graph to context graph ${targetCgId}`);
         }
         });
-      }
     }
 
     // SWM cleanup: ALWAYS remove published triples from SWM after chain confirmation.
@@ -1891,7 +1880,13 @@ export class DKGPublisher implements Publisher {
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
       const kaMap = skolemizeByEntity(quads);
-      await this.clearPublishedSwmRoots(contextGraphId, [...kaMap.keys()], options?.subGraphName, ctx);
+      await this.clearPublishedSwmRoots(
+        contextGraphId,
+        [...kaMap.keys()],
+        options?.subGraphName,
+        ctx,
+        sharedMemoryScope,
+      );
       // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
       // Default is false: unpublished entities stay in SWM for future publishes.
       if (options?.clearSharedMemoryAfter === true) {
@@ -2062,22 +2057,9 @@ export class DKGPublisher implements Publisher {
     // can be resolved at all, the on-chain branch throws
     // `PublisherWalletRequiredError` instead of silently degrading.
     const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
-    const willAttemptOnChainPublish = publisherContextGraphId !== undefined;
-    const chainV10Ready = await this.refreshChainV10Readiness();
-    const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
-    const resolvedPublisherAddress = canResolveOnChainPublisher
-      ? await this.resolvePublisherAddress(publisherContextGraphId)
-      : await this.resolvePublisherAddress(undefined, {
-        includeReservingPublisherProbe: false,
-        includeGenericSignMessageProbe: false,
-      });
-    const publisherSigner = canResolveOnChainPublisher
-      ? await this.getPublisherSigner(resolvedPublisherAddress)
-      : undefined;
-    const publisherAddress = resolvedPublisherAddress ?? this.localTentativePublisherAddress();
-    const canAttemptOnChainPublish = willAttemptOnChainPublish &&
-      chainV10Ready &&
-      publisherSigner !== undefined;
+    const publisherPlanning = await this.publisherPlanner.prepare(publisherContextGraphId);
+    const chainV10Ready = publisherPlanning.chainV10Ready;
+    const canAttemptOnChainPublish = publisherPlanning.canAttemptOnChainPublish;
 
     // RFC-001 §9.x — sign-at-creation. The publisher is a pure
     // transport layer for the AuthorAttestation: the seal is built at
@@ -2102,10 +2084,6 @@ export class DKGPublisher implements Publisher {
     }
     if (effectiveAccessPolicy !== 'allowList' && normalizedAllowedPeers.length > 0) {
       throw new Error('Publish rejected: "allowedPeers" is only valid when accessPolicy is "allowList"');
-    }
-
-    if (willAttemptOnChainPublish && chainV10Ready && !publisherSigner) {
-      throw new PublisherWalletRequiredError('publish');
     }
 
     onPhase?.('prepare', 'start');
@@ -2358,7 +2336,6 @@ export class DKGPublisher implements Publisher {
       // confirmed states for this publish so the `dkg:Publication` subject
       // emitted in metadata stays the same after on-chain confirmation.
       publishOperationId = `${this.sessionId}-${tentativeSeq}`;
-      ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
     };
 
     // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
@@ -2408,8 +2385,29 @@ export class DKGPublisher implements Publisher {
         'but not both in one publish without a mixed ACK mode that preserves curated confidentiality.',
       );
     }
+    // Funding/signer selection must finish before either encryption hook runs:
+    // the chunked hook persists and gossips member ciphertext, so invoking it
+    // for an unfundable publish would leave remote staging artifacts behind.
+    // Curated ACK pricing is known from the public catalog commitment without
+    // running member-side encryption, which lets us finalize the whole plan at
+    // this fail-fast boundary.
+    const stagingByteSize = useEncryptedInline && useCuratedCatalog
+      ? catalogByteSize
+      : publicByteSize;
+    const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
+    const finalizedPublisherPlan = await publisherPlanning.finalize({
+      explicitPublishEpochs,
+      effectiveByteSize,
+      ctx,
+    });
+    const publisherSigner = finalizedPublisherPlan.kind === 'on-chain'
+      ? finalizedPublisherPlan.signer
+      : undefined;
+    const publisherAddress = finalizedPublisherPlan.publisherAddress;
+    const publishEpochs = finalizedPublisherPlan.publishEpochs;
+    const precomputedTokenAmount = finalizedPublisherPlan.tokenAmount;
+
     let stagingQuads: Uint8Array | undefined;
-    let stagingByteSize = publicByteSize;
     if (useEncryptedInline) {
       // MEMBER-SIDE ENCRYPTION STAYS. The private (non-catalog) data is still
       // AEAD-encrypted and distributed to CG members — via the chunked SWM
@@ -2439,12 +2437,10 @@ export class DKGPublisher implements Publisher {
       // footprint, derived from the SAME committed leaf-set as the root.
       if (useCuratedCatalog) {
         stagingQuads = new TextEncoder().encode(catalogNquadsStr);
-        stagingByteSize = catalogByteSize;
       } else {
         // Curated CG with no catalog entry — nothing public to commit/serve.
         // Leave staging empty; this publish carries a zero catalog commitment.
         stagingQuads = undefined;
-        stagingByteSize = publicByteSize;
       }
     } else {
       // A2 (§1.1 fix): internal public-CG VM publishes ship small plaintext
@@ -2469,129 +2465,12 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    // Pre-compute tokenAmount and epochs so they can be included in the
-    // H5-prefixed publish ACK digest (incl. merkleLeafCount) — matches
-    // `packages/core/src/crypto/ack.ts:computePublishACKDigest` and
-    // `KnowledgeAssetsV10._executePublishCore`.
-    //
-    // PCA discount eligibility (`KnowledgeAssetsV10.publish`): the
-    // contract takes the PCA branch only when (1) the wallet is a
-    // registered PCA agent, (2) the PCA is not expired, AND
-    // (3) `p.epochs == lockDurationEpochs`. Any miss silently falls
-    // through to direct spend at FULL price. To make sure registered
-    // agents actually get the discount they paid for, we probe for the
-    // PCA mapping and snap `publishEpochs` to the PCA's
-    // `lockDurationEpochs` when one is found AND the caller did not
-    // explicitly override the publish lifetime. Wallets without a PCA
-    // (direct-spend branch) use the ordinary default lifetime.
-    // OT-RFC-49 / WS-D: pricing follows the byteSize that gets signed into the
-    // V10 digest. For a curated CG that's the PUBLIC `_catalog` footprint
-    // (`catalogByteSize`, flowed in via `stagingByteSize` above — derived from
-    // the SAME committed leaf-set as `catalogRoot`, so byteSize and the
-    // commitment cannot desync across fundability, tokenAmount, ACK digest, and
-    // chain byteSize); for public CGs it stays plaintext bytes. Single source
-    // of truth so ACK pricing == chain tx pricing. Resolved BEFORE the PCA
-    // coercion below so the fundability probe can price the lock-lifetime publish.
-    const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
-    let publishEpochs = explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
-    if (
-      explicitPublishEpochs === undefined &&
-      canAttemptOnChainPublish &&
-      publisherSigner !== undefined &&
-      typeof this.chain.getConvictionAgentAccountId === 'function' &&
-      typeof this.chain.getConvictionAccountLockDurationEpochs === 'function'
-    ) {
-      try {
-        const accountId = await this.chain.getConvictionAgentAccountId(publisherSigner.address);
-        if (accountId > 0n) {
-          const lockEpochs = await this.chain.getConvictionAccountLockDurationEpochs(accountId);
-          if (lockEpochs > 0) {
-            // Only snap the lifetime to the PCA lock if the account can
-            // actually cover THIS publish's discounted cost right now. Agent
-            // registration is consent-free (RFC-001 §3.6), so a third party
-            // can squat this signer against an underfunded PCA; since the
-            // contract's conviction branch now falls through to direct spend
-            // instead of reverting, coercing an unfundable account would
-            // publish at the PCA-lock lifetime AND full price rather than the
-            // caller's default. Price the prospective lock-lifetime publish
-            // (the exact base cost the coerced tx would carry) and ask the
-            // chain whether the PCA covers its discounted cost — a coarse
-            // "balance > 0" gate is not enough, since a nonzero-but-short
-            // account (or a few-wei squat) would still be coerced and then
-            // fall through to full-price direct spend. Adapters without the
-            // probe keep the legacy unconditional coercion.
-            let canFundDiscount = true;
-            if (typeof this.chain.convictionAccountCanCover === 'function') {
-              // The coverage probe is only meaningful against the REAL
-              // publish price. If we cannot price the prospective
-              // lock-lifetime publish — adapter lacks the quote, or the
-              // quote call reverts — treat the publish as "funding
-              // unverifiable" and do NOT coerce. Falling back to the
-              // protocol minimum (`lockEpochs` wei) would let a partial or
-              // squatted PCA pass the probe against that lower bound and
-              // then fall through to full-price direct spend at the wrong
-              // lifetime — the exact regression this gate exists to prevent.
-              if (typeof this.chain.getRequiredPublishTokenAmount !== 'function') {
-                canFundDiscount = false;
-              } else {
-                try {
-                  const quoted = await this.chain.getRequiredPublishTokenAmount(effectiveByteSize, lockEpochs);
-                  // Mirror the min-clamp applied to the real tx below.
-                  const prospectiveBaseCost = quoted > BigInt(lockEpochs) ? quoted : BigInt(lockEpochs);
-                  canFundDiscount = await this.chain.convictionAccountCanCover(accountId, prospectiveBaseCost);
-                } catch {
-                  canFundDiscount = false;
-                }
-              }
-            }
-            if (canFundDiscount) {
-              publishEpochs = lockEpochs;
-              this.log.info(
-                ctx,
-                `PCA-funded publish detected (signer=${publisherSigner.address}, accountId=${accountId}) — coercing publishEpochs to lockDurationEpochs=${lockEpochs}`,
-              );
-            } else {
-              this.log.info(
-                ctx,
-                `Signer ${publisherSigner.address} is a registered PCA agent (accountId=${accountId}) but funding for this publish's discounted cost could not be confirmed — NOT coercing publishEpochs; publishing at requested lifetime=${publishEpochs} via direct spend`,
-              );
-            }
-          }
-        }
-      } catch (err) {
-        // PCA probe is best-effort. On any RPC hiccup we keep the
-        // already-resolved publish lifetime. The contract is still the source
-        // of truth: if the signer turns out to be a PCA agent but
-        // `p.epochs != lockDurationEpochs`, the publish silently
-        // falls through to direct spend at full price (no revert).
-        // That degraded path is acceptable for a hot publish — the
-        // missed discount is observable via the lack of a
-        // `CostCovered` event on the receipt.
-        this.log.warn(
-          ctx,
-          `PCA epochs probe failed — falling back to publishEpochs=${publishEpochs}: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-    let precomputedTokenAmount = canAttemptOnChainPublish ? BigInt(publishEpochs) : 0n;
-    if (canAttemptOnChainPublish && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
-      try {
-        precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(effectiveByteSize, publishEpochs);
-        const minTokenAmount = BigInt(publishEpochs);
-        if (precomputedTokenAmount < minTokenAmount) {
-          this.log.warn(ctx, `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${effectiveByteSize}, epochs=${publishEpochs} — using ${minTokenAmount} as minimum so per-epoch CG value stays non-zero`);
-          precomputedTokenAmount = minTokenAmount;
-        }
-      } catch (err) {
-        this.log.warn(
-          ctx,
-          `getRequiredPublishTokenAmount failed — publish will fall back to tentative if on-chain submit cannot proceed: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-
+    // The adapter-owned plan above has already finalized signer, lifetime, and
+    // exact token amount before encryption or ACK collection. Those same values
+    // feed the H5-prefixed ACK digest and the chain call. For curated CGs the
+    // priced byte size is the committed public catalog footprint; for public
+    // CGs it is the plaintext footprint. This keeps fundability, pricing, ACK,
+    // and transaction inputs on one coherent plan.
     // Identifier split for V10 publishes.
     //
     //   `contextGraphId` (outer) = the SWM graph id the publisher reads
@@ -2917,6 +2796,9 @@ export class DKGPublisher implements Publisher {
     let onChainResult: OnChainPublishResult | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
     ensurePublishOperationIdentity();
+    // The operation id may be needed earlier as an encryption nonce domain,
+    // but its UAL is derived exactly once, after signer reservation is final.
+    ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
 
     // Resolve the on-chain attribution target from the per-call override
     // (computed above) or fall back to the daemon's persistent identity.
@@ -5453,14 +5335,27 @@ export class DKGPublisher implements Publisher {
   /** A promoted KA's SWM graph URI: per-KA `…/_shared_memory/{addr}/{number}` (resolved from the assertion), else the legacy bucket. */
   private async swmGraphUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): Promise<string> {
     const num = await this.resolveKaNumber(contextGraphId, agentAddress, name, subGraphName);
+    const bucketGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     return num !== null
-      ? contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, agentAddress, num, subGraphName)
-      : this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+      ? contextGraphLayerUri(
+          contextGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          agentAddress,
+          num,
+          subGraphName,
+        )
+      : bucketGraph;
   }
 
   /** SWM graph URI from an explicit `{author, number}` (receiver-side / freshly-allocated generic share). */
   private swmGraphUriFor(contextGraphId: string, agentAddress: string, kaNumber: bigint, subGraphName?: string): string {
-    return contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, agentAddress, kaNumber, subGraphName);
+    return contextGraphLayerUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      agentAddress,
+      kaNumber,
+      subGraphName,
+    );
   }
 
   /**
@@ -5471,6 +5366,89 @@ export class DKGPublisher implements Publisher {
    */
   private async swmGraphsUnder(bucketGraph: string): Promise<string[]> {
     return listGraphFamily(this.store, bucketGraph);
+  }
+
+  private async repairFinalizedLifecycleSwmPointer(
+    descriptor: FinalizedLifecycleSwmDescriptor,
+    targetGraph: string,
+  ): Promise<string> {
+    const { lifecycle } = descriptor;
+    const lifecycleUri = assertionLifecycleUri(
+      lifecycle.contextGraphId,
+      lifecycle.assertionLifecycleAgentAddress,
+      lifecycle.assertionName,
+      lifecycle.subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(lifecycle.contextGraphId);
+    const assertionGraphPredicate = 'http://dkg.io/ontology/assertionGraph';
+    await this.store.deleteByPattern({
+      graph: metaGraph,
+      subject: lifecycleUri,
+      predicate: assertionGraphPredicate,
+    });
+    await this.store.insert([{
+      graph: metaGraph,
+      subject: lifecycleUri,
+      predicate: assertionGraphPredicate,
+      object: targetGraph,
+    }]);
+    await this.store.flush?.();
+    return lifecycleUri;
+  }
+
+  /**
+   * Compatibility bridge for assets shared with `skipSeal` before a KA number
+   * existed. Those roots were written to the legacy SWM bucket; once
+   * `finalize(layer:"swm")` allocates a packed KA id, exact lifecycle reads
+   * must find the same payload under its canonical named graph.
+   *
+   * Insert-before-delete makes a failed migration retryable without losing the
+   * only copy. The lifecycle pointer is updated only after the data move, and a
+   * retry also repairs that pointer when the target already contains the data.
+   */
+  async ensureFinalizedLifecycleSwmPlacement(
+    descriptor: FinalizedLifecycleSwmDescriptor,
+    ctx: OperationContext,
+  ): Promise<EnsuredFinalizedLifecycleSwmPlacement> {
+    const { lifecycle, sealAuthorScope } = descriptor;
+    const { contextGraphId, subGraphName } = lifecycle;
+    const roots = [...new Set(descriptor.rootEntities)];
+    if (roots.length === 0 || roots.some((root) => !isSafeIri(root))) {
+      throw new Error('Named lifecycle SWM migration requires at least one safe root entity IRI');
+    }
+
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+    const migration = await migrateSharedMemoryRootClosureToNamedLifecycle(
+      this.store,
+      swmGraph,
+      { rootEntities: roots },
+      sealAuthorScope,
+      {
+        graphResolution: {
+          source: 'publisher.ensureFinalizedLifecycleSwmPlacement.graphs',
+        },
+        namedSource: {
+          source: 'publisher.ensureFinalizedLifecycleSwmPlacement.named-source',
+        },
+        legacyBucketSource: {
+          source: 'publisher.ensureFinalizedLifecycleSwmPlacement.legacy-source',
+        },
+      },
+    );
+    if (migration.sourceEmpty) return migration;
+
+    const lifecycleUri = await this.repairFinalizedLifecycleSwmPointer(
+      descriptor,
+      migration.targetGraph,
+    );
+    if (migration.migratedLegacyQuadCount > 0) {
+      this.log.info(
+        ctx,
+        `Copied ${migration.migratedLegacyQuadCount} legacy SWM triple(s) ` +
+        `for <${lifecycleUri}> to <${migration.targetGraph}> while retaining the compatibility source`,
+      );
+    }
+    return migration;
   }
 
   /**
@@ -5490,13 +5468,38 @@ export class DKGPublisher implements Publisher {
     rootEntities: string[],
     subGraphName: string | undefined,
     ctx: OperationContext,
+    scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<void> {
     if (rootEntities.length === 0) return;
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
-    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-    const swmGraphsForClear = await this.swmGraphsUnder(swmGraph);
-    let ownerDeletedTotal = 0;
+    const plan = await this.resolvePublishedSwmCleanupPlan(swmGraph, scope);
+    await this.deletePublishedSwmRootData(rootEntities, plan.dataGraphs);
+
+    const rootsToClearMetadata = plan.kind === 'complete-family'
+      ? rootEntities
+      : await this.namedLifecycleRootsWithoutRemainingShares(swmGraph, rootEntities);
+    await this.clearPublishedSwmRootMetadata(
+      contextGraphId,
+      rootsToClearMetadata,
+      subGraphName,
+      ctx,
+    );
+  }
+
+  private async resolvePublishedSwmCleanupPlan(
+    swmGraph: string,
+    scope: SharedMemoryGraphScope,
+  ): Promise<PublishedSwmCleanupPlan> {
+    const dataGraphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
+    return scope.kind === 'complete-family'
+      ? { kind: 'complete-family', dataGraphs }
+      : { kind: 'named-lifecycle', dataGraphs };
+  }
+
+  private async deletePublishedSwmRootData(
+    rootEntities: string[],
+    swmGraphsForClear: string[],
+  ): Promise<void> {
     for (const rootEntity of rootEntities) {
       for (const g of swmGraphsForClear) {
         await this.store.deleteByPattern({ graph: g, subject: rootEntity });
@@ -5505,10 +5508,51 @@ export class DKGPublisher implements Publisher {
           graph: g, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
         });
       }
-      const ownerDeleted = await this.store.deleteByPattern({
+    }
+  }
+
+  /**
+   * Root-keyed ownership metadata remains live only while another SWM family
+   * graph still contains the root. One family read reconciles the entire
+   * published set after the exact lifecycle's data has been deleted.
+   */
+  private async namedLifecycleRootsWithoutRemainingShares(
+    swmGraph: string,
+    rootEntities: string[],
+  ): Promise<string[]> {
+    const rootsWithRemainingShares = new Set<string>();
+    const remaining = await loadSelectedSharedMemoryQuads(
+      this.store,
+      swmGraph,
+      { rootEntities },
+      { querySource: 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership' },
+    );
+    for (const quad of remaining) {
+      for (const rootEntity of rootEntities) {
+        if (
+          quad.subject === rootEntity
+          || quad.subject.startsWith(`${rootEntity}/.well-known/genid/`)
+        ) {
+          rootsWithRemainingShares.add(rootEntity);
+        }
+      }
+    }
+    return rootEntities.filter((rootEntity) => !rootsWithRemainingShares.has(rootEntity));
+  }
+
+  private async clearPublishedSwmRootMetadata(
+    contextGraphId: string,
+    rootEntities: string[],
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+  ): Promise<void> {
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+    let ownerDeletedTotal = 0;
+    for (const rootEntity of rootEntities) {
+      ownerDeletedTotal += await this.store.deleteByPattern({
         graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
       });
-      ownerDeletedTotal += ownerDeleted;
       await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
       this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
     }

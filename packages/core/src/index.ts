@@ -6,6 +6,7 @@ export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
 export * from './trust.js';
+export * from './sparql-operation.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
@@ -174,6 +175,8 @@ export {
   type MessageDirection,
   type IdempotencyCheckResult,
   type ProtocolOutboxStore,
+  type LegacyProtocolOutboxStore,
+  type CompatibleProtocolOutboxStore,
   type ProtocolOutboxEntry,
   type KaNumberStore,
   RESPONSE_CACHE_BYTES,

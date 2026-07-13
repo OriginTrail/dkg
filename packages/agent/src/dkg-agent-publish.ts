@@ -101,7 +101,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadSelectedSharedMemoryQuads, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, canonicalSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -146,6 +146,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import {
+  prepareFinalizedLifecycleSwmForPublish,
+  sharedMemoryScopeForFinalizedLifecycle,
+} from './finalized-lifecycle-swm.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -2053,6 +2057,10 @@ export class PublishMethods extends DKGAgentBase {
     assertionUri: string;
     merkleRoot: Uint8Array;
     authorAddress: string;
+    /** Internal lifecycle identity used by seal-in-SWM migration. */
+    reservedKaId: bigint;
+    /** Internal exact payload boundary used by seal-in-SWM migration. */
+    rootEntities: string[];
     schemeVersion: number;
     chainId: bigint;
     kav10Address: string;
@@ -2265,6 +2273,8 @@ export class PublishMethods extends DKGAgentBase {
         assertionUri,
         merkleRoot: existingSeal.merkleRoot,
         authorAddress: existingSeal.authorAddress,
+        reservedKaId: reReservedKaId,
+        rootEntities: [...existingSeal.rootEntities],
         schemeVersion: existingSeal.authorSchemeVersion,
         chainId: existingSeal.chainId,
         kav10Address: existingSeal.kav10Address,
@@ -2638,6 +2648,8 @@ export class PublishMethods extends DKGAgentBase {
       assertionUri,
       merkleRoot,
       authorAddress,
+      reservedKaId,
+      rootEntities: [...rootEntities],
       schemeVersion,
       chainId,
       kav10Address,
@@ -3317,18 +3329,20 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     subGraphName?: string,
+    scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<Quad[]> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-    return loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
+    const options = {
       querySource: 'agent.resolveLiftWorkspaceSlice',
-      rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
+      rootEntitiesErrorMessage: ({ inputCount, hadInput }: { inputCount: number; hadInput: boolean }) => (
         hadInput
           ? `_loadSelectedSWMQuads: no valid rootEntities provided ` +
               `(all ${inputCount} entries failed IRI validation) ` +
               `for context graph ${contextGraphId}`
           : `_loadSelectedSWMQuads: no rootEntities supplied for context graph ${contextGraphId}`
       ),
-    });
+    } as const;
+    return loadSharedMemoryQuadsForScope(this.store, swmGraph, selection, scope, options);
   }
 
   /**
@@ -3805,6 +3819,10 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
+    const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
+      seal.authorAddress,
+      seal.reservedKaId ?? packedKaId,
+    );
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
@@ -3815,6 +3833,7 @@ export class PublishMethods extends DKGAgentBase {
           [...request.roots],
           request.subGraphName,
           ctx,
+          sharedMemoryScope,
         );
       } catch (err) {
         this.log.warn(
@@ -4264,8 +4283,47 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
+    const finalizedLifecycleSelection = { rootEntities: seal.rootEntities };
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
+    const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
+    const isExistingVmLifecycle = Boolean(vmCurrent && packedKaId !== undefined);
+    // FAIL FAST when this is an on-chain-capable daemon: a new mint below will
+    // submit the precomputed attestation, and a missing packed id would revert.
+    // Keep this validation before the compatibility preflight so an invalid
+    // legacy mint cannot mutate SWM while it is already known to be unusable.
+    const onChainCapable =
+      typeof this.chain.getEvmChainId === 'function' &&
+      typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
+    if (!isExistingVmLifecycle && recoveredReservedKaId === undefined && onChainCapable) {
+      throw new Error(
+        `publishFromFinalizedAssertion: cannot recover the §F2 reservedKaId for ` +
+          `<${assertionUri}> — the seal has neither a persisted reservedKaId nor a ` +
+          `stamped lifecycle kaId (legacy pre-OT-RFC-43-§F2 finalize). Minting with a ` +
+          `0n placeholder id would revert on-chain with KaIdNamespaceMismatch. ` +
+          `Re-finalize the assertion (POST /api/knowledge-assets/${name}/wm/finalize) ` +
+          `so the AuthorAttestation binds a valid packed kaId before publishing.`,
+      );
+    }
+
+    const finalizedLifecycleSwm = await prepareFinalizedLifecycleSwmForPublish({
+      publisher,
+      operationContext: opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      authorAddress: seal.authorAddress,
+      packedKaId: recoveredReservedKaId,
+      contextGraphId,
+      assertionName: name,
+      assertionLifecycleAgentAddress: agentAddress,
+      subGraphName: opts?.subGraphName,
+      rootEntities: seal.rootEntities,
+      load: (scope) => this._loadSelectedSWMQuads(
+        contextGraphId,
+        finalizedLifecycleSelection,
+        opts?.subGraphName,
+        scope,
+      ),
+    });
+    const sharedMemoryScope = finalizedLifecycleSwm.scope;
 
     let result: PublishResult;
     if (vmCurrent && packedKaId !== undefined) {
@@ -4275,11 +4333,7 @@ export class PublishMethods extends DKGAgentBase {
       // the merkle from the SWM-selected quads and requires a
       // precomputedUpdateAttestation over (kaId, newMerkleRoot, author); we
       // mint it here from the seal's merkle using the seal's author signer.
-      const updateQuads = await this._loadSelectedSWMQuads(
-        contextGraphId,
-        { rootEntities: seal.rootEntities },
-        opts?.subGraphName,
-      );
+      const updateQuads = finalizedLifecycleSwm.quads;
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
         seal,
@@ -4311,6 +4365,7 @@ export class PublishMethods extends DKGAgentBase {
             seal.rootEntities,
             opts?.subGraphName,
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+            sharedMemoryScope,
           );
         } catch (err) {
           this.log.warn(
@@ -4361,28 +4416,6 @@ export class PublishMethods extends DKGAgentBase {
       // lifecycle-URN kaId re-packed above. Both are undefined only for a
       // legacy seal that predates the §F2 binding AND was never stamped with a
       // lifecycle kaId.
-      const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
-      // FAIL FAST when this is an on-chain-capable daemon: the mint below will
-      // submit `precomputedAttestation` on-chain and a 0n placeholder packs to
-      // an id outside the author's namespace → guaranteed KaIdNamespaceMismatch
-      // revert. Require re-finalization instead of signing/persisting an
-      // unusable id. The same chain-capability probe gates the seal/chain
-      // cross-check above, so on mock/no-chain runs (no V10 adapter) packedKaId
-      // is legitimately undefined, the publish never goes on-chain, and the
-      // historical 0n placeholder is harmless — keep it there.
-      const onChainCapable =
-        typeof this.chain.getEvmChainId === 'function' &&
-        typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
-      if (recoveredReservedKaId === undefined && onChainCapable) {
-        throw new Error(
-          `publishFromFinalizedAssertion: cannot recover the §F2 reservedKaId for ` +
-            `<${assertionUri}> — the seal has neither a persisted reservedKaId nor a ` +
-            `stamped lifecycle kaId (legacy pre-OT-RFC-43-§F2 finalize). Minting with a ` +
-            `0n placeholder id would revert on-chain with KaIdNamespaceMismatch. ` +
-            `Re-finalize the assertion (POST /api/knowledge-assets/${name}/wm/finalize) ` +
-            `so the AuthorAttestation binds a valid packed kaId before publishing.`,
-        );
-      }
       // #1116 (round 5) — no-data preflight BEFORE the inner publisher's
       // CG-not-registered guard. `publishFromSharedMemory` checks registration
       // (throws CG_NOT_REGISTERED) BEFORE its own no-quads check, so an
@@ -4393,16 +4426,6 @@ export class PublishMethods extends DKGAgentBase {
       // it here so the no-data precondition fires for ALL callers regardless of
       // registration. Match the publisher's wording so the route's existing 409
       // mapping (/No quads in shared memory/) still applies.
-      const sealedSwmQuads = await this._loadSelectedSWMQuads(
-        contextGraphId,
-        { rootEntities: seal.rootEntities },
-        opts?.subGraphName,
-      );
-      if (sealedSwmQuads.length === 0) {
-        throw new Error(
-          `No quads in shared memory for context graph ${contextGraphId} matching selection`,
-        );
-      }
       result = await this.publishFromSharedMemory(
         contextGraphId,
         { rootEntities: seal.rootEntities },
@@ -4412,8 +4435,8 @@ export class PublishMethods extends DKGAgentBase {
           subGraphName: opts?.subGraphName,
           publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
           publishEpochs: opts?.publishEpochs,
-          clearSharedMemoryAfter: opts?.clearSharedMemoryAfter,
           reservedKaId: recoveredReservedKaId,
+          sharedMemoryScope,
           // Wired through to the inner publisher.publish() via
           // publishFromSharedMemory's `precomputedAttestation` option.
           // Skips the publisher's signing entirely.
@@ -4451,6 +4474,17 @@ export class PublishMethods extends DKGAgentBase {
           );
         }
       }
+    }
+
+    // Exact scope owns published-root cleanup. A caller's explicit request to
+    // clear every remaining share is a separate family-wide destructive action
+    // that runs only after a confirmed publish/update.
+    if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true) {
+      await publisher.clearRemainingSharedMemory(
+        contextGraphId,
+        opts?.subGraphName,
+        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      );
     }
 
     // OT-RFC-43 A2 (decision 2) — stamp the VM pointer on the lifecycle URN
@@ -4769,17 +4803,25 @@ export class PublishMethods extends DKGAgentBase {
    * CG-DID catalog subject is appended so it is in scope for BOTH the author seal
    * (`_loadSelectedSWMQuads`) and the publisher's reload — which scope identically.
    * For `selection: 'all'` the selection is returned unchanged (both already read
-   * the whole SWM graph).
+   * the whole SWM graph). The generated floor is written into the same explicit
+   * graph scope as the publish; otherwise an exact named-lifecycle read would
+   * correctly exclude a floor left in the legacy bucket.
    */
   async _ensureCuratedCatalogInSwm(this: DKGAgent,
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     subGraphName: string | undefined,
     ctx: OperationContext,
+    scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<'all' | { rootEntities: string[] }> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
+    const catalogTargetGraph = canonicalSharedMemoryScopeWriteGraph(swmGraph, scope);
     const cgDid = contextGraphDataUri(contextGraphId);
-    const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: swmGraph });
+    const catalogQuads = buildPublicProjection({
+      ual: cgDid,
+      accessPolicy: 'private',
+      graph: catalogTargetGraph,
+    });
     await this.store.insert(catalogQuads);
     this.log.info(
       ctx,
@@ -4844,6 +4886,7 @@ export class PublishMethods extends DKGAgentBase {
        * publisher then keeps its existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
+      sharedMemoryScope?: SharedMemoryGraphScope;
       /**
        * RFC-001 §9.x — pre-computed attestation captured by
        * `agent.assertion.finalize()`. When the caller has already
@@ -4919,7 +4962,13 @@ export class PublishMethods extends DKGAgentBase {
       ? generatedPrivateCatalogTripleKeys(contextGraphId)
       : undefined;
     if (hasGeneratedPrivateCatalog) {
-      selection = await this._ensureCuratedCatalogInSwm(contextGraphId, selection, options?.subGraphName, ctx);
+      selection = await this._ensureCuratedCatalogInSwm(
+        contextGraphId,
+        selection,
+        options?.subGraphName,
+        ctx,
+        options?.sharedMemoryScope,
+      );
     }
 
     // RFC-001 §9.x — selection-based publish bridge. If the caller
@@ -4940,6 +4989,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         selection,
         options?.subGraphName,
+        options?.sharedMemoryScope,
       );
       if (swmQuads.length > 0) {
         resolvedSeal = await this._buildPrecomputedAttestationForSelection(
@@ -5019,6 +5069,7 @@ export class PublishMethods extends DKGAgentBase {
       precomputedAttestation: resolvedSeal,
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
+      sharedMemoryScope: options?.sharedMemoryScope,
       encryptInlinePayload,
       encryptInlineChunked,
     });

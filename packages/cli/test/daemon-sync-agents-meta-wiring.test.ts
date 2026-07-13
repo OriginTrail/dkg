@@ -53,7 +53,7 @@ function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   db?.close?.();
 }
 
-describe('runDaemonInner wires resolved syncAgentsMeta into DKGAgent.create', () => {
+describe('runDaemonInner wires sync options into DKGAgent.create', () => {
   let tempHome: string | undefined;
   let originalDkgHome: string | undefined;
   const originalSyncEnv = process.env.DKG_SYNC_AGENTS_META;
@@ -150,5 +150,15 @@ describe('runDaemonInner wires resolved syncAgentsMeta into DKGAgent.create', ()
     process.env.DKG_SYNC_AGENTS_META = '0';
     const createArg = await captureCreateArg({ syncAgentsMeta: true });
     expect(createArg.syncAgentsMeta).toBe(true);
+  });
+
+  it('passes syncGlobalLimit and syncGlobalQueueLimit through unchanged', async () => {
+    const createArg = await captureCreateArg({
+      syncGlobalLimit: 1,
+      syncGlobalQueueLimit: 0,
+    });
+
+    expect(createArg.syncGlobalLimit).toBe(1);
+    expect(createArg.syncGlobalQueueLimit).toBe(0);
   });
 });

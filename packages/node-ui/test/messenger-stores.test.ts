@@ -45,9 +45,9 @@ describe('V12 migration', () => {
     // `message_idempotency` table. Both bumps are tested at the
     // DB layer in `db.test.ts`; this assertion just pins that
     // the substrate store fixtures are created against the
-    // current SCHEMA_VERSION (now 22 after runtime cursors moved to a
-    // dedicated table).
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    // current SCHEMA_VERSION (now 24 after the OT-RFC-59 changelog_cursors
+    // and changelog_era tables were added).
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
   });
 });
 
@@ -180,7 +180,7 @@ describe('SqliteProtocolOutboxStore', () => {
     payload[0] = 9;
     entry.payload[1] = 8;
 
-    const pending = store.pendingFor(PEER_A);
+    const pending = store.list().filter((entry) => entry.peer === PEER_A);
     expect(Array.from(pending[0].payload)).toEqual([1, 2, 3]);
 
     pending[0].payload[2] = 7;
@@ -207,13 +207,26 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(store.markDelivered(PEER_A, PROTO, MSG_1)).toBe(false);
   });
 
-  it('pendingFor returns entries sorted by firstFailureAt ascending', () => {
+  it('hasPendingFor reports whether a peer owns any durable row', () => {
     const store = new SqliteProtocolOutboxStore(db);
     store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2000);
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1000);
     store.enqueue(PEER_B, PROTO, MSG_1, PAYLOAD, 'e', 500);
-    expect(store.pendingFor(PEER_A).map((e) => e.messageId)).toEqual([MSG_1, MSG_2]);
+    expect(store.hasPendingFor(PEER_A)).toBe(true);
+    expect(store.hasPendingFor(PEER_B)).toBe(true);
+    expect(store.hasPendingFor('peer-c')).toBe(false);
+  });
+
+  it('retains the legacy peer snapshot contract without changing retry eligibility', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 60_000 });
+    store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2_000);
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
+    store.enqueue(PEER_B, PROTO, MSG_1, PAYLOAD, 'e', 500);
+
+    expect(store.pendingFor(PEER_A).map((entry) => entry.messageId)).toEqual([MSG_1, MSG_2]);
     expect(store.pendingFor(PEER_B)).toHaveLength(1);
+    expect(store.due(60_499)).toHaveLength(0);
+    expect(store.due(60_500).map((entry) => entry.peer)).toEqual([PEER_B]);
   });
 
   it('due returns entries with nextAttemptAt <= now', () => {
@@ -221,6 +234,44 @@ describe('SqliteProtocolOutboxStore', () => {
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000_000);
     expect(store.due(1_004_999)).toHaveLength(0);
     expect(store.due(1_005_000)).toHaveLength(1);
+  });
+
+  it('due applies a stable database-level batch limit', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
+    store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2_000);
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
+    expect(store.duePage(10_000, 1).map((entry) => entry.messageId)).toEqual([MSG_1]);
+    expect(store.duePage(10_000, 0)).toEqual([]);
+  });
+
+  it('due deterministically breaks exact timestamp ties by peer/protocol/message id', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
+    store.enqueue(PEER_B, PROTO, MSG_2, PAYLOAD, 'e', 1_000);
+    store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 1_000);
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
+
+    expect(store.duePage(6_000, 3).map((entry) => [entry.peer, entry.messageId])).toEqual([
+      [PEER_B, MSG_2],
+      [PEER_A, MSG_1],
+      [PEER_A, MSG_2],
+    ]);
+  });
+
+  it('uses firstFailureAt before key ordering when nextAttemptAt ties', () => {
+    const store = new SqliteProtocolOutboxStore(db, {
+      backoffFor: (attempts) => attempts === 1 ? 50 : 10,
+    });
+    store.enqueue(PEER_A, PROTO, 'z-older-failure', PAYLOAD, 'first', 0);
+    store.enqueue(PEER_A, PROTO, 'z-older-failure', PAYLOAD, 'second', 90);
+    store.enqueue(PEER_A, PROTO, 'a-newer-failure', PAYLOAD, 'first', 50);
+
+    const due = store.duePage(100, 1);
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({
+      messageId: 'z-older-failure',
+      firstFailureAt: 0,
+      nextAttemptAt: 100,
+    });
   });
 
   it('dropExpired removes entries older than maxAgeMs and returns them', () => {
@@ -259,7 +310,7 @@ describe('SqliteProtocolOutboxStore', () => {
     db.close();
     db = new DashboardDB({ dataDir: dir });
     const reopened = new SqliteProtocolOutboxStore(db);
-    const pending = reopened.pendingFor(PEER_A);
+    const pending = reopened.list().filter((entry) => entry.peer === PEER_A);
     expect(pending).toHaveLength(1);
     expect(pending[0].lastError).toBe('crash-before-delivery');
     expect(Array.from(pending[0].payload)).toEqual(Array.from(PAYLOAD));

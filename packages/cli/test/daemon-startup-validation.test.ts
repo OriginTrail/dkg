@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, open, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
+import {
+  DEFAULT_DAEMON_LOG_MAX_BYTES,
+} from '../src/daemon/log-rotation.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -36,6 +39,24 @@ function closeDashboardDbFromAgentCreateArg(createArg: any): void {
     createArg?.chainEventCursorStore?.cursors?.db ??
     createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
   db?.close?.();
+}
+
+async function readFileTail(path: string, maxBytes = 16 * 1024): Promise<string> {
+  const before = await stat(path);
+  const bytesToRead = Math.min(before.size, maxBytes);
+  const buffer = Buffer.alloc(bytesToRead);
+  const handle = await open(path, 'r');
+  try {
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      bytesToRead,
+      before.size - bytesToRead,
+    );
+    return buffer.subarray(0, bytesRead).toString('utf-8');
+  } finally {
+    await handle.close();
+  }
 }
 
 describe('daemon startup network validation', () => {
@@ -110,6 +131,43 @@ describe('daemon startup network validation', () => {
     );
   });
 
+  it('rotates an oversized inherited daemon log during startup before tee appends', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-log-rotation-startup-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+
+    const daemonLog = join(tempHome, 'daemon.log');
+    const logHandle = await open(daemonLog, 'w');
+    await logHandle.truncate(DEFAULT_DAEMON_LOG_MAX_BYTES + 1024);
+    await logHandle.close();
+
+    mocks.loadNetworkConfig.mockResolvedValue(null);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
+      throw new Error(`process.exit:${code}`);
+    }) as never);
+
+    await expect(runDaemonInner(true, {
+      name: 'startup-log-rotation-test',
+      networkConfig: 'missing-mainnet',
+      listenPort: 0,
+      nodeRole: 'edge',
+    } as any, Date.now())).rejects.toThrow('process.exit:1');
+
+    expect((await stat(daemonLog)).size).toBeLessThan(DEFAULT_DAEMON_LOG_MAX_BYTES);
+    let tail = '';
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      tail = await readFileTail(daemonLog);
+      if (tail.includes('Rotated daemon.log during startup')) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(tail).toContain('Rotated daemon.log during startup');
+  });
+
   it('exits before agent creation when config.networkConfig does not resolve', async () => {
     tempHome = await mkdtemp(join(tmpdir(), 'dkg-missing-network-startup-'));
     originalDkgHome = process.env.DKG_HOME;
@@ -143,7 +201,7 @@ describe('daemon startup network validation', () => {
     );
   });
 
-  it('passes the selected network genesis id into agent creation', async () => {
+  it('infers a legacy network from chainId and passes its genesis id into agent creation', async () => {
     tempHome = await mkdtemp(join(tmpdir(), 'dkg-genesis-startup-'));
     originalDkgHome = process.env.DKG_HOME;
     process.env.DKG_HOME = tempHome;
@@ -165,14 +223,13 @@ describe('daemon startup network validation', () => {
 
     await expect(runDaemonInner(true, {
       name: 'genesis-startup-test',
-      networkConfig: 'mainnet-gnosis',
       listenPort: 0,
       nodeRole: 'edge',
       chain: {
         type: 'evm',
         rpcUrl: 'https://private-rpc.example',
         hubAddress: '0x1234567890123456789012345678901234567890',
-        chainId: 'evm:100',
+        chainId: 'gnosis:100',
       },
     } as any, Date.now())).rejects.toThrow('after-agent-create');
 
@@ -191,7 +248,7 @@ describe('daemon startup network validation', () => {
       },
     });
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
-      chainId: 'evm:100',
+      chainId: 'gnosis:100',
       hubAddress: '0x1234567890123456789012345678901234567890',
     }));
     closeDashboardDbFromAgentCreateArg(createArg);

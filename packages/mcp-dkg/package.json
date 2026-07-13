@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-mcp",
-  "version": "10.0.5",
+  "version": "10.0.6",
   "description": "MCP server that exposes the local DKG daemon (projects, sub-graphs, activity, chat) to Cursor, Claude Code, and any other MCP-aware coding assistant.",
   "type": "module",
   "main": "dist/index.js",
@@ -42,6 +42,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@modelcontextprotocol/sdk": "^1",
     "zod": "^3.25",
     "yaml": "^2.6.0"

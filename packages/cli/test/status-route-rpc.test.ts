@@ -22,7 +22,15 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, getRpcFailoverStats, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import {
+  ChainRpcTransportError,
+  noteRpcFailover,
+  noteRpcExhaustion,
+  notePreferredEndpoint,
+  noteRpcServed,
+  getRpcFailoverStats,
+  _resetRpcFailoverStatsForTest,
+} from '@origintrail-official/dkg-chain';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { loadNetworkConfig } from '../src/config.js';
@@ -32,6 +40,15 @@ import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from '.
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
+const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
+  runtime: null,
+  availability: {
+    available: false,
+    reason: 'publisher_disabled',
+    retryable: false,
+    operatorActionRequired: true,
+  },
+};
 
 describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => {
   let daemon: LiveDaemon;
@@ -68,11 +85,20 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
     expect(body.chain).not.toHaveProperty('rpcUrl');
     expect(body.chain).not.toHaveProperty('rpcUrls');
     expect(body.chain).not.toHaveProperty('hubAddress');
+    expect(body.asyncPublisher).toEqual({
+      available: false,
+      reason: 'publisher_disabled',
+      retryable: false,
+      operatorActionRequired: true,
+    });
     // Multi-RPC failover observability (W3): scalar counts + bounded by-class
     // map only — host-only, never a full RPC URL.
     expect(typeof body.chain.rpcFailovers).toBe('number');
     expect(typeof body.chain.rpcExhaustions).toBe('number');
     expect(body.chain.rpcFailoversByClass).toBeDefined();
+    // Success-side per-provider distribution (which endpoint served) — host-only.
+    expect(body.chain.rpcServedByEndpointHost).toBeDefined();
+    expect(body.chain.rpcFailoversByEndpointHost).toBeDefined();
     expect(JSON.stringify(body.chain)).not.toContain('://');
   });
 
@@ -116,6 +142,7 @@ describe('/api/status selected overlay details', () => {
       await handleStatusRoutes({
         req,
         res,
+        publisherState: DISABLED_PUBLISHER_STATE,
         path: url.pathname,
         url,
         network,
@@ -162,6 +189,7 @@ describe('/api/status selected overlay details', () => {
 
   it('surfaces LIVE multi-RPC failover counters on /api/status (not hardcoded zero)', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const network = await loadNetworkConfig('mainnet-gnosis');
     try {
       // Seed the process-wide failover counters the status route reads, then
@@ -173,12 +201,14 @@ describe('/api/status selected overlay details', () => {
       noteRpcFailover('status-test publish', 'https://other.example', { status: 503 }, 'https://backup.example');
       noteRpcExhaustion('status-test publish', ['https://primary.example', 'https://backup.example']);
       notePreferredEndpoint('status-test publish', 'https://backup.example');
+      noteRpcServed('status-test read', 'https://served.example/key', { mode: 'read', key: 'status-test-read' });
 
       const server = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         await handleStatusRoutes({
           req,
           res,
+          publisherState: DISABLED_PUBLISHER_STATE,
           path: url.pathname,
           url,
           network,
@@ -215,6 +245,15 @@ describe('/api/status selected overlay details', () => {
         expect(body.chain.rpcExhaustions).toBe(before.exhaustions + 1);
         expect(body.chain.rpcFailoversByClass.THROTTLE_429).toBe((before.byErrorClass.THROTTLE_429 ?? 0) + 1);
         expect(body.chain.rpcFailoversByClass.SERVER_5XX).toBe((before.byErrorClass.SERVER_5XX ?? 0) + 1);
+        expect(body.chain.rpcServedByEndpointHost).toEqual({
+          ...before.servedByEndpointHost,
+          'served.example': (before.servedByEndpointHost['served.example'] ?? 0) + 1,
+        });
+        expect(body.chain.rpcFailoversByEndpointHost).toEqual({
+          ...before.byEndpointHost,
+          'primary.example': (before.byEndpointHost['primary.example'] ?? 0) + 1,
+          'other.example': (before.byEndpointHost['other.example'] ?? 0) + 1,
+        });
         // Endpoint-stickiness establishment counter is wired through /api/status.
         expect(body.chain.rpcPreferredEstablishments).toBe(before.preferredEstablishments + 1);
         // The counter surface stays host-only — never a raw RPC URL.
@@ -224,6 +263,8 @@ describe('/api/status selected overlay details', () => {
       }
     } finally {
       warnSpy.mockRestore();
+      logSpy.mockRestore();
+      _resetRpcFailoverStatsForTest();
     }
   });
 
@@ -233,6 +274,7 @@ describe('/api/status selected overlay details', () => {
       await handleStatusRoutes({
         req,
         res,
+        publisherState: DISABLED_PUBLISHER_STATE,
         path: url.pathname,
         url,
         network: null,

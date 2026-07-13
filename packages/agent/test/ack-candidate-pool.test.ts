@@ -14,6 +14,7 @@ type AgentInternals = {
     libp2p: {
       peerId: { toString(): string };
       getPeers: () => Array<{ toString(): string }>;
+      getConnections: () => Array<{ remotePeer: { toString(): string } }>;
     };
   };
   peerId: string;
@@ -33,6 +34,22 @@ type AgentInternals = {
 
 const CORE = ['core-1', 'core-2', 'core-3', 'core-4'];
 const EDGE = ['edge-1', 'edge-2'];
+const ADMISSION_FOREIGN = [
+  '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh',
+  '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb',
+];
+const ADMISSION_SAME_NETWORK = [
+  '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
+  '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M',
+];
+
+function peer(id: string): { toString(): string } {
+  return { toString: () => id };
+}
+
+function connection(id: string): { remotePeer: { toString(): string } } {
+  return { remotePeer: peer(id) };
+}
 
 async function buildAgent(opts: {
   confirmedCores: string[];
@@ -52,7 +69,8 @@ async function buildAgent(opts: {
   internals.node = {
     libp2p: {
       peerId: { toString: () => internals.peerId },
-      getPeers: () => opts.connected.map((id) => ({ toString: () => id })),
+      getPeers: () => opts.connected.map(peer),
+      getConnections: () => opts.connected.map(connection),
     },
   };
   for (const id of opts.confirmedCores) internals.knownCorePeerIds.add(id);
@@ -60,14 +78,14 @@ async function buildAgent(opts: {
   return internals;
 }
 
-function installAdmission(agent: AgentInternals, admission: NetworkAdmissionService): void {
+function installAdmission(agent: AgentInternals, admission: NetworkAdmissionService, enabled = true): void {
   agent.networkAdmission = admission;
   agent.networkAdmissionCoordinator = {
     get enabled() {
-      return admission.enabled;
+      return enabled;
     },
-    isAcceptedPeer: (peerId) => admission.isAcceptedPeer(peerId),
-    verifiedSameNetworkPeerIds: () => admission.verifiedSameNetworkPeerIds(),
+    isAcceptedPeer: (peerId) => enabled ? admission.isAcceptedPeer(peerId) : true,
+    verifiedSameNetworkPeerIds: () => enabled ? admission.verifiedSameNetworkPeerIds() : new Set(),
   };
 }
 
@@ -158,23 +176,21 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
   });
 
   it('filters ACK candidates to active-network admitted peers when admission is enabled', async () => {
-    const foreign = ['foreign-core-1', 'foreign-core-2'];
-    const sameNetwork = ['same-network-core', 'trusted-relay'];
+    const foreign = ADMISSION_FOREIGN;
+    const sameNetwork = ADMISSION_SAME_NETWORK;
     const a = await buildAgent({
       confirmedCores: [...foreign, ...sameNetwork],
       connected: [...foreign, ...sameNetwork],
-      preferredACKPeerIds: ['trusted-relay', foreign[0]],
+      preferredACKPeerIds: [sameNetwork[1], foreign[0]],
     });
-    const admission = new NetworkAdmissionService({
-      networkId: 'active-network',
-    });
+    const admission = new NetworkAdmissionService({ networkId: 'active-network' });
     installAdmission(a, admission);
-    admission.markVerifiedSameNetwork('same-network-core');
+    admission.markVerifiedSameNetwork(sameNetwork[0]);
 
-    expect(a.getACKCandidatePeers()).toEqual(['same-network-core']);
+    expect(a.getACKCandidatePeers()).toEqual([sameNetwork[0]]);
 
-    admission.markVerifiedSameNetwork('trusted-relay');
-    expect(a.getACKCandidatePeers()).toEqual(['trusted-relay', 'same-network-core']);
+    admission.markVerifiedSameNetwork(sameNetwork[1]);
+    expect(a.getACKCandidatePeers()).toEqual([sameNetwork[1], sameNetwork[0]]);
   });
 
   it('V2 folded-private rounds keep unlisted V2-advertising cores dialable, listed peers first within each tier', async () => {
@@ -211,10 +227,27 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
     a.node = {
       libp2p: {
         peerId: { toString: () => self },
-        getPeers: () => [self, ...CORE.slice(0, 3)].map((id) => ({ toString: () => id })),
+        getPeers: () => [self, ...CORE.slice(0, 3)].map(peer),
+        getConnections: () => [self, ...CORE.slice(0, 3)].map(connection),
       },
     };
     expect(a.getACKCandidatePeers()).not.toContain(self);
+  });
+
+  it('uses active connections when the peer-store peer list is still empty after startup', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE.slice(0, 3),
+      connected: [],
+    });
+    a.node = {
+      libp2p: {
+        peerId: { toString: () => a.peerId },
+        getPeers: () => [],
+        getConnections: () => CORE.slice(0, 3).map(connection),
+      },
+    };
+
+    expect(a.getACKCandidatePeers()).toEqual(CORE.slice(0, 3));
   });
 
   it('V2 folded-private ACKs prefer advertised V2 peers, then keep enough candidates for wire negotiation', async () => {

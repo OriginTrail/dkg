@@ -66,6 +66,41 @@ For heavy / production workloads, prefer an out-of-process SPARQL server
 (`sparql-http` or `blazegraph`), which handles reads and writes concurrently
 and keeps the daemon responsive under load.
 
+## External-store admission and deadlines
+
+All external adapters share a process-wide priority scheduler. Waiting work is
+bounded independently for `ack`, `normal`, and `background` traffic, and an
+operation rejected before dispatch receives `StoreSchedulerBusyError` with
+`code: STORE_SCHEDULER_BUSY`, `retryable: true`, and a reason of either
+`queue_full` or `queue_wait_timeout`. Because this error is only created before
+the operation closure starts, retrying it cannot duplicate a write that might
+already have reached the store.
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `DKG_STORE_MAX_CONCURRENT` | `8` | Maximum external-store operations in flight. |
+| `DKG_STORE_ACK_RESERVED_SLOTS` | `1` | In-flight capacity reserved for ACK work. |
+| `DKG_STORE_BACKGROUND_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for background progress. |
+| `DKG_STORE_QUEUE_LIMIT` | `64` | Maximum waiting operations in each priority queue. |
+| `DKG_STORE_ACK_QUEUE_LIMIT` | common limit | Optional ACK queue override. |
+| `DKG_STORE_NORMAL_QUEUE_LIMIT` | common limit | Optional normal queue override. |
+| `DKG_STORE_BACKGROUND_QUEUE_LIMIT` | common limit | Optional background queue override. |
+| `DKG_STORE_QUEUE_WAIT_TIMEOUT_MS` | `10000` | Maximum pre-dispatch wait before a retryable busy rejection. |
+| `DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS` | `30000` | Blazegraph end-to-end operation deadline, including scheduler wait, HTTP, response decoding, and mapping. |
+
+Blazegraph's deadline can also be set per store, which takes precedence over
+the environment default:
+
+```jsonc
+"store": {
+  "backend": "blazegraph",
+  "options": {
+    "url": "http://127.0.0.1:9999/blazegraph/namespace/dkg/sparql",
+    "timeout": 30000
+  }
+}
+```
+
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` — configuration types, logging, constants

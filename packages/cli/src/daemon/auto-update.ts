@@ -44,6 +44,8 @@ import {
   type DkgConfig,
   type ResolvedAutoUpdateConfig,
 } from '../config.js';
+import type { DaemonNodeCommand } from '../daemon-entrypoint.js';
+import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan, type AutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
   _autoUpdateIo,
   DAEMON_EXIT_CODE_RESTART,
@@ -79,40 +81,6 @@ export function normalizeRepo(repo: string): string {
   const m = t.match(/github\.com[/:](\S+\/\S+?)(?:\/|$)/);
   if (m) return m[1];
   return t;
-}
-
-export function parseTagName(ref: string): string | null {
-  const m = ref.match(/^refs\/tags\/(.+)$/);
-  return m ? m[1] : null;
-}
-
-export function isValidRef(ref: string): boolean {
-  if (!/^[\w./+\-]+$/.test(ref)) return false;
-  if (!ref || ref.startsWith("-") || ref.startsWith("/") || ref.endsWith("/")) return false;
-  if (ref.includes("..") || ref.includes("//") || ref.includes("@{")) return false;
-  if (ref.endsWith(".")) return false;
-  const parts = ref.split("/");
-  return parts.every((part) => {
-    if (!part || part === "." || part === "..") return false;
-    if (part.endsWith(".lock")) return false;
-    return true;
-  });
-}
-
-export function normalizeGitRefInput(ref: string): string {
-  const trimmed = ref.trim() || "main";
-  if (!isValidRef(trimmed)) {
-    throw new Error(`invalid branch/ref "${ref}"`);
-  }
-  if (trimmed.startsWith("refs/")) return trimmed;
-  return `refs/heads/${trimmed}`;
-}
-
-export function resolveAutoUpdateGitRef(
-  au: Pick<ResolvedAutoUpdateConfig, "branch"> & { ref?: string },
-  refOverride?: string,
-): string {
-  return normalizeGitRefInput(refOverride ?? au.ref ?? au.branch);
 }
 
 export function isValidRepoSpec(repo: string): boolean {
@@ -1187,13 +1155,19 @@ async function _performUpdateInner(
     }
   }
 
-  let ref = "";
+  let refPlan: AutoUpdateGitRefPlan;
   try {
-    ref = resolveAutoUpdateGitRef(au, opts.refOverride);
+    refPlan = resolveAutoUpdateGitRefPlan(au, {
+      refOverride: opts.refOverride,
+      ...(opts.verifyTagSignature !== undefined
+        ? { verifyTagSignature: opts.verifyTagSignature }
+        : {}),
+    });
   } catch (err: any) {
     log(`Auto-update (git): ${err?.message ?? "invalid branch/ref"}`);
     return "failed";
   }
+  const ref = refPlan.ref;
   const gitEnv = gitCommandEnv(au);
 
   const latestCommit = opts.expectedCommit?.trim()
@@ -1241,15 +1215,13 @@ async function _performUpdateInner(
   }
 
   try {
-    const maybeTag = parseTagName(ref);
-    const fetchRef = maybeTag ? `${ref}:${ref}` : ref;
     const fetchStartedAt = Date.now();
     log(
       `Auto-update (git): fetching "${ref}" from ${fetchUrl} into slot ${target}...`,
     );
     await execFileAsync(
       "git",
-      [...gitCommandArgs(fetchUrl, au), "fetch", fetchUrl, fetchRef],
+      [...gitCommandArgs(fetchUrl, au), "fetch", fetchUrl, refPlan.fetchRef],
       {
         cwd: targetDir,
         encoding: "utf-8",
@@ -1257,8 +1229,8 @@ async function _performUpdateInner(
         env: gitEnv,
       },
     );
-    if (opts.verifyTagSignature && maybeTag) {
-      await execFileAsync("git", ["verify-tag", maybeTag], {
+    if (refPlan.shouldVerifyTagSignature && refPlan.tagName) {
+      await execFileAsync("git", ["verify-tag", "--", refPlan.tagName], {
         cwd: targetDir,
         encoding: "utf-8",
         timeout: 30_000,
@@ -1572,20 +1544,19 @@ export async function performNpmUpdate(
  * version to `~/.dkg/previous-version` so `dkg rollback` (Edge
  * branch) has a target to reinstall.
  *
- * Tradeoffs accepted (per RFC §7.2):
- *   - Non-atomic: a mid-install crash leaves the global state
- *     half-updated. Recovery is `npm install -g` re-run.
- *   - Network-dependent rollback: requires the npm registry to
- *     have the previous version available.
+ * The npm mutation itself is not atomic, so completion is followed by an
+ * executable/version self-check. A failed check immediately reinstalls the
+ * recorded previous version before the daemon is allowed to restart.
  *
- * The function returns `'updated'` after the npm install completes;
- * the caller is responsible for stopping the running daemon so the
- * supervisor respawns from the new entry point (mirrors how the
- * Core path's swap-slot+restart sequence works).
+ * The function returns `'updated'` after the npm install and self-check
+ * complete; the caller is responsible for stopping the running daemon so
+ * the supervisor respawns from the new entry point (mirrors how the Core
+ * path's swap-slot+restart sequence works).
  *
- * Returns `'failed'` on any npm install failure; the previous-version
- * write is best-effort and a write failure does NOT block the install
- * (the operator can still rollback manually via
+ * Returns `'failed'` when the install or executable/version self-check
+ * fails, including after a rollback attempt. The previous-version write is
+ * best-effort and a write failure does NOT block the install (the operator
+ * can still rollback manually via
  * `npm install -g @origintrail-official/dkg@<known-version>`).
  */
 export async function performNpmUpdateEdge(
@@ -1604,7 +1575,13 @@ export async function performNpmUpdateEdge(
     return "failed";
   }
   try {
-    return await _performNpmUpdateInnerEdge(targetVersion, currentVersion, log);
+    const verificationCommand = _autoUpdateIo.resolveDaemonNodeCommand('--version');
+    return await _performNpmUpdateInnerEdge(
+      targetVersion,
+      currentVersion,
+      log,
+      verificationCommand,
+    );
   } finally {
     await releaseUpdateLock();
     _updateInProgress = false;
@@ -1615,11 +1592,12 @@ async function _performNpmUpdateInnerEdge(
   targetVersion: string,
   currentVersion: string | null,
   log: (msg: string) => void,
+  verificationCommand: DaemonNodeCommand,
 ): Promise<UpdateStatus> {
   // Destructure from `_autoUpdateIo` so unit tests can stub each
   // dependency — matches the existing `_performNpmUpdateInner`
   // (Core) pattern.
-  const { writeFile, exec: execAsyncIo, dkgDir } = _autoUpdateIo;
+  const { writeFile, exec: execAsyncIo, execFile: execFileAsyncIo, dkgDir } = _autoUpdateIo;
   const previousVersionPath = join(dkgDir(), "previous-version");
   if (currentVersion && currentVersion.length > 0) {
     try {
@@ -1642,18 +1620,11 @@ async function _performNpmUpdateInnerEdge(
 
   // 5-minute timeout covers slow network + npm registry round-trips on
   // CI / homegrown runners. Any longer is almost certainly a hung process.
-  const installCmd = `npm install -g ${CLI_NPM_PACKAGE}@${targetVersion}`;
+  const installCmd = globalCliInstallCommand(targetVersion);
   log(`Auto-update (npm-edge): running '${installCmd}'…`);
   try {
     const installStart = Date.now();
-    await execAsyncIo(installCmd, {
-      encoding: "utf-8",
-      timeout: 300_000,
-      // Allow npm's progress / warning output to surface in the daemon
-      // log — operators tailing the log get real-time feedback on slow
-      // installs. stderr → stdout merge mirrors how npm itself runs
-      // interactively.
-    });
+    await installGlobalCliVersion(execAsyncIo, targetVersion);
     const installMs = Date.now() - installStart;
     log(`Auto-update (npm-edge): npm install completed in ${installMs}ms.`);
   } catch (installErr: any) {
@@ -1669,11 +1640,122 @@ async function _performNpmUpdateInnerEdge(
     return "failed";
   }
 
-  log(
-    `Auto-update (npm-edge): ${CLI_NPM_PACKAGE}@${targetVersion} installed. ` +
-      "Stop the daemon to restart from the new entry point.",
+  const verificationOutcome = await verifyInstalledCliOrRollback({
+    execIo: execAsyncIo,
+    execFileIo: execFileAsyncIo,
+    targetVersion,
+    currentVersion,
+    verificationCommand,
+    log,
+  });
+  switch (verificationOutcome.kind) {
+    case 'targetVerified':
+      log(`Auto-update (npm-edge): self-check passed (${verificationOutcome.reported}).`);
+      log(
+        `Auto-update (npm-edge): ${CLI_NPM_PACKAGE}@${targetVersion} installed. ` +
+          "Stop the daemon to restart from the new entry point.",
+      );
+      return "updated";
+    case 'rollbackRestored':
+      log(`Auto-update (npm-edge): rollback restored ${verificationOutcome.reported}.`);
+      return 'failed';
+    case 'rollbackUnavailable':
+      log('Auto-update (npm-edge): previous version is unknown; automatic rollback is unavailable.');
+      return 'failed';
+    case 'rollbackFailed':
+      log(`Auto-update (npm-edge): CRITICAL rollback failed — ${verificationOutcome.error}.`);
+      return 'failed';
+  }
+}
+
+type EdgeExec = typeof _autoUpdateIo.exec;
+type EdgeExecFile = typeof _autoUpdateIo.execFile;
+
+type InstalledCliVerificationOutcome =
+  | { kind: 'targetVerified'; reported: string }
+  | { kind: 'rollbackRestored'; reported: string }
+  | { kind: 'rollbackUnavailable' }
+  | { kind: 'rollbackFailed'; error: string };
+
+function globalCliInstallCommand(version: string): string {
+  return `npm install -g ${CLI_NPM_PACKAGE}@${version}`;
+}
+
+async function installGlobalCliVersion(execIo: EdgeExec, version: string): Promise<void> {
+  await execIo(globalCliInstallCommand(version), {
+    encoding: 'utf-8',
+    timeout: 300_000,
+  });
+}
+
+function parseReportedDkgVersion(output: string): string | undefined {
+  return output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/)?.[1];
+}
+
+async function verifyGlobalDkgVersion(
+  execFileIo: EdgeExecFile,
+  verificationCommand: DaemonNodeCommand,
+  expectedVersion: string,
+  context: 'self-check' | 'rollback',
+): Promise<string> {
+  const { stdout, stderr } = await execFileIo(
+    verificationCommand.executable,
+    verificationCommand.args,
+    {
+      encoding: 'utf-8',
+      timeout: 30_000,
+    },
   );
-  return "updated";
+  const reported = `${stdout ?? ''} ${stderr ?? ''}`.trim();
+  const parsed = parseReportedDkgVersion(reported);
+  if (parsed !== expectedVersion) {
+    throw new Error(`${context} expected ${expectedVersion}, got ${parsed ?? (reported || 'empty version output')}`);
+  }
+  return reported;
+}
+
+async function verifyInstalledCliOrRollback(options: {
+  execIo: EdgeExec;
+  execFileIo: EdgeExecFile;
+  targetVersion: string;
+  currentVersion: string | null;
+  verificationCommand: DaemonNodeCommand;
+  log: (msg: string) => void;
+}): Promise<InstalledCliVerificationOutcome> {
+  const { execIo, execFileIo, targetVersion, currentVersion, verificationCommand, log } = options;
+  try {
+    const reported = await verifyGlobalDkgVersion(
+      execFileIo,
+      verificationCommand,
+      targetVersion,
+      'self-check',
+    );
+    return { kind: 'targetVerified', reported };
+  } catch (verifyErr: any) {
+    log(`Auto-update (npm-edge): post-install self-check failed — ${verifyErr?.message ?? verifyErr}.`);
+  }
+
+  if (!currentVersion) {
+    return { kind: 'rollbackUnavailable' };
+  }
+
+  const rollbackCmd = globalCliInstallCommand(currentVersion);
+  log(`Auto-update (npm-edge): rolling back with '${rollbackCmd}'…`);
+  try {
+    await installGlobalCliVersion(execIo, currentVersion);
+    const reported = await verifyGlobalDkgVersion(
+      execFileIo,
+      verificationCommand,
+      currentVersion,
+      'rollback',
+    );
+    return { kind: 'rollbackRestored', reported };
+  } catch (rollbackErr: any) {
+    return {
+      kind: 'rollbackFailed',
+      error: String(rollbackErr?.message ?? rollbackErr ?? 'unknown error'),
+    };
+  }
 }
 
 export async function checkForUpdate(

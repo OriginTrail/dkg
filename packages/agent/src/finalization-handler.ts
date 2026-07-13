@@ -12,7 +12,7 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, loadSelectedSharedMemoryQuads, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, loadSelectedSharedMemoryQuads, loadSharedMemorySliceWithKaBoundFallback, asGraphWriteGenSource, type GraphWriteGenSource, type SwmKaGraphBound, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -27,7 +27,16 @@ import {
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
+
+// Slow-query / canary tags for the finalization SWM slice (#1549). A healthy fleet
+// sees `.fallbackUnbounded` at ~0 relative to `.bounded`; a spike means the bound is
+// mis-derived or recurrence is common, and `DKG_DISABLE_SWM_KA_BOUND=1` is the lever.
+const SWM_SLICE_SOURCE = 'agent.finalization.sharedMemorySlice';
+const SWM_SLICE_SOURCE_BOUNDED = `${SWM_SLICE_SOURCE}.bounded`;
+const SWM_SLICE_SOURCE_WIDENED = `${SWM_SLICE_SOURCE}.fallbackUnbounded`;
 import { ethers } from 'ethers';
+import { createHash } from 'node:crypto';
+import { deriveSwmKaGraphBound } from './swm-ka-bound.js';
 import {
   FinalizationLifecycleLogger,
   finalizationLifecycleDecision,
@@ -41,6 +50,41 @@ import {
  * Shared with `DKGAgent` so the write and read sites can't drift.
  */
 export const KEEP_ROOT_COPY_PREDICATE = `${DKG_NS}keepRootCopyOnLabel`;
+
+/**
+ * Reader-maintained memo (#1609): the flat-KC merkle root a WorkspaceOperation's
+ * SWM snapshot hashes to, paired with `SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE` (a
+ * cheap digest of the exact content that produced it), stamped onto the op subject
+ * (`urn:dkg:share:<cg>:<id>`) the first time `findSwmSnapshotInNamespace` computes
+ * it. Lets a chain-reconcile lookup (a) resolve a *present* KA's op by root
+ * directly (fast path), and (b) skip the expensive `computeFlatKCRoot` recompute
+ * for an op whose content is unchanged (the digest still matches) — the recompute
+ * that dominates beacon reconcile load when a KA published elsewhere forces a full
+ * O(#WorkspaceOperations) scan to conclude "not here".
+ *
+ * This memo is a bridge, NOT the durable fix (see OT-RFC-60): a WorkspaceOperation
+ * is assembled incrementally (data quads and private roots arrive over time via
+ * *entity-keyed* writes that do NOT rewrite the op subject), so the stamp can go
+ * stale without a structural invalidation. Correctness therefore does NOT rely on
+ * the stamp being fresh:
+ *   - `verifyMerkleMatch` stays authoritative on the fast path — a stale stamp can
+ *     only ever cause a *missed* promotion, never a wrong one.
+ *   - the fallback scan re-reads EVERY op (it never excludes on stamp-presence) and
+ *     trusts the memoized root only when the content digest still matches; any
+ *     content change flips the digest → full recompute → the op is re-evaluated and
+ *     re-stamped. An op can never be stranded by a stale stamp.
+ * The durable fix (OT-RFC-60) makes the root a write-maintained, indexed property
+ * stamped once when an op becomes complete-and-immutable, removing both the
+ * recompute AND the staleness by construction.
+ *
+ * Deliberately invisible to the sibling VM-reconcile negative cache: its
+ * `readVmReconcileSwmGen` / `vmReconcileWorkspaceOperationPattern` fingerprints
+ * select only `rootEntity`/`publishedAt` on the op subject (plus the separate data
+ * graph), so stamping these predicates into the meta graph does not perturb the
+ * generation signal the negative cache keys on — the two mechanisms don't fight.
+ */
+export const SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE = `${DKG_NS}snapshotMerkleRoot`;
+export const SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE = `${DKG_NS}snapshotContentDigest`;
 
 /**
  * Resolves a local context-graph id (the topic/CG name used in gossip) to
@@ -77,6 +121,42 @@ function sameBigIntLiteral(left: string | bigint | null | undefined, right: stri
   }
 }
 
+/**
+ * Ops kill-switch for the #1549 bounded SWM read. Set `DKG_DISABLE_SWM_KA_BOUND=1`
+ * to fall back to the unbounded read with no redeploy. Read here at the
+ * orchestration boundary so `deriveSwmKaGraphBound` (in `swm-ka-bound.ts`) stays a
+ * deterministic identity transform.
+ */
+function swmKaBoundDisabled(): boolean {
+  return process.env.DKG_DISABLE_SWM_KA_BOUND === '1';
+}
+
+/**
+ * TTL cap on the in-memory negative reconcile memo (#1609) — the longest a
+ * "no local SWM snapshot" verdict may be trusted without a fresh scan even
+ * when no write-generation change was observed. Bounds the exposure to any
+ * SWM writer invisible to the adapter's write-generation counter (e.g. a
+ * second process mutating a shared oxigraph-server) to "≤ TTL late", never
+ * "never". Read per call (like `swmKaBoundDisabled`) so ops and tests can
+ * retune it without a redeploy.
+ */
+const VM_RECONCILE_NEGATIVE_TTL_MS_DEFAULT = 600_000;
+function vmReconcileNegativeTtlMs(): number {
+  const raw = Number(process.env['DKG_VM_RECONCILE_NEGATIVE_TTL_MS']);
+  return Number.isFinite(raw) && raw > 0 ? raw : VM_RECONCILE_NEGATIVE_TTL_MS_DEFAULT;
+}
+
+/** LRU cap for the negative reconcile memo — bounds memory across CGs × roots. */
+const VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES = 4096;
+
+type NegativeSnapshotMemoEntry = {
+  /** Write generation for the CG's graph prefix observed BEFORE the scan. */
+  writeGen: number;
+  recordedAt: number;
+  /** Catalog-floor eligibility at scan time — a policy flip changes what can match. */
+  allowGeneratedCatalogFloor: boolean;
+};
+
 export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
@@ -91,6 +171,18 @@ export class FinalizationHandler {
   // caching a miss for a KC finalized before its on-chain KA->CG binding lands
   // would pin it to the legacy `/_meta` fallback forever, re-opening the race.
   private readonly chainCgIdByBatchId = new Map<string, string>();
+  // #1609 (2026-07-11/12 testnet incident): the write-generation source backing
+  // the negative reconcile memo below. `null` when the store's adapter doesn't
+  // track write generations — the memo is then DISABLED and every reconcile
+  // scans (fail-open), matching pre-memo behavior.
+  private readonly graphWriteGen: GraphWriteGenSource | null;
+  // Negative memo for `findSwmSnapshotForMerkleRoot`: "this (cg, namespace,
+  // root) had NO matching local SWM snapshot at write generation G". Unlike
+  // `chainCgIdByBatchId` above, caching the negative here is sound BECAUSE it
+  // is generation-gated: the verdict is only replayed while the store proves
+  // no local write has touched the CG since the scan. LRU, in-memory only —
+  // a restart clears it (fail-open).
+  private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
 
   constructor(
     store: TripleStore,
@@ -101,6 +193,7 @@ export class FinalizationHandler {
     lifecycleLogOptions?: FinalizationLifecycleLogOptions,
   ) {
     this.store = store;
+    this.graphWriteGen = asGraphWriteGenSource(store);
     this.chain = chain;
     this.eventBus = eventBus;
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
@@ -234,19 +327,29 @@ export class FinalizationHandler {
         return;
       }
 
-      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, msg.rootEntities, subGraphName);
+      // #1549: read this KA's per-author SWM under-graphs first, widening to today's
+      // unbounded read on empty-or-mismatch. All of the bound/widen policy — and the
+      // reasoning for why it is safe — lives in storage's
+      // `loadSharedMemorySliceWithKaBoundFallback`, which owns the widen.
+      const { quads: sharedMemoryQuads, matched: merkleMatchedQuads } = await this.loadFinalizationSwmSlice(
+        contextGraphId,
+        msg.rootEntities,
+        subGraphName,
+        swmKaBoundDisabled() ? undefined : deriveSwmKaGraphBound(startKAId, endKAId),
+        async () => {
+          const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities, subGraphName);
+          const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, ctxGraphId);
+          return (quads) => this.sharedMemoryQuadsMatchingMerkle(
+            contextGraphId,
+            quads,
+            privateRoots,
+            msg.kcMerkleRoot,
+            allowGeneratedCatalogFloor,
+          );
+        },
+      );
 
       if (sharedMemoryQuads.length > 0) {
-        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities, subGraphName);
-        const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, ctxGraphId);
-        const merkleMatchedQuads = this.sharedMemoryQuadsMatchingMerkle(
-          contextGraphId,
-          sharedMemoryQuads,
-          privateRoots,
-          msg.kcMerkleRoot,
-          allowGeneratedCatalogFloor,
-        );
-
         if (merkleMatchedQuads) {
           const batchId = protoToBigInt(msg.batchId);
           // PR #845 review #9: derive `txIndex` from the verified receipt
@@ -478,37 +581,60 @@ export class FinalizationHandler {
     }
   }
 
-  private async getSharedMemoryQuadsForRoots(contextGraphId: string, rootEntities: string[], subGraphName?: string): Promise<Quad[]> {
-    const graphManager = new GraphManager(this.store);
-    const sharedMemoryGraph = subGraphName
-      ? graphManager.sharedMemoryUri(contextGraphId, subGraphName)
+  private finalizationSwmBucketUri(contextGraphId: string, subGraphName?: string): string {
+    return subGraphName
+      ? new GraphManager(this.store).sharedMemoryUri(contextGraphId, subGraphName)
       : contextGraphWorkspaceGraphUri(contextGraphId);
+  }
+
+  /**
+   * Read the finalization SWM slice, preferring this KA's per-author under-graphs
+   * and widening to the complete read on empty-or-mismatch (#1549). The widen — and
+   * the reasoning for why the bound is a safe pure accelerator (INV-1 is refuted
+   * under root recurrence, so the bounded read may miss and must widen before the
+   * caller records anything) — lives in storage's
+   * `loadSharedMemorySliceWithKaBoundFallback`. This method only resolves the bucket
+   * URI and the accept predicate; it is a thin finalization-specific adapter.
+   *
+   * #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
+   * `…/_shared_memory/{author}/{number}`, not the bare bucket, so the read must span
+   * bucket + per-KA graphs or a replica reports "no shared memory data" and never
+   * materialises the KA into VM.
+   */
+  private async loadFinalizationSwmSlice(
+    contextGraphId: string,
+    rootEntities: string[],
+    subGraphName: string | undefined,
+    kaGraphBound: SwmKaGraphBound | undefined,
+    createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  ): Promise<{ quads: Quad[]; matched: Quad[] | null }> {
+    const safeRoots = rootEntities.filter(isSafeIri);
+    if (safeRoots.length === 0) return { quads: [], matched: null };
+    const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+      this.store,
+      this.finalizationSwmBucketUri(contextGraphId, subGraphName),
+      { rootEntities: safeRoots },
+      kaGraphBound,
+      { bounded: SWM_SLICE_SOURCE_BOUNDED, widened: SWM_SLICE_SOURCE_WIDENED, unbounded: SWM_SLICE_SOURCE },
+      createAccept,
+    );
+    return { quads, matched: accepted };
+  }
+
+  /** Complete (unbounded) SWM read for the chain-reconcile backstop. */
+  private async getSharedMemoryQuadsForRoots(
+    contextGraphId: string,
+    rootEntities: string[],
+    subGraphName?: string,
+  ): Promise<Quad[]> {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
-
-    // #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
-    // `…/_shared_memory/{author}/{number}` (workspace-handler.ts ~line 987),
-    // not the bare bucket. Reading only the bucket made every replica report
-    // "no shared memory data … peer missed SWM sharing" on finalization, so
-    // the published KA was never materialized into VM on subscribed peers
-    // (the VM-divergence half of #1098). Read-both: bucket + per-KA graphs.
-    //
-    // A3 (O(store) relief): bind the read to the exact SWM graph set up front
-    // via the fast named-graph index (`resolveSharedMemoryReadGraphs` →
-    // `listGraphsByPrefix`) instead of an unbounded `GRAPH ?g` +
-    // `sharedMemoryReadBothFilter` STRSTARTS filter, which scans EVERY quad in
-    // EVERY graph on RocksDB and starves finalization/ACK under load. The
-    // resolved set is exactly what that filter matched (bucket + `${bucket}/`
-    // minus `${bucket}/staging/`). Merkle-critical but FAIL-SAFE: if the index
-    // ever omitted a graph the recompute would MISMATCH and this KA is rejected
-    // (retried on a later round), never accepted with corrupt data.
-    // CONSTRUCT (not SELECT) so literal terms keep full datatype/lang
-    // fidelity for the merkle recompute, and so the same logical triple
-    // present in BOTH the bucket and a per-KA graph collapses to one
-    // (a constructed graph is a set).
-    return loadSelectedSharedMemoryQuads(this.store, sharedMemoryGraph, { rootEntities: safeRoots }, {
-      querySource: 'agent.finalization.sharedMemorySlice',
-    });
+    return loadSelectedSharedMemoryQuads(
+      this.store,
+      this.finalizationSwmBucketUri(contextGraphId, subGraphName),
+      { rootEntities: safeRoots },
+      { querySource: SWM_SLICE_SOURCE },
+    );
   }
 
   private verifyMerkleMatch(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[], expectedMerkleRoot: Uint8Array): boolean {
@@ -1000,10 +1126,31 @@ export class FinalizationHandler {
    * KA belongs to a publish this node never shared. Either way the B.2 sweep
    * retries later.
    *
-   * Cost note: O(#WorkspaceOperations) root recomputations per call. Fine for
-   * typical CGs; if a CG grows large this can be optimised by stamping the KC
-   * merkle root onto SWM meta at publish time (a publisher-side change, out of
-   * scope here).
+   * Cost note (#1609): the recompute is memoized (`SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE`
+   * + content digest). A *present* KA is resolved by its stamped root directly (fast
+   * path, no scan); the fallback still enumerates every op — it must, because ops
+   * assemble incrementally — but reuses each op's memoized root whenever its content
+   * digest is unchanged, skipping the expensive `computeFlatKCRoot`. So steady-state
+   * reconcile pays one bounded read + a cheap digest per op instead of a full merkle
+   * recompute per op. This is a bridge; OT-RFC-60 makes the root a write-maintained,
+   * indexed property (stamped once at op completion) so the fallback disappears
+   * entirely. The generated-catalog-floor variant keeps the exhaustive recompute
+   * (its match is over quads+floor, not the op's intrinsic stamped root).
+   *
+   * READ memo (#1609, 2026-07-11/12 testnet incident): the #1612 digest memo skips
+   * only the merkle recompute — a never-match KA (a publish this node never shared,
+   * exactly the beacon shape) still paid O(#ops) unbounded SWM CONSTRUCTs on EVERY
+   * sweep tick, forever, stalling the event loop and dropping storage-ACK streams
+   * on big stores. This wrapper adds a write-generation-gated NEGATIVE memo over
+   * the whole scan (floor retry included): a "no match" verdict is replayed
+   * without touching the store while (a) the adapter's write generation for the
+   * CG's graph prefix is unchanged — new SWM only arrives via local writes
+   * (gossip receive, publish share, active fetch), all of which pass the adapter
+   * choke points and bump the generation, so the next call rescans — (b) the
+   * catalog-floor eligibility is unchanged, and (c) the entry is younger than
+   * `vmReconcileNegativeTtlMs()`. A MATCH is never memoized. Stores without the
+   * write-generation capability disable the memo entirely (always scan), and a
+   * restart clears it — every failure mode degrades to a rescan, never a miss.
    */
   private async findSwmSnapshotForMerkleRoot(
     contextGraphId: string,
@@ -1012,6 +1159,65 @@ export class FinalizationHandler {
     onChainCgId?: string,
   ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[]; subGraphName?: string } | null> {
     const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, onChainCgId);
+
+    // Every graph the scan reads — root/sub-graph SWM buckets, their per-KA
+    // under-graphs and `_shared_memory_meta` (op rows, `privateMerkleRoot`,
+    // stamps) — lives under the CG's URI subtree, so one prefix covers all
+    // namespaces of this call. Broader than strictly needed (any CG-local
+    // write invalidates) — that only costs an extra rescan.
+    const memoKey = `${contextGraphId}\0${subGraphName ?? ''}\0${ethers.hexlify(merkleRoot)}`;
+    const swmWritePrefix = `${contextGraphDataUri(contextGraphId)}/`;
+    const preScanGen = this.graphWriteGen?.getWriteGen(swmWritePrefix);
+    if (preScanGen !== undefined) {
+      const memo = this.negativeSnapshotMemo.get(memoKey);
+      if (memo) {
+        if (
+          memo.writeGen === preScanGen &&
+          memo.allowGeneratedCatalogFloor === allowGeneratedCatalogFloor &&
+          Date.now() - memo.recordedAt < vmReconcileNegativeTtlMs()
+        ) {
+          // Refresh LRU recency; recordedAt stays — the TTL runs from the scan.
+          this.negativeSnapshotMemo.delete(memoKey);
+          this.negativeSnapshotMemo.set(memoKey, memo);
+          return null;
+        }
+        this.negativeSnapshotMemo.delete(memoKey);
+      }
+    }
+
+    const hit = await this.scanForSwmSnapshot(
+      contextGraphId,
+      merkleRoot,
+      subGraphName,
+      allowGeneratedCatalogFloor,
+    );
+    if (hit) return hit;
+
+    if (preScanGen !== undefined) {
+      // Record at the PRE-scan generation: any write that raced the scan (or
+      // the scan's own best-effort restamps) flips the gate above, so the next
+      // call rescans rather than replaying a verdict that may predate the write.
+      this.negativeSnapshotMemo.set(memoKey, {
+        writeGen: preScanGen,
+        recordedAt: Date.now(),
+        allowGeneratedCatalogFloor,
+      });
+      while (this.negativeSnapshotMemo.size > VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES) {
+        const oldest = this.negativeSnapshotMemo.keys().next().value;
+        if (oldest === undefined) break;
+        this.negativeSnapshotMemo.delete(oldest);
+      }
+    }
+    return null;
+  }
+
+  /** The authoritative full scan behind {@link findSwmSnapshotForMerkleRoot}. */
+  private async scanForSwmSnapshot(
+    contextGraphId: string,
+    merkleRoot: Uint8Array,
+    subGraphName: string | undefined,
+    allowGeneratedCatalogFloor: boolean,
+  ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[]; subGraphName?: string } | null> {
     // Caller knows the exact namespace → search only that one.
     if (subGraphName) {
       const hit = await this.findSwmSnapshotInNamespace(
@@ -1069,12 +1275,175 @@ export class FinalizationHandler {
       ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
       : contextGraphWorkspaceMetaGraphUri(contextGraphId);
 
-    // Group root entities by their WorkspaceOperation so each candidate KC is
-    // verified as a whole (the merkle root is over all of an op's roots).
+    // The generated-catalog-floor variant matches over quads+floor rather than an
+    // op's intrinsic root, so it cannot be resolved by the stamped intrinsic root —
+    // those CGs (a stable per-CG access policy) keep the exhaustive recompute scan.
+    const useStampIndex = !allowGeneratedCatalogFloor;
+
+    // FAST PATH — resolve a *present* KA whose op is stamped with the target root via
+    // one indexed lookup (verified authoritatively), instead of recomputing every op's
+    // root. On a miss it falls through to the memoized fallback scan below.
+    if (useStampIndex) {
+      const stamped = await this.findStampedSwmSnapshot(contextGraphId, wsMetaGraph, merkleRoot, subGraphName);
+      if (stamped) return stamped;
+    }
+
+    // Enumerate EVERY op with its memoized (root, content-digest) stamp. We never
+    // exclude on stamp-presence: a WorkspaceOperation is assembled incrementally via
+    // entity-keyed data / private-root writes that don't rewrite the op subject, so a
+    // stamp can be stale. The digest below makes reuse safe without a full recompute —
+    // reuse the memoized root only when the op's current content still hashes to the
+    // same cheap digest; any content change flips the digest → full recompute → the
+    // op is re-evaluated and re-stamped. No op can be stranded by a stale stamp.
+    type OpMemo = { roots: string[]; memoRoot?: string; memoDigest?: string };
+    const opsBySubject = new Map<string, OpMemo>();
+    try {
+      const memoPatterns = useStampIndex
+        ? `OPTIONAL { ?op <${SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE}> ?memoRoot . }
+          OPTIONAL { ?op <${SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE}> ?memoDigest . }`
+        : '';
+      const result = await this.store.query(`SELECT ?op ?root ?memoRoot ?memoDigest WHERE {
+        GRAPH <${assertSafeIri(wsMetaGraph)}> {
+          ?op <${DKG_NS}rootEntity> ?root .
+          ${memoPatterns}
+        }
+      }`);
+      if (result.type === 'bindings') {
+        for (const row of result.bindings) {
+          const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
+          const root = typeof row['root'] === 'string' ? row['root'].replace(/^<(.*)>$/, '$1') : '';
+          if (!op || !isSafeIri(root)) continue;
+          const memo = opsBySubject.get(op) ?? { roots: [] };
+          if (!memo.roots.includes(root)) memo.roots.push(root);
+          if (memo.memoRoot === undefined && typeof row['memoRoot'] === 'string') {
+            memo.memoRoot = row['memoRoot'].replace(/^"(.*)".*$/, '$1');
+          }
+          if (memo.memoDigest === undefined && typeof row['memoDigest'] === 'string') {
+            memo.memoDigest = row['memoDigest'].replace(/^"(.*)".*$/, '$1');
+          }
+          opsBySubject.set(op, memo);
+        }
+      }
+    } catch { /* SWM meta may not exist yet */ }
+
+    if (opsBySubject.size === 0) return null;
+
+    const opsSorted = [...opsBySubject.entries()].sort(
+      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+    );
+    // Ops whose content changed (or were never stamped) get a fresh (root, digest)
+    // memo written after the loop — best-effort: a store hiccup on the memo must
+    // never fail reconcile (correctness comes from the recompute here).
+    const restamp = new Map<string, { root: string; digest: string }>();
+    const targetHex = ethers.hexlify(merkleRoot);
+    let hit: { rootEntities: string[]; sharedMemoryQuads: Quad[] } | null = null;
+    for (const [op, memo] of opsSorted) {
+      const roots = memo.roots;
+      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
+      if (sharedMemoryQuads.length === 0) continue;
+      const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
+      if (useStampIndex) {
+        const digest = this.swmContentDigest(sharedMemoryQuads, privateRoots);
+        let computedHex: string;
+        if (memo.memoRoot !== undefined && memo.memoDigest === digest) {
+          // Content unchanged since the memo was written → reuse the root and skip
+          // the expensive computeFlatKCRoot. The digest is a pure function of the
+          // same (quads, privateRoots) computeFlatKCRoot consumes, so digest-equal
+          // ⇒ root-equal.
+          computedHex = memo.memoRoot;
+        } else {
+          computedHex = this.computeOpMerkleRoot(sharedMemoryQuads, privateRoots);
+          restamp.set(op, { root: computedHex, digest });
+        }
+        if (computedHex === targetHex) {
+          hit = { rootEntities: roots, sharedMemoryQuads };
+          break;
+        }
+      } else {
+        const merkleMatchedQuads = this.sharedMemoryQuadsMatchingMerkle(
+          contextGraphId,
+          sharedMemoryQuads,
+          privateRoots,
+          merkleRoot,
+          allowGeneratedCatalogFloor,
+        );
+        if (merkleMatchedQuads) {
+          return { rootEntities: roots, sharedMemoryQuads: merkleMatchedQuads };
+        }
+      }
+    }
+    await this.persistSwmStamps(wsMetaGraph, restamp);
+    return hit;
+  }
+
+  /**
+   * Cheap content fingerprint of an op's SWM snapshot — a pure function of the same
+   * `(sharedMemoryQuads, privateRoots)` that `computeFlatKCRoot` consumes, but a
+   * plain sorted-sha256 rather than the full skolemize + merkle construction. Used
+   * only to decide whether a memoized root is still valid (digest-equal ⇒ the
+   * content, hence its flat-KC root, is unchanged), never as an authoritative root.
+   */
+  /**
+   * The op's intrinsic flat-KC merkle root (hex) — the expensive recompute the
+   * content-digest memo lets us skip for unchanged ops. A named seam so callers and
+   * tests can attribute the cost.
+   */
+  private computeOpMerkleRoot(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[]): string {
+    return ethers.hexlify(computeFlatKCRoot(sharedMemoryQuads, privateRoots));
+  }
+
+  private swmContentDigest(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[]): string {
+    // Unambiguous encoding (NUL field-sep, NL row-sep) matching the SWM-generation
+    // fingerprint convention in `readVmReconcileSwmGen`, so distinct contents cannot
+    // collide to the same digest and cause a wrong memoized-root reuse.
+    const quadLines = sharedMemoryQuads
+      .map((q) => [q.subject, q.predicate, typeof q.object === 'string' ? q.object : String(q.object), q.graph ?? ''].join('\0'))
+      .sort();
+    const privateLines = privateRoots.map((r) => ethers.hexlify(r)).sort();
+    const payload = `${quadLines.join('\n')}\0\0private\0\0${privateLines.join('\n')}`;
+    return createHash('sha256').update(payload, 'utf8').digest('hex');
+  }
+
+  /**
+   * Replace the (root, content-digest) memo for each op — delete-then-insert so an
+   * op never accumulates duplicate/stale stamp triples. Best-effort; a failure here
+   * leaves the memo absent (next pass recomputes), never wrong.
+   */
+  private async persistSwmStamps(wsMetaGraph: string, restamp: Map<string, { root: string; digest: string }>): Promise<void> {
+    if (restamp.size === 0) return;
+    try {
+      const quads: Quad[] = [];
+      for (const [op, { root, digest }] of restamp) {
+        await this.store.deleteByPattern({ graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE });
+        await this.store.deleteByPattern({ graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE });
+        quads.push(
+          { subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: `"${root}"`, graph: wsMetaGraph },
+          { subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE, object: `"${digest}"`, graph: wsMetaGraph },
+        );
+      }
+      await this.store.insert(quads);
+    } catch { /* memo is best-effort; the recompute is the source of truth */ }
+  }
+
+  /**
+   * Fast path for `findSwmSnapshotInNamespace`: resolve the WorkspaceOperation
+   * whose stamped intrinsic root equals `merkleRoot` without recomputing every
+   * op's root. Re-verifies with `verifyMerkleMatch` (authoritative) so a stale
+   * stamp can never promote the wrong snapshot; a stamp that no longer verifies is
+   * dropped so the op falls back into the recompute scan this same pass.
+   */
+  private async findStampedSwmSnapshot(
+    contextGraphId: string,
+    wsMetaGraph: string,
+    merkleRoot: Uint8Array,
+    subGraphName?: string,
+  ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[] } | null> {
+    const targetHex = ethers.hexlify(merkleRoot);
     const rootsByOp = new Map<string, string[]>();
     try {
       const result = await this.store.query(`SELECT ?op ?root WHERE {
         GRAPH <${assertSafeIri(wsMetaGraph)}> {
+          ?op <${SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE}> "${targetHex}" .
           ?op <${DKG_NS}rootEntity> ?root .
         }
       }`);
@@ -1088,27 +1457,22 @@ export class FinalizationHandler {
           rootsByOp.set(op, list);
         }
       }
-    } catch { /* SWM meta may not exist yet */ }
+    } catch { return null; }
 
-    if (rootsByOp.size === 0) return null;
-
-    const opsSorted = [...rootsByOp.entries()].sort(
-      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
-    );
-    for (const [, roots] of opsSorted) {
+    for (const [op, roots] of rootsByOp) {
       const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
-      if (sharedMemoryQuads.length === 0) continue;
-      const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
-      const merkleMatchedQuads = this.sharedMemoryQuadsMatchingMerkle(
-        contextGraphId,
-        sharedMemoryQuads,
-        privateRoots,
-        merkleRoot,
-        allowGeneratedCatalogFloor,
-      );
-      if (merkleMatchedQuads) {
-        return { rootEntities: roots, sharedMemoryQuads: merkleMatchedQuads };
+      if (sharedMemoryQuads.length > 0) {
+        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
+        if (this.verifyMerkleMatch(sharedMemoryQuads, privateRoots, merkleRoot)) {
+          return { rootEntities: roots, sharedMemoryQuads };
+        }
       }
+      // The stamp no longer reflects the op's content — drop the whole (root, digest)
+      // memo so the recompute scan re-evaluates and re-stamps it this pass.
+      try {
+        await this.store.deleteByPattern({ graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE });
+        await this.store.deleteByPattern({ graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE });
+      } catch { /* best-effort self-heal */ }
     }
     return null;
   }

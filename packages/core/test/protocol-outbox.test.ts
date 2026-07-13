@@ -5,7 +5,12 @@ import {
   InMemoryProtocolOutboxStore,
   ProtocolOutbox,
 } from '../src/protocol-outbox.js';
-import { RESPONSE_CACHE_BYTES } from '../src/messenger-types.js';
+import {
+  RESPONSE_CACHE_BYTES,
+  type LegacyProtocolOutboxStore,
+  type ProtocolOutboxEntry,
+  type ProtocolOutboxStore,
+} from '../src/messenger-types.js';
 
 const PEER_A = '12D3KooWMilesPlaceholder';
 const PEER_B = '12D3KooWLexPlaceholder';
@@ -71,7 +76,7 @@ describe('ProtocolOutbox.enqueueFailure', () => {
     payload[0] = 9;
     entry.payload[1] = 8;
 
-    const pending = outbox.pendingFor(PEER_A);
+    const pending = outbox.list().filter((entry) => entry.peer === PEER_A);
     expect(Array.from(pending[0].payload)).toEqual([1, 2, 3]);
 
     pending[0].payload[2] = 7;
@@ -94,8 +99,8 @@ describe('ProtocolOutbox.markDelivered + hasEntry', () => {
   });
 
   it('hasEntry is the stale-snapshot guard required by the substrate contract', () => {
-    // Models the rc9 #538 race: two sibling flushes both got the same
-    // entry from `pendingFor`, one completed delivery + markDelivered,
+    // Models the rc9 #538 race: two overlapping scheduled drains both got the
+    // same entry from a due snapshot, one completed delivery + markDelivered,
     // the other races to retry. The second MUST check `hasEntry` after
     // `tryBeginAttempt` returns true, because tryBeginAttempt only
     // guards against TRULY concurrent attempts, not stale-snapshot-
@@ -128,7 +133,7 @@ describe('ProtocolOutbox.tryBeginAttempt / endAttempt', () => {
   });
 });
 
-describe('ProtocolOutbox.due / pendingFor', () => {
+describe('ProtocolOutbox.due / peer presence', () => {
   it('due returns entries whose nextAttemptAt is at or before now', () => {
     const { outbox } = fixture();
     outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1000);
@@ -137,14 +142,144 @@ describe('ProtocolOutbox.due / pendingFor', () => {
     expect(outbox.due(expectedNext)).toHaveLength(1);
   });
 
-  it('pendingFor returns all entries for a peer in firstFailureAt ascending order', () => {
+  it('bounds due snapshots in retry-time order', () => {
+    const { outbox } = fixture();
+    outbox.enqueueFailure(PEER_A, PROTO, 'third', PAYLOAD, 'e', 3000);
+    outbox.enqueueFailure(PEER_A, PROTO, 'first', PAYLOAD, 'e', 1000);
+    outbox.enqueueFailure(PEER_A, PROTO, 'second', PAYLOAD, 'e', 2000);
+    const now = 3000 + DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[0];
+    expect(outbox.duePage(now, 2).map((entry) => entry.messageId)).toEqual(['first', 'second']);
+  });
+
+  it('normalizes limits once and deterministically orders exact timestamp ties', () => {
+    const { outbox } = fixture();
+    outbox.enqueueFailure(PEER_A, PROTO, 'z-last', PAYLOAD, 'e', 1000);
+    outbox.enqueueFailure(PEER_A, PROTO, 'a-first', PAYLOAD, 'e', 1000);
+    const now = 1000 + DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[0];
+
+    expect(outbox.duePage(now, 1.9).map((entry) => entry.messageId)).toEqual(['a-first']);
+    expect(outbox.duePage(now, Number.NaN).map((entry) => entry.messageId)).toEqual(['a-first', 'z-last']);
+  });
+
+  it('keeps legacy due/pendingFor stores compatible and sorts before applying the cap', () => {
+    const backing = new InMemoryProtocolOutboxStore();
+    const entry = (
+      messageId: string,
+      firstFailureAt: number,
+    ): ProtocolOutboxEntry => ({
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId,
+      payload: PAYLOAD,
+      attempts: 1,
+      firstFailureAt,
+      lastAttemptAt: firstFailureAt,
+      nextAttemptAt: 100,
+      lastError: 'offline',
+    });
+    const newer = entry('a-newer-failure', 20);
+    const older = entry('z-older-failure', 10);
+    const legacyStore: LegacyProtocolOutboxStore = {
+      enqueue: backing.enqueue.bind(backing),
+      markDelivered: backing.markDelivered.bind(backing),
+      hasEntry: backing.hasEntry.bind(backing),
+      pendingFor: (peer) => peer === PEER_A ? [newer, older] : [],
+      due: () => [newer, older],
+      dropExpired: backing.dropExpired.bind(backing),
+      size: backing.size.bind(backing),
+      list: backing.list.bind(backing),
+      getEntry: backing.getEntry.bind(backing),
+    };
+    const outbox = new ProtocolOutbox(legacyStore);
+
+    expect(outbox.duePage(100, 1).map((candidate) => candidate.messageId))
+      .toEqual(['z-older-failure']);
+    expect(outbox.due(100).map((candidate) => candidate.messageId))
+      .toEqual(['z-older-failure', 'a-newer-failure']);
+    expect(outbox.hasPendingFor(PEER_A)).toBe(true);
+    expect(outbox.hasPendingFor(PEER_B)).toBe(false);
+    expect(outbox.pendingFor(PEER_A).map((candidate) => candidate.messageId))
+      .toEqual(['z-older-failure', 'a-newer-failure']);
+  });
+
+  it('keeps current hasPendingFor-only stores compatible without requiring peer snapshots', () => {
+    const backing = new InMemoryProtocolOutboxStore();
+    const entry = (
+      peer: string,
+      messageId: string,
+      firstFailureAt: number,
+    ): ProtocolOutboxEntry => ({
+      peer,
+      protocol: PROTO,
+      messageId,
+      payload: PAYLOAD,
+      attempts: 1,
+      firstFailureAt,
+      lastAttemptAt: firstFailureAt,
+      nextAttemptAt: 100,
+      lastError: 'offline',
+    });
+    const newer = entry(PEER_A, 'a-newer-failure', 20);
+    const older = entry(PEER_A, 'z-older-failure', 10);
+    const otherPeer = entry(PEER_B, 'other-peer', 1);
+    let listCalls = 0;
+    const currentStore: ProtocolOutboxStore = {
+      enqueue: backing.enqueue.bind(backing),
+      markDelivered: backing.markDelivered.bind(backing),
+      hasEntry: backing.hasEntry.bind(backing),
+      hasPendingFor: (peer) => peer === PEER_A,
+      due: backing.due.bind(backing),
+      dropExpired: backing.dropExpired.bind(backing),
+      size: backing.size.bind(backing),
+      list: () => {
+        listCalls += 1;
+        return [newer, otherPeer, older];
+      },
+      getEntry: backing.getEntry.bind(backing),
+    };
+    const outbox = new ProtocolOutbox(currentStore);
+
+    expect(outbox.hasPendingFor(PEER_A)).toBe(true);
+    expect(outbox.hasPendingFor(PEER_B)).toBe(false);
+    expect(listCalls).toBe(0);
+
+    const pending = outbox.pendingFor(PEER_A);
+    expect(pending.map((candidate) => candidate.messageId))
+      .toEqual(['z-older-failure', 'a-newer-failure']);
+    expect(listCalls).toBe(1);
+    pending[0].payload[0] = 99;
+    expect(older.payload[0]).toBe(PAYLOAD[0]);
+  });
+
+  it('uses firstFailureAt before key ordering when nextAttemptAt ties', () => {
+    const store = new InMemoryProtocolOutboxStore({ backoffs: [50, 10] });
+    const outbox = new ProtocolOutbox(store, { backoffs: [50, 10] });
+    outbox.enqueueFailure(PEER_A, PROTO, 'z-older-failure', PAYLOAD, 'first', 0);
+    outbox.enqueueFailure(PEER_A, PROTO, 'z-older-failure', PAYLOAD, 'second', 90);
+    outbox.enqueueFailure(PEER_A, PROTO, 'a-newer-failure', PAYLOAD, 'first', 50);
+
+    const due = outbox.duePage(100, 1);
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({
+      messageId: 'z-older-failure',
+      firstFailureAt: 0,
+      nextAttemptAt: 100,
+    });
+  });
+
+  it('hasPendingFor tracks peer rows without exposing a reconnect drain snapshot', () => {
     const { outbox } = fixture();
     outbox.enqueueFailure(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2000);
     outbox.enqueueFailure(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1000);
     outbox.enqueueFailure(PEER_B, PROTO, MSG_1, PAYLOAD, 'e', 500);
-    const peerA = outbox.pendingFor(PEER_A);
-    expect(peerA.map((e) => e.messageId)).toEqual([MSG_1, MSG_2]);
-    expect(outbox.pendingFor(PEER_B)).toHaveLength(1);
+    expect(outbox.hasPendingFor(PEER_A)).toBe(true);
+    expect(outbox.hasPendingFor(PEER_B)).toBe(true);
+    expect(outbox.hasPendingFor('peer-c')).toBe(false);
+
+    const pending = outbox.pendingFor(PEER_A);
+    expect(pending.map((entry) => entry.messageId)).toEqual([MSG_1, MSG_2]);
+    pending[0].payload[0] = 99;
+    expect(outbox.pendingFor(PEER_A)[0].payload[0]).toBe(PAYLOAD[0]);
   });
 });
 

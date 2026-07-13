@@ -100,6 +100,10 @@ interface ACKCollectorDepsCapture {
   ) => Promise<VerifyACKIdentityResult>;
 }
 
+interface StorageACKHandlerConfigCapture {
+  isCgCurated?: (cgId: string, swmGraphId?: string) => Promise<boolean | null>;
+}
+
 /**
  * Reach into the agent's `private createV10ACKProvider(cgId)` so the
  * ACK collector is actually constructed and its deps are captured.
@@ -268,12 +272,12 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     agent = boot.agent;
     const internals = boot.internals;
     const response = new Uint8Array([9]);
-    const sendReliable = vi.fn(async () => ({
+    const sendRequestOwned = vi.fn(async () => ({
       delivered: true,
       response,
     }));
     const payload = new Uint8Array([1, 2, 3]);
-    internals.messenger = { sendReliable };
+    internals.messenger = { sendRequestOwned };
 
     internals.createV10ACKProvider('test-cg');
     const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
@@ -283,12 +287,35 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const updateDeps = capturedAckCollectorDeps[1] as ACKCollectorDepsCapture;
     await expect(updateDeps.sendP2P!('peer-b', '/dkg/test/storage-update-ack', payload)).resolves.toEqual(response);
 
-    expect(sendReliable).toHaveBeenNthCalledWith(1, 'peer-a', '/dkg/test/storage-ack', payload, {
+    expect(sendRequestOwned).toHaveBeenNthCalledWith(1, 'peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
-    expect(sendReliable).toHaveBeenNthCalledWith(2, 'peer-b', '/dkg/test/storage-update-ack', payload, {
+    expect(sendRequestOwned).toHaveBeenNthCalledWith(2, 'peer-b', '/dkg/test/storage-update-ack', payload, {
       timeoutMs: 60_000,
     });
+  });
+
+  it('returns request-owned address failures to the ACK collector retry loop', async () => {
+    const boot = await bootProviderAgent({ ackSendTimeoutMs: 60_000 });
+    agent = boot.agent;
+    const internals = boot.internals;
+    const payload = new Uint8Array([1, 2, 3]);
+    const sendRequestOwned = vi.fn(async () => {
+      throw new Error('no valid addresses for peer');
+    });
+    internals.messenger = { sendRequestOwned };
+
+    internals.createV10ACKProvider('test-cg');
+    const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+    await expect(
+      publishDeps.sendP2P!('peer-a', '/dkg/test/storage-ack', payload),
+    ).rejects.toThrow('no valid addresses for peer');
+    expect(sendRequestOwned).toHaveBeenCalledWith(
+      'peer-a',
+      '/dkg/test/storage-ack',
+      payload,
+      { timeoutMs: 60_000 },
+    );
   });
 
   it('normalizes legacy handler-only ACK timing before publish sendP2P wiring', async () => {
@@ -296,18 +323,18 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     agent = boot.agent;
     const internals = boot.internals;
     const response = new Uint8Array([9]);
-    const sendReliable = vi.fn(async () => ({
+    const sendRequestOwned = vi.fn(async () => ({
       delivered: true,
       response,
     }));
-    internals.messenger = { sendReliable };
+    internals.messenger = { sendRequestOwned };
     const payload = new Uint8Array([1]);
 
     internals.createV10ACKProvider('test-cg');
     const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
     await expect(publishDeps.sendP2P!('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);
 
-    expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
+    expect(sendRequestOwned).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
   });
@@ -340,11 +367,11 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     agent = boot.agent;
     const internals = boot.internals;
     const response = new Uint8Array([9]);
-    const sendReliable = vi.fn(async () => ({
+    const sendRequestOwned = vi.fn(async () => ({
       delivered: true,
       response,
     }));
-    internals.messenger = { sendReliable };
+    internals.messenger = { sendRequestOwned };
     const payload = new Uint8Array([1]);
 
     internals.createV10ACKProvider('test-cg');
@@ -355,7 +382,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       handlerDeadlineMs: 0,
       sendTimeoutMs: 20_000,
     });
-    expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
+    expect(sendRequestOwned).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 20_000,
     });
   });
@@ -370,10 +397,10 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       delivered: false,
       error: 'queued',
     }));
-    internals.messenger = { sendReliable: queuedSend };
+    internals.messenger = { sendRequestOwned: queuedSend };
     await expect(
       internals.createACKTransportFactory()().sendP2P('peer-a', '/dkg/test/storage-ack', payload),
-    ).rejects.toThrow(/substrate queued \(transport\): queued/);
+    ).rejects.toThrow(/substrate send already in flight \(transport\): queued/);
     expect(queuedSend).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
@@ -381,7 +408,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const missingResponseSend = vi.fn(async () => ({
       delivered: true,
     }));
-    internals.messenger = { sendReliable: missingResponseSend };
+    internals.messenger = { sendRequestOwned: missingResponseSend };
     await expect(
       internals.createACKTransportFactory()().sendP2P('peer-a', '/dkg/test/storage-ack', payload),
     ).rejects.toThrow(/substrate delivered \(transport\) without response/);
@@ -415,5 +442,37 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(capturedStorageACKHandlerConfigs).toContainEqual(
       expect.objectContaining({ ackHandlerDeadlineMs: 55_000 }),
     );
+  });
+
+  it('delegates StorageACK curation config to the named target-policy resolver', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+
+    agent = await DKGAgent.create({
+      name: 'ACKCurationFastPathTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    await agent.start();
+
+    const resolver = vi.spyOn(agent, 'resolveCgCurationForAck').mockResolvedValue(true);
+
+    const handlerConfig = capturedStorageACKHandlerConfigs.find(
+      (config): config is StorageACKHandlerConfigCapture =>
+        typeof (config as StorageACKHandlerConfigCapture).isCgCurated === 'function',
+    );
+    expect(handlerConfig?.isCgCurated).toBeTypeOf('function');
+
+    // StorageACKHandler uses this one callback from both handler() and
+    // updateHandler(). The source SWM graph must not enter the target-policy
+    // resolver; only the PublishIntent's target cgId determines curation.
+    await expect(handlerConfig!.isCgCurated!('101', 'private-looking-source')).resolves.toBe(true);
+    expect(resolver).toHaveBeenCalledOnce();
+    expect(resolver).toHaveBeenCalledWith('101', expect.any(Object));
   });
 });

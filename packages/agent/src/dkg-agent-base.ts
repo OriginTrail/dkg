@@ -94,6 +94,7 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
@@ -146,7 +147,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
-import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
+import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
@@ -216,7 +217,7 @@ import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-cor
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { insertWithOversizeGuard } from './sync/oversize-filter.js';
 import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
-import { getSyncCheckpointKey, MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
+import { getSyncCheckpointKey, MemorySyncCheckpointStore, MemoryChangelogCursorStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -354,7 +355,7 @@ import {
   type ReplicationEvent,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
-import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
+import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -399,14 +400,6 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
 }
 
-function isSparqlUpdateStatement(sparql: string): boolean {
-  const withoutPrologue = sparql.replace(
-    /^\s*(?:(?:PREFIX\s+[\w-]*:\s*<[^>]+>|BASE\s+<[^>]+>)\s*)*/i,
-    '',
-  );
-  return /^(?:WITH\s+<[^>]+>\s*)?(?:INSERT|DELETE|DROP|CLEAR|CREATE|LOAD|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
-}
-
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
   invalidate: () => void,
@@ -428,6 +421,9 @@ export function createListContextGraphsCacheInvalidatingStore(
     innerStore,
     get queryCancellation() {
       return innerStore.queryCancellation;
+    },
+    getPressureSnapshot() {
+      return innerStore.getPressureSnapshot?.();
     },
     insert(quads, options) {
       return invalidateAfterMutation(
@@ -453,12 +449,12 @@ export function createListContextGraphsCacheInvalidatingStore(
     query(sparql, options) {
       return invalidateAfterMutation(
         () => innerStore.query(sparql, options),
-        () => isSparqlUpdateStatement(sparql),
+        () => isSparqlUpdateOperation(sparql),
         () => markProjectionDirty?.(),
       );
     },
-    hasGraph(graphUri) {
-      return innerStore.hasGraph(graphUri);
+    hasGraph(graphUri, options) {
+      return innerStore.hasGraph(graphUri, options);
     },
     createGraph(graphUri) {
       return innerStore.createGraph(graphUri);
@@ -616,6 +612,12 @@ export class DKGAgentBase {
    * field.
    */
   protected readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
+  /**
+   * Cached curation classification for each host-mode handler. The handler
+   * reads this map before dispatch so the strip can cover both legacy and
+   * chunked envelopes without a store-backed policy lookup per message.
+   */
+  protected readonly swmHostModeCurated = new Map<string, boolean>();
   /**
    * Per-CG reference to the host-mode gossip handler closure. Kept
    * so we can call `gossip.offMessage(topic, handler)` to remove
@@ -900,9 +902,8 @@ export class DKGAgentBase {
   protected hostModeReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   protected hostModePruneTimer: ReturnType<typeof setInterval> | null = null;
   // rc.9 PR-10: joinApprovalRetryQueue + joinApprovalRetryTimer
-  // deleted. The substrate's SQLite-backed ProtocolOutbox + its tick
-  // (`Messenger.processOutboxTick`) + opportunistic on-connect flush
-  // (`Messenger.processOutboxOnConnect`) replace the entire in-memory
+  // deleted. The substrate's SQLite-backed ProtocolOutbox + its
+  // scheduled tick (`Messenger.processOutboxTick`) replace the in-memory
   // queue: persistence across restart, generic per-protocol coverage,
   // identical backoff-ladder semantics. Operator-facing diagnostics
   // (`listPendingJoinApprovalRetries`) are stubbed to [] until PR-12
@@ -917,6 +918,8 @@ export class DKGAgentBase {
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingHandle: RandomSamplingHandle | null = null;
+  protected randomSamplingIdentityId = 0n;
+  protected randomSamplingDisabledReason: RandomSamplingDisabledReason = 'not_started';
   protected randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingBindRetryInFlight = false;
   protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1130,8 +1133,8 @@ export class DKGAgentBase {
    *      the access policy as soon as the core sees the `ContextGraphCreated`
    *      / `NameClaimed` event from chain, BEFORE the publisher's
    *      first publish intent arrives.
-   *   2. `isCgCurated` callback (lazy) — when local store has no
-   *      access-policy triple AND the cache is cold, the callback falls
+   *   2. {@link resolveCgCurationForAck} (lazy) — when local store has no
+   *      access-policy triple AND the cache is cold, the resolver falls
    *      back to a single `chain.getContextGraphAccessPolicy` RPC and
    *      memoizes the answer here.
    *
@@ -1376,6 +1379,7 @@ export class DKGAgentBase {
    * by PR #237 (sync-refactor-rebased).
    */
   protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
+  protected changelogCursors: ChangelogCursorStore = new MemoryChangelogCursorStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
@@ -1458,6 +1462,7 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceAgentRecipientResolver((input) => (this as unknown as DKGAgent).resolveWorkspaceRecipientsGated(input));
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
+    this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
   }
 
   /**

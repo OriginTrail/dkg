@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
 import { _autoUpdateIo } from '../src/daemon.js';
 
@@ -197,11 +197,16 @@ function restoreIo() {
 import {
   checkForNewCommitWithStatus,
   checkForUpdate,
+  formatAutoUpdateTagVerificationWarning,
   normalizeGitRefInput,
   performUpdate,
   performNpmUpdate,
   resolveAutoUpdateGitRef,
+  resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
+import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
+import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
+import type { LastUpdateCheck } from '../src/daemon/state.js';
 
 const AU: AutoUpdateConfig = {
   enabled: true,
@@ -232,6 +237,66 @@ describe('git auto-update ref normalization', () => {
     expect(() => normalizeGitRefInput('main; rm -rf /')).toThrow(/invalid branch\/ref/);
     expect(() => normalizeGitRefInput('--upload-pack=/tmp/pwn')).toThrow(/invalid branch\/ref/);
     expect(() => normalizeGitRefInput('refs/heads/')).toThrow(/invalid branch\/ref/);
+  });
+
+  it('plans signed tag verification and the matching force-fetch ref in one place', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: true,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/tags/v10.0.8',
+      tagName: 'v10.0.8',
+      verifyTagSignature: true,
+      shouldVerifyTagSignature: true,
+      fetchRef: '+refs/tags/v10.0.8:refs/tags/v10.0.8',
+    });
+    expect(formatAutoUpdateTagVerificationWarning(plan)).toBeNull();
+  });
+
+  it('plans unverified tag fetches with a non-forced destination refspec', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: false,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/tags/v10.0.8',
+      tagName: 'v10.0.8',
+      verifyTagSignature: false,
+      shouldVerifyTagSignature: false,
+      fetchRef: 'refs/tags/v10.0.8:refs/tags/v10.0.8',
+    });
+  });
+
+  it('plans branch verification as inert and formats the daemon startup warning', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: true,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/heads/main',
+      tagName: null,
+      verifyTagSignature: true,
+      shouldVerifyTagSignature: false,
+      fetchRef: 'refs/heads/main',
+    });
+    expect(formatAutoUpdateTagVerificationWarning(plan)).toContain(
+      'verifyTagSignature=true is inert for non-tag ref "refs/heads/main"',
+    );
   });
 });
 
@@ -1014,9 +1079,78 @@ describe('blue-green checkForUpdate', () => {
     expect(fetchUrl).toContain('/commits/v9.0.5');
     expect(fetchUrl).not.toContain('refs%2Ftags%2Fv9.0.5');
     const allGitCalls = getExecFileCalls();
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git +refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- v9.0.5')).toBe(true);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'checkout --force FETCH_HEAD')).toBe(true);
+  });
+
+  it('defaults tag-signature verification from resolved git auto-update config', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/v9.0.5', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- v9.0.5')).toBe(true);
+  });
+
+  it('terminates git verify-tag options before option-shaped tag names', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/--signed-release', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    const verifyCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'verify-tag');
+    expect(verifyCall?.args).toEqual(['verify-tag', '--', '--signed-release']);
+  });
+
+  it('preserves normal tag immutability when tag verification is disabled', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'fetch' && args.at(-1) === 'refs/tags/v9.0.5:refs/tags/v9.0.5') {
+        throw new Error('would clobber existing tag');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const logCalls: string[] = [];
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/v9.0.5', verifyTagSignature: false },
+      (msg) => { logCalls.push(msg); },
+    );
+
+    expect(result).toBe(false);
+    const allGitCalls = getExecFileCalls();
+    const fetchCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'fetch');
+    expect(fetchCall?.args).toEqual(['fetch', 'https://github.com/owner/repo.git', 'refs/tags/v9.0.5:refs/tags/v9.0.5']);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.includes('+refs/tags/v9.0.5:refs/tags/v9.0.5'))).toBe(false);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args[0] === 'verify-tag')).toBe(false);
+    expect(logCalls.some((msg) => msg.includes('would clobber existing tag'))).toBe(true);
+  });
+
+  it('does not run git verify-tag for branch refs when tag verification is requested', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('branchsha123');
+
+    const result = await performUpdate(
+      { ...AU, branch: 'main', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git refs/heads/main')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args[0] === 'verify-tag')).toBe(false);
   });
 
   it('accepts refs containing build metadata (+) for tag checks', async () => {
@@ -1962,4 +2096,195 @@ describe('autoupdater hardening', () => {
     expect(swapSlotCalls.length).toBe(0);
   });
 
+});
+
+// Post-hold-off revalidation mappers for the rollout gate. These guard the
+// exact seam behind the 🔴 review finding: after the jitter delay, the target
+// detected earlier must be RE-CONFIRMED so a withdrawn / rolled-back release is
+// never installed. (The gate orchestration itself is covered in
+// auto-update-jitter.test.ts; here we prove the real npm/git mappers.)
+describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
+  function makeRegistryResponse(distTags: Record<string, string>) {
+    return { ok: true, json: async () => ({ 'dist-tags': distTags }) } as any;
+  }
+  function currentVersion(v: string) {
+    readFileImpl = async (path: any) => {
+      if (String(path).endsWith('.current-version')) return v;
+      throw new Error('ENOENT');
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('returns the version when the channel target is still available and ahead', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
+    currentVersion('9.0.0');
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toBe('9.1.0');
+  });
+
+  it('returns null when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
+    currentVersion('9.0.0');
+    // 9.1.0 pulled; latest rolled back to what the node already runs.
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.0.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toBeNull();
+  });
+
+  it('returns null when a pinned channel no longer has an acceptable target', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
+    currentVersion('9.0.0');
+    // The 'mainnet' dist-tag is absent -> no-target -> nothing to apply.
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toBeNull();
+  });
+});
+
+describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
+  const gitAu = { ...AU, repo: 'git@github.com:owner/repo.git', sshKeyPath: '/tmp/key' } as any;
+  function remoteSha(sha: string) {
+    execFileImpl = async (file: string, args: string[]) =>
+      file === 'git' && args[0] === 'ls-remote'
+        ? { stdout: `${sha}\trefs/heads/main\n`, stderr: '' }
+        : { stdout: '', stderr: '' };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('returns the fresh remote commit when the ref is still ahead', async () => {
+    const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
+    readFileImpl = async () => 'aaa1111'; // current commit
+    remoteSha('bbb2222');
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBe('bbb2222');
+  });
+
+  it('returns null when the ref moved back to the running commit during the hold-off', async () => {
+    const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
+    readFileImpl = async () => 'aaa1111';
+    remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBeNull();
+  });
+});
+
+// End-to-end polling wiring: prove the REAL npm/git runChecks route through the
+// gate and skip a target that was withdrawn during the hold-off — i.e. that the
+// production path uses the post-hold-off revalidation, not the pre-hold-off
+// detected target. (Guards against a `revalidate: () => detectedTarget` regression.)
+function freshLastCheck(): LastUpdateCheck {
+  return { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false };
+}
+function noJitterGate(log: (m: string) => void) {
+  return createUpdateHoldoffGate({ jitterMs: 0, isShuttingDown: () => false, setUpdating: () => {}, log });
+}
+
+describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
+  function currentVersion(v: string) {
+    readFileImpl = async (path: any) => {
+      if (String(path).endsWith('.current-version')) return v;
+      throw new Error('ENOENT');
+    };
+  }
+  // Successive fetches return successive dist-tag sets (detect, then revalidate).
+  function registrySequence(...tagSets: Record<string, string>[]) {
+    let i = 0;
+    fetchImpl = async () => {
+      const tags = tagSets[Math.min(i, tagSets.length - 1)];
+      i += 1;
+      return { ok: true, json: async () => ({ 'dist-tags': tags }) } as any;
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('does NOT install a version withdrawn during the hold-off (detect ahead, revalidate up-to-date)', async () => {
+    const logs: string[] = [];
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' }, { latest: '9.0.0' }); // 9.1.0 detected, then rolled back
+    const lastUpdateCheck = freshLastCheck();
+    const onRestart = vi.fn(async () => {});
+    const runCheck = createNpmUpdateRunCheck({
+      gate: noJitterGate((m) => logs.push(m)),
+      log: (m) => logs.push(m),
+      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart,
+    });
+
+    await runCheck();
+
+    expect(mkdirCalls.length, 'the installer (performNpmUpdate) must not run').toBe(0);
+    expect(onRestart).not.toHaveBeenCalled();
+    expect(logs.some((m) => m.includes('superseded'))).toBe(true);
+    expect(lastUpdateCheck.latestVersion).toBe('9.1.0'); // detect recorded the then-available target
+  });
+
+  it('reaches the installer when the target is still available after the hold-off', async () => {
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' }); // available on both detect and revalidate
+    const runCheck = createNpmUpdateRunCheck({
+      gate: noJitterGate(() => {}), log: () => {},
+      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+    });
+
+    // The installer may error under the shallow IO mocks; we only assert it was ENTERED.
+    await runCheck().catch(() => {});
+    expect(mkdirCalls.length, 'installer entered → releases dir created').toBeGreaterThan(0);
+  });
+
+  it('version-check-only mode (no gate) records status but never installs', async () => {
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' });
+    const lastUpdateCheck = freshLastCheck();
+    const runCheck = createNpmUpdateRunCheck({
+      gate: null, log: () => {},
+      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+    });
+
+    await runCheck();
+    expect(mkdirCalls.length).toBe(0);
+    expect(lastUpdateCheck.latestVersion).toBe('9.1.0');
+    expect(lastUpdateCheck.upToDate).toBe(false);
+  });
+});
+
+describe('createGitUpdateRunCheck (end-to-end polling wiring)', () => {
+  const gitAu = { ...AU, repo: 'git@github.com:owner/repo.git', sshKeyPath: '/tmp/key' } as any;
+  function remoteSequence(...shas: string[]) {
+    let i = 0;
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'ls-remote') {
+        const sha = shas[Math.min(i, shas.length - 1)];
+        i += 1;
+        return { stdout: `${sha}\trefs/heads/main\n`, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('does NOT build a commit the ref moved away from during the hold-off', async () => {
+    const logs: string[] = [];
+    readFileImpl = async () => 'aaa1111';   // current commit
+    remoteSequence('bbb2222', 'aaa1111');    // detect ahead, then ref rolled back to current
+    const lastUpdateCheck = freshLastCheck();
+    const onRestart = vi.fn(async () => {});
+    const runCheck = createGitUpdateRunCheck({
+      gate: noJitterGate((m) => logs.push(m)),
+      log: (m) => logs.push(m),
+      lastUpdateCheck, au: gitAu, onRestart,
+    });
+
+    await runCheck();
+
+    // Direct signal, not a log substring: performUpdateWithStatus's first act is
+    // acquireUpdateLock -> openSync(".update.lock"). Zero openSync calls proves
+    // the updater was never entered (detect/revalidate never openSync).
+    expect(openSyncCalls.length, 'the updater (performUpdateWithStatus) must not be entered').toBe(0);
+    expect(onRestart).not.toHaveBeenCalled();
+    expect(logs.some((m) => m.includes('superseded'))).toBe(true);
+    expect(lastUpdateCheck.latestCommit).toBe('bbb2222'); // detect recorded the then-available tip
+  });
 });

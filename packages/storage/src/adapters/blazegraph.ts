@@ -1,7 +1,9 @@
+import { performance } from 'node:perf_hooks';
 import type {
   TripleStore,
   Quad as DKGQuad,
   QueryOptions,
+  UpdateOptions,
   StorePressureSnapshot,
   TripleStoreQueryOptions,
   QueryResult,
@@ -11,8 +13,160 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
+import {
+  formatSparqlJsonBindings,
+  type AdapterSparqlJsonSelectResponse,
+} from './sparql-json-results.js';
+import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
+import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
+
+export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
+
+export interface BlazegraphStoreOptions {
+  /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
+  timeout?: number;
+}
+
+interface StoreOperationDeadline {
+  readonly signal: AbortSignal;
+  waitFor<T>(work: Promise<T>): Promise<T>;
+  check(): void;
+  dispose(): void;
+}
+
+function parsePositiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveOperationTimeout(configured: number | undefined): number {
+  if (configured === undefined) {
+    return parsePositiveIntegerEnv(
+      'DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS',
+      DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS,
+    );
+  }
+  if (!Number.isInteger(configured) || configured <= 0) {
+    throw new Error('BlazegraphStore timeout must be a positive integer in milliseconds');
+  }
+  return configured;
+}
+
+function abortError(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
+function createStoreOperationDeadline(
+  timeoutMs: number,
+  callerSignal?: AbortSignal,
+): StoreOperationDeadline {
+  const controller = new AbortController();
+  const deadlineAt = performance.now() + timeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let callerAttached = false;
+
+  const timeoutError = () => new DOMException(
+    `Blazegraph operation exceeded its ${timeoutMs}ms deadline`,
+    'TimeoutError',
+  );
+  const detachCaller = () => {
+    if (!callerAttached) return;
+    callerAttached = false;
+    callerSignal?.removeEventListener('abort', onCallerAbort);
+  };
+  const onCallerAbort = () => {
+    detachCaller();
+    controller.abort(callerSignal?.reason);
+  };
+
+  if (callerSignal?.aborted) {
+    controller.abort(callerSignal.reason);
+  } else {
+    if (callerSignal) {
+      callerAttached = true;
+      callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+    timer = setTimeout(() => {
+      timer = undefined;
+      detachCaller();
+      controller.abort(timeoutError());
+    }, timeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
+  }
+
+  const check = () => {
+    if (controller.signal.aborted) throw abortError(controller.signal);
+    if (performance.now() < deadlineAt) return;
+    const error = timeoutError();
+    detachCaller();
+    controller.abort(error);
+    throw error;
+  };
+  const waitFor = async <T>(work: Promise<T>): Promise<T> => {
+    let result: T;
+    try {
+      result = await raceAgainstAbort(work, controller.signal);
+    } catch (error) {
+      // The timer callback may be delayed by synchronous response processing.
+      // Re-check the monotonic deadline before preserving an underlying error
+      // so elapsed operations still surface the deadline's TimeoutError.
+      check();
+      throw error;
+    }
+    check();
+    return result;
+  };
+
+  return {
+    signal: controller.signal,
+    waitFor,
+    check,
+    dispose: () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      detachCaller();
+    },
+  };
+}
+
+function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let listening = false;
+    const cleanup = () => {
+      if (!listening) return;
+      listening = false;
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(abortError(signal));
+    };
+    work.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      listening = true;
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    }
+  });
+}
 
 /**
  * BlazegraphStore — TripleStore adapter backed by a remote Blazegraph
@@ -26,22 +180,31 @@ export class BlazegraphStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
   private readonly url: string;
+  private readonly operationTimeoutMs: number;
 
-  constructor(url: string) {
+  constructor(url: string, options: BlazegraphStoreOptions = {}) {
     this.url = url.replace(/\/$/, '');
+    this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
   }
 
   private runStoreWork<T>(
     operation: string,
     options: QueryOptions | undefined,
-    work: () => Promise<T>,
+    work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
-    return externalStorePriorityScheduler.run(
+    const deadline = createStoreOperationDeadline(this.operationTimeoutMs, options?.signal);
+    const scheduled = externalStorePriorityScheduler.run(
       options?.priority,
       options?.source ?? `blazegraph.${operation}`,
-      work,
-      options?.signal,
+      async () => {
+        deadline.check();
+        const result = await work(deadline);
+        deadline.check();
+        return result;
+      },
+      deadline.signal,
     );
+    return scheduled.finally(deadline.dispose);
   }
 
   getPressureSnapshot(): StorePressureSnapshot {
@@ -54,25 +217,30 @@ export class BlazegraphStore implements TripleStore {
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.insert',
-    });
-    const nquads = quads.map(quadToNQuad).join('\n') + '\n';
-    const res = await this.runStoreWork('insert', {
+    await this.runStoreWork('insert', {
       ...options,
       source: options?.source ?? 'blazegraph.insert',
-    }, async () => fetch(this.url, {
+    }, async (deadline) => {
+      assertQuadLiteralsMutf8Safe(quads, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'BlazegraphStore.insert',
+      });
+      // Serialize only after scheduler admission. A blocked store therefore
+      // retains the caller's quad array, not an additional potentially-large
+      // N-Quads copy for every waiting insert.
+      const nquads = quads.map(quadToBlazegraphNQuad).join('\n') + '\n';
+      deadline.check();
+      const res = await deadline.waitFor(fetch(this.url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/x-nquads' },
         body: nquads,
-        signal: options?.signal,
-      }),
-    );
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Blazegraph insert failed (${res.status}): ${text.slice(0, 200)}`);
-    }
+        signal: deadline.signal,
+      }));
+      if (!res.ok) {
+        const text = await deadline.waitFor(res.text().catch(() => ''));
+        throw new Error(`Blazegraph insert failed (${res.status}): ${text.slice(0, 200)}`);
+      }
+    });
   }
 
   async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
@@ -146,7 +314,7 @@ export class BlazegraphStore implements TripleStore {
    * delete with two full-graph `countQuads` scans (see above), which is
    * prohibitive on a CPU-pegged core.
    */
-  async update(sparql: string, options?: QueryOptions): Promise<void> {
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
     await this.sparqlUpdate(
       sparql,
       { ...options, source: options?.source ?? 'blazegraph.update' },
@@ -159,18 +327,14 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    return this.runStoreWork('query', options, async () => {
-      if (options?.signal?.aborted) {
-        const reason = options.signal.reason;
-        throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-      }
+    return this.runStoreWork('query', options, async (deadline) => {
       const trimmed = sparql.trim();
       const upper = trimmed.toUpperCase();
       const isAsk = upper.startsWith('ASK');
       const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
 
       if (isConstruct) {
-        return this.queryConstruct(trimmed, options);
+        return this.queryConstruct(trimmed, deadline);
       }
 
       // Direct POST (W3C SPARQL 1.1 Protocol): send the query as the raw
@@ -180,56 +344,54 @@ export class BlazegraphStore implements TripleStore {
       // on stock Blazegraph) and rejects larger payloads with HTTP 400
       // "Unable to parse form content". The direct-POST body is not form
       // parsed, so large queries (e.g. CONSTRUCT/VALUES) are not capped.
-      const res = await fetch(this.url, {
+      // SPARQL_QUERY_CONTENT_TYPE carries charset=utf-8 (see sparql-content-types.ts).
+      const res = await deadline.waitFor(fetch(this.url, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/sparql-query',
+          'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
           Accept: 'application/sparql-results+json',
         },
         body: trimmed,
-        signal: options?.signal,
-      });
+        signal: deadline.signal,
+      }));
       if (!res.ok) {
-        const text = await res.text().catch(() => '');
+        const text = await deadline.waitFor(res.text().catch(() => ''));
         throw new Error(`Blazegraph query failed (${res.status}): ${text.slice(0, 300)}`);
       }
 
-      const json = (await res.json()) as BlazeSelectResponse | BlazeAskResponse;
+      const json = await deadline.waitFor(
+        res.json() as Promise<AdapterSparqlJsonSelectResponse | BlazeAskResponse>,
+      );
 
       if (isAsk || 'boolean' in json) {
         return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
       }
 
-      const sr = json as BlazeSelectResponse;
-      const vars = sr.head?.vars ?? [];
-      const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
-        const obj: Record<string, string> = {};
-        for (const v of vars) {
-          const cell = row[v];
-          if (cell) obj[v] = blazeTermToString(cell);
-        }
-        return obj;
-      });
+      const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
       return { type: 'bindings', bindings } satisfies SelectResult;
     });
   }
 
-  private async queryConstruct(sparql: string, options?: QueryOptions): Promise<ConstructResult> {
-    const res = await fetch(this.url, {
+  private async queryConstruct(
+    sparql: string,
+    deadline: StoreOperationDeadline,
+  ): Promise<ConstructResult> {
+    const res = await deadline.waitFor(fetch(this.url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/sparql-query',
+        'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
         Accept: 'text/x-nquads, application/n-quads',
       },
       body: sparql,
-      signal: options?.signal,
-    });
+      signal: deadline.signal,
+    }));
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
+      const text = await deadline.waitFor(res.text().catch(() => ''));
       throw new Error(`Blazegraph construct failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    const text = await res.text();
+    const text = await deadline.waitFor(res.text());
     const quads = parseNQuadsText(text);
+    deadline.check();
     return { type: 'quads', quads };
   }
 
@@ -310,17 +472,20 @@ export class BlazegraphStore implements TripleStore {
     // HTTP 400 "Unable to parse form content" — which broke large publishes
     // (a publish issues a DELETE DATA / INSERT over the full quad set). The
     // raw body is not form parsed, so large updates succeed.
-    const res = await this.runStoreWork(operation, options, async () => fetch(this.url, {
+    //
+    // SPARQL_UPDATE_CONTENT_TYPE carries charset=utf-8 (see sparql-content-types.ts).
+    await this.runStoreWork(operation, options, async (deadline) => {
+      const res = await deadline.waitFor(fetch(this.url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/sparql-update' },
+        headers: { 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
         body: update,
-        signal: options?.signal,
-      }),
-    );
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Blazegraph update failed (${res.status}): ${text.slice(0, 300)}`);
-    }
+        signal: deadline.signal,
+      }));
+      if (!res.ok) {
+        const text = await deadline.waitFor(res.text().catch(() => ''));
+        throw new Error(`Blazegraph update failed (${res.status}): ${text.slice(0, 300)}`);
+      }
+    });
   }
 }
 
@@ -328,37 +493,8 @@ export class BlazegraphStore implements TripleStore {
 // Blazegraph JSON result types
 // =====================================================================
 
-interface BlazeTermValue {
-  type: 'uri' | 'literal' | 'bnode' | 'typed-literal';
-  value: string;
-  datatype?: string;
-  'xml:lang'?: string;
-}
-
-interface BlazeSelectResponse {
-  head: { vars: string[] };
-  results: { bindings: Array<Record<string, BlazeTermValue>> };
-}
-
 interface BlazeAskResponse {
   boolean: boolean;
-}
-
-function escapeNQuadsLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
-}
-
-function blazeTermToString(t: BlazeTermValue): string {
-  if (t.type === 'bnode') return `_:${t.value}`;
-  if (t.type === 'literal' || t.type === 'typed-literal') {
-    const escaped = escapeNQuadsLiteral(t.value);
-    if (t['xml:lang']) return `"${escaped}"@${t['xml:lang']}`;
-    if (t.datatype && t.datatype !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${escaped}"^^<${t.datatype}>`;
-    }
-    return `"${escaped}"`;
-  }
-  return t.value;
 }
 
 // =====================================================================
@@ -371,6 +507,21 @@ function quadToNQuad(q: DKGQuad): string {
   const o = formatTerm(q.object);
   const g = q.graph ? ` <${q.graph}>` : '';
   return `${s} ${p} ${o}${g} .`;
+}
+
+/**
+ * N-Quads serializer for Blazegraph's bulk-insert wire format: a standard
+ * N-Quads line ({@link quadToNQuad}) made ASCII-safe
+ * ({@link toBlazegraphAsciiSafeNQuads}). This is the single serialization
+ * entry point for the adapter's write path, so the Blazegraph wire-format
+ * invariant lives at the serialization boundary rather than as a separate
+ * post-processing pass a caller must remember to apply. The ASCII-safe pass
+ * operates on the assembled line by design: it normalizes `\U` escapes and
+ * relies on backslash parity across the whole line, both of which are
+ * line-level properties of the rendered N-Quads, not of an individual term.
+ */
+function quadToBlazegraphNQuad(q: DKGQuad): string {
+  return toBlazegraphAsciiSafeNQuads(quadToNQuad(q));
 }
 
 function formatTerm(term: string): string {
@@ -497,5 +648,6 @@ function rejectOversizedLiterals(quads: DKGQuad[], maxBytes: number): DKGQuad[] 
 registerTripleStoreAdapter('blazegraph', async (opts) => {
   const url = opts?.url as string | undefined;
   if (!url) throw new Error('blazegraph adapter requires options.url (SPARQL endpoint)');
-  return new BlazegraphStore(url);
+  const timeout = opts?.timeout as number | undefined;
+  return new BlazegraphStore(url, { timeout });
 });

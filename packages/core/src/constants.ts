@@ -23,6 +23,15 @@ export const PROTOCOL_DISCOVER = '/dkg/10.0.0/discover';
 // (sync is a self-healing catch-up net, so the brief mixed-version
 // window during auto-update is no-data-loss).
 export const PROTOCOL_SYNC = '/dkg/10.0.2/sync';
+// OT-RFC-59 changelog read-lane — a SEPARATE protocol id, not a field on
+// PROTOCOL_SYNC: the legacy sync response is bare N-Quads with no envelope, so a
+// structured (era, headSeq, nextSeq, records) head cannot ride the existing
+// wire. Same 10.0.2 family; the distinct suffix means legacy peers never dial it
+// and identify simply omits it. Advertised ONLY when config.changelog is on
+// (the responder registers it iff asChangelogReader(store) is non-null), so it
+// is default-off and mixed-version-safe: a changelog-capable requester falls
+// back to PROTOCOL_SYNC when a peer does not advertise this id.
+export const PROTOCOL_SYNC_CHANGELOG = '/dkg/10.0.2/sync-changelog';
 export const PROTOCOL_GET_ASSERTION_ARTIFACT = '/dkg/10.0.2/get-assertion-artifact';
 // Universal Messenger pilot protocol (rc.9 PR-3). Bumped from
 // /dkg/10.0.0/message to /dkg/10.0.1/message to opt into the
@@ -311,6 +320,39 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
   return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
 }
 
+/** Canonical identity segment used by all new per-KA memory-layer writes. */
+export function canonicalKnowledgeAssetAgentAddress(agentAddress: string): string {
+  // Non-EVM legacy identities (notably peer IDs) remain byte-for-byte stable.
+  return /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
+    ? agentAddress.toLowerCase()
+    : agentAddress;
+}
+
+/** Compare graph identity addresses using EVM case-folding and legacy exactness. */
+export function knowledgeAssetAgentAddressesEqual(left: string, right: string): boolean {
+  return canonicalKnowledgeAssetAgentAddress(left) === canonicalKnowledgeAssetAgentAddress(right);
+}
+
+/** Build the layer-independent canonical `{address}/{number}` suffix. */
+export function canonicalKnowledgeAssetGraphIdentitySuffix(
+  agentAddress: string,
+  kaNumber: string | number | bigint,
+): string {
+  const canonicalAgentAddress = canonicalKnowledgeAssetAgentAddress(agentAddress);
+  return `${canonicalAgentAddress}/${kaNumber}`;
+}
+
+function contextGraphLayerBaseUri(
+  contextGraphId: string,
+  layer: MemoryLayer,
+  subGraphName?: string,
+): string {
+  const base = subGraphName
+    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
+    : `did:dkg:context-graph:${contextGraphId}`;
+  return `${base}/${memoryLayerSlug(layer)}`;
+}
+
 /**
  * Uniform per-KA graph URI for ANY memory layer (OT-RFC-46 Chorus).
  *
@@ -320,7 +362,8 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
  * builder, and (downstream) ONE read path. `kaNumber` is the per-author KA
  * number (the identifying half of the UAL `did:dkg:{chain}/{addr}/{number}`),
  * minted at create. A KA moves between layers by swapping only the `{_layer}`
- * segment; the `{addr}/{number}` suffix is stable for its whole lifecycle.
+ * segment; the canonical `{addr}/{number}` suffix is stable for its whole
+ * lifecycle.
  */
 export function contextGraphLayerUri(
   contextGraphId: string,
@@ -329,10 +372,39 @@ export function contextGraphLayerUri(
   kaNumber: string | number | bigint,
   subGraphName?: string,
 ): string {
-  const base = subGraphName
-    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
-    : `did:dkg:context-graph:${contextGraphId}`;
-  return `${base}/${memoryLayerSlug(layer)}/${agentAddress}/${kaNumber}`;
+  const layerBase = contextGraphLayerBaseUri(contextGraphId, layer, subGraphName);
+  return `${layerBase}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
+}
+
+/**
+ * Canonical per-KA graph first, followed by the caller-known historical casing
+ * when it differs. Store-backed readers can discover additional aliases and
+ * compare them with `knowledgeAssetAgentAddressesEqual`.
+ */
+export function contextGraphLayerUriCandidates(
+  contextGraphId: string,
+  layer: MemoryLayer,
+  agentAddress: string,
+  kaNumber: string | number | bigint,
+  subGraphName?: string,
+): string[] {
+  const layerBase = contextGraphLayerBaseUri(contextGraphId, layer, subGraphName);
+  const canonical = `${layerBase}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
+  const legacy = `${layerBase}/${agentAddress}/${kaNumber}`;
+  return canonical === legacy ? [canonical] : [canonical, legacy];
+}
+
+/** Canonical and caller-known legacy prefixes for an unscoped layer read. */
+export function contextGraphLayerPrefixCandidates(
+  contextGraphId: string,
+  layer: MemoryLayer,
+  agentAddress: string,
+  subGraphName?: string,
+): string[] {
+  const layerBase = contextGraphLayerBaseUri(contextGraphId, layer, subGraphName);
+  const canonical = `${layerBase}/${canonicalKnowledgeAssetAgentAddress(agentAddress)}/`;
+  const legacy = `${layerBase}/${agentAddress}/`;
+  return canonical === legacy ? [canonical] : [canonical, legacy];
 }
 
 export interface ContextGraphLayerIdentity {

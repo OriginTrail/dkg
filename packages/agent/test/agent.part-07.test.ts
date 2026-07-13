@@ -14,6 +14,241 @@ afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
 
+function randomSamplingRetryTimer(agent: DKGAgent): ReturnType<typeof setInterval> | null {
+  return (agent as unknown as {
+    randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null;
+  }).randomSamplingBindRetryTimer;
+}
+
+describe('Random Sampling lifecycle gating', () => {
+  it('reports a profiled core as waiting until sharding-table admission', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 52n);
+    let sharded = false;
+    const membership = vi.spyOn(chain, 'isShardingTableMember')
+      .mockImplementation(async (identityId) => identityId === 52n && sharded);
+    const agent = await DKGAgent.create({
+      name: 'RsWaitsForStake',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+      randomSamplingTickIntervalMs: 60_000,
+    });
+    const realSetInterval = globalThis.setInterval;
+    const intervalCallbacks = new Map<
+      ReturnType<typeof setInterval>,
+      (...args: unknown[]) => void
+    >();
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((
+      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+        const handle = realSetInterval(callback, delay, ...args);
+        intervalCallbacks.set(handle, callback);
+        return handle;
+      }
+    ) as typeof setInterval);
+
+    try {
+      await agent.start();
+      intervalSpy.mockRestore();
+
+      expect(membership).toHaveBeenCalledWith(52n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        role: 'core',
+        identityId: '52',
+        disabledReason: 'awaiting_sharding_table',
+        loop: null,
+      });
+
+      const retryTimer = randomSamplingRetryTimer(agent);
+      expect(retryTimer).not.toBeNull();
+      const retryTick = retryTimer ? intervalCallbacks.get(retryTimer) : undefined;
+      expect(retryTick).toBeTypeOf('function');
+
+      sharded = true;
+      retryTick?.();
+      await vi.waitFor(
+        () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
+        { timeout: 2_000, interval: 10 },
+      );
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: true,
+        identityId: '52',
+        disabledReason: null,
+      });
+      expect(randomSamplingRetryTimer(agent)).toBeNull();
+    } finally {
+      intervalSpy.mockRestore();
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not retry when sharding-table contract wiring is permanently unavailable', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 53n);
+    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(true);
+    vi.spyOn(chain, 'isShardingTableMember').mockRejectedValue(
+      new Error(
+        'Contract "ShardingTableStorage" not found in Hub at ' +
+          '0x0000000000000000000000000000000000000001',
+      ),
+    );
+    const agent = await DKGAgent.create({
+      name: 'RsMissingShardingTableStorage',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+    });
+
+    try {
+      await agent.start();
+
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '53',
+        disabledReason: 'contracts_not_deployed',
+      });
+      expect(randomSamplingRetryTimer(agent)).toBeNull();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('retries a temporary sharding-table lookup failure and starts after recovery', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 56n);
+    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(true);
+    const membership = vi.spyOn(chain, 'isShardingTableMember')
+      .mockRejectedValueOnce(new Error('temporary membership RPC outage'))
+      .mockResolvedValue(true);
+    const agent = await DKGAgent.create({
+      name: 'RsMembershipLookupRecovers',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+      randomSamplingTickIntervalMs: 60_000,
+    });
+    const realSetInterval = globalThis.setInterval;
+    const intervalCallbacks = new Map<
+      ReturnType<typeof setInterval>,
+      (...args: unknown[]) => void
+    >();
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((
+      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+        const handle = realSetInterval(callback, delay, ...args);
+        intervalCallbacks.set(handle, callback);
+        return handle;
+      }
+    ) as typeof setInterval);
+
+    try {
+      await expect(agent.start()).resolves.toBeUndefined();
+      intervalSpy.mockRestore();
+
+      expect(membership).toHaveBeenNthCalledWith(1, 56n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '56',
+        disabledReason: 'eligibility_lookup_failed',
+      });
+
+      const retryTimer = randomSamplingRetryTimer(agent);
+      expect(retryTimer).not.toBeNull();
+      const retryTick = retryTimer ? intervalCallbacks.get(retryTimer) : undefined;
+      expect(retryTick).toBeTypeOf('function');
+
+      retryTick?.();
+      await vi.waitFor(
+        () => expect(agent.getRandomSamplingStatus().enabled).toBe(true),
+        { timeout: 2_000, interval: 10 },
+      );
+      expect(membership).toHaveBeenNthCalledWith(2, 56n);
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: true,
+        identityId: '56',
+        disabledReason: null,
+      });
+      expect(randomSamplingRetryTimer(agent)).toBeNull();
+    } finally {
+      intervalSpy.mockRestore();
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('checks permanent Random Sampling deployment readiness before membership RPCs', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 54n);
+    vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(false);
+    const membership = vi.spyOn(chain, 'isShardingTableMember').mockRejectedValue(
+      new Error('temporary RPC failure that must not hide missing contracts'),
+    );
+    const agent = await DKGAgent.create({
+      name: 'RsContractsNotDeployed',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+    });
+
+    try {
+      await agent.start();
+
+      expect(membership).not.toHaveBeenCalled();
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '54',
+        disabledReason: 'contracts_not_deployed',
+      });
+      expect(randomSamplingRetryTimer(agent)).toBeNull();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('keeps a throwing readiness probe retryable without failing node startup', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 55n);
+    vi.spyOn(chain, 'isRandomSamplingReady').mockImplementation(() => {
+      throw new Error('temporary readiness probe failure');
+    });
+    const membership = vi.spyOn(chain, 'isShardingTableMember');
+    const agent = await DKGAgent.create({
+      name: 'RsReadinessProbeFailure',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      randomSamplingUseWorkerThread: false,
+    });
+
+    try {
+      await expect(agent.start()).resolves.toBeUndefined();
+
+      expect(membership).not.toHaveBeenCalled();
+      expect(agent.getRandomSamplingStatus()).toMatchObject({
+        enabled: false,
+        identityId: '55',
+        disabledReason: 'bind_failed',
+      });
+      expect(randomSamplingRetryTimer(agent)).not.toBeNull();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+});
+
 describe('DKGAgent ACK signer gating', () => {
 
     it('allows core chainConfig without a profile admin key for existing no-admin identities', async () => {

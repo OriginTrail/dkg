@@ -2,8 +2,9 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult } from '../triple-store.js';
+import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { GraphWriteGenTracker } from '../graph-write-gen.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -151,6 +152,10 @@ export class OxigraphWorkerStore implements TripleStore {
   private worker!: Worker;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  // #1609: per-graph write generations, bumped client-side after each
+  // successful mutation RPC (the worker owns no caller-visible caches).
+  // Feeds the chain-reconcile negative memo via `asGraphWriteGenSource`.
+  private readonly writeGen = new GraphWriteGenTracker();
   private readonly operationTimeoutMs: number;
   /** Resolved path of the compiled worker impl; reused verbatim on respawn. */
   private readonly workerPath: string;
@@ -623,12 +628,29 @@ export class OxigraphWorkerStore implements TripleStore {
   // can't land without the other). Large idempotent bulk imports that want
   // head-of-line fairness should run on an external SPARQL server, not by
   // silently fragmenting this insert into non-atomic chunks.
-  async insert(quads: Quad[]): Promise<void> { return this.call('insert', quads); }
-  async delete(quads: Quad[]): Promise<void> { return this.call('delete', quads); }
-  async deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.call('deleteByPattern', pattern); }
+  async insert(quads: Quad[]): Promise<void> {
+    await this.call('insert', quads);
+    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
+  }
+  async delete(quads: Quad[]): Promise<void> {
+    await this.call('delete', quads);
+    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
+  }
+  async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
+    const removed = await this.call<number>('deleteByPattern', pattern);
+    if (pattern.graph) this.writeGen.recordGraphWrites([pattern.graph]);
+    else this.writeGen.recordUnscopedWrite();
+    return removed;
+  }
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
-  async update(sparql: string): Promise<void> { return this.call('update', sparql); }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async update(sparql: string, _options?: UpdateOptions): Promise<void> {
+    await this.call('update', sparql);
+    // A raw UPDATE's write scope is not derivable at the call site
+    // (`touchedGraphs` hints only membership changes) — unscoped bump.
+    this.writeGen.recordUnscopedWrite();
+  }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
   }
@@ -636,11 +658,23 @@ export class OxigraphWorkerStore implements TripleStore {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);
   }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
-  async dropGraph(graphUri: string): Promise<void> { return this.call('dropGraph', graphUri); }
+  async dropGraph(graphUri: string): Promise<void> {
+    await this.call('dropGraph', graphUri);
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
   }
-  async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> { return this.call('deleteBySubjectPrefix', graphUri, prefix); }
+  async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
+    const removed = await this.call<number>('deleteBySubjectPrefix', graphUri, prefix);
+    this.writeGen.recordGraphWrites([graphUri]);
+    return removed;
+  }
+
+  /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
+  getWriteGen(graphPrefix: string): number {
+    return this.writeGen.getWriteGen(graphPrefix);
+  }
   async countQuads(graphUri?: string): Promise<number> { return this.call('countQuads', graphUri); }
   async flush(): Promise<void> { return this.call('flush'); }
 

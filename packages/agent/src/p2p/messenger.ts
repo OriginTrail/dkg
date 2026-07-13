@@ -6,11 +6,20 @@ import {
   RESPONSE_GONE_MARKER,
   isRecoverableSendError,
   ProtocolOutbox,
+  type CompatibleProtocolOutboxStore,
   type MessageIdempotencyStore,
-  type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
+import {
+  OutboxDrainer,
+  type OutboxDrainerOptions,
+} from './outbox-drainer.js';
+export {
+  DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+  DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
+  type OutboxDrainerOptions,
+} from './outbox-drainer.js';
 
 /** Bytes payload the substrate uses to signal `RESPONSE_GONE` on the wire. */
 const RESPONSE_GONE_BYTES = new TextEncoder().encode(RESPONSE_GONE_MARKER);
@@ -119,7 +128,7 @@ export interface MessengerDeps {
    * `ProtocolOutbox` internally (which owns the backoff ladder +
    * inflight guard).
    */
-  outboxStore?: ProtocolOutboxStore;
+  outboxStore?: CompatibleProtocolOutboxStore;
   /**
    * Override the default backoff ladder (5s → 2h, mirrors rc.8 chat
    * outbox). Caller can pass a tighter / looser ladder per Messenger
@@ -158,6 +167,11 @@ export interface MessengerDeps {
    * production uses the default `Date.now`.
    */
   clock?: () => number;
+  /**
+   * Periodic retry scheduler bounds. Defaults and validation are owned by
+   * `OutboxDrainer` (`batchSize: 100`, `concurrency: 4`).
+   */
+  outboxDrain?: OutboxDrainerOptions;
 }
 
 export interface SendOpts {
@@ -250,6 +264,15 @@ export type ReliableSendResult =
       error: string;
     };
 
+/** The explicit throw policy can never produce a durable queued result. */
+export type ThrowingReliableSendResult = Exclude<
+  ReliableSendResult,
+  { delivered: false; queued: true }
+>;
+
+/** Internal ownership policy; public callers use distinct named methods. */
+type FramedFailurePolicy = 'durable-outbox' | 'request-owned';
+
 /** Handler signature for `Messenger.register`. */
 export type ReliableHandler = (
   payload: Uint8Array,
@@ -324,13 +347,13 @@ export interface SloProtocolStats {
  * via `sloWindowSamples` in `MessengerDeps`.
  */
 export const DEFAULT_SLO_WINDOW_SAMPLES = 1000;
-
 export class Messenger {
   private readonly router: ProtocolRouter;
   private readonly idempotencyStore?: MessageIdempotencyStore;
   private readonly outbox?: ProtocolOutbox;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
+  private readonly outboxDrainer?: OutboxDrainer<ProtocolOutboxEntry>;
 
   /**
    * Application handlers registered via `register`. Stored separately
@@ -345,9 +368,8 @@ export class Messenger {
    * Per-`(protocol, peer, messageId)` "first sendReliable invocation"
    * timestamp. Used to compute the SLO latency clock per the rc.9
    * plan: "sendReliable invoke → resolved {delivered:true} (includes
-   * queue + retries)". Cleared on delivery + on outbox expiry; on
-   * non-recoverable throw the entry leaks (acceptable — these are
-   * exceptional cases that the plan's overnight soak surfaces).
+   * queue + retries)". Cleared on delivery, outbox expiry, and any
+   * terminal/request-owned failure that has no durable retry owner.
    */
   private readonly firstAttemptAt = new Map<string, number>();
 
@@ -377,6 +399,13 @@ export class Messenger {
    * on still-fresh peerStore data).
    */
   private readonly lastDhtWalkAt = new Map<string, number>();
+
+  /**
+   * Active peer-resolution work by peer. Request-owned sends await this exact
+   * promise before returning failure to their external retry owner; durable
+   * outbox retries keep the historical fire-and-forget behavior.
+   */
+  private readonly dhtWalksInFlight = new Map<string, Promise<void>>();
 
   /**
    * Per-protocol classifier that decides whether a successful wire
@@ -414,6 +443,13 @@ export class Messenger {
     this.clock = deps.clock ?? (() => Date.now());
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
+    if (this.outbox) {
+      this.outboxDrainer = new OutboxDrainer(
+        (now, limit) => this.outbox!.duePage(now, limit),
+        (entry) => this.retryOutboxEntry(entry),
+        deps.outboxDrain,
+      );
+    }
   }
 
   /**
@@ -575,6 +611,42 @@ export class Messenger {
     payload: Uint8Array,
     opts: SendReliableOpts = {},
   ): Promise<ReliableSendResult> {
+    return this.sendFramed(peerId, protocolId, payload, opts, 'durable-outbox');
+  }
+
+  /** Reliable framing/idempotency for bounded request-owned retries; never queues. */
+  async sendRequestOwned(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts: SendReliableOpts = {},
+  ): Promise<ThrowingReliableSendResult> {
+    return this.sendFramed(peerId, protocolId, payload, opts, 'request-owned');
+  }
+
+  private sendFramed(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts: SendReliableOpts,
+    failurePolicy: 'durable-outbox',
+  ): Promise<ReliableSendResult>;
+
+  private sendFramed(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts: SendReliableOpts,
+    failurePolicy: 'request-owned',
+  ): Promise<ThrowingReliableSendResult>;
+
+  private async sendFramed(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts: SendReliableOpts,
+    failurePolicy: FramedFailurePolicy,
+  ): Promise<ReliableSendResult> {
     this.requireSubstrate('sendReliable');
 
     const messageId = opts.messageId ?? randomUUID();
@@ -633,8 +705,8 @@ export class Messenger {
 
     // Inflight guard (rc.9 #521 lesson lifted): two parallel
     // attempters on the same `(peer, protocol, messageId)` can race
-    // when the periodic tick + an opportunistic-flush fire close
-    // together. Second attempter exits without dialing.
+    // when a first sender + periodic retry (or overlapping explicit callers)
+    // race. Second attempter exits without dialing.
     if (!outbox.tryBeginAttempt(peerId, protocolId, messageId)) {
       // Another attempt is in flight. This is not the same thing as
       // durable queued: the winning attempt may still be on its first
@@ -667,26 +739,20 @@ export class Messenger {
       // the outbox stays out of it because retrying an encoding
       // bug / unhandled protocol won't help.
       if (!isRecoverableMessengerSendError(err, errMsg)) {
+        this.firstAttemptAt.delete(sloK);
         throw err;
       }
-      const entry = outbox.enqueueFailure(
+      if (failurePolicy === 'request-owned') {
+        await this.handleRequestOwnedRecoverableFailure(peerId, errMsg, sloK);
+        throw err;
+      }
+      return this.handleDurableRecoverableFailure({
         peerId,
         protocolId,
         messageId,
-        envelope,
+        payload: envelope,
         errMsg,
-        this.clock(),
-      );
-      this.noteQueuedForSlo(protocolId);
-      this.maybeScheduleDhtWalk(peerId, entry.attempts, errMsg);
-      return {
-        delivered: false,
-        queued: true,
-        attempts: entry.attempts,
-        messageId,
-        error: errMsg,
-        nextAttemptAtMs: entry.nextAttemptAt,
-      };
+      });
     } finally {
       outbox.endAttempt(peerId, protocolId, messageId);
     }
@@ -790,30 +856,18 @@ export class Messenger {
    * `dropExpired(now)` evicts it on age — recovering an encoding
    * bug requires operator action (manual replay or shutdown).
    */
-  async processOutboxTick(now: number): Promise<void> {
-    if (!this.outbox) return;
-    const due = this.outbox.due(now);
-    for (const entry of due) {
-      await this.retryOutboxEntry(entry);
-    }
+  processOutboxTick(now: number): Promise<void> {
+    return this.outboxDrainer?.tick(now) ?? Promise.resolve();
   }
 
-  /**
-   * Opportunistic-flush retry loop. The lifecycle.ts wiring (PR-3)
-   * calls this from a libp2p `connection:open` event for `peerId`:
-   * a reconnection is the signal we were waiting for, so attempt
-   * every pending entry for `peer` NOW even if `nextAttemptAt` is
-   * still in the future.
-   *
-   * Same guards as `processOutboxTick` — must check `hasEntry`
-   * after `tryBeginAttempt` to defend against the rc.9 #538 race.
-   */
-  async processOutboxOnConnect(peerId: string): Promise<void> {
-    if (!this.outbox) return;
-    const pending = this.outbox.pendingFor(peerId);
-    for (const entry of pending) {
-      await this.retryOutboxEntry(entry);
-    }
+  /** Await the currently active periodic drain during graceful shutdown. */
+  async waitForOutboxDrain(): Promise<void> {
+    await this.outboxDrainer?.wait();
+  }
+
+  /** Cancel the remainder of the loaded page and join already-started retries. */
+  async stopOutboxDrain(): Promise<void> {
+    await this.outboxDrainer?.stop();
   }
 
   private async retryOutboxEntry(entry: {
@@ -827,7 +881,7 @@ export class Messenger {
       return;
     }
     try {
-      // Stale-snapshot guard — between the moment `due`/`pendingFor`
+      // Stale-snapshot guard — between the moment `due`
       // gave us the snapshot and the moment `tryBeginAttempt` won,
       // a sibling flush may have completed delivery and called
       // `markDelivered`. Re-check `hasEntry` and bail if gone.
@@ -852,78 +906,123 @@ export class Messenger {
       this.clearDhtWalkRateLimitIfDrained(entry.peer);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      const updated = outbox.enqueueFailure(
+        entry.peer,
+        entry.protocol,
+        entry.messageId,
+        entry.payload,
+        errMsg,
+        this.clock(),
+      );
       if (isRecoverableMessengerSendError(err, errMsg)) {
-        const updated = outbox.enqueueFailure(
-          entry.peer,
-          entry.protocol,
-          entry.messageId,
-          entry.payload,
-          errMsg,
-          this.clock(),
-        );
-        this.maybeScheduleDhtWalk(entry.peer, updated.attempts, errMsg);
+        this.scheduleOutboxPeerRecovery(entry.peer, updated.attempts, errMsg);
       }
-      // Non-recoverable: leave the entry alone. `dropExpired` will
-      // age it out; an operator-facing diagnostic surface (PR-12)
-      // will surface stuck entries so a human can intervene.
+      // A non-recoverable retry remains visible for operator intervention, but
+      // advances on the backoff ladder so it cannot permanently occupy the
+      // front of every bounded due page and starve later deliverable rows.
     } finally {
       outbox.endAttempt(entry.peer, entry.protocol, entry.messageId);
     }
   }
 
-  /**
-   * DHT-walk-on-stall recovery primitive (rc.9 PR-5). Fire a
-   * `resolvePeer` call in the background when an outbox entry hits
-   * `OUTBOX_STALL_THRESHOLD` attempts on an address-resolution
-   * error, subject to per-peer rate-limiting.
-   *
-   * Fire-and-forget: never blocks the caller. The DHT walk's
-   * side-effect (populating `peerStore` for the peer) heals the
-   * next opportunistic-flush or periodic-tick retry, not the
-   * current one. This is intentional — the current retry has
-   * already failed; the walk is for the next attempt.
-   *
-   * Guards:
-   *   1. No-op when `resolvePeer` not wired.
-   *   2. No-op below `OUTBOX_STALL_THRESHOLD` attempts (don't
-   *      spend a DHT walk on a transient blip the backoff would
-   *      have healed anyway).
-   *   3. No-op for non-address-resolution errors (DHT walk
-   *      doesn't fix stream resets or NO_RESERVATION-after-handshake).
-   *   4. Per-peer rate limit (`DHT_WALK_RATE_LIMIT_MS`).
-   *   5. Time-bounded (`DHT_WALK_TIMEOUT_MS`) — failures logged,
-   *      never bubble.
-   */
-  private maybeScheduleDhtWalk(peerId: string, attempts: number, errMsg: string): void {
-    if (!this.resolvePeer) return;
-    if (attempts < OUTBOX_STALL_THRESHOLD) return;
+  /** Request-owned failures never create a durable row or leave an SLO owner. */
+  private async handleRequestOwnedRecoverableFailure(
+    peerId: string,
+    errMsg: string,
+    sloK: string,
+  ): Promise<void> {
+    this.firstAttemptAt.delete(sloK);
     if (!shouldTriggerDhtWalk(errMsg)) return;
+    await this.resolvePeerOnce(peerId, 'after a request-owned address failure');
+  }
+
+  /** Durable failures enqueue first, then optionally schedule threshold recovery. */
+  private handleDurableRecoverableFailure(args: {
+    peerId: string;
+    protocolId: string;
+    messageId: string;
+    payload: Uint8Array;
+    errMsg: string;
+  }): Extract<ReliableSendResult, { delivered: false; queued: true }> {
+    const entry = this.outbox!.enqueueFailure(
+      args.peerId,
+      args.protocolId,
+      args.messageId,
+      args.payload,
+      args.errMsg,
+      this.clock(),
+    );
+    this.noteQueuedForSlo(args.protocolId);
+    this.scheduleOutboxPeerRecovery(args.peerId, entry.attempts, args.errMsg);
+    return {
+      delivered: false,
+      queued: true,
+      attempts: entry.attempts,
+      messageId: args.messageId,
+      error: args.errMsg,
+      nextAttemptAtMs: entry.nextAttemptAt,
+    };
+  }
+
+  /** Durable outbox recovery is thresholded and always background-owned. */
+  private scheduleOutboxPeerRecovery(
+    peerId: string,
+    attempts: number,
+    errMsg: string,
+  ): void {
+    if (attempts < OUTBOX_STALL_THRESHOLD || !shouldTriggerDhtWalk(errMsg)) return;
+    void this.resolvePeerOnce(peerId, `after ${attempts} stalled outbox attempts`);
+  }
+
+  /**
+   * One de-duplicated, rate-limited, bounded peer-resolution attempt. Ownership
+   * stays with the named caller: request-owned sends await this promise, while
+   * durable outbox paths deliberately discard it after attaching handlers.
+   * Resolver errors are logged and swallowed so they never replace the original
+   * transport error.
+   */
+  private resolvePeerOnce(
+    peerId: string,
+    reason: string,
+  ): Promise<void> {
+    if (!this.resolvePeer) return Promise.resolve();
+
+    const activeWalk = this.dhtWalksInFlight.get(peerId);
+    if (activeWalk) return activeWalk;
+
     const last = this.lastDhtWalkAt.get(peerId);
     const now = this.clock();
-    if (last !== undefined && now - last < DHT_WALK_RATE_LIMIT_MS) return;
+    if (last !== undefined && now - last < DHT_WALK_RATE_LIMIT_MS) {
+      return Promise.resolve();
+    }
 
     this.lastDhtWalkAt.set(peerId, now);
     const signal = AbortSignal.timeout(DHT_WALK_TIMEOUT_MS);
-    // Fire-and-forget; never await. Any error swallowed + logged.
-    // The walk's value is its side-effect (peerStore population),
-    // not its return value, so we don't even need the resolved
-    // multiaddrs here.
-    void this.resolvePeer(peerId, { signal })
+    // Errors are swallowed after logging so a request-owned caller still
+    // receives the original transport failure, not a secondary DHT error.
+    const walk = this.resolvePeer(peerId, { signal })
       .then(() => {
         console.warn(
-          `[Messenger] DHT walk completed for ${peerId.slice(-8)} after ${attempts} stalled outbox attempts — peerStore should now be primed`,
+          `[Messenger] DHT walk completed for ${peerId.slice(-8)} ${reason} — peerStore should now be primed`,
         );
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(
-          `[Messenger] DHT walk for ${peerId.slice(-8)} failed (attempts=${attempts}): ${msg}`,
+          `[Messenger] DHT walk for ${peerId.slice(-8)} failed (${reason}): ${msg}`,
         );
+      })
+      .finally(() => {
+        if (this.dhtWalksInFlight.get(peerId) === walk) {
+          this.dhtWalksInFlight.delete(peerId);
+        }
       });
+    this.dhtWalksInFlight.set(peerId, walk);
+    return walk;
   }
 
   private clearDhtWalkRateLimitIfDrained(peerId: string): void {
-    if (!this.outbox || this.outbox.pendingFor(peerId).length === 0) {
+    if (!this.outbox || !this.outbox.hasPendingFor(peerId)) {
       this.lastDhtWalkAt.delete(peerId);
     }
   }

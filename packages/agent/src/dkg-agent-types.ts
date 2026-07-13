@@ -25,8 +25,8 @@ import type {
   OperationContext,
   AuthorAttestationTypedData,
   DkgNetworkIdentity,
+  CompatibleProtocolOutboxStore,
   MessageIdempotencyStore,
-  ProtocolOutboxStore,
   SwmSenderKeyPackageAckReasonCode,
 } from '@origintrail-official/dkg-core';
 import type {
@@ -41,7 +41,7 @@ import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore 
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
-import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
+import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
 import type { JsonLdContent } from './dkg-agent-utils.js';
 import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
@@ -938,8 +938,15 @@ export interface DKGAgentConfig {
   syncOnConnectEnabled?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
-  /** Global cap for concurrent sync jobs. Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins. */
+  /**
+   * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
+   * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
+   */
   syncGlobalMaxInflight?: number;
+  /** Backwards-compatible alias for syncGlobalMaxInflight. Env DKG_SYNC_GLOBAL_LIMIT wins. */
+  syncGlobalLimit?: number;
+  /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
+  syncGlobalQueueLimit?: number;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**
@@ -1103,6 +1110,8 @@ export interface DKGAgentConfig {
     adminPrivateKey?: string;
     operationalKeys: string[];
     chainId?: string;
+    /** Overall submitted-transaction receipt deadline (default 10 minutes). */
+    receiptTimeoutMs?: number;
     /**
      * Optional V10 allowance-sizing policy. Threaded straight through to
      * the `EVMChainAdapter`; see `ApprovalPolicy` in
@@ -1192,6 +1201,8 @@ export interface DKGAgentConfig {
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
   /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
   syncCheckpointStore?: SyncCheckpointStore;
+  /** OT-RFC-59 durable per-(peer,CG) changelog cursor store. Defaults to in-memory. */
+  changelogCursorStore?: ChangelogCursorStore;
   /** Durable lane cursor store for the chain event poller. Defaults to in-memory. */
   chainEventCursorStore?: ChainEventCursorPersistence;
   /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
@@ -1237,7 +1248,7 @@ export interface DKGAgentConfig {
   onReplicationEvent?: ReplicationEventSink;
   messengerStores?: {
     idempotencyStore: MessageIdempotencyStore;
-    outboxStore: ProtocolOutboxStore;
+    outboxStore: CompatibleProtocolOutboxStore;
   };
 }
 

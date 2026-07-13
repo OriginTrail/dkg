@@ -37,7 +37,7 @@ import { GraphManager, createTripleStore } from '@origintrail-official/dkg-stora
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
-import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
+import { createPublisherRuntimeFromAgent, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
 
 const CG_ID = 'issue-1116-cg';
@@ -62,7 +62,25 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     agentOverrides: Record<string, unknown> = {},
     routeOverrides: { requestToken?: string; requestAgentAddress?: string } = {},
     publisherControl: Record<string, unknown> = {},
+    publisherRuntime: unknown = {
+      walletIds: ['0x1111111111111111111111111111111111111111'],
+      wallets: [{ address: '0x1111111111111111111111111111111111111111' }],
+    },
+    config: Record<string, unknown> = {},
+    publisherAvailability: AsyncPublisherAvailability = { available: true },
   ) {
+    const publisherState = publisherAvailability.available
+      ? {
+          runtime: publisherRuntime,
+          availability: publisherAvailability,
+        }
+      : {
+          runtime: null,
+          availability: publisherAvailability,
+          ...(publisherAvailability.reason === 'publisher_startup_failed'
+            ? { error: new Error('test publisher startup failure') }
+            : {}),
+        };
     const agent = {
       async listContextGraphs() {
         return [{
@@ -90,8 +108,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           res,
           agent,
           publisherControl,
-          publisherRuntime: null,
-          config: {},
+          publisherState,
+          config,
           startedAt: Date.now(),
           dashDb: { insertNotification: () => 1 },
           opWallets: {},
@@ -380,6 +398,121 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
     expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async rejects before persisting when no runtime can claim jobs', async () => {
+    let resolved = 0;
+    let enqueued = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => { resolved += 1; },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
+    }, null, {}, {
+      available: false,
+      reason: 'publisher_disabled',
+      retryable: false,
+      operatorActionRequired: true,
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'async_publisher_unavailable',
+      reason: 'publisher_disabled',
+      retryable: false,
+      operatorActionRequired: true,
+    });
+    expect(resolved).toBe(0);
+    expect(enqueued).toBe(0);
+  });
+
+  it('vm/publish-async treats an empty-wallet runtime as operator-actionable', async () => {
+    let enqueued = 0;
+    await startWith({}, {}, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
+    }, { walletIds: [], wallets: [] }, { publisher: { enabled: true } }, {
+      available: false,
+      reason: 'no_publisher_wallets',
+      retryable: false,
+      operatorActionRequired: true,
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'async_publisher_unavailable',
+      reason: 'no_publisher_wallets',
+      retryable: false,
+      operatorActionRequired: true,
+    });
+    expect(enqueued).toBe(0);
+  });
+
+  it('vm/publish-async uses lifecycle no-wallet state when the runtime is null', async () => {
+    let enqueued = 0;
+    await startWith({}, {}, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
+    }, null, { publisher: { enabled: true } }, {
+      available: false,
+      reason: 'no_publisher_wallets',
+      retryable: false,
+      operatorActionRequired: true,
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      reason: 'no_publisher_wallets', retryable: false, operatorActionRequired: true,
+    });
+    expect(enqueued).toBe(0);
+  });
+
+  it.each([
+    {
+      reason: 'publisher_starting' as const,
+      retryable: true,
+      operatorActionRequired: false,
+    },
+    {
+      reason: 'publisher_startup_failed' as const,
+      retryable: false,
+      operatorActionRequired: true,
+    },
+  ])('vm/publish-async honors lifecycle $reason before intent resolution', async (availability) => {
+    let resolved = 0;
+    let enqueued = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => { resolved += 1; },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
+    }, null, { publisher: { enabled: true } }, {
+      available: false,
+      ...availability,
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'async_publisher_unavailable',
+      ...availability,
+    });
+    expect(resolved).toBe(0);
+    expect(enqueued).toBe(0);
+  });
+
+  it('vm/publish-async reports lifecycle startup failure as operator-actionable', async () => {
+    await startWith({}, {}, {}, {}, null, { publisher: { enabled: true } }, {
+      available: false,
+      reason: 'publisher_startup_failed',
+      retryable: false,
+      operatorActionRequired: true,
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      reason: 'publisher_startup_failed', retryable: false, operatorActionRequired: true,
+    });
   });
 
   it('vm/publish-async rejects a missing real share snapshot before enqueue', async () => {

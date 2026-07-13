@@ -1,7 +1,11 @@
 import { performance } from 'node:perf_hooks';
-import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore } from './triple-store.js';
+import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
+import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore, UpdateOptions } from './triple-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
+export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
+const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
 
 export type GraphSetMutationSource =
   | 'seed'
@@ -11,10 +15,12 @@ export type GraphSetMutationSource =
   | 'deleteByPattern'
   | 'deleteBySubjectPrefix'
   | 'dropGraph'
-  | 'query';
+  | 'query'
+  | 'update';
 
-type GraphSetRefreshSource = 'seed' | 'revalidate' | 'deleteByPattern' | 'query' | 'update';
-type PendingFullRefreshSource = 'deleteByPattern' | 'query' | 'update';
+type TouchedGraphMutationSource = 'delete' | 'deleteByPattern' | 'deleteBySubjectPrefix' | 'update';
+type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
+type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
 
 export type GraphSetMutationEvent =
   | {
@@ -38,6 +44,16 @@ export interface GraphSetIndexStoreOptions {
   enabled?: boolean;
   /** Revalidate after this interval. Use 0 to revalidate on every read. */
   revalidateMs?: number;
+  /**
+   * Initial retry delay after a failed warm periodic revalidation.
+   * Ignored when revalidateMs is 0.
+   */
+  revalidateFailureBackoffMs?: number;
+  /**
+   * Maximum exponential retry delay after failed warm periodic revalidations.
+   * Ignored when revalidateMs is 0.
+   */
+  revalidateFailureMaxBackoffMs?: number;
   now?: () => number;
   onMutation?: (event: GraphSetMutationEvent) => void;
 }
@@ -60,11 +76,14 @@ export class GraphSetIndexStore implements TripleStore {
   private readonly inner: TripleStore;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
+  private readonly revalidateFailureBackoffMs: number;
+  private readonly revalidateFailureMaxBackoffMs: number;
   private readonly now: () => number;
   private readonly onMutation?: (event: GraphSetMutationEvent) => void;
 
   private graphs: Set<string> | null = null;
-  private validatedAt = 0;
+  private nextRevalidateAt = 0;
+  private revalidateFailureCount = 0;
   private mutationGeneration = 0;
   private refreshInFlight: Promise<Set<string>> | null = null;
   /**
@@ -78,6 +97,17 @@ export class GraphSetIndexStore implements TripleStore {
     this.inner = inner;
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
+    this.revalidateFailureBackoffMs = positiveFiniteMs(
+      options.revalidateFailureBackoffMs,
+      Math.max(MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS, this.revalidateMs),
+    );
+    this.revalidateFailureMaxBackoffMs = Math.max(
+      this.revalidateFailureBackoffMs,
+      positiveFiniteMs(
+        options.revalidateFailureMaxBackoffMs,
+        DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS,
+      ),
+    );
     this.now = options.now ?? (() => performance.now());
     this.onMutation = options.onMutation;
   }
@@ -103,7 +133,7 @@ export class GraphSetIndexStore implements TripleStore {
     const touched = namedGraphsFromQuads(quads);
     if (touched.length === 0) return;
     this.bumpMutation();
-    await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'delete', options));
+    await this.maintainTouchedGraphs(touched, 'delete', options);
   }
 
   async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
@@ -115,7 +145,7 @@ export class GraphSetIndexStore implements TripleStore {
     const graph = pattern.graph;
     if (graph) {
       this.bumpMutation();
-      await this.maintainIndex(() => this.refreshTouchedGraphs([graph], 'deleteByPattern', options));
+      await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
     } else {
       // No target graph → can't know which graphs emptied; defer to a single
       // lazy rebuild on the next read instead of a full scan now.
@@ -129,29 +159,50 @@ export class GraphSetIndexStore implements TripleStore {
       return this.inner.query(sparql, options);
     }
     const result = await this.inner.query(sparql, options);
-    if (isSparqlUpdate(sparql)) {
-      // A SPARQL UPDATE may create/drop named graphs we can't derive
-      // incrementally. Mark dirty for a single lazy rebuild on the next read
-      // instead of re-scanning the whole store now — the eager per-UPDATE scan
-      // thrashed large stores under the RS-heal/sync UPDATE stream.
+    if (isSparqlUpdateOperation(sparql)) {
+      // A SPARQL UPDATE through query() may create/drop named graphs we can't
+      // derive incrementally — query() is the READ-path type and carries no
+      // index-maintenance hint (that lives on `update(…, UpdateOptions.touchedGraphs)`).
+      // Mark dirty for a single lazy rebuild on the next read instead of re-scanning
+      // the whole store now (the eager per-UPDATE scan thrashed large stores).
       this.scheduleFullRefresh('query');
     }
     return result;
   }
 
-  async update(sparql: string, options?: QueryOptions): Promise<void> {
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
-      throw new Error('GraphSetIndexStore: inner store does not support update()');
+      throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
     }
     if (!this.enabled) {
       await this.inner.update(sparql, options);
       return;
     }
     await this.inner.update(sparql, options);
-    // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create
-    // or drop named graphs the index must learn about. Rather than re-scan the
-    // whole store on every UPDATE (the thrash), mark dirty: the next read does a
-    // single rebuild and the freshly-created/dropped graph is reflected then.
+    // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
+    // drop named graphs the index must learn about. When the caller declares the
+    // touched graphs (#1549: RS-heal + agents-meta prune write statically-known
+    // URIs), maintain the index INCREMENTALLY — a bounded per-graph `hasGraph`
+    // (which correctly handles an ASK-guarded INSERT that matched zero rows) —
+    // instead of marking the whole index dirty. That keeps the index warm so
+    // graph enumeration stays O(1) rather than forcing a full store scan on the
+    // next read. Only opaque updates (no `touchedGraphs`) fall back to the lazy
+    // full rebuild.
+    if (options?.touchedGraphs) {
+      // Normalize the caller-supplied hint once at the boundary (filter falsy +
+      // de-dupe), matching the `namedGraphsFromQuads` pattern — keeps the incremental
+      // path predictable and avoids repeated `hasGraph` calls on duplicates.
+      const touched = normalizeGraphUris(options.touchedGraphs);
+      if (touched.length > 0) {
+        // Strip the update-only `touchedGraphs` hint before the maintenance READS
+        // (`hasGraph`) — it is meaningless on the read path and must not be smuggled
+        // through the `QueryOptions` boundary into read-path wrappers/diagnostics.
+        const readOptions = queryOptionsFromUpdateOptions(options);
+        this.bumpMutation();
+        await this.maintainTouchedGraphs(touched, 'update', readOptions);
+        return;
+      }
+    }
     this.scheduleFullRefresh('update');
   }
 
@@ -212,7 +263,7 @@ export class GraphSetIndexStore implements TripleStore {
     const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
     if (removed <= 0) return removed;
     this.bumpMutation();
-    await this.maintainIndex(() => this.refreshTouchedGraphs([graphUri], 'deleteBySubjectPrefix', options));
+    await this.maintainTouchedGraphs([graphUri], 'deleteBySubjectPrefix', options);
     return removed;
   }
 
@@ -234,7 +285,7 @@ export class GraphSetIndexStore implements TripleStore {
       this.graphs &&
       !this.pendingFullRefresh &&
       this.revalidateMs > 0 &&
-      this.now() - this.validatedAt < this.revalidateMs
+      this.now() < this.nextRevalidateAt
     ) {
       return this.graphs;
     }
@@ -246,7 +297,22 @@ export class GraphSetIndexStore implements TripleStore {
 
   private async refreshIndex(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
     if (this.refreshInFlight) return this.refreshInFlight;
-    const task = this.refreshIndexLoop(source, options);
+    let task = this.refreshIndexLoop(source, options);
+    if (source === 'revalidate') {
+      task = task.catch((error: unknown) => {
+        // Periodic discovery of out-of-contract writers is advisory once the
+        // write-through index is warm. Preserve that last known set and back
+        // off after a store failure instead of making every graph reader repeat
+        // the same expensive scan. Cold seeds and mutation-dirty rebuilds are
+        // correctness paths: if either condition applies by the time the scan
+        // fails, keep the original strict rejection behavior.
+        if (options?.signal?.aborted || !this.graphs || this.pendingFullRefresh) {
+          throw error;
+        }
+        this.noteRevalidationFailure();
+        return this.graphs;
+      });
+    }
     this.refreshInFlight = task;
     try {
       return await task;
@@ -257,9 +323,22 @@ export class GraphSetIndexStore implements TripleStore {
 
   private async refreshIndexLoop(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
     for (;;) {
+      const isDirtyRebuild = this.pendingFullRefresh != null;
       const sourceForScan = this.pendingFullRefresh ?? source;
       const generation = this.mutationGeneration;
-      const next = new Set((await this.inner.listGraphs(options)).filter(Boolean));
+      // #1549: force the bulk full-store `SELECT DISTINCT ?g` rebuild onto the
+      // BACKGROUND lane ONLY when it is a DIRTY rebuild (an opaque server-side UPDATE
+      // marked the index dirty). Such a rebuild would otherwise inherit an
+      // `ack`-priority reader's `options` and run the full scan on the scarce reserved
+      // ACK slot, head-of-line-blocking other ACK work. A SEED (cold start) or
+      // REVALIDATE refresh is genuinely part of serving the caller — an `ack` read's
+      // seed scan SHOULD use the reserved ACK lane — so it keeps the caller's
+      // priority/source. Cancellation (`signal`) is preserved either way. (With L1
+      // keeping the index warm at source, dirty rebuilds are rare.)
+      const scanOptions: QueryOptions | undefined = isDirtyRebuild
+        ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
+        : options;
+      const next = new Set((await this.inner.listGraphs(scanOptions)).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
       // This scan reflects every mutation up to `generation` (synchronous from
       // here — no await — so a concurrent write can't slip between the check and
@@ -281,9 +360,20 @@ export class GraphSetIndexStore implements TripleStore {
     this.pendingFullRefresh ??= source;
   }
 
-  private async maintainIndex(task: () => Promise<unknown>): Promise<void> {
+  private async maintainIndex<T>(
+    source: PendingFullRefreshSource,
+    inspect: () => Promise<T>,
+    apply: (result: T) => void,
+  ): Promise<void> {
+    const generation = this.mutationGeneration;
     try {
-      await task();
+      const result = await inspect();
+      if (!this.graphs) return;
+      if (generation !== this.mutationGeneration) {
+        this.scheduleFullRefresh(source);
+        return;
+      }
+      apply(result);
     } catch {
       this.clearIndex();
     }
@@ -291,7 +381,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   private clearIndex(): void {
     this.graphs = null;
-    this.validatedAt = 0;
+    this.resetRevalidationSchedule();
   }
 
   private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
@@ -299,10 +389,34 @@ export class GraphSetIndexStore implements TripleStore {
     const added = [...next].filter((graph) => !previous.has(graph)).sort();
     const removed = [...previous].filter((graph) => !next.has(graph)).sort();
     this.graphs = next;
-    this.validatedAt = this.now();
+    this.revalidateFailureCount = 0;
+    this.nextRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
       this.emit({ type: 'graph-set-revalidated', added, removed, source });
     }
+  }
+
+  private noteRevalidationFailure(): void {
+    // revalidateMs=0 is the strict-freshness opt-out from both cached reads and
+    // failure backoff: every read must attempt another scan, even after failure.
+    if (this.revalidateMs === 0) {
+      this.resetRevalidationSchedule();
+      return;
+    }
+    // Cap the exponent before multiplication as an additional overflow guard;
+    // the configured maximum is the externally visible bound.
+    const exponent = Math.min(this.revalidateFailureCount, 30);
+    const delay = Math.min(
+      this.revalidateFailureMaxBackoffMs,
+      this.revalidateFailureBackoffMs * (2 ** exponent),
+    );
+    this.revalidateFailureCount++;
+    this.nextRevalidateAt = this.now() + delay;
+  }
+
+  private resetRevalidationSchedule(): void {
+    this.revalidateFailureCount = 0;
+    this.nextRevalidateAt = 0;
   }
 
   private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
@@ -322,20 +436,31 @@ export class GraphSetIndexStore implements TripleStore {
     }
   }
 
-  private async refreshTouchedGraphs(
+  private async maintainTouchedGraphs(
     graphs: string[],
-    source: GraphSetMutationSource,
+    source: TouchedGraphMutationSource,
     options?: QueryOptions,
   ): Promise<void> {
     if (!this.graphs) return;
-    for (const graph of graphs) {
-      if (!graph) continue;
-      if (await this.inner.hasGraph(graph, options)) {
-        this.addGraphs([graph], source);
-      } else {
-        this.removeGraphs([graph], source);
-      }
-    }
+    const uniqueGraphs = [...new Set(graphs.filter(Boolean))];
+    await this.maintainIndex(
+      source,
+      () => Promise.all(
+        uniqueGraphs.map(async (graph) => ({
+          graph,
+          present: await this.inner.hasGraph(graph, options),
+        })),
+      ),
+      (graphPresence) => {
+        for (const { graph, present } of graphPresence) {
+          if (present) {
+            this.addGraphs([graph], source);
+          } else {
+            this.removeGraphs([graph], source);
+          }
+        }
+      },
+    );
   }
 
   private emit(event: GraphSetMutationEvent): void {
@@ -351,12 +476,23 @@ function namedGraphsFromQuads(quads: Quad[]): string[] {
   return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
 }
 
-function isSparqlUpdate(sparql: string): boolean {
-  const withoutPrologue = sparql
-    .trimStart()
-    .replace(/^(?:(?:#[^\r\n]*(?:\r?\n|$))|(?:PREFIX\s+(?:[A-Za-z][\w-]*)?:\s*<[^>]*>|BASE\s*<[^>]*>)\s*)+/i, '')
-    .trimStart();
-  return /^(?:INSERT|DELETE|WITH|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
+/** Filter falsy entries and de-duplicate a caller-supplied graph-URI hint list. */
+function normalizeGraphUris(graphs: readonly string[]): string[] {
+  return [...new Set(graphs.filter(Boolean))];
+}
+
+/**
+ * Drop the update-only `touchedGraphs` hint, yielding the read-path `QueryOptions`
+ * (source/priority/signal) to forward to index-maintenance reads (`hasGraph`) — so
+ * the update-only field never crosses into a read call via structural assignability.
+ */
+function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
+  const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
+  return readOptions;
+}
+
+function positiveFiniteMs(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && (value as number) > 0 ? value as number : fallback;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

@@ -41,6 +41,7 @@ import {
   computeFlatKCMerkleLeafCountV10,
 } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
+import { replaceCatalogQuads } from './catalog-persistence.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -612,13 +613,7 @@ export class StorageACKHandler {
     }
   }
 
-  /**
-   * REPLACE-persist a verified public `_catalog` into `<cg>/_catalog`:
-   * clear each subject then insert the catalog quads under `catalogGraph`.
-   * Used by BOTH the curated publish and curated update paths (identical
-   * store shape). The caller MUST have already run `assertSafeIri(catalogGraph)`
-   * (malformed-request → reset stays outside the store-op wrapper).
-   */
+  /** Persist a verified public catalog under the shared store-error boundary. */
   private async persistCatalogOrDecline(
     cgId: string,
     catalogGraph: string,
@@ -629,24 +624,11 @@ export class StorageACKHandler {
     // the store wrapper so they reset the stream instead of being mislabeled
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsedCatalog);
-    const result = await this.runStoreOpOrDecline(cgId, async () => {
-      const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
-      for (const subject of catalogSubjects) {
-        await this.store.deleteByPattern(
-          { graph: catalogGraph, subject },
-          ackStoreOptions('storage-ack.persistCatalog.deleteByPattern', signal),
-        );
-      }
-      await this.store.insert(
-        parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
-        ackStoreOptions('storage-ack.persistCatalog.insert', signal),
-      );
-      // Durability boundary: the ACK we are about to sign asserts this data is
-      // stored, and a worker respawn can recover from a snapshot that predates
-      // the debounced flush — so force it durable before signing. A flush
-      // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.(ackStoreOptions('storage-ack.persistCatalog.flush', signal));
-    }, signal);
+    const result = await this.runStoreOpOrDecline(
+      cgId,
+      () => replaceCatalogQuads(this.store, catalogGraph, parsedCatalog, signal),
+      signal,
+    );
     return result.ok ? { ok: true } : result;
   }
 

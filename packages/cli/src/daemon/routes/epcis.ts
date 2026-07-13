@@ -218,8 +218,6 @@ import {
 } from '../http-utils.js';
 import {
   normalizeRepo,
-  parseTagName,
-  isValidRef,
   isValidRepoSpec,
   repoToFetchUrl,
   githubRepoForApi,
@@ -240,6 +238,7 @@ import {
   releaseUpdateLock,
   performNpmUpdate,
 } from '../auto-update.js';
+import { isValidRef, parseTagName } from '../../auto-update-ref.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -398,7 +397,6 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
-    publisherRuntime,
     config,
     startedAt,
     dashDb,
@@ -491,16 +489,20 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
 
   // POST /api/epcis/capture  { contextGraphId?, subGraphName?, epcisDocument, publishOptions? }
   if (req.method === "POST" && path === "/api/epcis/capture") {
-    if (!config.publisher?.enabled) {
+    const publisherAvailability = ctx.publisherState.availability;
+    if (!publisherAvailability.available && publisherAvailability.reason === 'publisher_disabled') {
       return jsonResponse(res, 503, {
         error: "PublisherDisabled",
         message: "Async EPCIS capture requires publisher.enabled=true",
       });
     }
-    if (!publisherRuntime || publisherRuntime.walletIds.length === 0) {
+    if (!publisherAvailability.available) {
       return jsonResponse(res, 503, {
         error: "PublisherUnavailable",
         message: "Async EPCIS capture requires the publisher runtime to be running with at least one configured publisher wallet",
+        reason: publisherAvailability.reason,
+        retryable: publisherAvailability.retryable,
+        operatorActionRequired: publisherAvailability.operatorActionRequired,
       });
     }
     const body = await readBody(req);

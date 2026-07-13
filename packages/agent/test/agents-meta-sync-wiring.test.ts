@@ -2,11 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Wiring guard for the sync-storm mitigation (Chunk 1). The pure resolver is
 // unit-tested in `agents-meta-policy.test.ts`, but that alone would stay
-// green if someone reverted the production call site in
-// `dkg-agent-lifecycle.ts::syncFromPeerDetailed` back to `nodeRole==='core'
-// ? true`. This test exercises the REAL call site with a stubbed
-// `runDurableSync` and asserts the `syncAgentsMeta` value it actually passes
-// through, so such a regression fails here.
+// green if someone reverted the production call site back to
+// `nodeRole==='core' ? true`. This test exercises the REAL call site with a
+// stubbed `runDurableSync` and asserts the `syncAgentsMeta` value it actually
+// passes through, so such a regression fails here.
+//
+// OT-RFC-59: `syncFromPeerDetailed` now delegates the legacy lane to
+// `runLegacyDurableSync` (which owns the syncAgentsMeta resolution + the
+// runDurableSync call), so the fake `this` must carry that method too. The
+// changelog branch is skipped because `this.store` is absent (asChangelogReader
+// returns null).
 
 // Replace `runDurableSync` so `syncFromPeerDetailed` never touches the store /
 // network — we only capture the options object it forwards. `importOriginal`
@@ -34,6 +39,10 @@ const mockedRunDurableSync = vi.mocked(runDurableSync);
 function fakeAgent(config: { nodeRole?: 'core' | 'edge'; syncAgentsMeta?: boolean }): any {
   return {
     config,
+    store: undefined, // no ChangelogStore ⇒ asChangelogReader null ⇒ legacy lane runs
+    // The legacy lane the changelog dispatch delegates to; it owns the
+    // syncAgentsMeta resolution + the (stubbed) runDurableSync call.
+    runLegacyDurableSync: LifecycleSyncMethods.prototype.runLegacyDurableSync,
     createContextGraphSyncDeadline: () => Date.now() + 60_000,
     fetchSyncPages: async () => ({}),
     processDurableBatchInWorker: async () => ({}),

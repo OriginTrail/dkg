@@ -2,8 +2,9 @@ import { parentPort } from 'node:worker_threads';
 import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
+import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
+import { appendInPlace } from './sync/append-in-place.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -32,7 +33,7 @@ parentPort?.on('message', async (message: { id: number; method: string; args: un
     }
     if (message.method === 'processDurableBatch') {
       const [dataQuads, metaQuads, acceptUnverified] = message.args as [Quad[], Quad[], boolean];
-      const result = processDurableBatch(dataQuads, metaQuads, acceptUnverified);
+      const result = processDurableBatchForWire(dataQuads, metaQuads, acceptUnverified);
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -60,8 +61,23 @@ export function verifySyncedData(
   metaQuads: Quad[],
   acceptUnverified = false,
 ): SyncVerifyResult {
+  return verifySyncedDataImpl(dataQuads, metaQuads, acceptUnverified);
+}
+
+type VerifiedSelectionIndexes = {
+  data: number[];
+  meta: number[];
+};
+
+function verifySyncedDataImpl(
+  dataQuads: Quad[],
+  metaQuads: Quad[],
+  acceptUnverified = false,
+  recordSelection?: (indexes: VerifiedSelectionIndexes) => void,
+): SyncVerifyResult {
   const logs: SyncVerifyLogEntry[] = [];
   if (metaQuads.length === 0) {
+    recordSelection?.({ data: allIndexes(dataQuads), meta: [] });
     return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
   }
 
@@ -114,6 +130,7 @@ export function verifySyncedData(
   }
 
   if (kcMerkleRoots.size === 0) {
+    recordSelection?.({ data: allIndexes(dataQuads), meta: allIndexes(metaQuads) });
     return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
   }
 
@@ -152,7 +169,7 @@ export function verifySyncedData(
       const allQuadsForKC: Quad[] = [];
       for (const rootEntity of rootEntities) {
         const quads = partitioned.get(rootEntity) ?? [];
-        allQuadsForKC.push(...quads);
+        appendInPlace(allQuadsForKC, quads);
       }
 
       const privateRoots: Uint8Array[] = [];
@@ -193,6 +210,7 @@ export function verifySyncedData(
 
   if (acceptUnverified && rejected > 0 && verifiedKcUals.size < kcMerkleRoots.size) {
     logs.push({ level: 'debug', message: `Accepting ${rejected} unverified KC(s) (system context graph)` });
+    recordSelection?.({ data: allIndexes(dataQuads), meta: allIndexes(metaQuads) });
     return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
   }
 
@@ -208,22 +226,47 @@ export function verifySyncedData(
     for (const rootEntity of entities) allKnownRootEntities.add(rootEntity);
   }
 
-  const verifiedData = dataQuads.filter((q) => {
+  const selectedData = selectQuads(dataQuads, (q) => {
     if (allKnownRootEntities.has(q.subject)) return verifiedRootEntities.has(q.subject);
     for (const rootEntity of verifiedRootEntities) {
       if (q.subject.startsWith(rootEntity)) return true;
     }
     return true;
-  });
+  }, recordSelection !== undefined);
 
-  const verifiedMeta = metaQuads.filter((q) => {
+  const selectedMeta = selectQuads(metaQuads, (q) => {
     if (kcMerkleRoots.has(q.subject)) return verifiedKcUals.has(q.subject);
     const kcUri = kaToKc.get(q.subject);
     if (kcUri) return verifiedKcUals.has(kcUri);
     return true;
+  }, recordSelection !== undefined);
+
+  recordSelection?.({
+    data: selectedData.indexes!,
+    meta: selectedMeta.indexes!,
   });
 
-  return { data: verifiedData, meta: verifiedMeta, rejected, logs };
+  return { data: selectedData.quads, meta: selectedMeta.quads, rejected, logs };
+}
+
+function allIndexes(source: readonly unknown[]): number[] {
+  return Array.from({ length: source.length }, (_, index) => index);
+}
+
+function selectQuads(
+  source: Quad[],
+  include: (quad: Quad) => boolean,
+  captureIndexes: boolean,
+): { quads: Quad[]; indexes?: number[] } {
+  const quads: Quad[] = [];
+  const indexes = captureIndexes ? [] as number[] : undefined;
+  for (let index = 0; index < source.length; index++) {
+    const quad = source[index];
+    if (!include(quad)) continue;
+    quads.push(quad);
+    indexes?.push(index);
+  }
+  return { quads, indexes };
 }
 
 function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
@@ -417,11 +460,16 @@ function combineRegisteredSubGraphNames(
   return [...out];
 }
 
+type DurableBatchSelectionResult = DurableBatchProcessResult & {
+  verifiedDataIndexes: number[];
+  verifiedMetaIndexes: number[];
+};
+
 function processDurableBatch(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
-): DurableBatchProcessResult {
+): DurableBatchSelectionResult {
   const logs: SyncVerifyLogEntry[] = [];
   const totalFetchedDataQuads = dataQuads.length;
   const totalFetchedMetaQuads = metaQuads.length;
@@ -430,6 +478,8 @@ function processDurableBatch(
     return {
       verifiedData: [],
       verifiedMeta: [],
+      verifiedDataIndexes: [],
+      verifiedMetaIndexes: [],
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -448,6 +498,8 @@ function processDurableBatch(
     return {
       verifiedData: [],
       verifiedMeta: [],
+      verifiedDataIndexes: [],
+      verifiedMetaIndexes: [],
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -466,10 +518,18 @@ function processDurableBatch(
     });
   }
 
-  const verified = verifySyncedData(dataQuads, metaQuads, acceptUnverified);
+  let verifiedIndexes: VerifiedSelectionIndexes = { data: [], meta: [] };
+  const verified = verifySyncedDataImpl(
+    dataQuads,
+    metaQuads,
+    acceptUnverified,
+    (indexes) => { verifiedIndexes = indexes; },
+  );
   return {
     verifiedData: verified.data,
     verifiedMeta: verified.meta,
+    verifiedDataIndexes: verifiedIndexes.data,
+    verifiedMetaIndexes: verifiedIndexes.meta,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs: verified.rejected,
@@ -477,6 +537,38 @@ function processDurableBatch(
     metaOnlyResponses,
     dataRejectedMissingMeta: 0,
     logs: [...logs, ...verified.logs],
+  };
+}
+
+export function processDurableBatchForWire(
+  dataQuads: Quad[],
+  metaQuads: Quad[],
+  acceptUnverified: boolean,
+): DurableBatchProcessWireResult {
+  const result = processDurableBatch(dataQuads, metaQuads, acceptUnverified);
+  const {
+    verifiedDataIndexes,
+    verifiedMetaIndexes,
+    totalFetchedDataQuads,
+    totalFetchedMetaQuads,
+    rejectedKcs,
+    emptyResponses,
+    metaOnlyResponses,
+    dataRejectedMissingMeta,
+    logs,
+  } = result;
+  // Selection indexes are produced by the exact verification/filter pass,
+  // avoiding any hidden dependency on Quad object identity or source order.
+  return {
+    verifiedDataIndexes,
+    verifiedMetaIndexes,
+    totalFetchedDataQuads,
+    totalFetchedMetaQuads,
+    rejectedKcs,
+    emptyResponses,
+    metaOnlyResponses,
+    dataRejectedMissingMeta,
+    logs,
   };
 }
 

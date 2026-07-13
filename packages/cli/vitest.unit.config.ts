@@ -14,10 +14,13 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/api-client.test.ts',
+          'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
+          'test/status-route-store-quads.test.ts',
+          'test/status-command-store.test.ts',
           'test/memory-graph-events.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',
@@ -42,6 +45,7 @@ export default defineConfig({
           'test/init.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
+          'test/random-sampling-status.test.ts',
           'test/catchup-runner.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',

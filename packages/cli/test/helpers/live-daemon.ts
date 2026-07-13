@@ -53,6 +53,8 @@ function uniquePort(base: number): number {
 
 export interface StartDaemonOpts {
   authEnabled?: boolean;
+  /** Enable a real async publisher and seed its wallet file. */
+  publisherEnabled?: boolean;
   /** Extra keys merged into config.json (e.g. preset contextGraphs). */
   extraConfig?: Record<string, unknown>;
   readyTimeoutMs?: number;
@@ -89,6 +91,7 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
       auth: { enabled: authEnabled },
       store: { backend: 'oxigraph-worker', options: { path: join(home, 'store.nq') } },
       chain: { type: 'evm', rpcUrl, hubAddress, chainId: 'evm:31337' },
+      ...(opts.publisherEnabled ? { publisher: { enabled: true } } : {}),
       contextGraphs: [],
       ...(opts.extraConfig ?? {}),
     }),
@@ -102,6 +105,13 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
     JSON.stringify({ wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }] }, null, 2) + '\n',
     { mode: 0o600 },
   );
+  if (opts.publisherEnabled) {
+    await writeFile(
+      join(home, 'publisher-wallets.json'),
+      JSON.stringify({ wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }] }, null, 2) + '\n',
+      { mode: 0o600 },
+    );
+  }
 
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
@@ -149,6 +159,25 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
     daemon.token =
       raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !l.startsWith('#')) ?? null;
     if (!daemon.token) throw new Error('auth enabled but no token written');
+  }
+  if (opts.publisherEnabled) {
+    // `/api/status` becomes ready before the zero-delay publisher startup task.
+    // Poll its explicit readiness field rather than fabricating a business
+    // publish request whose validation order could change independently.
+    for (let i = 0; i < 60; i += 1) {
+      const res = await fetch(`${daemon.base}/api/status`, {
+        headers: daemon.token ? { Authorization: `Bearer ${daemon.token}` } : {},
+      });
+      const body = await res.json().catch(() => ({})) as {
+        asyncPublisher?: { available?: boolean; reason?: string };
+      };
+      if (body.asyncPublisher?.available === true) break;
+      if (body.asyncPublisher?.reason !== 'publisher_starting') {
+        throw new Error(`Async publisher failed readiness: ${body.asyncPublisher?.reason ?? res.status}`);
+      }
+      await sleep(100);
+      if (i === 59) throw new Error('Async publisher did not become ready in time');
+    }
   }
   return daemon;
 }

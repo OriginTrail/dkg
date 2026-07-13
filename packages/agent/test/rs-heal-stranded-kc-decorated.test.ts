@@ -10,15 +10,21 @@
  * in every normal daemon config → the guard silently returns → the heal never
  * runs and RS stays stuck. The bare-adapter gate tests cannot see this.
  *
- * This builds the store the way production does (factory + agent wrapper) and
+ * This builds the production decorator order around a counted adapter and
  * proves: (1) `update` propagates to the top of the stack; (2) the heal
  * actually RELOCATES through it (byte-exact root equality — if `update` were
  * dropped the guard would no-op and scoped would stay empty); (3) the wrapper's
- * cache-invalidation + the GraphSetIndex refresh fire so the new scoped graph
- * is enumerable.
+ * cache invalidation fires and the GraphSetIndex touched-graph maintenance keeps
+ * the new scoped graph enumerable without a lazy full rebuild.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
-import { createTripleStore, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  GraphSetIndexStore,
+  OxigraphStore,
+  type QueryOptions,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { V10MerkleTree, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling';
 import { writeMaterializedVersion } from '@origintrail-official/dkg-publisher';
@@ -53,9 +59,29 @@ function metaQuads(ual: string, metaGraph: string): Quad[] {
   ];
 }
 
+type ListGraphsCountingStore = TripleStore & { readonly listGraphsCalls: number };
+
+function countListGraphs(inner: TripleStore): ListGraphsCountingStore {
+  let listGraphsCalls = 0;
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === 'listGraphsCalls') return listGraphsCalls;
+      if (prop === 'listGraphs') {
+        return async (options?: QueryOptions) => {
+          listGraphsCalls += 1;
+          return target.listGraphs(options);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as ListGraphsCountingStore;
+}
+
 describe('healStrandedScopedKCs — through the production store decorator stack', () => {
   let store: TripleStore;
   let invalidateCount: number;
+  let countedAdapter: ListGraphsCountingStore;
 
   const TEST_CG = 'stranded-cg';
   const TEST_ONCHAIN = '7';
@@ -66,9 +92,10 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
   beforeEach(async () => {
     invalidateCount = 0;
-    // Production wrapping: createTripleStore (→ GraphSetIndexStore) then the
-    // agent's listContextGraphs cache-invalidating wrapper (DKGAgent.create).
-    const inner = await createTripleStore({ backend: 'oxigraph', graphSetIndex: true });
+    // Production wrapping order: adapter → GraphSetIndexStore → the agent's
+    // listContextGraphs cache-invalidating wrapper (DKGAgent.create).
+    countedAdapter = countListGraphs(new OxigraphStore());
+    const inner = new GraphSetIndexStore(countedAdapter);
     store = createListContextGraphsCacheInvalidatingStore(
       inner,
       () => { invalidateCount += 1; },
@@ -107,15 +134,80 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(typeof store.update).toBe('function');
   });
 
+  it('forwards pressure telemetry and hasGraph admission options through the agent decorator', async () => {
+    const pressure = {
+      ackInflight: 1,
+      normalInflight: 2,
+      backgroundInflight: 3,
+      ackQueued: 4,
+      normalQueued: 5,
+      backgroundQueued: 6,
+      maxConcurrent: 8,
+      ackReservedSlots: 2,
+    };
+    const hasGraph = vi.fn(async () => true);
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'getPressureSnapshot') return () => pressure;
+        if (prop === 'hasGraph') return hasGraph;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(adapter, () => undefined);
+    const controller = new AbortController();
+    const options: QueryOptions = {
+      source: 'test.ack-read',
+      priority: 'ack',
+      signal: controller.signal,
+    };
+
+    expect(wrapped.getPressureSnapshot?.()).toBe(pressure);
+    await expect(wrapped.hasGraph('urn:test:graph', options)).resolves.toBe(true);
+    expect(hasGraph).toHaveBeenCalledWith('urn:test:graph', options);
+
+    await wrapped.close();
+  });
+
+  it('invalidates caches for query updates with dotted PREFIX labels', async () => {
+    const adapter = new OxigraphStore();
+    const queryStore = new Proxy(adapter, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async () => ({ type: 'bindings' as const, bindings: [] });
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let invalidations = 0;
+    let projectionInvalidations = 0;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      queryStore,
+      () => { invalidations += 1; },
+      () => { projectionInvalidations += 1; },
+    );
+
+    await wrapped.query(
+      'PREFIX foaf.core: <http://xmlns.com/foaf/0.1/> ' +
+      'INSERT DATA { GRAPH <urn:g> { <urn:s> foaf.core:name "v" } }',
+    );
+
+    expect(invalidations).toBe(1);
+    expect(projectionInvalidations).toBe(1);
+    await wrapped.close();
+  });
+
   it('relocates the stranded KC through the full stack (heal does NOT silently no-op)', async () => {
     const ctrl = await extractV10KCFromStore(store, BigInt(CTRL_ONCHAIN), KA_ID);
     const expectedRoot = new V10MerkleTree(ctrl.leaves).root;
     await expect(extractV10KCFromStore(store, BigInt(TEST_ONCHAIN), KA_ID)).rejects.toBeTruthy();
 
-    // Seed the GraphSetIndex BEFORE the heal so we can prove the update-path
-    // refresh registers the newly-created scoped graph (not just a lazy scan).
+    // Seed the GraphSetIndex BEFORE the heal so touchedGraphs must maintain an
+    // already-populated graph index without a full rebuild.
     const graphsBefore = await store.listGraphs();
     expect(graphsBefore).not.toContain(contextGraphMetaUri(TEST_CG, TEST_ONCHAIN));
+    expect(countedAdapter.listGraphsCalls).toBe(1);
     const invalidatesBefore = invalidateCount;
 
     await runHeal(TEST_CG, TEST_ONCHAIN);
@@ -128,17 +220,53 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     // (2) the cache-invalidating wrapper's update() ran (graph-creating mutation).
     expect(invalidateCount).toBeGreaterThan(invalidatesBefore);
 
-    // (3) GraphSetIndexStore.update() refreshed the index — the new scoped
-    //     graph is now enumerable.
+    // (3) GraphSetIndexStore.update() used the declared touchedGraphs to keep the
+    //     index warm, so the new scoped graphs are enumerable without a rescan.
     const graphsAfter = await store.listGraphs();
     expect(graphsAfter).toContain(contextGraphMetaUri(TEST_CG, TEST_ONCHAIN));
     expect(graphsAfter).toContain(contextGraphDataUri(TEST_CG, TEST_ONCHAIN));
+    expect(countedAdapter.listGraphsCalls).toBe(1);
 
     // copies, never moves.
     const legacyStill = await store.query(
       `ASK { GRAPH <${contextGraphMetaUri(TEST_CG)}> { <${TEST_UAL}> <${DKG}batchId> "${KA_ID}"^^<${XSD}integer> } }`,
     );
     expect(legacyStill.type === 'boolean' && legacyStill.value).toBe(true);
+  });
+
+  it('(#1549) RS-heal INSERTs declare touchedGraphs through the decorator stack', async () => {
+    // Guard the #1549 warm-index behaviour at the call site: a regression reverting
+    // either INSERT to a plain `store.update(sparql)` would still relocate the KC
+    // (the graphsAfter/merkle assertions above stay green) but would re-dirty the
+    // graph-set index and force a full rebuild scan. Capture the update() options the
+    // heal sends through the top of the production stack and assert each INSERT
+    // declares its scoped target graph + source tag.
+    const updateCalls: Array<{ sparql: string; options?: { source?: string; touchedGraphs?: readonly string[] } }> = [];
+    const capturing = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'update') {
+          const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['update']>;
+          return (sparql: string, options?: { source?: string; touchedGraphs?: readonly string[] }) => {
+            updateCalls.push({ sparql, options });
+            return orig.call(target, sparql, options);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      { store: capturing, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      TEST_CG,
+      { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
+    );
+
+    const scopedData = contextGraphDataUri(TEST_CG, TEST_ONCHAIN);
+    const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
+    const dataInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedData));
+    const metaInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedMeta));
+    expect(dataInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedData] });
+    expect(metaInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedMeta] });
   });
 
   it('relocates a VM-graph-only one-shot strand through the full stack (read-both)', async () => {

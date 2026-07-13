@@ -61,6 +61,33 @@ Optional:
 For a local Oxigraph server you do **not** have to run it yourself: set `"store": { "backend": "oxigraph-server" }` (the `dkg init` default) and the daemon fetches the pinned `oxigraph` binary, spawns it on `127.0.0.1`, and supervises it. Use the manual `sparql-http` steps above only when you run Oxigraph (or another SPARQL store) yourself or off-host.
 {% endhint %}
 
+Managed Oxigraph accepts optional launch settings under `store.options`:
+
+```json
+{
+  "store": {
+    "backend": "oxigraph-server",
+    "options": {
+      "port": 7878,
+      "location": "/var/lib/dkg/oxigraph-data",
+      "cacheDir": "/var/lib/dkg/oxigraph-bin",
+      "readyTimeoutMs": 180000,
+      "queryTimeoutS": 35,
+      "memoryHighMiB": 2048,
+      "memoryMaxMiB": 3072
+    }
+  }
+}
+```
+
+`readyTimeoutMs` is the maximum startup readiness wait in milliseconds. It must be a positive integer; invalid values are ignored and the default 30-second timeout is used. Increase it when a large or recovering RocksDB database needs longer to open.
+
+`queryTimeoutS` is the native Oxigraph query timeout in seconds. The rewritten HTTP store timeout includes an additional five-second grace period so Oxigraph can return its timeout response before the client aborts the request.
+
+On Linux hosts using systemd, `memoryMaxMiB` runs managed Oxigraph in a dedicated transient user scope with a finite hard limit and disables swap for that scope, so database pressure cannot spill into host swap and stall the node. Optional `memoryHighMiB` sets its soft reclaim threshold and must not exceed `memoryMaxMiB`. This keeps Oxigraph outside the DKG daemon service's cgroup, so a finite `MemoryMax` on the daemon cannot kill the store or throttle the Node.js control plane as one combined process group. Enable lingering once for the node service account (`sudo loginctl enable-linger <dkg-user>`) so its user manager and bus exist before the system service starts at boot; verify with `systemctl --user is-system-running` as that account. The daemon supplies the required user-bus environment automatically. Startup fails rather than silently dropping configured limits when the scope cannot be created.
+
+Size the daemon service and Oxigraph scope independently, while keeping their combined maxima within host capacity. For example, an 8 GiB node can reserve 3 GiB for managed Oxigraph and place a separate finite 4 GiB cap on the DKG service, leaving roughly 1 GiB for the OS. These options are deliberately opt-in and are not supported on non-systemd platforms.
+
 ### Other stores
 
 - **Blazegraph:** One URL for both query and update. Set only `queryEndpoint` or set both options to the same URL (e.g. `http://127.0.0.1:9999/blazegraph/namespace/kb/sparql`).

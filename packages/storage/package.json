@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-storage",
-  "version": "10.0.5",
+  "version": "10.0.6",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "oxigraph": "^0.5"
   },
   "devDependencies": {

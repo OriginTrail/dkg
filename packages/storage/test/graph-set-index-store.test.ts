@@ -8,65 +8,9 @@ import {
   createTripleStore,
   registerTripleStoreAdapter,
   type GraphSetMutationEvent,
-  type Quad,
   type QueryOptions,
-  type QueryResult,
-  type TripleStore,
 } from '../src/index.js';
-
-function q(graph: string, subject = 'urn:s'): Quad {
-  return {
-    subject,
-    predicate: 'urn:p',
-    object: '"v"',
-    graph,
-  };
-}
-
-class CountingStore implements TripleStore {
-  listGraphsCalls = 0;
-  hasGraphOptions: Array<QueryOptions | undefined> = [];
-  listGraphsOptions: Array<QueryOptions | undefined> = [];
-  listGraphsGate: Promise<void> | null = null;
-  failListGraphs = false;
-
-  constructor(protected readonly inner: TripleStore) {}
-
-  insert(quads: Quad[], options?: QueryOptions): Promise<void> { return this.inner.insert(quads, options); }
-  delete(quads: Quad[], options?: QueryOptions): Promise<void> { return this.inner.delete(quads, options); }
-  deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
-    return this.inner.deleteByPattern(pattern, options);
-  }
-  query(sparql: string, options?: QueryOptions): Promise<QueryResult> { return this.inner.query(sparql, options); }
-  async update(sparql: string, options?: QueryOptions): Promise<void> {
-    if (typeof this.inner.update !== 'function') throw new Error('inner store does not support update()');
-    await this.inner.update(sparql, options);
-  }
-  hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    this.hasGraphOptions.push(options);
-    return this.inner.hasGraph(graphUri, options);
-  }
-  createGraph(graphUri: string): Promise<void> { return this.inner.createGraph(graphUri); }
-  dropGraph(graphUri: string, options?: QueryOptions): Promise<void> { return this.inner.dropGraph(graphUri, options); }
-  deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
-    return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
-  }
-  countQuads(graphUri?: string, options?: QueryOptions): Promise<number> { return this.inner.countQuads(graphUri, options); }
-  flush(options?: QueryOptions): Promise<void> { return this.inner.flush?.(options) ?? Promise.resolve(); }
-  close(): Promise<void> { return this.inner.close(); }
-
-  async listGraphs(options?: QueryOptions): Promise<string[]> {
-    this.listGraphsCalls++;
-    this.listGraphsOptions.push(options);
-    if (this.listGraphsGate) await this.listGraphsGate;
-    if (this.failListGraphs) throw new Error('listGraphs failed');
-    return this.inner.listGraphs(options);
-  }
-}
-
-function emptyBindings(): QueryResult {
-  return { type: 'bindings', bindings: [] };
-}
+import { CountingStore, MutationHookStore, emptyBindings, q } from './graph-set-index-store-harness.js';
 
 class FailingMaintenanceStore extends CountingStore {
   failHasGraph = false;
@@ -77,43 +21,13 @@ class FailingMaintenanceStore extends CountingStore {
   }
 }
 
-type MutationHookInput = {
-  sparql: string;
-  seq: number;
-  inner: TripleStore;
-  options?: QueryOptions;
-};
+class GatedMaintenanceStore extends CountingStore {
+  hasGraphGate: Promise<void> | null = null;
 
-class MutationHookStore extends CountingStore {
-  private querySeq = 0;
-  private updateSeq = 0;
-
-  constructor(
-    inner: TripleStore,
-    private readonly hooks: {
-      onQuery?: (input: MutationHookInput) => Promise<QueryResult | undefined> | QueryResult | undefined;
-      onUpdate?: (input: MutationHookInput) => Promise<void> | void;
-    },
-  ) {
-    super(inner);
-  }
-
-  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
-    if (this.hooks.onQuery) {
-      const seq = this.querySeq++;
-      const result = await this.hooks.onQuery({ sparql, seq, inner: this.inner, options });
-      if (result !== undefined) return result;
-    }
-    return super.query(sparql, options);
-  }
-
-  async update(sparql: string, options?: QueryOptions): Promise<void> {
-    if (this.hooks.onUpdate) {
-      const seq = this.updateSeq++;
-      await this.hooks.onUpdate({ sparql, seq, inner: this.inner, options });
-      return;
-    }
-    await super.update(sparql, options);
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    const present = await super.hasGraph(graphUri, options);
+    if (this.hasGraphGate) await this.hasGraphGate;
+    return present;
   }
 }
 
@@ -177,6 +91,37 @@ describe('GraphSetIndexStore', () => {
     await store.insert([q(graph)]);
     await store.dropGraph(graph);
     await expect(store.listGraphs()).resolves.toEqual([]);
+  });
+
+  it('defers stale touched-graph probe results when another mutation wins the race', async () => {
+    const graph = 'did:dkg:context-graph:stale-delete-probe';
+    const inner = new OxigraphStore();
+    await inner.insert([q(graph)]);
+    const gated = new GatedMaintenanceStore(inner);
+    const events: GraphSetMutationEvent[] = [];
+    let release!: () => void;
+    gated.hasGraphGate = new Promise<void>((resolve) => { release = resolve; });
+    const store = new GraphSetIndexStore(gated, { onMutation: (event) => events.push(event) });
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    expect(gated.listGraphsCalls).toBe(1);
+
+    const staleDelete = store.delete([q(graph)]);
+    for (let i = 0; i < 10 && gated.hasGraphOptions.length === 0; i++) {
+      await Promise.resolve();
+    }
+    expect(gated.hasGraphOptions).toHaveLength(1);
+    await store.insert([q(graph, 'urn:after')]);
+    release();
+    await staleDelete;
+
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    expect(gated.listGraphsCalls).toBe(2);
+    expect(events).toContainEqual({
+      type: 'graph-set-revalidated',
+      added: [],
+      removed: [],
+      source: 'delete',
+    });
   });
 
   it('refreshes the full index after graph-wide deleteByPattern without a graph constraint', async () => {
@@ -267,6 +212,78 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(2);
   });
 
+  it('serves a warm index and exponentially backs off failed periodic revalidations', async () => {
+    let now = 1_000;
+    const cached = 'did:dkg:context-graph:cached';
+    const external = 'did:dkg:context-graph:external-after-failure';
+    const inner = new OxigraphStore();
+    await inner.insert([q(cached)]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 100,
+      revalidateFailureBackoffMs: 10,
+      revalidateFailureMaxBackoffMs: 40,
+      now: () => now,
+    });
+
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    await inner.insert([q(external)]);
+    counting.failListGraphs = true;
+
+    // The first expired periodic refresh fails, but the warm write-through set
+    // remains serviceable. Repeated readers do not immediately re-run the scan.
+    now += 100;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(2);
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    now += 9;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(2);
+
+    // Failure delays grow 10 -> 20 -> 40 ms and are bounded at 40 ms.
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(3);
+    now += 19;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(3);
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(4);
+    now += 39;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(4);
+
+    counting.failListGraphs = false;
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, external]));
+    expect(counting.listGraphsCalls).toBe(5);
+
+    // A successful refresh resets the exponential sequence to its initial delay.
+    counting.failListGraphs = true;
+    now += 100;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, external]));
+    expect(counting.listGraphsCalls).toBe(6);
+    now += 9;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, external]));
+    expect(counting.listGraphsCalls).toBe(6);
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, external]));
+    expect(counting.listGraphsCalls).toBe(7);
+  });
+
+  it('keeps a failed cold seed strict instead of serving an empty graph set', async () => {
+    const counting = new CountingStore(new OxigraphStore());
+    counting.failListGraphs = true;
+    const store = new GraphSetIndexStore(counting);
+
+    await expect(store.listGraphs()).rejects.toThrow('listGraphs failed');
+    expect(counting.listGraphsCalls).toBe(1);
+    counting.failListGraphs = false;
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(2);
+  });
+
   it('treats revalidateMs 0 as always expired', async () => {
     const inner = new OxigraphStore();
     const counting = new CountingStore(inner);
@@ -276,6 +293,34 @@ describe('GraphSetIndexStore', () => {
     await inner.insert([q('did:dkg:context-graph:zero-revalidate')]);
     await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:zero-revalidate']);
     expect(counting.listGraphsCalls).toBe(2);
+  });
+
+  it('retries every read after a warm revalidation failure when revalidateMs is 0', async () => {
+    const now = 1_000;
+    const cached = 'did:dkg:context-graph:cached-zero-revalidate';
+    const recovered = 'did:dkg:context-graph:recovered-zero-revalidate';
+    const inner = new OxigraphStore();
+    await inner.insert([q(cached)]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 0,
+      revalidateFailureBackoffMs: 10,
+      now: () => now,
+    });
+
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    await inner.insert([q(recovered)]);
+    counting.failListGraphs = true;
+
+    // A failed warm scan still serves the last known set for availability.
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(2);
+
+    // Recovery is visible on the very next read at the same timestamp. The
+    // configured failure delay must not override the always-revalidate contract.
+    counting.failListGraphs = false;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, recovered]));
+    expect(counting.listGraphsCalls).toBe(3);
   });
 
   it('coalesces concurrent refresh callers onto one listGraphs scan', async () => {
@@ -369,7 +414,7 @@ describe('GraphSetIndexStore', () => {
     const store = new GraphSetIndexStore(counting);
     await expect(store.listGraphs()).resolves.toEqual([]);
 
-    await store.query('# cleanup\nINSERT DATA { GRAPH <ignored> { <urn:s> <urn:p> "v" } }');
+    await store.query(`# cleanup\nINSERT DATA { GRAPH <${graph}> { <urn:s> <urn:p> "v" } }`);
     await expect(store.listGraphs()).resolves.toEqual([graph]);
   });
 
@@ -388,9 +433,9 @@ describe('GraphSetIndexStore', () => {
 
     // Three mutating SPARQL updates. Pre-fix each eager-rescanned the whole
     // store (calls would be 4 here); the fix defers them.
-    await store.query('INSERT DATA { GRAPH <g0> { <urn:s> <urn:p> "v" } }');
-    await store.query('INSERT DATA { GRAPH <g1> { <urn:s> <urn:p> "v" } }');
-    await store.query('INSERT DATA { GRAPH <g2> { <urn:s> <urn:p> "v" } }');
+    await store.query('INSERT { GRAPH ?g { <urn:s> <urn:p> "v" } } WHERE { VALUES ?g { <urn:g0> } }');
+    await store.query('INSERT { GRAPH ?g { <urn:s> <urn:p> "v" } } WHERE { VALUES ?g { <urn:g1> } }');
+    await store.query('INSERT { GRAPH ?g { <urn:s> <urn:p> "v" } } WHERE { VALUES ?g { <urn:g2> } }');
     expect(counting.listGraphsCalls).toBe(1); // no eager rescan per update
 
     // The next read rebuilds exactly once and reflects ALL three writes
@@ -415,6 +460,29 @@ describe('GraphSetIndexStore', () => {
     });
   });
 
+  it('runs deferred full rebuild scans on the background lane even when an ack read waits for them', async () => {
+    const graph = 'did:dkg:context-graph:ack-triggered-rebuild';
+    const counting = new MutationHookStore(new OxigraphStore(), {
+      onQuery: async ({ inner }) => {
+        await inner.insert([q(graph)]);
+        return emptyBindings();
+      },
+    });
+    const store = new GraphSetIndexStore(counting);
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await store.query(`INSERT DATA { GRAPH <${graph}> { <urn:s> <urn:p> "v" } }`);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await expect(store.listGraphs({ priority: 'ack', source: 'test.ack.listGraphs' })).resolves.toEqual([graph]);
+    expect(counting.listGraphsCalls).toBe(2);
+    expect(counting.listGraphsOptions.at(-1)).toMatchObject({
+      priority: 'background',
+      source: 'graph-set-index.rebuild',
+    });
+  });
+
   it('a SPARQL update marks the index dirty so the next read rebuilds even within revalidateMs', async () => {
     let now = 1_000;
     const counting = new MutationHookStore(new OxigraphStore(), {
@@ -429,7 +497,7 @@ describe('GraphSetIndexStore', () => {
 
     // Well within revalidateMs — a read alone would serve cache — but a mutating
     // update forces the next read to rebuild (freshness, not staleness).
-    await store.query('INSERT DATA { GRAPH <g> { <urn:s> <urn:p> "v" } }');
+    await store.query('INSERT { GRAPH ?g { <urn:s> <urn:p> "v" } } WHERE { VALUES ?g { <urn:g> } }');
     now += 1;
     await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:seq-0']);
     expect(counting.listGraphsCalls).toBe(2);
@@ -451,8 +519,8 @@ describe('GraphSetIndexStore', () => {
     await expect(store.listGraphs()).resolves.toEqual([]);
     expect(counting.listGraphsCalls).toBe(1);
 
-    await store.update('INSERT DATA { GRAPH <g0> { <urn:s> <urn:p> "v" } }');
-    await store.update('INSERT DATA { GRAPH <g1> { <urn:s> <urn:p> "v" } }');
+    await store.update('INSERT { GRAPH ?g { <urn:s> <urn:p> "v" } } WHERE { VALUES ?g { <urn:g0> } }');
+    await store.update('INSERT { GRAPH ?g { <urn:s> <urn:p> "v" } } WHERE { VALUES ?g { <urn:g1> } }');
     expect(counting.listGraphsCalls).toBe(1);
 
     now += 1;
@@ -474,6 +542,102 @@ describe('GraphSetIndexStore', () => {
     });
   });
 
+  it('#1549: update() with declared touchedGraphs maintains the index INCREMENTALLY — no full rebuild scan', async () => {
+    const healed = 'did:dkg:context-graph:heal';
+    const counting = new MutationHookStore(new OxigraphStore(), {
+      onUpdate: async ({ inner }) => { await inner.insert([q(healed)]); },
+    });
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 100_000, now: () => 1_000, onMutation: (e) => events.push(e),
+    });
+    await store.insert([q('did:dkg:context-graph:seed')]);
+    await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:seed']);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    // A server-side UPDATE that creates a new graph, with the touched graph DECLARED.
+    // Contrast with the "defers update()" test above (no touchedGraphs → a full
+    // rebuild scan on the next read); here the index stays warm with zero scans.
+    await store.update(
+      'INSERT DATA { GRAPH <did:dkg:context-graph:heal> { <urn:s> <urn:p> "v" } }',
+      { touchedGraphs: [healed], priority: 'ack', source: 'test.explicit-update' },
+    );
+
+    expect(counting.listGraphsCalls).toBe(1); // incremental hasGraph, NOT a full scan
+    expect(counting.hasGraphOptions.at(-1)).toEqual({
+      priority: 'ack',
+      source: 'test.explicit-update',
+    });
+    await expect(store.listGraphs()).resolves.toEqual(
+      expect.arrayContaining([healed, 'did:dkg:context-graph:seed']),
+    );
+    expect(counting.listGraphsCalls).toBe(1); // still warm — no rebuild triggered
+    expect(events).toContainEqual({ type: 'graph-added', graph: healed, source: 'update' });
+  });
+
+  it('#1549: a rebuild triggered by an ack-priority read runs the full scan on the BACKGROUND lane, not ack', async () => {
+    const counting = new MutationHookStore(new OxigraphStore(), {
+      onUpdate: async ({ inner }) => { await inner.insert([q('did:dkg:context-graph:y')]); },
+    });
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100_000, now: () => 1_000 });
+    await store.insert([q('did:dkg:context-graph:x')]);
+    await store.listGraphs(); // seed (listGraphsCalls = 1)
+    expect(counting.listGraphsCalls).toBe(1);
+
+    // Opaque update (NO touchedGraphs) marks the index dirty → next read rebuilds.
+    await store.update('INSERT DATA { GRAPH <did:dkg:context-graph:y> { <urn:s> <urn:p> "v" } }');
+
+    // An ACK-priority read on the dirty index forces the rebuild. The rebuild's full
+    // SELECT DISTINCT ?g scan must NOT run on the ack lane (it would consume the
+    // scarce reserved ACK slot); it is forced onto background + tagged.
+    await store.listGraphsByPrefix('did:dkg:', { priority: 'ack', source: 'test.ack.read' });
+    expect(counting.listGraphsCalls).toBe(2);
+
+    const rebuildScan = counting.listGraphsOptions.at(-1);
+    expect(rebuildScan).toMatchObject({ priority: 'background', source: 'graph-set-index.rebuild' });
+    expect(rebuildScan?.priority).not.toBe('ack');
+  });
+
+  it('#1549: a cold/seed ack-priority read KEEPS the ACK lane (only the dirty rebuild is demoted)', async () => {
+    const inner = new OxigraphStore();
+    await inner.insert([q('did:dkg:context-graph:seedme')]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting);
+
+    // Cold index (graphs === null). An inbound StorageACK read must SEED on the ACK
+    // lane — demoting the seed to background would make the first ACK after restart
+    // wait behind saturated sync scans and miss its deadline.
+    await expect(
+      store.listGraphsByPrefix('did:dkg:', { priority: 'ack', source: 'test.ack.cold' }),
+    ).resolves.toEqual(['did:dkg:context-graph:seedme']);
+    expect(counting.listGraphsCalls).toBe(1);
+    expect(counting.listGraphsOptions.at(-1)).toMatchObject({ priority: 'ack', source: 'test.ack.cold' });
+  });
+
+  it('#1549: update() with touchedGraphs REMOVES a graph emptied by a DELETE — no full rebuild scan', async () => {
+    const graph = 'did:dkg:context-graph:prune-me';
+    const counting = new MutationHookStore(new OxigraphStore(), {
+      onUpdate: async ({ inner }) => { await inner.deleteByPattern({ graph }); },
+    });
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 100_000, now: () => 1_000, onMutation: (e) => events.push(e),
+    });
+    await store.insert([q(graph)]);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    // A server-side DELETE that empties the graph, with the touched graph declared
+    // (mirrors the agents-meta prune). The index REMOVES it via a bounded hasGraph,
+    // never a full rebuild scan.
+    await store.update(`DELETE WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { touchedGraphs: [graph] });
+
+    expect(counting.listGraphsCalls).toBe(1); // incremental hasGraph, NOT a full scan
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1); // still warm — no rebuild triggered
+    expect(events).toContainEqual({ type: 'graph-removed', graph, source: 'update' });
+  });
+
   it('removes stale graph names after a deferred SPARQL query removal', async () => {
     const graph = 'did:dkg:context-graph:old-query';
     const counting = new MutationHookStore(new OxigraphStore(), {
@@ -488,7 +652,7 @@ describe('GraphSetIndexStore', () => {
     await expect(store.listGraphs()).resolves.toEqual([graph]);
     expect(counting.listGraphsCalls).toBe(1);
 
-    await store.query('DROP GRAPH <ignored>');
+    await store.query('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }');
     expect(counting.listGraphsCalls).toBe(1);
 
     await expect(store.listGraphs()).resolves.toEqual([]);
@@ -514,7 +678,7 @@ describe('GraphSetIndexStore', () => {
     await expect(store.listGraphs()).resolves.toEqual([graph]);
     expect(counting.listGraphsCalls).toBe(1);
 
-    await store.update('DELETE WHERE { GRAPH <ignored> { ?s ?p ?o } }');
+    await store.update('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }');
     expect(counting.listGraphsCalls).toBe(1);
 
     await expect(store.listGraphs()).resolves.toEqual([]);
@@ -544,8 +708,8 @@ describe('GraphSetIndexStore', () => {
     await expect(store.listGraphs()).resolves.toEqual([]);
     expect(counting.listGraphsCalls).toBe(1);
 
-    await store.query('INSERT DATA { GRAPH <q> { <urn:s> <urn:p> "v" } }');
-    await store.update('INSERT DATA { GRAPH <u> { <urn:s> <urn:p> "v" } }');
+    await store.query('INSERT { GRAPH ?g { <urn:s> <urn:p> "v" } } WHERE { VALUES ?g { <urn:q> } }');
+    await store.update('INSERT { GRAPH ?g { <urn:s> <urn:p> "v" } } WHERE { VALUES ?g { <urn:u> } }');
     expect(counting.listGraphsCalls).toBe(1);
 
     await expect(store.listGraphs()).resolves.toEqual(

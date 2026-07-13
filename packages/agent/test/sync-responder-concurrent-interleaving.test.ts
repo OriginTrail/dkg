@@ -1,15 +1,6 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import {
-  createResponderGraphListMemo,
-  createResponderSyncRowListMemo,
-  SyncRowSnapshotLimitError,
-} from '../src/sync/responder/graph-plan.js';
-import {
-  SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
-  SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT,
-  SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
-} from '../src/sync/responder/sync-handler.js';
+import { createResponderGraphListMemo } from '../src/sync/responder/graph-plan.js';
 import {
   DKG_NS,
   lineGraphsFromNquads,
@@ -42,16 +33,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it('keeps responder snapshot defaults above the generic memo fallback', () => {
-  expect(SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT).toBe(128);
-  expect(SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT).toBe(64);
-  expect(SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT).toBe(64);
-});
-
 function watchBoundedPageQuery(
   store: OxigraphStore,
   graph: string,
-  expectedOffset: number,
+  expectedOffset: number | readonly number[],
   expectedLimit: number,
 ) {
   const originalQuery = store.query.bind(store);
@@ -59,13 +44,16 @@ function watchBoundedPageQuery(
   store.query = (async (sparql: string) => {
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     const isTargetPageQuery = /^SELECT (?:DISTINCT )?\?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`GRAPH <${graph}>`);
+      normalized.includes(`GRAPH <${graph}>`) && normalized.includes('ORDER BY');
     const isTargetMultiGraphPageQuery = /^SELECT (?:DISTINCT )?\?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`VALUES ?g { <${graph}>`);
+      normalized.includes(`VALUES ?g { <${graph}>`) && normalized.includes('ORDER BY');
     if (isTargetPageQuery || isTargetMultiGraphPageQuery) {
       observedPageQueries++;
       expect(normalized).toMatch(/ORDER BY \?g \?s \?p \?o|ORDER BY \?s \?p \?o/);
-      expect(normalized).toContain(`OFFSET ${expectedOffset}`);
+      const expectedOffsets: readonly number[] = typeof expectedOffset === 'number'
+        ? [expectedOffset]
+        : expectedOffset;
+      expect(expectedOffsets.some((offset) => normalized.includes(`OFFSET ${offset}`))).toBe(true);
       expect(normalized).toContain(`LIMIT ${expectedLimit}`);
     }
     const result = await originalQuery(sparql);
@@ -78,33 +66,6 @@ function watchBoundedPageQuery(
   return {
     assertObserved() {
       expect(observedPageQueries).toBeGreaterThan(0);
-    },
-  };
-}
-
-function watchUnorderedSnapshotRead(
-  store: OxigraphStore,
-  graph: string,
-) {
-  const originalQuery = store.query.bind(store);
-  let observedSnapshotReads = 0;
-  store.query = (async (sparql: string) => {
-    const normalized = sparql.replace(/\s+/g, ' ').trim();
-    const isTargetSnapshotRead = /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`VALUES ?g { <${graph}>`) &&
-      normalized.includes('GRAPH ?g { ?s ?p ?o }');
-    if (isTargetSnapshotRead) {
-      observedSnapshotReads++;
-      expect(normalized).not.toContain('ORDER BY');
-      expect(normalized).not.toContain('OFFSET ');
-      expect(normalized).not.toContain('LIMIT ');
-    }
-    return originalQuery(sparql);
-  }) as OxigraphStore['query'];
-
-  return {
-    assertObserved() {
-      expect(observedSnapshotReads).toBeGreaterThan(0);
     },
   };
 }
@@ -143,6 +104,203 @@ describe('sync responder pagination interleaving', () => {
     }
     const graphs = new Set(outputs.flatMap((out) => [...lineGraphsFromNquads(out)]));
     expect(graphs).toEqual(new Set([graphA, graphB, graphC]));
+  });
+
+  it('falls back to store-bounded paging when a durable snapshot exceeds its cap', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-fallback';
+    const graph = `did:dkg:context-graph:${cgId}/data`;
+    await store.insert([q(graph, 0), q(graph, 1), q(graph, 2)]);
+    const boundedQuery = watchBoundedPageQuery(store, graph, [0, 2], 2);
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 2,
+      syncSessionId: 'oversized-fallback-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+    boundedQuery.assertObserved();
+  });
+
+  it('falls back to store-bounded paging for an oversized durable-meta snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-durable-meta';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const metaGraph = `${cgPrefix}/_meta`;
+    // Rows keyed on the CG entity subject survive readDurableMetaRows filtering.
+    await store.insert(Array.from({ length: 3 }, (_, i) => ({
+      graph: metaGraph,
+      subject: cgPrefix,
+      predicate: `http://schema.org/p${i.toString().padStart(3, '0')}`,
+      object: `"meta-${i.toString().padStart(3, '0')}"`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta' as const,
+      limit: 2,
+      syncSessionId: 'oversized-durable-meta-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+  });
+
+  it('falls back to store-bounded paging for an oversized shared-memory meta snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-swm-meta';
+    const swmMetaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    await store.insert(Array.from({ length: 3 }, (_, index) => q(swmMetaGraph, index)));
+    const boundedQuery = watchBoundedPageQuery(store, swmMetaGraph, [0, 2], 2);
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: 0,
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta' as const,
+      limit: 2,
+      syncSessionId: 'oversized-swm-meta-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+    boundedQuery.assertObserved();
+  });
+
+  it('falls back to store-bounded paging for an oversized TTL-filtered SWM data snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-swm-data-ttl';
+    const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
+    const dataGraph = `${swmGraph}/0xabc/1`;
+    const swmMetaGraph = `${swmGraph}_meta`;
+    const now = new Date().toISOString();
+    const rows: Quad[] = [];
+    for (let index = 0; index < 3; index++) {
+      const root = `urn:interleave:${index.toString().padStart(3, '0')}`;
+      rows.push(q(dataGraph, index));
+      rows.push(...workspaceOpQuads(cgId, `op-${index}`, root, swmMetaGraph, now));
+    }
+    await store.insert(rows);
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: 60_000,
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data' as const,
+      limit: 2,
+      syncSessionId: 'oversized-swm-data-ttl-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(lineGraphsFromNquads(`${first}\n${second}`)).toEqual(new Set([dataGraph]));
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+  });
+
+  it('falls back to store-bounded delta paging for an oversized sinceBatchId snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-delta';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const dataGraph = `${cgPrefix}/context/1`;
+    const metaGraph = `${cgPrefix}/context/1/_meta`;
+    const intLit = (n: number) => `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    const quads: Quad[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const kc = `did:dkg:evm:31337/0xkc${i}`;
+      const ka = `${kc}/1`;
+      const root = `urn:delta-root:${i}`;
+      quads.push(
+        { graph: metaGraph, subject: kc, predicate: `${DKG_NS}batchId`, object: intLit(i) },
+        { graph: metaGraph, subject: ka, predicate: `${DKG_NS}partOf`, object: kc },
+        { graph: metaGraph, subject: ka, predicate: `${DKG_NS}rootEntity`, object: root },
+        { graph: dataGraph, subject: root, predicate: `${DKG_NS}label`, object: `"delta-${i}"` },
+      );
+    }
+    await store.insert(quads);
+
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 1000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 2,
+      sinceBatchId: '1',
+      syncSessionId: 'oversized-delta-session',
+    };
+
+    const collected: string[] = [];
+    for (let offset = 0, page = 0; page < 20; page += 1, offset += 2) {
+      const out = await cap.invoke({ ...base, offset });
+      const lines = linesFromNquads(out);
+      collected.push(...lines);
+      if (lines.length < 2) break;
+    }
+    const joined = collected.join('\n');
+    // Included: KCs with batchId 2, 3 (> sinceBatchId 1); excluded: batchId 1.
+    expect(joined).toContain('"delta-2"');
+    expect(joined).toContain('"delta-3"');
+    expect(joined).not.toContain('"delta-1"');
   });
 
   it('uses bounded store-side paging for deep SWM data pages without TTL', async () => {
@@ -195,7 +353,7 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
-  it('uses unordered snapshot reads for deep SWM data pages with TTL filtering', async () => {
+  it('uses store-bounded paged reads for deep TTL-filtered SWM data pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-swm-ttl';
     const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
@@ -210,7 +368,9 @@ describe('sync responder pagination interleaving', () => {
     }
     await store.insert(rows);
 
-    const probe = watchUnorderedSnapshotRead(store, dataGraph);
+    // The TTL-cutoff SWM-data read is now store-bounded (fresh roots resolved via
+    // FILTER EXISTS), so a deep page pulls only the requested rows.
+    const probe = watchBoundedPageQuery(store, dataGraph, 90, 5);
     const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 60_000, syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -230,7 +390,7 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
-  it('uses unordered snapshot reads for deep durable meta pages', async () => {
+  it('uses store-bounded paged reads for deep durable meta pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-meta';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -253,7 +413,9 @@ describe('sync responder pagination interleaving', () => {
     });
     await store.insert(rows);
 
-    const probe = watchUnorderedSnapshotRead(store, metaGraph);
+    // The durable-meta read is now store-bounded (subject-membership filter
+    // pushed into the store via EXISTS), so a deep page is a paged store query.
+    const probe = watchBoundedPageQuery(store, metaGraph, 90, 5);
     const cap = registerTestSyncHandler(store, { syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -723,211 +885,5 @@ describe('sync responder pagination interleaving', () => {
     await expect(overlappingRefresh).resolves.toEqual(['new']);
     await expect(deepPage).resolves.toEqual(['new']);
     expect(calls).toBe(2);
-  });
-
-  it('keeps active durable row snapshots alive while pages are still being read', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-
-    const memo = createResponderSyncRowListMemo(10);
-    let loads = 0;
-    const loadRows = async () => {
-      loads++;
-      return [{
-        s: 'urn:memo:row',
-        p: `${DKG_NS}label`,
-        o: `"snapshot-${loads}"`,
-        g: 'urn:memo:graph',
-      }];
-    };
-
-    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
-      { o: '"snapshot-1"' },
-    ]);
-
-    vi.setSystemTime(9);
-    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
-      { o: '"snapshot-1"' },
-    ]);
-
-    vi.setSystemTime(18);
-    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
-      { o: '"snapshot-1"' },
-    ]);
-    expect(loads).toBe(1);
-  });
-
-  it('does not rebuild an expired durable row snapshot for the same session', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-
-    const memo = createResponderSyncRowListMemo(10);
-    let loads = 0;
-    const loadRows = async () => {
-      loads++;
-      return [{
-        s: 'urn:memo:row',
-        p: `${DKG_NS}label`,
-        o: `"snapshot-${loads}"`,
-        g: 'urn:memo:graph',
-      }];
-    };
-
-    await expect(memo.get('durable', loadRows)).resolves.toHaveLength(1);
-
-    vi.setSystemTime(11);
-    await expect(memo.get('durable', loadRows)).rejects.toThrow(
-      'Durable data sync session snapshot expired before page completion',
-    );
-    expect(loads).toBe(1);
-  });
-
-  it('does not retain empty durable row snapshots against the active cap', async () => {
-    const memo = createResponderSyncRowListMemo(10_000, 1);
-    let emptyLoads = 0;
-    let nonEmptyLoads = 0;
-
-    await expect(memo.get('durable:empty', async () => {
-      emptyLoads++;
-      return [];
-    })).resolves.toHaveLength(0);
-
-    await expect(memo.get('durable:non-empty', async () => {
-      nonEmptyLoads++;
-      return [{
-        s: 'urn:memo:row',
-        p: `${DKG_NS}label`,
-        o: '"snapshot"',
-        g: 'urn:memo:graph',
-      }];
-    })).resolves.toHaveLength(1);
-
-    expect(emptyLoads).toBe(1);
-    expect(nonEmptyLoads).toBe(1);
-  });
-
-  it('rejects new durable row snapshots at the active cap without evicting existing sessions', async () => {
-    const memo = createResponderSyncRowListMemo(10_000, 2);
-    let loads = 0;
-    const loadRows = async () => {
-      loads++;
-      return [{
-        s: 'urn:memo:row',
-        p: `${DKG_NS}label`,
-        o: `"snapshot-${loads}"`,
-        g: 'urn:memo:graph',
-      }];
-    };
-
-    await expect(memo.get('durable:session-1', loadRows)).resolves.toHaveLength(1);
-    await expect(memo.get('durable:session-2', loadRows)).resolves.toHaveLength(1);
-    await expect(memo.get('durable:session-3', loadRows)).rejects.toThrow(
-      SyncRowSnapshotLimitError,
-    );
-    await expect(memo.get('durable:session-3', loadRows)).rejects.toMatchObject({
-      key: 'durable:session-3',
-      maxEntries: 2,
-      cachedEntries: 2,
-      inflightEntries: 0,
-      activeEntries: 2,
-    });
-
-    await expect(
-      memo.get('durable:session-1', loadRows, { requireExisting: true }),
-    ).resolves.toMatchObject([{ o: '"snapshot-1"' }]);
-    expect(loads).toBe(2);
-  });
-
-  it('retains the completed snapshot for reuse when the serving request aborts mid-build', async () => {
-    // The owner's row load is not abort-aware, so a settled snapshot is the
-    // COMPLETE result even if the owner's stream aborted while it was loading.
-    // The aborted owner must still reject, but the snapshot it already paid to
-    // build must be cached so a later same-session request reuses it instead of
-    // issuing a second, redundant store query (regression: PR #1142 discarded it,
-    // breaking sync-responder-protection's "keeps row-list cache-miss owners
-    // counted until the shared snapshot settles" on the CI ordering).
-    const memo = createResponderSyncRowListMemo(10_000, 1);
-    const snapshot = deferred<readonly {
-      s: string;
-      p: string;
-      o: string;
-      g: string;
-    }[]>();
-    const controller = new AbortController();
-    let loads = 0;
-    const loadRows = () => {
-      loads += 1;
-      return snapshot.promise;
-    };
-
-    const first = memo.get('durable:aborted', loadRows, { signal: controller.signal });
-    controller.abort(new Error('request aborted'));
-    snapshot.resolve([{
-      s: 'urn:memo:row',
-      p: `${DKG_NS}label`,
-      o: '"aborted"',
-      g: 'urn:memo:graph',
-    }]);
-
-    // The aborting owner still rejects (its stream is gone).
-    await expect(first).rejects.toThrow('request aborted');
-
-    // A later same-session reader reuses the cached snapshot — no second load.
-    await expect(
-      memo.get('durable:aborted', () => {
-        throw new Error('snapshot must be reused, not re-loaded');
-      }, { requireExisting: true }),
-    ).resolves.toHaveLength(1);
-    expect(loads).toBe(1);
-  });
-
-  it('releases completed durable row snapshots after the completion grace window', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const memo = createResponderSyncRowListMemo(10_000, 1);
-    const row = {
-      s: 'urn:memo:row',
-      p: `${DKG_NS}label`,
-      o: '"snapshot"',
-      g: 'urn:memo:graph',
-    };
-
-    await expect(memo.get('durable:complete', async () => [row])).resolves.toHaveLength(1);
-    memo.release('durable:complete', { graceMs: 10 });
-
-    await expect(memo.get('durable:blocked', async () => [row])).rejects.toThrow(
-      SyncRowSnapshotLimitError,
-    );
-
-    vi.advanceTimersByTime(11);
-    await expect(memo.get('durable:blocked', async () => [row])).resolves.toHaveLength(1);
-  });
-
-  it('coalesces concurrent durable row snapshot refreshes', async () => {
-    const memo = createResponderSyncRowListMemo();
-    const snapshot = deferred<readonly {
-      s: string;
-      p: string;
-      o: string;
-      g: string;
-    }[]>();
-    let loads = 0;
-    const loadRows = () => {
-      loads++;
-      return snapshot.promise;
-    };
-
-    const first = memo.get('durable', loadRows, { refresh: true });
-    const second = memo.get('durable', loadRows, { refresh: true });
-    snapshot.resolve([{
-      s: 'urn:memo:row',
-      p: `${DKG_NS}label`,
-      o: '"snapshot"',
-      g: 'urn:memo:graph',
-    }]);
-
-    await expect(first).resolves.toHaveLength(1);
-    await expect(second).resolves.toHaveLength(1);
-    expect(loads).toBe(1);
   });
 });

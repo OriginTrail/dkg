@@ -18,6 +18,19 @@ import { isStandaloneInstall } from '../config.js';
 
 export type CorsAllowlist = '*' | string[];
 
+/** Most recent "is this daemon up to date?" result; polled by `/api/status`
+ *  and written by the auto-update polling runners. */
+export interface LastUpdateCheck {
+  upToDate: boolean;
+  checkedAt: number;
+  latestCommit: string;
+  latestVersion: string;
+  /** True when a pinned auto-update channel has no acceptable target
+   *  (tag missing / prerelease rejected / non-semver). Distinct from
+   *  `upToDate` so `/api/status` can show a misconfigured channel. */
+  channelTargetMissing: boolean;
+}
+
 /**
  * Verbose sync-progress tracing. Opt-in via either env var. Referenced
  * from the catch-up job handler (routes/context-graph.ts) plus the
@@ -33,16 +46,7 @@ export const daemonState: {
   /** Set to `true` while a package or git slot update is in flight. */
   isUpdating: boolean;
   /** Most recent "is this daemon up to date?" result; polled by `/status`. */
-  lastUpdateCheck: {
-    upToDate: boolean;
-    checkedAt: number;
-    latestCommit: string;
-    latestVersion: string;
-    /** True when a pinned auto-update channel has no acceptable target
-     *  (tag missing / prerelease rejected / non-semver). Distinct from
-     *  `upToDate` so `/api/status` can show a misconfigured channel. */
-    channelTargetMissing: boolean;
-  };
+  lastUpdateCheck: LastUpdateCheck;
   /** Memoised result of `isStandaloneInstall()` — null = not yet checked. */
   standaloneCache: boolean | null;
   /**

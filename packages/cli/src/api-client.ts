@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
+import type { RandomSamplingDisabledReason } from '@origintrail-official/dkg-agent';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -235,12 +236,15 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
  * lives here so the CLI doesn't take a runtime dep on the agent
  * package (only types). The `loop.lastOutcome` is intentionally
  * `unknown` -- the CLI prints it as JSON; the structured discrimination
- * is the prover's concern, not the CLI's.
+ * is the prover's concern, not the CLI's. `disabledReason` distinguishes
+ * identity, admission, adapter, and bind failures without a chain call.
  */
 export interface RandomSamplingStatusResponse {
   enabled: boolean;
   role: 'core' | 'edge';
   identityId: string;
+  /** Optional for compatibility with daemons that predate explicit status reasons. */
+  disabledReason?: RandomSamplingDisabledReason | null;
   loop: null | {
     totalTicks: number;
     inflight: boolean;
@@ -284,11 +288,14 @@ export interface DaemonStatusResponse {
   } | null;
   // Triple-store backend fields (RFC 120). For local backends only
   // `storeBackend` is meaningful; external backends additionally surface
-  // `storeUrl` and a TTL-cached `storeQuads` count. `null` when local /
-  // unreachable.
+  // `storeUrl` and a TTL-cached `storeQuads` count. `storeQuadsStatus`
+  // distinguishes an initial background refresh from an unreachable store.
+  // Older daemons omit the status; consumers should retain the legacy
+  // `null` = unreachable fallback in that case.
   storeBackend?: string;
   storeUrl?: string | null;
   storeQuads?: number | null;
+  storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
   // Concurrency admission control (PR #1209 limiter, surfaced by #1230):
   // inFlight = requests currently holding a slot, max = effective cap
   // (0 = disabled), rejectedTotal = cumulative 503-shed count since boot.
@@ -322,6 +329,17 @@ function controlPlaneWarning(missingFiles: string[]): string | undefined {
 
 function isAmbiguousFallbackName(name: unknown): boolean {
   return typeof name !== 'string' || name.trim() === '' || name.trim() === DEFAULT_NODE_NAME;
+}
+
+function configuredApiBaseUrl(apiHost: unknown, port: number): string {
+  const configuredHost = typeof apiHost === 'string' ? apiHost.trim() : '';
+  const host = !configuredHost || configuredHost === '0.0.0.0'
+    ? '127.0.0.1'
+    : configuredHost === '::'
+      ? '::1'
+      : configuredHost;
+  const authority = host.includes(':') ? `[${host}]` : host;
+  return `http://${authority}:${port}`;
 }
 
 function isConnectionFailure(err: unknown): boolean {
@@ -386,11 +404,19 @@ export class ApiClient {
     let port = envPort ?? filePort;
     let warning: string | undefined;
     let expectedStatusName: string | undefined;
+    let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
+
+    // A persisted api.port contains only the bound port. Pair it with the
+    // configured bind host so CLI commands reach daemons bound to a specific
+    // non-loopback address. Keep the port usable if config parsing fails.
+    if (!hasEnvPort && filePort && configExists()) {
+      config = await loadConfig().catch(() => null);
+    }
 
     if (!port) {
       const pid = await readPid();
       if (opts.allowConfigFallback && !hasEnvPort && configExists()) {
-        const config = await loadConfig();
+        config = config ?? await loadConfig();
         const configuredPort = Number.isFinite(config.apiPort) && config.apiPort > 0 ? config.apiPort : null;
         if (configuredPort && !isAmbiguousFallbackName(config.name)) {
           const missingFiles = ['api.port', ...(pid ? [] : ['daemon.pid'])];
@@ -411,7 +437,10 @@ export class ApiClient {
 
     const tokens = await loadTokens();
     const token = tokens.size > 0 ? tokens.values().next().value : undefined;
-    return new ApiClient(port, token, { controlPlaneWarning: warning, expectedStatusName });
+    const portOrBaseUrl = !hasEnvPort && config
+      ? configuredApiBaseUrl(config.apiHost, port)
+      : port;
+    return new ApiClient(portOrBaseUrl, token, { controlPlaneWarning: warning, expectedStatusName });
   }
 
   async status(): Promise<DaemonStatusResponse> {
@@ -495,9 +524,9 @@ export class ApiClient {
 
   /**
    * V10 Random Sampling prover snapshot. Cheap; safe to poll. Returns
-   * `enabled: false` when the bind layer no-op'd (edge node, no
-   * identity, or chain adapter missing methods); the `loop` field is
-   * `null` in that case.
+   * `enabled: false` when the node is ineligible or binding failed
+   * (edge node, no identity, awaiting sharding-table admission, etc.).
+   * Read `disabledReason` for the exact state; `loop` is then `null`.
    */
   async randomSamplingStatus(): Promise<RandomSamplingStatusResponse> {
     return this.get('/api/random-sampling/status');

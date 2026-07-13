@@ -1258,13 +1258,15 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
           recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
         }
-        // #1116: surface the seal outcome. `sealed`/`publishReady` describe THIS
-        // share (subset or skipSeal → false by design, not a failure).
+        // #1116: ownership conflicts are advisory skips. A zero-row outcome is
+        // still HTTP 200, but it did not create an SWM share and must not report
+        // the pre-share WM seal as a sealed share.
+        const swmShared = share.promotedCount > 0;
         return jsonResponse(res, 200, {
-          swmShared: true,
+          swmShared,
           promotedCount: share.promotedCount,
-          sealed: share.sealed,
-          publishReady: share.publishReady,
+          ...(share.sealed !== undefined ? { sealed: swmShared && share.sealed } : {}),
+          ...(share.publishReady !== undefined ? { publishReady: swmShared && share.publishReady } : {}),
           ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
         });
       } catch (e: any) {
@@ -1345,6 +1347,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // to 400 (parity with the legacy publish path).
     if (layer === "vm" && verb === "publish-async") {
       try {
+        const publisherAvailability = ctx.publisherState.availability;
+        if (!publisherAvailability.available) {
+          return jsonResponse(res, 503, {
+            code: "async_publisher_unavailable",
+            error: "The asynchronous publisher cannot accept jobs on this node.",
+            reason: publisherAvailability.reason,
+            retryable: publisherAvailability.retryable,
+            operatorActionRequired: publisherAvailability.operatorActionRequired,
+          });
+        }
         const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
         if (opts === null) return;
         const publishOptions = opts;

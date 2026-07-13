@@ -2,7 +2,8 @@
  * BlazegraphStore unit tests with mocked fetch (03 §16 — graph isolation via GRAPH IRIs;
  * no live Blazegraph required).
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { performance } from 'node:perf_hooks';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { getExternalStorePrioritySchedulerSnapshot } from '../src/store-priority-scheduler.js';
 
@@ -37,6 +38,31 @@ function blazeListGraphsResponse(): Response {
     }),
     { status: 200, headers: { 'Content-Type': 'application/json' } },
   );
+}
+
+async function outcomeWithin(work: Promise<unknown>, timeoutMs: number): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+      new Promise<'still-pending'>((resolve) => {
+        timer = setTimeout(() => resolve('still-pending'), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function blockEventLoopFor(durationMs: number): void {
+  const end = performance.now() + durationMs;
+  while (performance.now() < end) {
+    // Deliberately keep timers from firing so the post-await clock check owns
+    // timeout classification when the awaited work rejects.
+  }
 }
 
 describe('BlazegraphStore (mocked HTTP)', () => {
@@ -95,6 +121,65 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).toContain('<http://ex.org/g>');
   });
 
+  // ── ASCII-safe insert body (devnet pr1386-term-canon astral regression) ──
+  // Blazegraph's N-Quads parser reads the body byte-wise as ASCII (charset
+  // ignored) and truncates \UXXXXXXXX escapes to their low 16 bits, so the
+  // adapter must ship a pure-ASCII body using \uXXXX per UTF-16 code unit
+  // (astral chars as their surrogate pair). Wire-format proof lives here; the
+  // live round-trip proof is in blazegraph.integration.test.ts.
+  it('insert body is pure ASCII: raw astral/BMP chars become UTF-16 \\uXXXX escapes', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    await s.insert([
+      // 😀 U+1F600 (surrogate pair D83D DE00), é U+00E9, 𠜎 U+2070E (pair D841 DF0E)
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"café \u{1F600}\u{2070E}"', graph: 'http://ex.org/g' },
+    ]);
+    const body = String(fetchCalls[0][1]?.body);
+    // eslint-disable-next-line no-control-regex
+    expect(body).toMatch(/^[\x00-\x7F]*$/); // nothing non-ASCII on the wire
+    expect(body).toContain('"caf\\u00E9 \\uD83D\\uDE00\\uD841\\uDF0E"');
+  });
+
+  it('insert rewrites in-range \\UXXXXXXXX escapes (Blazegraph truncates them) to surrogate-pair \\uXXXX', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    await s.insert([
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"esc\\U0001F600ape"', graph: 'http://ex.org/g' },
+      // BMP big-U form also folds to the single-code-unit escape.
+      { subject: 'http://ex.org/s2', predicate: 'http://ex.org/p', object: '"bmp\\U000000E9"', graph: 'http://ex.org/g' },
+    ]);
+    const body = String(fetchCalls[0][1]?.body);
+    expect(body).toContain('"esc\\uD83D\\uDE00ape"');
+    expect(body).toContain('"bmp\\u00E9"');
+    expect(body).not.toContain('\\U0001F600');
+  });
+
+  it('insert leaves literal-backslash \\\\U sequences and out-of-range \\U escapes untouched', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    await s.insert([
+      // "\\U0001F600" in the term = ESCAPED backslash + text, NOT a \U escape.
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"lit\\\\U0001F600"', graph: 'http://ex.org/g' },
+      // \UFFFFFFFF > U+10FFFF is unrepresentable — must pass through unmangled.
+      { subject: 'http://ex.org/s2', predicate: 'http://ex.org/p', object: '"bad\\UFFFFFFFFx"', graph: 'http://ex.org/g' },
+    ]);
+    const body = String(fetchCalls[0][1]?.body);
+    expect(body).toContain('"lit\\\\U0001F600"');
+    expect(body).toContain('"bad\\UFFFFFFFFx"');
+  });
+
+  it('insert escapes non-ASCII in IRIs too (UCHAR is valid in IRIREF)', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    await s.insert([
+      { subject: 'http://ex.org/café', predicate: 'http://ex.org/p', object: '"o"', graph: 'http://ex.org/g' },
+    ]);
+    const body = String(fetchCalls[0][1]?.body);
+    // eslint-disable-next-line no-control-regex
+    expect(body).toMatch(/^[\x00-\x7F]*$/);
+    expect(body).toContain('<http://ex.org/caf\\u00E9>');
+  });
+
   it('insert throws on HTTP error with body snippet', async () => {
     setFetch(async () => new Response('bad request', { status: 400, statusText: 'Bad Request' }));
     const s = new BlazegraphStore(baseUrl);
@@ -131,9 +216,221 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const [, init] = fetchCalls[0];
     // Direct POST: raw query as the request body with application/sparql-query,
     // NOT URL-encoded form data (which would hit Jetty's maxFormContentSize cap).
-    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query');
+    // charset=utf-8 is required — without it Jetty decodes the body ISO-8859-1
+    // and non-ASCII literals in patterns never match.
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query; charset=utf-8');
     expect(String(init?.body)).toMatch(/^SELECT /);
     expect(String(init?.body)).not.toMatch(/^query=/);
+  });
+
+  it('CONSTRUCT query carries charset=utf-8 on the request Content-Type', async () => {
+    // Regression guard for the separate queryConstruct/DESCRIBE request path:
+    // same ISO-8859-1 default-decode hazard as SELECT — without charset=utf-8
+    // Jetty mojibakes any non-ASCII literal in the CONSTRUCT pattern/FILTER.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://schema.org/name> "caf\\u00E9" <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    const r = await s.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ctx/1> { ?s ?p ?o } }');
+    expect(r.type).toBe('quads');
+    const [, init] = fetchCalls[0];
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query; charset=utf-8');
+    expect(String(init?.body)).toMatch(/^CONSTRUCT /);
+  });
+
+  it.each([
+    {
+      name: 'SELECT',
+      run: (store: BlazegraphStore) => store.query('SELECT ?s WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'CONSTRUCT',
+      run: (store: BlazegraphStore) => store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'UPDATE',
+      run: (store: BlazegraphStore) => store.update('DELETE WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'bulk insert',
+      run: (store: BlazegraphStore) => store.insert([
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
+      ]),
+    },
+  ])('applies its end-to-end timeout to an in-flight $name fetch', async ({ run }) => {
+    let seenSignal: AbortSignal | undefined;
+    setFetch(async (_url, init) => {
+      seenSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    const outcome = await outcomeWithin(run(s), 200);
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it('reports TimeoutError when fetch rejects after the deadline clock but before its timer runs', async () => {
+    const lateTransportFailure = new Error('late transport failure');
+    setFetch(async () => {
+      blockEventLoopFor(25);
+      throw lateTransportFailure;
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 5 });
+
+    const outcome = await outcomeWithin(
+      s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(outcome).not.toBe(lateTransportFailure);
+  });
+
+  it('reports TimeoutError when JSON decoding rejects after the deadline clock but before its timer runs', async () => {
+    const lateDecodeFailure = new Error('late JSON failure');
+    setFetch(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        blockEventLoopFor(25);
+        throw lateDecodeFailure;
+      },
+    }) as Response);
+    const s = new BlazegraphStore(baseUrl, { timeout: 5 });
+
+    const outcome = await outcomeWithin(
+      s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(outcome).not.toBe(lateDecodeFailure);
+  });
+
+  it('preserves the exact caller abort reason while fetch is in flight', async () => {
+    setFetch(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled query');
+    const s = new BlazegraphStore(baseUrl);
+    const query = s.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: controller.signal });
+    await waitForCondition(() => fetchCalls.length === 1, 'query fetch did not start');
+
+    controller.abort(reason);
+
+    await expect(query).rejects.toBe(reason);
+  });
+
+  it('keeps the SELECT deadline active through response JSON decoding', async () => {
+    let rejectBody!: (reason?: unknown) => void;
+    const body = new Promise<unknown>((_resolve, reject) => {
+      rejectBody = reject;
+    });
+    setFetch(async () => ({
+      ok: true,
+      status: 200,
+      json: () => body,
+    }) as Response);
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    try {
+      const outcome = await outcomeWithin(
+        s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+        200,
+      );
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      rejectBody(new Error('late JSON failure'));
+    }
+  });
+
+  it('keeps the UPDATE deadline active while reading an error response body', async () => {
+    let rejectBody!: (reason?: unknown) => void;
+    const body = new Promise<string>((_resolve, reject) => {
+      rejectBody = reject;
+    });
+    setFetch(async () => ({
+      ok: false,
+      status: 500,
+      text: () => body,
+    }) as Response);
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    try {
+      const outcome = await outcomeWithin(
+        s.update('DELETE WHERE { ?s ?p ?o }'),
+        200,
+      );
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      rejectBody(new Error('late body failure'));
+    }
+  });
+
+  it('expires queued work before fetch and never dispatches it later', async () => {
+    const before = getExternalStorePrioritySchedulerSnapshot();
+    const normalSlots = before.maxConcurrent - before.ackReservedSlots;
+    const releases: Array<(response: Response) => void> = [];
+    const blockers: Array<Promise<unknown>> = [];
+    let fetchCount = 0;
+    setFetch(async (_url, init) => {
+      fetchCount++;
+      return new Promise<Response>((resolve, reject) => {
+        releases.push(resolve);
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+
+    try {
+      const blockingStore = new BlazegraphStore(baseUrl, { timeout: 30_000 });
+      for (let i = 0; i < normalSlots; i++) {
+        blockers.push(blockingStore.query(
+          `SELECT ?s WHERE { # queue-blocker-${i}\n?s ?p ?o }`,
+          { priority: 'normal' },
+        ));
+      }
+      await waitForCondition(
+        () => fetchCount === normalSlots,
+        `normal store lanes did not fill; fetchCount=${fetchCount}, slots=${normalSlots}`,
+      );
+
+      const deadlineStore = new BlazegraphStore(baseUrl, { timeout: 20 });
+      const queued = deadlineStore.query(
+        'SELECT ?s WHERE { # must-not-dispatch\n?s ?p ?o }',
+        { priority: 'normal' },
+      );
+      const outcome = await outcomeWithin(queued, 200);
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+      expect(fetchCount).toBe(normalSlots);
+
+      for (const release of releases.splice(0)) release(blazeSelectResponse());
+      await Promise.allSettled([...blockers, queued]);
+      expect(fetchCount).toBe(normalSlots);
+    } finally {
+      for (const release of releases.splice(0)) release(blazeSelectResponse());
+      await Promise.allSettled(blockers);
+    }
+  });
+
+  it('detaches the caller abort listener after a completed operation', async () => {
+    setFetch(async () => blazeSelectResponse());
+    const caller = new AbortController();
+    const addListener = vi.spyOn(caller.signal, 'addEventListener');
+    const removeListener = vi.spyOn(caller.signal, 'removeEventListener');
+    const s = new BlazegraphStore(baseUrl);
+
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: caller.signal });
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(removeListener).toHaveBeenCalledTimes(1);
+    addListener.mockRestore();
+    removeListener.mockRestore();
+  });
+
+  it('rejects invalid explicit operation timeouts', () => {
+    expect(() => new BlazegraphStore(baseUrl, { timeout: 0 })).toThrow(/positive integer/);
   });
 
   it('routes ack-priority adapter queries ahead of queued background fetch work', async () => {
@@ -253,7 +550,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       String(c[1]?.body).includes('DROP SILENT GRAPH'),
     );
     expect(call).toBeDefined();
-    expect((call?.[1]?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update');
+    expect((call?.[1]?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update; charset=utf-8');
   });
 
   it('update POSTs raw SPARQL to the endpoint with application/sparql-update and no COUNT scans', async () => {
@@ -273,9 +570,11 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(url).toBe(baseUrl);
     expect(init?.method).toBe('POST');
     // Direct POST: raw update body with application/sparql-update (not form-encoded).
-    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update');
+    // charset=utf-8 keeps Jetty from ISO-8859-1-decoding non-ASCII literals.
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update; charset=utf-8');
     expect(String(init?.body)).toBe(sparql);
-    expect(init?.signal).toBe(controller.signal);
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.signal).not.toBe(controller.signal);
     expect(fetchCalls.some((c) => /\bCOUNT\b/i.test(String(c[1]?.body ?? '')))).toBe(false);
     expect(fetchCalls.some((c) => String(c[1]?.body ?? '').startsWith('SELECT'))).toBe(false);
   });
@@ -283,14 +582,15 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   it('update honors pre-aborted options before dispatch', async () => {
     const s = new BlazegraphStore(baseUrl);
     const controller = new AbortController();
-    controller.abort(new Error('cancel update'));
+    const reason = new Error('cancel update');
+    controller.abort(reason);
 
     await expect(
       s.update('DELETE WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
         priority: 'ack',
         signal: controller.signal,
       }),
-    ).rejects.toThrow('cancel update');
+    ).rejects.toBe(reason);
     expect(fetchCalls).toHaveLength(0);
   });
 

@@ -80,6 +80,7 @@ OUT_DIR="$DEVNET_DIR/soak-r${ROUND}"
 TIMESERIES="$OUT_DIR/timeseries.jsonl"
 PUBLISH_LOG="$OUT_DIR/publish.jsonl"
 EVENTS_LOG="$OUT_DIR/chain-events.jsonl"
+RESTART_WINDOW_FILE="$OUT_DIR/restart-window.json"
 DELEGATORS_FILE="$OUT_DIR/delegators.json"
 STAKE_BEFORE="$OUT_DIR/stake.before.json"
 STAKE_AFTER="$OUT_DIR/stake.after.json"
@@ -634,30 +635,35 @@ while true; do
 
   if [ "${SOAK_SKIP_RESTART:-0}" != "1" ] && [ "$restart_done" -eq 0 ] && [ "$now" -ge "$RESTART_AT_TS" ]; then
     log "MID-SOAK INTERVENTION: stopping core node ${RESTART_NODE} for ~120s"
-    pidfile="$DEVNET_DIR/node${RESTART_NODE}/devnet.pid"
-    if [ -f "$pidfile" ]; then
-      pid=$(cat "$pidfile")
-      kill "$pid" 2>/dev/null || true
-      log "  killed node ${RESTART_NODE} pid=$pid"
-      rm -f "$pidfile"
-    fi
+    restart_log="$OUT_DIR/node${RESTART_NODE}-restart.log"
+    restart_stop_ts=$(date +%s)
+    restart_stop_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    DEVNET_DIR="$DEVNET_DIR" HARDHAT_PORT="$HARDHAT_PORT" API_PORT_BASE="$API_PORT_BASE" \
+      "$REPO_ROOT/scripts/devnet.sh" stop-node "$RESTART_NODE" >> "$restart_log" 2>&1
+    log "  stopped node ${RESTART_NODE} via devnet.sh stop-node (see $restart_log)"
     sleep 120
-    log "  restarting node ${RESTART_NODE} via daemon..."
-    rm -f "$DEVNET_DIR/node${RESTART_NODE}/daemon.pid"
-    DKG_HOME="$DEVNET_DIR/node${RESTART_NODE}" DKG_NO_BLUE_GREEN=1 \
-      node "$CLI_JS" start --foreground \
-      >> "$DEVNET_DIR/node${RESTART_NODE}/console.log" 2>&1 &
-    new_pid=$!
-    echo "$new_pid" > "$pidfile"
-    log "  restarted node ${RESTART_NODE} pid=$new_pid; verifying API readiness..."
+    log "  restarting node ${RESTART_NODE} via devnet.sh restart-node..."
+    DEVNET_DIR="$DEVNET_DIR" HARDHAT_PORT="$HARDHAT_PORT" API_PORT_BASE="$API_PORT_BASE" \
+      "$REPO_ROOT/scripts/devnet.sh" restart-node "$RESTART_NODE" >> "$restart_log" 2>&1
+    log "  restarted node ${RESTART_NODE}; verifying API readiness..."
     api_port=$((API_PORT_BASE + RESTART_NODE - 1))
+    restart_ready_ts=""
+    restart_ready_iso=""
     for i in $(seq 1 60); do
       if curl -sf -H "Authorization: Bearer $AUTH_TOKEN" "http://127.0.0.1:${api_port}/api/status" > /dev/null 2>&1; then
         log "  node ${RESTART_NODE} API back up after ${i}s"
+        restart_ready_ts=$(date +%s)
+        restart_ready_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         break
       fi
       sleep 1
     done
+    if [ -z "$restart_ready_ts" ]; then
+      fail "node ${RESTART_NODE} API did not recover after restart"
+    fi
+    printf '{"node":%d,"stopTs":%d,"stopIso":"%s","apiReadyTs":%d,"apiReadyIso":"%s","graceSec":45}\n' \
+      "$RESTART_NODE" "$restart_stop_ts" "$restart_stop_iso" "$restart_ready_ts" "$restart_ready_iso" \
+      > "$RESTART_WINDOW_FILE"
     restart_done=1
   fi
 
@@ -694,6 +700,7 @@ OUT_DIR="$OUT_DIR" \
 TIMESERIES="$TIMESERIES" \
 PUBLISH_LOG="$PUBLISH_LOG" \
 EVENTS_LOG="$EVENTS_LOG" \
+RESTART_WINDOW_FILE="$RESTART_WINDOW_FILE" \
 STAKE_BEFORE="$STAKE_BEFORE" \
 STAKE_AFTER="$STAKE_AFTER" \
 DELEGATORS_FILE="$DELEGATORS_FILE" \
@@ -723,15 +730,40 @@ const stakeAfter  = JSON.parse(fs.readFileSync(out.STAKE_AFTER, "utf8"));
 const tsLines     = readLines(out.TIMESERIES).map(jsonOrNull).filter(Boolean);
 const pubLines    = readLines(out.PUBLISH_LOG).map(jsonOrNull).filter(Boolean);
 const evtLines    = readLines(out.EVENTS_LOG).map(jsonOrNull).filter(Boolean);
+const restartWindow = fs.existsSync(out.RESTART_WINDOW_FILE)
+  ? jsonOrNull(fs.readFileSync(out.RESTART_WINDOW_FILE, "utf8"))
+  : null;
 
-// 1. Publisher: at least 50% of attempts must succeed
+function isPlannedRestartPublishFailure(p) {
+  if (!restartWindow || p.status !== "fail") return false;
+  const tsMs = Date.parse(p.ts);
+  if (!Number.isFinite(tsMs)) return false;
+  const startMs = Number(restartWindow.stopTs ?? 0) * 1000;
+  const endMs = (Number(restartWindow.apiReadyTs ?? 0) + Number(restartWindow.graceSec ?? 0)) * 1000;
+  if (!startMs || !endMs || tsMs < startMs || tsMs > endMs) return false;
+  return /storage_ack_insufficient|Daemon is not running|ECONNREFUSED|fetch failed|api request failed/i.test(String(p.out ?? ""));
+}
+
+// 1. Publisher: at least 90% of non-planned-outage attempts must succeed.
+// The mid-soak restart intentionally removes one core for ~120s. With
+// requiredACKs=3, a publisher on another core can only collect two core ACKs
+// during that window; those publish attempts validate outage behavior but
+// should not fail the lane after the restarted node has recovered cleanly.
 const pubOk = pubLines.filter(p => p.status === "ok").length;
-const pubFail = pubLines.filter(p => p.status === "fail").length;
+const pubFailures = pubLines.filter(p => p.status === "fail");
+const plannedRestartFailures = pubFailures.filter(isPlannedRestartPublishFailure);
+const blockingPubFailures = pubFailures.filter(p => !isPlannedRestartPublishFailure(p));
+const pubFail = pubFailures.length;
 const pubTotal = pubLines.length;
-if (pubTotal > 0 && pubOk / pubTotal >= 0.9) {
-  ok.push("PUBLISH success rate " + pubOk + "/" + pubTotal + " (" + Math.round(100*pubOk/pubTotal) + "%) >= 90%");
+const effectivePubTotal = pubTotal - plannedRestartFailures.length;
+if (plannedRestartFailures.length > 0) {
+  const node = restartWindow?.node ?? "?";
+  ok.push("PUBLISH tolerated " + plannedRestartFailures.length + " failure(s) during planned node" + node + " restart window");
+}
+if (effectivePubTotal > 0 && blockingPubFailures.length === 0 && pubOk / effectivePubTotal >= 0.9) {
+  ok.push("PUBLISH success rate excluding planned restart window " + pubOk + "/" + effectivePubTotal + " (" + Math.round(100*pubOk/effectivePubTotal) + "%) >= 90%");
 } else {
-  fail.push("PUBLISH success rate " + pubOk + "/" + pubTotal + " (failures=" + pubFail + ")");
+  fail.push("PUBLISH success rate excluding planned restart window " + pubOk + "/" + effectivePubTotal + " (blocking failures=" + blockingPubFailures.length + ", total failures=" + pubFail + ")");
 }
 
 // 2. RS prover: take the PEAK submittedCount per node across the whole

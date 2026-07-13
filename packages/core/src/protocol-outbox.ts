@@ -28,9 +28,11 @@
  */
 
 import type {
+  CompatibleProtocolOutboxStore,
   IdempotencyCheckResult,
   MessageDirection,
   MessageIdempotencyStore,
+  LegacyProtocolOutboxStore,
   ProtocolOutboxEntry,
   ProtocolOutboxStore,
 } from './messenger-types.js';
@@ -89,30 +91,66 @@ function cloneOutboxEntry(entry: ProtocolOutboxEntry): ProtocolOutboxEntry {
   return { ...entry, payload: cloneBytes(entry.payload) };
 }
 
+function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
+  return a.nextAttemptAt - b.nextAttemptAt
+    || a.firstFailureAt - b.firstFailureAt
+    || a.peer.localeCompare(b.peer)
+    || a.protocol.localeCompare(b.protocol)
+    || a.messageId.localeCompare(b.messageId);
+}
+
+function comparePendingEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
+  return a.firstFailureAt - b.firstFailureAt
+    || a.protocol.localeCompare(b.protocol)
+    || a.messageId.localeCompare(b.messageId);
+}
+
+function normalizeDuePageLimit(limit: number | undefined): number | undefined {
+  if (limit === undefined || !Number.isFinite(limit)) return undefined;
+  return Math.max(0, Math.floor(limit));
+}
+
 interface ProtocolOutboxStorePolicy extends ProtocolOutboxOptions {
   backoffFor: (attempts: number) => number;
 }
 
-type PolicyAwareProtocolOutboxStore = ProtocolOutboxStore & {
+type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
   configurePolicy?: (policy: ProtocolOutboxStorePolicy) => void;
 };
+
+/**
+ * Keep compatibility at the constructor boundary. Internally the outbox only
+ * sees the current boolean peer-presence contract, while a legacy snapshot
+ * store is adapted once with all method receivers preserved.
+ */
+function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOutboxStore {
+  if (typeof store.hasPendingFor === 'function') return store as ProtocolOutboxStore;
+
+  const legacy = store as LegacyProtocolOutboxStore;
+  const normalized: ProtocolOutboxStore = {
+    enqueue: legacy.enqueue.bind(legacy),
+    markDelivered: legacy.markDelivered.bind(legacy),
+    hasEntry: legacy.hasEntry.bind(legacy),
+    due: legacy.due.bind(legacy),
+    dropExpired: legacy.dropExpired.bind(legacy),
+    size: legacy.size.bind(legacy),
+    list: legacy.list.bind(legacy),
+    getEntry: legacy.getEntry.bind(legacy),
+    hasPendingFor: (peer) => legacy.pendingFor(peer).length > 0,
+    pendingFor: legacy.pendingFor.bind(legacy),
+  };
+  if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
+  return normalized;
+}
 
 export class ProtocolOutbox {
   private readonly store: ProtocolOutboxStore;
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
-   * same `(peer, protocol, messageId)`. Two trigger surfaces — the
-   * periodic tick (`Messenger.processOutboxTick`) and the
-   * opportunistic flush on `connection:open`
-   * (`Messenger.processOutboxOnConnect`) — can interleave: the tick
-   * starts the send for entry E, JS yields, `connection:open` fires,
-   * the on-connect handler reads `pendingFor(peer)` (entry E is still
-   * there — `markDelivered` hasn't fired yet because the in-flight
-   * send hasn't resolved), and would start a CONCURRENT second send
-   * for the same entry. Worst case both succeed and the receiver sees
-   * the same payload twice (receiver dedup absorbs it, but we waste
-   * a round-trip and amplify load).
+   * same `(peer, protocol, messageId)`. Overlapping scheduler callers or
+   * another explicit sender can otherwise interleave around a stale due
+   * snapshot and duplicate the same wire attempt.
    *
    * `tryBeginAttempt` is an atomic check-and-set: the second
    * concurrent attempter sees `false` and exits without dialing.
@@ -124,18 +162,18 @@ export class ProtocolOutbox {
    */
   private readonly inflight = new Set<string>();
 
-  constructor(store: ProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+  constructor(store: CompatibleProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
     const backoffs = options.backoffs ?? DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
     if (backoffs.length === 0) {
       throw new Error('ProtocolOutbox: backoffs must be non-empty');
     }
-    this.store = store;
     this.backoffs = backoffs;
-    (this.store as PolicyAwareProtocolOutboxStore).configurePolicy?.({
+    (store as PolicyAwareProtocolOutboxStore).configurePolicy?.({
       backoffs,
       maxAgeMs: options.maxAgeMs ?? DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
       backoffFor: (attempts) => this.backoffFor(attempts),
     });
+    this.store = normalizeOutboxStore(store);
   }
 
   /**
@@ -201,18 +239,41 @@ export class ProtocolOutbox {
     return this.store.hasEntry(peer, protocol, messageId);
   }
 
-  /** Entries whose `nextAttemptAt <= now`. */
+  /** All due entries in deterministic retry order. */
   due(now: number): ProtocolOutboxEntry[] {
-    return this.store.due(now);
+    return this.duePage(now);
   }
 
   /**
-   * All entries for `peer`, regardless of `nextAttemptAt`. Used by
-   * `Messenger.processOutboxOnConnect` for opportunistic flush on
-   * reconnection.
+   * Return a canonical retry page while preserving legacy `due(now)` stores.
+   * Stores may opt into the bounded fast path; the fallback sorts before it
+   * caps so an older store cannot bypass either the order or the batch bound.
+   */
+  duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
+    const normalizedLimit = normalizeDuePageLimit(limit);
+    if (normalizedLimit === 0) return [];
+
+    const snapshot = normalizedLimit !== undefined && this.store.duePage
+      ? this.store.duePage(now, normalizedLimit)
+      : this.store.due(now);
+    const ordered = [...snapshot].sort(compareDueEntries);
+    return normalizedLimit === undefined ? ordered : ordered.slice(0, normalizedLimit);
+  }
+
+  hasPendingFor(peer: string): boolean {
+    return this.store.hasPendingFor(peer);
+  }
+
+  /**
+   * Compatibility/diagnostic snapshot for a peer. This does not participate in
+   * retry selection; scheduled drains remain exclusively `duePage`-driven.
    */
   pendingFor(peer: string): ProtocolOutboxEntry[] {
-    return this.store.pendingFor(peer);
+    const pendingFor = this.store.pendingFor;
+    const snapshot = pendingFor
+      ? pendingFor.call(this.store, peer)
+      : this.store.list().filter((entry) => entry.peer === peer);
+    return [...snapshot].sort(comparePendingEntries).map(cloneOutboxEntry);
   }
 
   /** Drop entries older than the store's configured max-age. */
@@ -327,9 +388,13 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     return this.entries.has(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
   }
 
+  hasPendingFor(peer: string): boolean {
+    return Array.from(this.entries.values()).some((entry) => entry.peer === peer);
+  }
+
   pendingFor(peer: string): ProtocolOutboxEntry[] {
     return Array.from(this.entries.values())
-      .filter((e) => e.peer === peer)
+      .filter((entry) => entry.peer === peer)
       .sort((a, b) => a.firstFailureAt - b.firstFailureAt)
       .map(cloneOutboxEntry);
   }
@@ -337,7 +402,12 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   due(now: number): ProtocolOutboxEntry[] {
     return Array.from(this.entries.values())
       .filter((e) => e.nextAttemptAt <= now)
+      .sort(compareDueEntries)
       .map(cloneOutboxEntry);
+  }
+
+  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
+    return this.due(now).slice(0, limit);
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {
@@ -356,12 +426,12 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   list(): ProtocolOutboxEntry[] {
-    return Array.from(this.entries.values()).map((e) => ({ ...e }));
+    return Array.from(this.entries.values()).map(cloneOutboxEntry);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
     const entry = this.entries.get(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
-    return entry ? { ...entry } : undefined;
+    return entry ? cloneOutboxEntry(entry) : undefined;
   }
 }
 

@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -434,6 +434,69 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     const value = result.bindings[0]?.['id'];
     return typeof value === 'string' ? value.replace(/^"|"$/g, '') : null;
+  }
+
+  /**
+   * Resolve whether the TARGET context graph on a StorageACK requires curated
+   * payload handling. The source SWM graph is intentionally not part of this
+   * decision: a private local staging graph cannot override the target CG's
+   * immutable on-chain access policy.
+   *
+   * Resolution order is ACK-specific and intentional:
+   *   1. An immutable chain-event cache hit is authoritative (public or curated).
+   *   2. On cache miss, the local projection may provide a cheap curated shortcut.
+   *   3. Otherwise, lazily read the numeric target id from chain and cache a
+   *      valid public/curated enum for subsequent ACKs.
+   *
+   * Returns `null` when the policy is genuinely indeterminate. StorageACKHandler
+   * treats that as fail-closed.
+   */
+  async resolveCgCurationForAck(
+    this: DKGAgent,
+    cgId: string,
+    ctx: OperationContext = createOperationContext('resolve'),
+  ): Promise<boolean | null> {
+    const cached = this.onChainAccessPolicyCache.get(cgId);
+    if (cached !== undefined) {
+      return cached === 1;
+    }
+
+    try {
+      if (await this.isPrivateContextGraph(cgId)) return true;
+    } catch {
+      // A failed local projection is not authoritative; continue to chain.
+    }
+
+    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    if (typeof getAccessPolicy !== 'function') {
+      return null;
+    }
+
+    let numericId: bigint;
+    try {
+      numericId = BigInt(cgId);
+    } catch {
+      return null;
+    }
+    if (numericId <= 0n) {
+      return null;
+    }
+
+    try {
+      const policy = await getAccessPolicy.call(this.chain, numericId);
+      if (policy === 0 || policy === 1) {
+        this.onChainAccessPolicyCache.set(cgId, policy);
+        return policy === 1;
+      }
+      return null;
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `isCgCurated: chain.getContextGraphAccessPolicy(${cgId}) failed — treating as UNKNOWN (fail-closed at handler): ` +
+        (err instanceof Error ? err.message : String(err)),
+      );
+      return null;
+    }
   }
 
   /**
@@ -883,11 +946,22 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const gm = new GraphManager(this.store);
 
     const { subGraphDeregistrationSparql } = await import('@origintrail-official/dkg-publisher');
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     try {
-      await this.store.query(subGraphDeregistrationSparql(contextGraphId, subGraphName));
+      const sparql = subGraphDeregistrationSparql(contextGraphId, subGraphName);
+      const updated = await tryUpdateWithTouchedGraphs(
+        this.store,
+        sparql,
+        [metaGraph],
+        {
+          source: 'agent.cg.removeSubGraph.registration',
+        },
+      );
+      if (!updated) {
+        await this.store.query(sparql);
+      }
     } catch {
       // SPARQL DELETE WHERE may not be supported — delete quads manually
-      const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
       const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
       await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
     }

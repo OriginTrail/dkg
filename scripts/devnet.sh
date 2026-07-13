@@ -5,6 +5,7 @@
 # Usage:
 #   ./scripts/devnet.sh start [N]      Start devnet with N nodes (default 6)
 #   ./scripts/devnet.sh stop            Stop all devnet processes (incl. UI)
+#   ./scripts/devnet.sh stop-node <N>   Stop one devnet node and its managed store
 #   ./scripts/devnet.sh status          Show running devnet processes (incl. UI)
 #   ./scripts/devnet.sh logs [N]        Tail logs for node N (1-based)
 #   ./scripts/devnet.sh clean           Stop and wipe all devnet data
@@ -134,11 +135,54 @@ ensure_built() {
   fi
 }
 
+find_hardhat_pid_by_port() {
+  command -v lsof >/dev/null 2>&1 || return 1
+
+  local raw_pids pid cmdline
+  raw_pids=$(lsof -nP -iTCP:"$HARDHAT_PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)
+  for pid in $raw_pids; do
+    cmdline=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    case "$cmdline" in
+      *"$REPO_ROOT"*hardhat*"node --port $HARDHAT_PORT"*)
+        echo "$pid"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+refresh_hardhat_pidfile() {
+  local pidfile="$DEVNET_DIR/hardhat.pid"
+  local pid
+
+  if [ -f "$pidfile" ]; then
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "$pid"
+      return 0
+    fi
+  fi
+
+  pid=$(find_hardhat_pid_by_port || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    mkdir -p "$DEVNET_DIR"
+    echo "$pid" > "$pidfile"
+    echo "$pid"
+    return 0
+  fi
+
+  rm -f "$pidfile"
+  return 1
+}
+
 start_hardhat() {
   local pidfile="$DEVNET_DIR/hardhat.pid"
+  local existing_pid
 
-  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    log "Hardhat node already running (PID $(cat "$pidfile"))"
+  existing_pid=$(refresh_hardhat_pidfile || true)
+  if [ -n "$existing_pid" ]; then
+    log "Hardhat node already running (PID $existing_pid)"
     return 0
   fi
 
@@ -167,9 +211,41 @@ start_hardhat() {
 
   # --config "$HARDHAT_CONFIG" (defined up top): devnet-only solc 0.8.24 + cancun.
   # The full rationale lives in packages/evm-module/hardhat.devnet.config.ts.
-  npx hardhat node --port "$HARDHAT_PORT" --no-deploy --config "$HARDHAT_CONFIG" \
-    > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
-  local hh_pid=$!
+  local hardhat_cli
+  hardhat_cli=$(node -e "console.log(require.resolve('hardhat/internal/cli/bootstrap'))")
+  local hh_pid
+  hh_pid=$(HARDHAT_CLI="$hardhat_cli" \
+    HARDHAT_LOG="$DEVNET_DIR/hardhat/node.log" \
+    HARDHAT_PORT="$HARDHAT_PORT" \
+    HARDHAT_CONFIG="$HARDHAT_CONFIG" \
+    EVM_MODULE_DIR="$REPO_ROOT/packages/evm-module" \
+    node -e '
+      const fs = require("fs");
+      const { spawn } = require("child_process");
+      const out = fs.openSync(process.env.HARDHAT_LOG, "w");
+      const child = spawn(
+        process.execPath,
+        [
+          "--max-old-space-size=2048",
+          process.env.HARDHAT_CLI,
+          "node",
+          "--port",
+          process.env.HARDHAT_PORT,
+          "--no-deploy",
+          "--config",
+          process.env.HARDHAT_CONFIG,
+        ],
+        {
+          cwd: process.env.EVM_MODULE_DIR,
+          detached: true,
+          stdio: ["ignore", out, out],
+          env: process.env,
+        },
+      );
+      child.unref();
+      if (!child.pid) process.exit(1);
+      console.log(child.pid);
+    ')
   echo "$hh_pid" > "$pidfile"
   log "Hardhat node started (PID $hh_pid)"
 
@@ -285,10 +361,14 @@ deploy_contracts() {
 
 BLAZEGRAPH_AVAILABLE=false
 
+read_blazegraph_metadata() {
+  node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" \
+    "$REPO_ROOT/blazegraph-image.json"
+}
+
 start_blazegraph() {
-  # Use an EXTERNAL Blazegraph already serving on the port (e.g. a native arm64 JAR
-  # started out-of-band because the amd64 Docker image only runs under glacial qemu
-  # on Apple silicon). Skips Docker entirely; namespaces are the operator's job here.
+  # Use an EXTERNAL Blazegraph already serving on the port. Skips Docker entirely;
+  # namespaces are the operator's job here.
   if curl -sf --max-time 4 "http://127.0.0.1:${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX}/status" >/dev/null 2>&1; then
     log "Blazegraph already serving on :${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX} (external) — using it (skip Docker)"
     BLAZEGRAPH_AVAILABLE=true
@@ -308,10 +388,17 @@ start_blazegraph() {
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
   fi
 
+  local blazegraph_metadata blazegraph_image blazegraph_container_port
+  if ! blazegraph_metadata="$(read_blazegraph_metadata)"; then
+    log "ERROR: Could not read the pinned Blazegraph image metadata"
+    return 1
+  fi
+  IFS=$'\t' read -r blazegraph_image blazegraph_container_port <<< "$blazegraph_metadata"
+
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
-    -p "$BLAZEGRAPH_PORT:8080" \
-    lyrasis/blazegraph:2.1.5 > /dev/null 2>&1; then
+    -p "127.0.0.1:$BLAZEGRAPH_PORT:$blazegraph_container_port" \
+    "$blazegraph_image" > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
     return 0
   fi
@@ -842,11 +929,19 @@ start_node() {
   local cli_entry
   cli_entry="$(node_cli_entry "$node_num")"
   log "Node $node_num launching from $cli_entry"
-  DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
-    node "$cli_entry" start --foreground \
-    > "$node_dir/console.log" 2>&1 &
-  local node_pid=$!
-  echo "$node_pid" > "$pidfile"
+  # Use the CLI's detached supervisor. `restart-node` is commonly called from
+  # short-lived devnet test scripts; foreground mode leaves the worker in that
+  # shell's process group and can make the daemon disappear after the helper
+  # exits. Plain `start` returns after the daemon is ready and leaves a detached
+  # supervisor behind. Store that supervisor pid in devnet.pid so stop/restart
+  # still bounce the whole node process tree.
+  if ! env DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
+    node "$cli_entry" start \
+    > "$node_dir/console.log" 2>&1 < /dev/null; then
+    log "WARNING: Node $node_num start command returned non-zero (check $node_dir/console.log)"
+  fi
+  local node_pid
+  node_pid=$(refresh_node_pidfile "$node_num" || true)
 
   # Wait for API to be ready — relay node (1) gets extra time since first boot
   # compiles Solidity contracts which is CPU-intensive.
@@ -869,8 +964,10 @@ start_node() {
   # 1 and 2 would ever start.
   local i
   for i in $(seq 1 "$max_wait"); do
+    [ -n "$node_pid" ] || node_pid=$(refresh_node_pidfile "$node_num" || true)
     if curl -sf "${auth_args[@]}" "http://127.0.0.1:$api_port/api/status" > /dev/null 2>&1; then
-      log "Node $node_num ready (PID $node_pid, API http://127.0.0.1:$api_port)"
+      [ -n "$node_pid" ] || node_pid=$(refresh_node_pidfile "$node_num" || true)
+      log "Node $node_num ready (PID ${node_pid:-unknown}, API http://127.0.0.1:$api_port)"
       ready=true
       break
     fi
@@ -921,19 +1018,134 @@ start_node() {
   fi
 }
 
+collect_devnet_node_pids() {
+  local node_num="${1:-}"
+  local pids="" f pid root_node ps_pids children
+  if [ -n "$node_num" ]; then
+    root_node="$DEVNET_DIR/node${node_num}"
+    for f in "$root_node/devnet.pid" "$root_node/daemon.pid"; do
+      [ -f "$f" ] || continue
+      pid=$(cat "$f" 2>/dev/null || true)
+      [ -n "$pid" ] && pids+=" $pid"
+    done
+  else
+    root_node="$DEVNET_DIR/node"
+    for f in "$DEVNET_DIR"/node*/devnet.pid "$DEVNET_DIR"/node*/daemon.pid; do
+      [ -f "$f" ] || continue
+      pid=$(cat "$f" 2>/dev/null || true)
+      [ -n "$pid" ] && pids+=" $pid"
+    done
+  fi
+
+  if command -v ps >/dev/null 2>&1; then
+    ps_pids=$(ps eww -axo pid=,command= 2>/dev/null | awk -v root="$root_node" '
+      index($0, "DKG_HOME=" root) > 0 || index($0, root "/") > 0 { print $1 }
+    ' 2>/dev/null || true)
+    for pid in $ps_pids; do pids+=" $pid"; done
+  fi
+
+  if [ -n "$pids" ] && command -v ps >/dev/null 2>&1; then
+    children=$(ps -A -o pid=,ppid= 2>/dev/null | awk -v plist="$pids" '
+      BEGIN { n = split(plist, arr, " "); for (i=1;i<=n;i++) if (arr[i] != "") parents[arr[i]] = 1 }
+      { if ($2 in parents) print $1 }
+    ' 2>/dev/null || true)
+    for pid in $children; do pids+=" $pid"; done
+  fi
+
+  echo "$pids" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' '
+}
+
+refresh_node_pidfile() {
+  local node_num="$1"
+  local node_dir="$DEVNET_DIR/node${node_num}"
+  local pidfile="$node_dir/devnet.pid"
+  local node_pid="" worker_pid="" supervisor_pid="" pid cmd
+
+  if [ -f "$node_dir/daemon.pid" ]; then
+    worker_pid=$(cat "$node_dir/daemon.pid" 2>/dev/null || true)
+  fi
+  if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
+    supervisor_pid=$(ps -p "$worker_pid" -o ppid= 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -n "$supervisor_pid" ] && [ "$supervisor_pid" != "1" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
+      node_pid="$supervisor_pid"
+    else
+      node_pid="$worker_pid"
+    fi
+  fi
+
+  if [ -z "$node_pid" ]; then
+    for pid in $(collect_devnet_node_pids "$node_num"); do
+      kill -0 "$pid" 2>/dev/null || continue
+      cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+      case "$cmd" in
+        *" daemon-supervisor"*) node_pid="$pid"; break ;;
+      esac
+    done
+  fi
+
+  if [ -z "$node_pid" ]; then
+    for pid in $(collect_devnet_node_pids "$node_num"); do
+      kill -0 "$pid" 2>/dev/null || continue
+      cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+      case "$cmd" in
+        *oxigraph*) continue ;;
+      esac
+      node_pid="$pid"
+      break
+    done
+  fi
+
+  if [ -n "$node_pid" ]; then
+    echo "$node_pid" > "$pidfile"
+    printf '%s\n' "$node_pid"
+  fi
+}
+
+stop_devnet_node_processes() {
+  local node_num="${1:-}"
+  local pids pid any_alive node_label
+  pids=$(collect_devnet_node_pids "$node_num")
+  [ -n "$(echo "$pids" | tr -d ' ')" ] || return 0
+
+  node_label="nodes"
+  [ -n "$node_num" ] && node_label="node $node_num"
+  log "Stopping $node_label (pids=$pids)..."
+  for pid in $pids; do
+    [ "$pid" = "$$" ] && continue
+    kill -0 "$pid" 2>/dev/null || continue
+    kill "$pid" 2>/dev/null || true
+  done
+
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    any_alive=false
+    for pid in $pids; do
+      [ "$pid" = "$$" ] && continue
+      if kill -0 "$pid" 2>/dev/null; then
+        any_alive=true
+        break
+      fi
+    done
+    [ "$any_alive" = false ] && break
+    sleep 1
+  done
+
+  for pid in $pids; do
+    [ "$pid" = "$$" ] && continue
+    kill -0 "$pid" 2>/dev/null || continue
+    kill -9 "$pid" 2>/dev/null || true
+  done
+
+  if [ -n "$node_num" ]; then
+    rm -f "$DEVNET_DIR/node${node_num}/devnet.pid" "$DEVNET_DIR/node${node_num}/daemon.pid" "$DEVNET_DIR/node${node_num}/api.port"
+  else
+    rm -f "$DEVNET_DIR"/node*/devnet.pid "$DEVNET_DIR"/node*/daemon.pid "$DEVNET_DIR"/node*/api.port
+  fi
+}
+
 stop_devnet_nodes_only() {
   # Stop DKG node processes only (leave Hardhat, Blazegraph, Oxigraph servers running).
   # Ensures the next start_node uses freshly written configs (e.g. store backends).
-  for pidfile in "$DEVNET_DIR"/node*/devnet.pid; do
-    [ -f "$pidfile" ] || continue
-    local pid
-    pid=$(cat "$pidfile")
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      log "Stopped node (PID $pid) for config refresh"
-    fi
-    rm -f "$pidfile"
-  done
+  stop_devnet_node_processes
 }
 
 start_ui() {
@@ -946,17 +1158,28 @@ start_ui() {
 
   log "Starting node-ui Vite dev server on port $UI_PORT (talks to devnet node $UI_NODE_ID)..."
 
-  # Detach with nohup + setsid-equivalent (`bash -c 'exec ...' &` + disown so
-  # SIGHUP from a dying parent shell can't reach it). The UI process group is
-  # its own from this point on. This is the fix for the "Vite dies when the
-  # Cursor agent terminal recycles" SIGHUP cascade we observed.
-  (
-    cd "$REPO_ROOT/packages/node-ui"
-    nohup env DEVNET_NODE="$UI_NODE_ID" pnpm dev:ui \
-      > "$UI_LOGFILE" 2>&1 < /dev/null &
-    echo $! > "$UI_PIDFILE"
-    disown
-  )
+  # Start Vite in a detached process group. A plain `nohup ... & disown`
+  # still inherits the caller's process group on macOS, so stop_ui's
+  # `kill -TERM -$pgid` can accidentally signal the orchestrator that launched
+  # the smoke test. Node's detached spawn gives the UI its own group while
+  # keeping the shell script portable.
+  node - "$REPO_ROOT/packages/node-ui" "$UI_LOGFILE" "$UI_PIDFILE" "$UI_NODE_ID" <<'NODE'
+const { openSync, closeSync, writeFileSync } = require('node:fs');
+const { spawn } = require('node:child_process');
+
+const [, , cwd, logFile, pidFile, uiNodeId] = process.argv;
+const out = openSync(logFile, 'a');
+const child = spawn('pnpm', ['dev:ui'], {
+  cwd,
+  detached: true,
+  env: { ...process.env, DEVNET_NODE: uiNodeId },
+  stdio: ['ignore', out, out],
+});
+
+writeFileSync(pidFile, `${child.pid}\n`);
+child.unref();
+closeSync(out);
+NODE
 
   # Poll until Vite reports ready or we hit the budget. Vite v6 binds to
   # `localhost` only by default, which on macOS resolves to ::1 first, so we
@@ -1581,28 +1804,17 @@ cmd_stop() {
 
   stop_ui
 
-  # Stop nodes
-  for pidfile in "$DEVNET_DIR"/node*/devnet.pid; do
-    [ -f "$pidfile" ] || continue
-    local pid
-    pid=$(cat "$pidfile")
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      log "Stopped node (PID $pid)"
-    fi
-    rm -f "$pidfile"
-  done
+  stop_devnet_node_processes
 
   # Stop hardhat
-  if [ -f "$DEVNET_DIR/hardhat.pid" ]; then
-    local pid
-    pid=$(cat "$DEVNET_DIR/hardhat.pid")
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      log "Stopped Hardhat (PID $pid)"
-    fi
-    rm -f "$DEVNET_DIR/hardhat.pid"
+  local pid
+  pid=$(refresh_hardhat_pidfile || true)
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    log "Stopped Hardhat (PID $pid)"
+    sleep 1
   fi
+  rm -f "$DEVNET_DIR/hardhat.pid"
 
   stop_blazegraph
   stop_oxigraph_servers
@@ -1640,7 +1852,10 @@ cmd_stop() {
 # stays bash 3.2 clean.
 collect_devnet_pids() {
   local pids="" f pid children
-  for f in "$DEVNET_DIR/hardhat.pid" "$DEVNET_DIR"/node*/devnet.pid "$DEVNET_DIR"/node*/daemon.pid; do
+  pids="$(collect_devnet_node_pids)"
+  pid=$(refresh_hardhat_pidfile || true)
+  [ -n "$pid" ] && pids+=" $pid"
+  for f in "$DEVNET_DIR/hardhat.pid"; do
     [ -f "$f" ] || continue
     pid=$(cat "$f" 2>/dev/null || true)
     [ -n "$pid" ] && pids+=" $pid"
@@ -1742,8 +1957,10 @@ sweep_ports_for_devnet() {
 cmd_status() {
   echo "=== Devnet Status ==="
 
-  if [ -f "$DEVNET_DIR/hardhat.pid" ] && kill -0 "$(cat "$DEVNET_DIR/hardhat.pid")" 2>/dev/null; then
-    echo "Hardhat:  RUNNING (PID $(cat "$DEVNET_DIR/hardhat.pid"), port $HARDHAT_PORT)"
+  local hardhat_pid
+  hardhat_pid=$(refresh_hardhat_pidfile || true)
+  if [ -n "$hardhat_pid" ]; then
+    echo "Hardhat:  RUNNING (PID $hardhat_pid, port $HARDHAT_PORT)"
   else
     echo "Hardhat:  STOPPED"
   fi
@@ -1754,8 +1971,15 @@ cmd_status() {
     node_num=$(basename "$node_dir" | sed 's/node//')
     local api_port=$((API_PORT_BASE + node_num - 1))
     local pidfile="$node_dir/devnet.pid"
+    local pid=""
 
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      pid=$(cat "$pidfile")
+    else
+      pid=$(refresh_node_pidfile "$node_num" || true)
+    fi
+
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       local status_json
       status_json=$(curl -s "http://127.0.0.1:$api_port/api/status" 2>/dev/null || echo "{}")
       local peer_id
@@ -1765,7 +1989,7 @@ cmd_status() {
           try{const j=JSON.parse(d);console.log(j.peerId?.slice(0,16)||'??')}catch{console.log('??')}
         })
       " 2>/dev/null || echo "??")
-      echo "Node $node_num:   RUNNING (PID $(cat "$pidfile"), API :$api_port, peer ${peer_id}...)"
+      echo "Node $node_num:   RUNNING (PID $pid, API :$api_port, peer ${peer_id}...)"
     else
       echo "Node $node_num:   STOPPED"
     fi
@@ -1825,8 +2049,9 @@ cmd_addnode() {
     core|edge) ;;
     *) echo "[devnet] role must be 'core' or 'edge'"; exit 1 ;;
   esac
-  local hardhat_pid_file="$DEVNET_DIR/hardhat.pid"
-  if [ ! -f "$hardhat_pid_file" ] || ! kill -0 "$(cat "$hardhat_pid_file")" 2>/dev/null; then
+  local hardhat_pid
+  hardhat_pid=$(refresh_hardhat_pidfile || true)
+  if [ -z "$hardhat_pid" ]; then
     echo "[devnet] Hardhat is not running. Start the devnet first with: $0 start <N>"
     exit 1
   fi
@@ -1866,29 +2091,40 @@ cmd_restart_node() {
     echo "[devnet] node${node_num} does not exist at $DEVNET_DIR/node${node_num} — start the devnet first."
     exit 1
   fi
-  local pidf="$DEVNET_DIR/node${node_num}/devnet.pid"
-  if [ -f "$pidf" ]; then
-    local pid
-    pid=$(cat "$pidf")
-    if kill -0 "$pid" 2>/dev/null; then
-      log "Stopping node $node_num (pid=$pid)..."
-      kill "$pid" 2>/dev/null || true
-      for _ in 1 2 3 4 5 6 7 8 9 10; do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 1
-      done
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f "$pidf"
-  fi
+  stop_devnet_node_processes "$node_num"
   cd "$REPO_ROOT" || exit 1
   start_node "$node_num"
   log "Node $node_num restarted."
 }
 
+# Stop a single already-existing devnet node. Preserves on-chain state,
+# wallets, store backends, and CG metadata. Unlike ad-hoc pidfile kills,
+# this uses the same process discovery as full devnet shutdown so detached
+# daemon children and managed stores cannot keep the API port alive.
+#
+# Usage: devnet.sh stop-node <num>
+cmd_stop_node() {
+  local node_num="${2:-}"
+  if [ -z "$node_num" ]; then
+    echo "Usage: $0 stop-node <num>"
+    exit 1
+  fi
+  if [ ! -d "$DEVNET_DIR/node${node_num}" ]; then
+    echo "[devnet] node${node_num} does not exist at $DEVNET_DIR/node${node_num} — start the devnet first."
+    exit 1
+  fi
+  stop_devnet_node_processes "$node_num"
+  log "Node $node_num stopped."
+}
+
+if [ "${DEVNET_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 case "${1:-}" in
   start)            cmd_start ;;
   addnode)          cmd_addnode "$@" ;;
+  stop-node)        cmd_stop_node "$@" ;;
   restart-node)     cmd_restart_node "$@" ;;
   prepare-version)  cmd_prepare_version "$@" ;;
   stop)         cmd_stop ;;

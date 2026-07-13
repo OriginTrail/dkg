@@ -30,12 +30,10 @@ import {
   chmod,
   copyFile,
   mkdir,
-  readFile,
   rename,
   rm,
   stat,
   unlink,
-  writeFile,
 } from "node:fs/promises";
 import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -49,6 +47,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
+import { rotateDaemonLogIfNeeded } from './log-rotation.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -68,7 +67,6 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
-  type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -95,6 +93,8 @@ import {
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
+  SqliteChangelogCursorStore,
+  SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
@@ -104,6 +104,7 @@ import {
   loadConfig,
   saveConfig,
   loadNetworkConfig,
+  loadResolvedNetworkConfig,
   resolveAutoUpdateConfig,
   resolveChainConfig,
   dkgDir,
@@ -125,8 +126,6 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
-  resolveNetworkConfigName,
-  resolveApprovalPolicy,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
   repoDir,
@@ -143,10 +142,11 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
+import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
-import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
+import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -274,8 +274,6 @@ import {
 } from './http-utils.js';
 import {
   normalizeRepo,
-  parseTagName,
-  isValidRef,
   isValidRepoSpec,
   repoToFetchUrl,
   githubRepoForApi,
@@ -288,19 +286,12 @@ import {
   type NpmVersionResult,
   resolveLatestNpmVersion,
   compareSemver,
-  getCurrentCliVersion,
-  type NpmVersionStatus,
-  checkForNpmVersionUpdate,
-  deriveUpdateCheckState,
-  type UpdateStatus,
   acquireUpdateLock,
   releaseUpdateLock,
-  resolveAutoUpdateGitRef,
-  checkForNewCommitWithStatus,
-  performUpdateWithStatus,
-  performNpmUpdate,
-  performNpmUpdateEdge,
 } from './auto-update.js';
+import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
+import { resolveUpdateJitterMs, createUpdateHoldoffGate } from './auto-update-jitter.js';
+import { createGitUpdateRunCheck, createNpmUpdateRunCheck } from './auto-update-runner.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -999,6 +990,10 @@ export async function runDaemonInner(
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
   const logFile = logPath();
+  // Rotate before installing the in-process stdout/stderr tee so startup does
+  // not race the truncation with fresh log appends. Existing logs survive
+  // upgrades/restarts and can already be multi-gigabyte at this point.
+  const startupLogRotation = await rotateDaemonLogIfNeeded(logFile).catch(() => null);
 
   // Tee all stdout/stderr (including structured Logger output) into the log file
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
@@ -1022,6 +1017,13 @@ export async function runDaemonInner(
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
     appendFile(logFile, line + "\n").catch(() => {});
+  }
+
+  if (startupLogRotation?.rotated) {
+    log(
+      `Rotated daemon.log during startup ` +
+      `(was ${(startupLogRotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
+    );
   }
 
   process.on("uncaughtException", (err) => {
@@ -1118,9 +1120,11 @@ export async function runDaemonInner(
   }
 
   const storageAckTiming = resolveStorageAckTiming(config.storageAck);
-  const selectedNetworkConfig = config.networkConfig?.trim();
-  const network = await loadNetworkConfig(selectedNetworkConfig);
-  if (selectedNetworkConfig && !network) {
+  const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
+    config,
+    loadNetworkConfig,
+  );
+  if (!network) {
     log(`FATAL: network config "${selectedNetworkConfig}" was not found (expected network/${selectedNetworkConfig}.json).`);
     process.exit(1);
   }
@@ -1169,7 +1173,7 @@ export async function runDaemonInner(
   // 'testnet' fallback and never spuriously trips on a normal restart.
   const networkSwitch = detectNetworkSwitch({
     dataDir: dkgDir(),
-    currentNetworkConfig: resolveNetworkConfigName(config),
+    currentNetworkConfig: selectedNetworkConfig,
     acceptNetworkSwitch: process.env.DKG_ACCEPT_NETWORK_SWITCH === '1',
     log,
   });
@@ -1351,6 +1355,7 @@ export async function runDaemonInner(
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
   const chainBase = resolveChainConfig(config, network);
+  const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -1510,6 +1515,11 @@ export async function runDaemonInner(
     },
   });
   const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
+  const changelogCursorStore = new SqliteChangelogCursorStore(dashDb);
+  // OT-RFC-59 §6 P0: the durable era guard MUST back the changelog when enabled —
+  // it lives in node-ui.db (survives a `store.nq` RDF restore) so a restore/rollback
+  // rotates the era and forces peers to full-resync instead of silently skipping.
+  const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
 
@@ -1536,7 +1546,7 @@ export async function runDaemonInner(
       genesisId: network?.genesisId,
       networkId,
       chainId: chainBase?.chainId,
-      networkConfigName: resolveNetworkConfigName(config),
+      networkConfigName: selectedNetworkConfig,
     },
     framework: "DKG",
     listenPort: config.listenPort,
@@ -1569,6 +1579,16 @@ export async function runDaemonInner(
       backend: runtimeStore.backend,
       options: runtimeStore.options,
       graphSetIndex: runtimeStore.graphSetIndex,
+      // OT-RFC-59: operator opt-in to the append-only change log (default OFF).
+      // Sourced from config.store (operator intent), NOT runtimeStore — the
+      // managed-oxigraph path rebuilds runtimeStore and would drop it. Enabling
+      // this wraps the store in ChangelogStore, which is what makes
+      // asChangelogReader(store) non-null and registers the responder delta lane.
+      // Wire the DURABLE era guard (§6 P0) so restore/rollback rotates the era —
+      // enabling the changelog fleet-wide without it is unsafe (silent skips).
+      changelog: config.store?.changelog
+        ? { enabled: true, eraGuard: changelogEraGuard }
+        : undefined,
     } : undefined,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
@@ -1577,6 +1597,8 @@ export async function runDaemonInner(
     syncOnConnectEnabled: config.syncOnConnectEnabled,
     durableSyncEnabled: config.durableSyncEnabled,
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
+    syncGlobalLimit: config.syncGlobalLimit,
+    syncGlobalQueueLimit: config.syncGlobalQueueLimit,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
@@ -1585,21 +1607,12 @@ export async function runDaemonInner(
     // Only forward chain to the agent when both required fields resolved.
     // resolveChainConfig() may return a partial block if neither config nor
     // network supplies one of them; the agent expects rpcUrl + hubAddress.
-    chainConfig: chainBase?.rpcUrl && chainBase?.hubAddress ? {
-      rpcUrl: chainBase.rpcUrl,
-      rpcUrls: chainBase.rpcUrls,
-      walletRpcUrls: chainBase.walletRpcUrls,
-      hubAddress: chainBase.hubAddress,
-      tokenAddress: chainBase.tokenAddress,
+    chainConfig: runtimeEvmChainConfig ? {
+      ...runtimeEvmChainConfig,
       ...(opWallets.adminWallet
         ? { adminPrivateKey: opWallets.adminWallet.privateKey }
         : {}),
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
-      chainId: chainBase.chainId,
-      approvalPolicy: resolveApprovalPolicy(chainBase.approvalPolicy) as ApprovalPolicy | undefined,
-      cgRegistryScanPageSize: chainBase.cgRegistryScanPageSize,
-      minPublisherNativeWei: chainBase.minPublisherNativeWei,
-      minPublisherTracWei: chainBase.minPublisherTracWei,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
@@ -1609,6 +1622,7 @@ export async function runDaemonInner(
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
     storageAckTiming,
     syncCheckpointStore,
+    changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
     contextGraphSubscriptionStore: {
@@ -1707,7 +1721,7 @@ export async function runDaemonInner(
     },
   });
 
-  let publisherRuntime: PublisherRuntime | null = null;
+  let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the
   // async-promote-queue series). Initialised in `startPostApiPublishing`
   // after the API is up so a recoverOnStartup hiccup never blocks boot;
@@ -1928,15 +1942,7 @@ export async function runDaemonInner(
     resetNatStatus();
   }
 
-  const publisherChainBase = chainBase?.rpcUrl && chainBase?.hubAddress
-    ? {
-        rpcUrl: chainBase.rpcUrl,
-        rpcUrls: chainBase.rpcUrls,
-        hubAddress: chainBase.hubAddress,
-        tokenAddress: chainBase.tokenAddress,
-        chainId: chainBase.chainId,
-      }
-    : undefined;
+  const publisherChainBase = runtimeEvmChainConfig;
   const startPostApiPublishing = () => {
     const profileTimer = setTimeout(() => {
       void agent.publishProfile().catch((err: any) => {
@@ -1962,24 +1968,26 @@ export async function runDaemonInner(
 
     const publisherTimer = setTimeout(() => {
       void (async () => {
-        try {
-          const runtime = await startPublisherRuntimeIfEnabled({
-            dataDir: dkgDir(),
-            config,
-            store: agent.store,
-            keypair: agent.wallet.keypair,
-            chainBase: publisherChainBase,
-            ackTransportFactory: agent.createACKTransportFactory({
-              sendTimeoutMs: storageAckTiming.sendTimeoutMs,
-              log,
-            }),
-            publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
-            knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
-            knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+        const outcome = await startPublisherRuntimeWithOutcome({
+          dataDir: dkgDir(),
+          config,
+          store: agent.store,
+          keypair: agent.wallet.keypair,
+          chainBase: publisherChainBase,
+          ackTransportFactory: agent.createACKTransportFactory({
+            sendTimeoutMs: storageAckTiming.sendTimeoutMs,
             log,
-          });
-          publisherRuntime = runtime;
-        } catch (err: any) {
+          }),
+          publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
+          knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
+          knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+          log,
+        });
+        publisherState = outcome;
+        if (!outcome.availability.available
+          && outcome.availability.reason === 'publisher_startup_failed'
+          && 'error' in outcome) {
+          const err = outcome.error as any;
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
         }
       })();
@@ -2096,8 +2104,10 @@ export async function runDaemonInner(
     const checkIntervalMs = au.checkIntervalMinutes * 60_000;
     let watchedRef = "";
     let watchedRepo = "";
+    let watchedRefPlan: ReturnType<typeof resolveAutoUpdateGitRefPlan> | null = null;
     try {
-      watchedRef = resolveAutoUpdateGitRef(au);
+      watchedRefPlan = resolveAutoUpdateGitRefPlan(au);
+      watchedRef = watchedRefPlan.ref;
       watchedRepo = repoToFetchUrl(au.repo);
     } catch (err: any) {
       log(
@@ -2111,43 +2121,26 @@ export async function runDaemonInner(
         `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
           `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
       );
+      const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
+      if (verificationWarning) log(verificationWarning);
 
-      const runCheck = async () => {
-        const gitStatus = await checkForNewCommitWithStatus(au, log);
-        if (gitStatus.status === "error") {
-          log("Auto-update (git): update check failed.");
-          return;
-        }
-
-        daemonState.lastUpdateCheck.checkedAt = Date.now();
-        daemonState.lastUpdateCheck.upToDate = gitStatus.status === "up-to-date";
-        daemonState.lastUpdateCheck.channelTargetMissing = false;
-        daemonState.lastUpdateCheck.latestVersion = "";
-        daemonState.lastUpdateCheck.latestCommit = gitStatus.commit ?? "";
-
-        if (gitStatus.status !== "available" || !gitStatus.commit) return;
-
-        daemonState.isUpdating = true;
-        let updateStatus: UpdateStatus = "failed";
-        try {
-          updateStatus = await performUpdateWithStatus(au, log, {
-            expectedCommit: gitStatus.commit,
-          });
-        } finally {
-          daemonState.isUpdating = false;
-        }
-
-        if (updateStatus === "updated") {
-          log("Auto-update (git): update activated; exiting for supervised restart.");
-          await shutdown(DAEMON_EXIT_CODE_RESTART);
-          return;
-        }
-        if (updateStatus === "up-to-date") {
-          log("Auto-update (git): update skipped — node caught up before apply.");
-          return;
-        }
-        log("Auto-update (git): update failed.");
-      };
+      // Rollout jitter: hold off a per-node random delay between detecting an
+      // available commit and applying it, so a release never restarts the whole
+      // fleet in one window (the 2026-07-10 bootstrap-storm trigger). The gate is
+      // created ONCE here so its single-flight guard holds across polling ticks.
+      const gate = createUpdateHoldoffGate({
+        jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
+        isShuttingDown: () => shuttingDown,
+        setUpdating: (updating) => { daemonState.isUpdating = updating; },
+        log,
+      });
+      const runCheck = createGitUpdateRunCheck({
+        gate,
+        log,
+        lastUpdateCheck: daemonState.lastUpdateCheck,
+        au,
+        onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
+      });
 
       setTimeout(runCheck, 15_000);
       updateInterval = setInterval(runCheck, checkIntervalMs);
@@ -2169,38 +2162,27 @@ export async function runDaemonInner(
       `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${au?.checkIntervalMinutes ?? 30}min)`,
     );
 
-    const runCheck = async () => {
-      const npmStatus = await checkForNpmVersionUpdate(log, allowPre, channel);
-      const derived = deriveUpdateCheckState(npmStatus);
-      if (derived) {
-        daemonState.lastUpdateCheck.checkedAt = Date.now();
-        daemonState.lastUpdateCheck.upToDate = derived.upToDate;
-        daemonState.lastUpdateCheck.channelTargetMissing = derived.channelTargetMissing;
-        // Always write (including '') so a prior "available" version does not
-        // linger after the target disappears or the node catches up.
-        daemonState.lastUpdateCheck.latestVersion = derived.latestVersion;
-        if (npmStatus.status === "no-target")
-          log(
-            `Auto-update (npm): WARNING — channel "${npmStatus.channel}" has no acceptable target (tag missing or rejected by allowPrerelease); node will not update until it is published.`,
-          );
-      }
-      if (npmStatus.status !== "available" || !npmStatus.version) return;
-      if (!au) return; // version check only — no auto-apply when polling disabled
-
-      daemonState.isUpdating = true;
-      // OT-RFC-41 Bundle B1b: Edge → npm install -g, Core → slot install.
-      const role = config.nodeRole ?? "edge";
-      const status = role === "edge"
-        ? await performNpmUpdateEdge(npmStatus.version, getCurrentCliVersion(), log)
-        : await performNpmUpdate(npmStatus.version, log);
-      const updated = status === "updated";
-      daemonState.isUpdating = false;
-      if (updated) {
-        log("Auto-update: update activated; exiting for supervised restart.");
-        await shutdown(DAEMON_EXIT_CODE_RESTART);
-        return;
-      }
-    };
+    // Rollout jitter (same rationale as the git path): stagger the fleet's
+    // restarts by holding off a per-node random delay before applying. The gate
+    // is null in version-check-only mode (au disabled) — detect + record only.
+    // Created ONCE so single-flight holds across polling ticks.
+    const gate = au
+      ? createUpdateHoldoffGate({
+          jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
+          isShuttingDown: () => shuttingDown,
+          setUpdating: (updating) => { daemonState.isUpdating = updating; },
+          log,
+        })
+      : null;
+    const runCheck = createNpmUpdateRunCheck({
+      gate,
+      log,
+      lastUpdateCheck: daemonState.lastUpdateCheck,
+      allowPrerelease: allowPre,
+      channel,
+      nodeRole: config.nodeRole ?? "edge",
+      onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
+    });
 
     setTimeout(runCheck, 15_000);
     updateInterval = setInterval(runCheck, checkIntervalMs);
@@ -2600,28 +2582,22 @@ export async function runDaemonInner(
     }
   }
 
-  const MAX_LOG_BYTES = 50 * 1024 * 1024; // 50 MB
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
-  const pruneTimer = setInterval(async () => {
+  const pruneRuntimeState = async (): Promise<void> => {
     try {
       dashDb.prune();
-      const st = await stat(logFile).catch(() => null);
-      if (st && st.size > MAX_LOG_BYTES) {
-        const tail = await readFile(logFile, "utf8");
-        const keepFrom = tail.length - Math.floor(MAX_LOG_BYTES * 0.7);
-        const newlineIdx = tail.indexOf("\n", keepFrom);
-        if (newlineIdx > 0) {
-          await writeFile(logFile, tail.slice(newlineIdx + 1));
-        } else {
-          await writeFile(logFile, tail.slice(keepFrom));
-        }
+      const rotation = await rotateDaemonLogIfNeeded(logFile);
+      if (rotation.rotated) {
         log(
-          `Rotated daemon.log (was ${(st.size / 1024 / 1024).toFixed(1)} MB)`,
+          `Rotated daemon.log (was ${(rotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
         );
       }
     } catch {
       /* never crash the daemon */
     }
+  };
+  const pruneTimer = setInterval(() => {
+    void pruneRuntimeState();
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
@@ -2630,7 +2606,7 @@ export async function runDaemonInner(
   // Wiring only (scheduling/format live in rpc-usage-log.ts, unit-tested).
   // The composite source merges EVERY drainable this process owns: the agent
   // (its chain adapter) plus the async-publisher runtime's per-wallet
-  // adapters — `publisherRuntime` is late-bound, so read the live variable at
+  // adapters — `publisherState` is late-bound, so read the live runtime at
   // each drain. chainId is the EFFECTIVE one (chainBase resolves field-level
   // inheritance; config.chain?.chainId alone is undefined for configs that
   // override only rpcUrl).
@@ -2639,7 +2615,7 @@ export async function runDaemonInner(
     source: {
       drainRpcUsage: () => mergeRpcUsageWindows(
         agent.drainRpcUsage(),
-        publisherRuntime?.drainRpcUsage(),
+        publisherState.runtime?.drainRpcUsage(),
       ),
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
@@ -3375,12 +3351,12 @@ export async function runDaemonInner(
       const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
       if (handled) return;
 
-      await handleRequest(
+      await handleRequest({
         req,
         res,
         agent,
         publisherControl,
-        publisherRuntime,
+        publisherState,
         config,
         startedAt,
         dashDb,
@@ -3402,10 +3378,10 @@ export async function runDaemonInner(
         apiHost,
         apiPortRef,
         routePlugins,
-        admissionStats,
+        admission: admissionStats,
         emitMemoryGraphChanged,
         emitNotification,
-      );
+      });
     } catch (err: any) {
       // Single top-level error→HTTP mapping (in http-utils.ts
       // respondWithDaemonError): 413 payload-too-large; 400 SyntaxError /
@@ -3509,7 +3485,7 @@ export async function runDaemonInner(
         await stopTelemetry();
         natStatusWatcherStop?.();
         resetNatStatus();
-        await publisherRuntime
+        await publisherState.runtime
           ?.stop()
           .catch((err: any) =>
             log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),

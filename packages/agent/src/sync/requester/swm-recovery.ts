@@ -7,6 +7,7 @@ import {
 import type { SyncPageResult } from './page-fetch.js';
 import { applySwmRecovery, type SwmRecoveryStore } from './swm-recovery-apply.js';
 import { sharedMemoryOwnershipKeyFromGraph } from './shared-memory-sync.js';
+import { appendInPlace } from '../append-in-place.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -122,7 +123,7 @@ async function fetchPhaseFully(
     const page = await deps.fetchSyncPages(
       deps.ctx, deps.remotePeerId, deps.contextGraphId, true, phase, graphUri, deps.deadline,
     );
-    all.push(...page.quads);
+    appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
     if (page.completed) {
       deps.deleteCheckpoint(page.checkpointKey);

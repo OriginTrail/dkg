@@ -15,7 +15,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 22;
+const SCHEMA_VERSION = 24;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -536,12 +536,11 @@ export class DashboardDB {
       //     (i.e. the `ReliableEnvelope` proto output, not the raw
       //     application payload), so retries replay byte-identical
       //     frames without re-encoding.
-      //   - `idx_outbox_next_attempt` indexes the periodic-tick query
-      //     (`SELECT ... WHERE next_attempt_at <= ?`); the
-      //     opportunistic-flush query
-      //     (`SELECT ... WHERE peer_id = ?`) uses an implicit scan
-      //     on the PK prefix, which is fast enough at expected
-      //     queue sizes (~tens of entries per peer).
+      //   - `idx_outbox_next_attempt` indexes the sole automatic retry query
+      //     (`SELECT ... WHERE next_attempt_at <= ?`). The peer-scoped query is
+      //     retained only for diagnostics/DHT bookkeeping and MUST NOT become a
+      //     connection-triggered drain; it uses the PK prefix at expected queue
+      //     sizes (~tens of entries per peer).
       //
       // No data migration: pure additive. The chat-specific
       // `idx_chat_msgid` from V11 stays in place — PR-3 will drop
@@ -812,6 +811,38 @@ export class DashboardDB {
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_runtime_cursors_namespace_scope
           ON runtime_cursors(namespace, scope);
+      `);
+    }
+
+    if (version < 23) {
+      // OT-RFC-59 SC5: durable per-(peer, contextGraph) changelog cursor. NEVER
+      // pruned (see SqliteChangelogCursorStore) — a TTL would defeat the O(delta)
+      // cross-restart catch-up this table exists for.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS changelog_cursors (
+          peer_id TEXT NOT NULL,
+          context_graph_id TEXT NOT NULL,
+          era TEXT NOT NULL,
+          seq INTEGER NOT NULL CHECK (seq >= 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (peer_id, context_graph_id)
+        );
+      `);
+    }
+
+    if (version < 24) {
+      // OT-RFC-59 §6 P0 durable era guard: the write-side ChangelogStore's
+      // restore-detection needs the (era, highSeq) high-water in a store that a
+      // `store.nq` restore does NOT roll back with the RDF store. node-ui.db
+      // survives such a restore, so a rollback under the same era rotates the era
+      // (forcing peers to full-resync instead of silently skipping). Single row.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS changelog_era (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          era TEXT NOT NULL,
+          high_seq INTEGER NOT NULL CHECK (high_seq >= 0),
+          updated_at INTEGER NOT NULL
+        );
       `);
     }
 
@@ -2422,6 +2453,85 @@ export class SqliteSyncCheckpointStore {
   }
 }
 
+/**
+ * OT-RFC-59 SC5 durable changelog cursor store (duck-compatible with the agent's
+ * ChangelogCursorStore). Keyed by (peer_id, context_graph_id); stores the last
+ * APPLIED (era, seq) from that responder. Like `ka_numbers` / `protocol_outbox`
+ * this state is durable: it is NEVER added to `prune()` — a TTL would defeat the
+ * O(delta) cross-restart catch-up the changelog lane exists for.
+ */
+export class SqliteChangelogCursorStore {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+
+  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+  }
+
+  get(peerId: string, contextGraphId: string): { era: string; seq: number; updatedAtMs: number } | undefined {
+    const row = this.db.prepare(
+      `SELECT era, seq, updated_at FROM changelog_cursors WHERE peer_id = ? AND context_graph_id = ?`,
+    ).get(peerId, contextGraphId) as { era: string; seq: number; updated_at: number } | undefined;
+    if (!row) return undefined;
+    return { era: row.era, seq: row.seq, updatedAtMs: row.updated_at };
+  }
+
+  set(peerId: string, contextGraphId: string, era: string, seq: number, nowMs = this.clock()): void {
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      throw new Error(`Invalid changelog cursor seq for ${peerId}/${contextGraphId}: ${seq}`);
+    }
+    this.db.prepare(`
+      INSERT INTO changelog_cursors (peer_id, context_graph_id, era, seq, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(peer_id, context_graph_id) DO UPDATE SET
+        era = excluded.era,
+        seq = excluded.seq,
+        updated_at = excluded.updated_at
+    `).run(peerId, contextGraphId, era, seq, nowMs);
+  }
+}
+
+/**
+ * OT-RFC-59 §6 P0 durable era guard (duck-compatible with storage's
+ * ChangelogEraGuard). Persists the single (era, high_seq) high-water in
+ * node-ui.db — which a `store.nq` RDF-store restore does NOT roll back — so the
+ * write-side ChangelogStore can detect a restore/rollback (seq regressed under
+ * the same era) and rotate the era, forcing peers to full-resync instead of
+ * silently skipping. `save` is called after every committed seq, so it must be a
+ * single fast upsert.
+ */
+export class SqliteChangelogEraGuard {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+
+  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+  }
+
+  async load(): Promise<{ era: string; highSeq: number } | null> {
+    const row = this.db.prepare(
+      `SELECT era, high_seq FROM changelog_era WHERE id = 1`,
+    ).get() as { era: string; high_seq: number } | undefined;
+    return row ? { era: row.era, highSeq: row.high_seq } : null;
+  }
+
+  async save(era: string, highSeq: number): Promise<void> {
+    if (!Number.isSafeInteger(highSeq) || highSeq < 0) {
+      throw new Error(`Invalid changelog era high_seq: ${highSeq}`);
+    }
+    this.db.prepare(`
+      INSERT INTO changelog_era (id, era, high_seq, updated_at)
+      VALUES (1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        era = excluded.era,
+        high_seq = excluded.high_seq,
+        updated_at = excluded.updated_at
+    `).run(era, highSeq, this.clock());
+  }
+}
+
 // --- Universal Messenger substrate stores (rc.9 plan PR-1) ---
 
 /**
@@ -2663,10 +2773,16 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     return row !== undefined;
   }
 
+  hasPendingFor(peer: string): boolean {
+    return this.db.prepare('SELECT 1 FROM protocol_outbox WHERE peer_id = ? LIMIT 1').get(peer) !== undefined;
+  }
+
   pendingFor(peer: string): ProtocolOutboxEntry[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM protocol_outbox WHERE peer_id = ? ORDER BY first_failure_at ASC`,
+        `SELECT * FROM protocol_outbox
+         WHERE peer_id = ?
+         ORDER BY first_failure_at ASC, protocol ASC, message_id ASC`,
       )
       .all(peer) as Array<{
       peer_id: string;
@@ -2685,9 +2801,35 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   due(now: number): ProtocolOutboxEntry[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM protocol_outbox WHERE next_attempt_at <= ?`,
+        `SELECT * FROM protocol_outbox
+         WHERE next_attempt_at <= ?
+         ORDER BY next_attempt_at ASC, first_failure_at ASC,
+                  peer_id ASC, protocol ASC, message_id ASC`,
       )
       .all(now) as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      payload: Buffer;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  }
+
+  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM protocol_outbox
+         WHERE next_attempt_at <= ?
+         ORDER BY next_attempt_at ASC, first_failure_at ASC,
+                  peer_id ASC, protocol ASC, message_id ASC
+         LIMIT ?`,
+      )
+      .all(now, limit) as Array<{
       peer_id: string;
       protocol: string;
       message_id: string;

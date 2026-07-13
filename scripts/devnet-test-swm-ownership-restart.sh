@@ -10,8 +10,9 @@
 #   3. Node 1 is stopped, so the original owner is offline.
 #   4. Node 2 is restarted, clearing process-local publisher ownership maps
 #      while preserving its local store and without live owner help.
-#   5. Node 2 attempts to promote the same root. This must hard-fail from
-#      durable local SWM metadata, and must not overwrite SWM data or owner.
+#   5. Node 2 attempts to promote the same root. Assertion-promote ownership
+#      conflicts are advisory skips (#1116): the call returns HTTP 200 with an
+#      explicit non-share outcome and must not overwrite SWM data or owner.
 #
 # Preconditions:
 #   ./scripts/devnet.sh clean
@@ -247,20 +248,8 @@ wait_for_node_up() {
 }
 
 kill_node() {
-  local node="$1" pid
-  pid=$(cat "$(node_pidfile "$node")" 2>/dev/null || true)
-  [ -n "$pid" ] || return 0
-  kill "$pid" 2>/dev/null || true
-  for _ in $(seq 1 30); do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      break
-    fi
-    sleep 0.5
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    log "node $node not down after SIGTERM, sending SIGKILL"
-    kill -9 "$pid" 2>/dev/null || true
-  fi
+  local node="$1"
+  ( cd "$REPO_ROOT" && ./scripts/devnet.sh stop-node "$node" 2>&1 | sed "s/^/  [devnet] /" )
   wait_for_node_down "$node"
 }
 
@@ -306,6 +295,27 @@ promote_expect_success() {
   response=$(api_call "$node" POST "/api/knowledge-assets/${assertion}/swm/share" "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
   count=$(parse_json "$response" '.promotedCount')
   [ "$count" = "1" ] || fail "expected one promoted quad for $assertion, got '$count': $response"
+}
+
+assert_cross_owner_promote_skipped() {
+  local code="$1" body="$2"
+  [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || return 1
+  printf '%s' "$body" | node -e '
+    let input = "";
+    process.stdin.on("data", (chunk) => input += chunk);
+    process.stdin.on("end", () => {
+      try {
+        const result = JSON.parse(input);
+        const valid = result.swmShared === false &&
+          result.promotedCount === 0 &&
+          result.sealed === false &&
+          result.publishReady === false;
+        process.exit(valid ? 0 : 1);
+      } catch {
+        process.exit(1);
+      }
+    });
+  '
 }
 
 owner_values_on_node() {
@@ -388,22 +398,17 @@ wait_for_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_VALUE"
 wait_for_owner_meta "$ATTACKER_NODE" "$ROOT" "$OWNER_PEER"
 log "node $ATTACKER_NODE still has durable owner metadata after offline-owner restart"
 
-act "5. Cross-owner promote must fail from durable local metadata"
+act "5. Cross-owner promote must be advisory-skipped from durable local metadata"
 assertion_create_write_finalize "$ATTACKER_NODE" "$ATTACKER_ASSERTION" "$ROOT" "$ATTACKER_VALUE"
 
 PROMOTE_BODY=""
 PROMOTE_CODE=""
 api_capture "$ATTACKER_NODE" POST "/api/knowledge-assets/${ATTACKER_ASSERTION}/swm/share" "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" PROMOTE_BODY PROMOTE_CODE
-if [ "$PROMOTE_CODE" -ge 200 ] && [ "$PROMOTE_CODE" -lt 300 ]; then
-  fail "cross-owner promote unexpectedly succeeded with HTTP $PROMOTE_CODE: $PROMOTE_BODY"
-fi
-EXPECTED_ERROR="Cannot promote entity <${ROOT}>: owned by peer ${OWNER_PEER}, not by caller ${ATTACKER_PEER}."
-case "$PROMOTE_BODY" in
-  *"$EXPECTED_ERROR"*) log "cross-owner promote failed with expected ownership error" ;;
-  *) fail "promote failed with unexpected body (HTTP $PROMOTE_CODE): $PROMOTE_BODY; expected '$EXPECTED_ERROR'" ;;
-esac
+assert_cross_owner_promote_skipped "$PROMOTE_CODE" "$PROMOTE_BODY" \
+  || fail "cross-owner promote must return the advisory non-share contract (HTTP 200, swmShared=false, promotedCount=0, sealed=false, publishReady=false); got HTTP $PROMOTE_CODE: $PROMOTE_BODY"
+log "cross-owner promote returned the advisory non-share contract"
 
-act "6. Failed promote left WM, SWM, and ownership metadata intact"
+act "6. Blocked/skipped promote left WM, SWM, and ownership metadata intact"
 ASSERTION_QUERY=$(api_call "$ATTACKER_NODE" GET "/api/knowledge-assets/${ATTACKER_ASSERTION}/wm/quads?contextGraphId=$CONTEXT_GRAPH")
 ASSERTION_CT=$(quads_count "$ASSERTION_QUERY")
 [ "$ASSERTION_CT" = "1" ] || fail "attacker WM assertion should still have 1 quad after failed promote, got '$ASSERTION_CT': $ASSERTION_QUERY"
@@ -419,4 +424,4 @@ OWNERS_AFTER="$(owner_values_on_node "$ATTACKER_NODE" "$ROOT")"
 [ "$OWNERS_AFTER" = "$OWNER_PEER" ] \
   || fail "owner metadata changed after failed promote; owners='$OWNERS_AFTER', expected '$OWNER_PEER'"
 
-log "PASS: durable SWM ownership blocks cross-author promote after restart while owner is offline"
+log "PASS: durable SWM ownership prevents cross-author overwrite after restart while owner is offline"
