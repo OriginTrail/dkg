@@ -208,7 +208,7 @@ function canonDecimal(lex: string): string {
   const m = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(lex);
   if (!m || (m[2] === '' && (m[3] === undefined || m[3] === ''))) throw new Error(`invalid xsd:decimal: ${lex}`);
   const intRaw = m[2].replace(/^0+/, '');
-  const frac = (m[3] ?? '').replace(/0+$/, '');
+  const frac = trimTrailingAsciiZeros(m[3] ?? '');
   // oxigraph stores xsd:decimal as the SAME i128 / 10^18 fixed-point as duration
   // seconds: a value needing more than 18 fractional digits, or whose 10^18-scaled
   // magnitude overflows i128, fails to parse and is kept VERBATIM.
@@ -330,9 +330,16 @@ function expandToPlainDecimal(s: string): string {
   return stripTrailingZeros(`${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`);
 }
 
+function trimTrailingAsciiZeros(s: string): string {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 48 /* 0 */) end--;
+  return end === s.length ? s : s.slice(0, end);
+}
+
 function stripTrailingZeros(s: string): string {
   if (!s.includes('.')) return s;
-  return s.replace(/0+$/, '').replace(/\.$/, '');
+  const trimmed = trimTrailingAsciiZeros(s);
+  return trimmed.endsWith('.') ? trimmed.slice(0, -1) : trimmed;
 }
 
 // ── date/time family ───────────────────────────────────────────────────────────
@@ -360,7 +367,7 @@ function splitTzToOffset(s: string): { body: string; offsetMin: number; hadTz: b
 // empty. Truncate, NOT round (matches Blazegraph). (OT-RFC-57)
 function normFrac(frac: string | undefined): string {
   if (frac === undefined) return '';
-  const d = frac.slice(1, 4).replace(/0+$/, ''); // at most 3 digits, then strip trailing zeros
+  const d = trimTrailingAsciiZeros(frac.slice(1, 4)); // at most 3 digits, then strip trailing zeros
   return d === '' ? '' : `.${d}`;
 }
 
@@ -563,7 +570,7 @@ function canonDuration(lex: string, dt: string): string {
       sWhole = sTok;
     } else {
       sWhole = sTok.slice(0, dot) || '0';
-      const fracDigits = sTok.slice(dot + 1).replace(/0+$/, '');
+      const fracDigits = trimTrailingAsciiZeros(sTok.slice(dot + 1));
       if (fracDigits.length > 18) throw new Error('sub-1e-18 seconds');
       fracScaled = fracDigits === '' ? 0n : BigInt(fracDigits.padEnd(18, '0'));
     }
@@ -601,7 +608,7 @@ function canonDuration(lex: string, dt: string): string {
   if (H > 0n) time += `${H}H`;
   if (Min > 0n) time += `${Min}M`;
   if (S > 0n || fracRem > 0n) {
-    const fracStr = fracRem === 0n ? '' : `.${fracRem.toString().padStart(18, '0').replace(/0+$/, '')}`;
+    const fracStr = fracRem === 0n ? '' : `.${trimTrailingAsciiZeros(fracRem.toString().padStart(18, '0'))}`;
     time += `${S}${fracStr}S`;
   }
   const body = time ? `${date}T${time}` : date;
