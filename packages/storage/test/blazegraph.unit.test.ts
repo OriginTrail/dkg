@@ -3,6 +3,7 @@
  * no live Blazegraph required).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { performance } from 'node:perf_hooks';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { getExternalStorePrioritySchedulerSnapshot } from '../src/store-priority-scheduler.js';
 
@@ -53,6 +54,14 @@ async function outcomeWithin(work: Promise<unknown>, timeoutMs: number): Promise
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+function blockEventLoopFor(durationMs: number): void {
+  const end = performance.now() + durationMs;
+  while (performance.now() < end) {
+    // Deliberately keep timers from firing so the post-await clock check owns
+    // timeout classification when the awaited work rejects.
   }
 }
 
@@ -262,6 +271,57 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const outcome = await outcomeWithin(run(s), 200);
     expect(outcome).toMatchObject({ name: 'TimeoutError' });
     expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it('reports TimeoutError when fetch rejects after the deadline clock but before its timer runs', async () => {
+    const lateTransportFailure = new Error('late transport failure');
+    setFetch(async () => {
+      blockEventLoopFor(25);
+      throw lateTransportFailure;
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 5 });
+
+    const outcome = await outcomeWithin(
+      s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(outcome).not.toBe(lateTransportFailure);
+  });
+
+  it('reports TimeoutError when JSON decoding rejects after the deadline clock but before its timer runs', async () => {
+    const lateDecodeFailure = new Error('late JSON failure');
+    setFetch(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        blockEventLoopFor(25);
+        throw lateDecodeFailure;
+      },
+    }) as Response);
+    const s = new BlazegraphStore(baseUrl, { timeout: 5 });
+
+    const outcome = await outcomeWithin(
+      s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(outcome).not.toBe(lateDecodeFailure);
+  });
+
+  it('preserves the exact caller abort reason while fetch is in flight', async () => {
+    setFetch(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled query');
+    const s = new BlazegraphStore(baseUrl);
+    const query = s.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: controller.signal });
+    await waitForCondition(() => fetchCalls.length === 1, 'query fetch did not start');
+
+    controller.abort(reason);
+
+    await expect(query).rejects.toBe(reason);
   });
 
   it('keeps the SELECT deadline active through response JSON decoding', async () => {
@@ -522,14 +582,15 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   it('update honors pre-aborted options before dispatch', async () => {
     const s = new BlazegraphStore(baseUrl);
     const controller = new AbortController();
-    controller.abort(new Error('cancel update'));
+    const reason = new Error('cancel update');
+    controller.abort(reason);
 
     await expect(
       s.update('DELETE WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
         priority: 'ack',
         signal: controller.signal,
       }),
-    ).rejects.toThrow('cancel update');
+    ).rejects.toBe(reason);
     expect(fetchCalls).toHaveLength(0);
   });
 
