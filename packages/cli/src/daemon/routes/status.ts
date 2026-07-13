@@ -503,8 +503,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
-    storeRuntime,
     config,
+    effectiveStore,
+    runtimeStore,
     startedAt,
     dashDb,
     opWallets,
@@ -658,8 +659,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // sentinels when build-info.json is absent (monorepo / dev),
     // so consumers can branch reliably.
     const buildInfo = loadBuildInfo();
-    const effectiveStore = storeRuntime.effectiveStore;
-    const runtimeStore = storeRuntime.runtimeStore;
     const runtimeStoreOptions = (runtimeStore.options ?? {}) as Record<string, unknown>;
     return jsonResponse(res, 200, {
       name: config.name,

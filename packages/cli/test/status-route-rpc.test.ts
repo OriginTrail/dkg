@@ -38,7 +38,10 @@ import {
   handleStatusRoutes,
   invalidateExternalStoreQuadsCache,
 } from '../src/daemon/routes/status.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import {
+  createRequestStoreContext,
+  type RequestContext,
+} from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
@@ -156,8 +159,7 @@ describe('/api/status selected overlay details', () => {
         path: url.pathname,
         url,
         network: null,
-        config,
-        storeRuntime: managedStoreRuntime(config),
+        ...createRequestStoreContext(managedStoreRuntime(config)),
         startedAt: Date.now(),
         agent: {
           peerId: 'peer-status-test',
@@ -212,8 +214,7 @@ describe('/api/status selected overlay details', () => {
         path: url.pathname,
         url,
         network: null,
-        config,
-        storeRuntime: managedStoreRuntime(config),
+        ...createRequestStoreContext(managedStoreRuntime(config)),
         startedAt: Date.now(),
         agent: {
           peerId: 'peer-status-test',
@@ -266,8 +267,7 @@ describe('/api/status selected overlay details', () => {
         path: url.pathname,
         url,
         network,
-        config,
-        storeRuntime: managedStoreRuntime(config),
+        ...createRequestStoreContext(managedStoreRuntime(config)),
         startedAt: Date.now(),
         agent: {
           peerId: 'peer-status-test',
@@ -338,8 +338,7 @@ describe('/api/status selected overlay details', () => {
           path: url.pathname,
           url,
           network,
-          config,
-          storeRuntime: managedStoreRuntime(config),
+          ...createRequestStoreContext(managedStoreRuntime(config)),
           startedAt: Date.now(),
           agent: {
             peerId: 'peer-status-test',

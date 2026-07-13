@@ -311,7 +311,12 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
+import {
+  createRequestStoreContext,
+  type MemoryGraphChangedEvent,
+  type NotificationSseEvent,
+  type RequestContext,
+} from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -368,7 +373,6 @@ export async function handleRequest(
   emitNotification?: (event: NotificationSseEvent) => void,
   publisherAvailability?: AsyncPublisherAvailability,
 ): Promise<void> {
-  const config = storeRuntime.operatorConfig;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
@@ -385,8 +389,7 @@ export async function handleRequest(
     publisherControl,
     publisherRuntime,
     publisherAvailability,
-    storeRuntime,
-    config,
+    ...createRequestStoreContext(storeRuntime),
     startedAt,
     dashDb,
     opWallets,

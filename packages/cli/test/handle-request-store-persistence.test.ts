@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DkgConfig } from '../src/config.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
+import { createRequestStoreContext } from '../src/daemon/routes/context.js';
 import type { StoreRuntimeContext } from '../src/daemon/store-runtime.js';
 
 describe('handleRequest store config boundary', () => {
@@ -34,6 +35,14 @@ describe('handleRequest store config boundary', () => {
         },
       },
     };
+    const requestStoreContext = createRequestStoreContext(storeRuntime);
+    expect(requestStoreContext).toEqual({
+      config: operatorConfig,
+      effectiveStore: storeRuntime.effectiveStore,
+      runtimeStore: storeRuntime.runtimeStore,
+    });
+    expect(requestStoreContext).not.toHaveProperty('operatorConfig');
+    expect(requestStoreContext).not.toHaveProperty('storeRuntime');
 
     const server = createServer((req, res) => {
       const args: Parameters<typeof handleRequest> = [
