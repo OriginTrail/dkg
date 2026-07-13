@@ -9,7 +9,11 @@ import {
   type ProtocolRouter,
   type StreamHandler,
 } from '@origintrail-official/dkg-core';
-import { Messenger, MessengerNotConfiguredError } from '../src/p2p/messenger.js';
+import {
+  DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+  Messenger,
+  MessengerNotConfiguredError,
+} from '../src/p2p/messenger.js';
 
 /**
  * Hand-rolled call recorder: records every call's args on `.calls`
@@ -58,7 +62,9 @@ interface RouterDouble {
   inboundHandler?: StreamHandler;
 }
 
-function makeRouter(sendImpl?: () => Promise<Uint8Array>): RouterDouble {
+function makeRouter(
+  sendImpl?: (...args: [string, string, Uint8Array, ...unknown[]]) => Promise<Uint8Array>,
+): RouterDouble {
   const send = recorder(
     (sendImpl ?? (async () => new Uint8Array([0x10]))) as (
       ...args: [string, string, Uint8Array, ...unknown[]]
@@ -410,6 +416,116 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
 
     await messenger.processOutboxTick(clock() + 100);
     expect(router.send.calls.length).toBe(sendCallsBefore);
+  });
+
+  it('coalesces overlapping ticks and bounds batch size and retry concurrency', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const releases: Array<() => void> = [];
+    const router = makeRouter(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return new Uint8Array([0x42]);
+    });
+    const idempotencyStore = new InMemoryMessageIdempotencyStore();
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    for (let i = 0; i < 5; i += 1) {
+      outboxStore.enqueue(PEER_A, PROTO, `message-${i}`, new Uint8Array([i]), 'offline', 0);
+    }
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore,
+      outboxStore,
+      backoffs: [10],
+      outboxDrain: { batchSize: 3, concurrency: 2 },
+    });
+
+    const first = messenger.processOutboxTick(100);
+    const overlapping = messenger.processOutboxTick(100);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(router.send.calls).toHaveLength(2);
+    expect(maxActive).toBe(2);
+    releases.splice(0).forEach((release) => release());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releases.splice(0).forEach((release) => release());
+    await Promise.all([first, overlapping]);
+
+    expect(router.send.calls).toHaveLength(3);
+    expect(outboxStore.size()).toBe(2);
+  });
+
+  it('caps a production-default tick at the default batch size', async () => {
+    const router = makeRouter(async () => new Uint8Array([0x42]));
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    const queued = DEFAULT_OUTBOX_DRAIN_BATCH_SIZE + 25;
+    for (let i = 0; i < queued; i += 1) {
+      outboxStore.enqueue(PEER_A, PROTO, `default-batch-${i}`, new Uint8Array([i]), 'offline', 0);
+    }
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+      backoffs: [10],
+    });
+
+    await messenger.processOutboxTick(100);
+
+    expect(router.send.calls).toHaveLength(DEFAULT_OUTBOX_DRAIN_BATCH_SIZE);
+    expect(outboxStore.size()).toBe(25);
+  });
+
+  it('moves terminal failures behind later due rows instead of starving the next page', async () => {
+    const router = makeRouter(async (_peer, _protocol, payload) => {
+      if (payload[0] < 2) throw new Error('Invalid payload');
+      return new Uint8Array([0x42]);
+    });
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    for (let i = 0; i < 3; i += 1) {
+      outboxStore.enqueue(PEER_A, PROTO, `terminal-${i}`, new Uint8Array([i]), 'offline', 0);
+    }
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+      backoffs: [10],
+      clock: () => 100,
+      outboxDrain: { batchSize: 2, concurrency: 1 },
+    });
+
+    await messenger.processOutboxTick(100);
+    await messenger.processOutboxTick(100);
+    expect(router.send.calls).toHaveLength(3);
+    expect(outboxStore.size()).toBe(2);
+  });
+
+  it('waitForOutboxDrain stays pending until the active retry completes', async () => {
+    let release!: () => void;
+    const router = makeRouter(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return new Uint8Array([0x42]);
+    });
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    outboxStore.enqueue(PEER_A, PROTO, FIXED_MSG_ID, new Uint8Array([1]), 'offline', 0);
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+      backoffs: [10],
+    });
+
+    const tick = messenger.processOutboxTick(100);
+    let waitResolved = false;
+    const waiting = messenger.waitForOutboxDrain().then(() => { waitResolved = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(router.send.calls).toHaveLength(1);
+    expect(waitResolved).toBe(false);
+
+    release();
+    await Promise.all([tick, waiting]);
+    expect(waitResolved).toBe(true);
+    expect(outboxStore.size()).toBe(0);
   });
 });
 

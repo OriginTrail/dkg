@@ -11,6 +11,15 @@ import {
   type ProtocolOutboxEntry,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
+import {
+  OutboxDrainer,
+  type OutboxDrainerOptions,
+} from './outbox-drainer.js';
+export {
+  DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+  DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
+  type OutboxDrainerOptions,
+} from './outbox-drainer.js';
 
 /** Bytes payload the substrate uses to signal `RESPONSE_GONE` on the wire. */
 const RESPONSE_GONE_BYTES = new TextEncoder().encode(RESPONSE_GONE_MARKER);
@@ -158,6 +167,11 @@ export interface MessengerDeps {
    * production uses the default `Date.now`.
    */
   clock?: () => number;
+  /**
+   * Periodic retry scheduler bounds. Defaults and validation are owned by
+   * `OutboxDrainer` (`batchSize: 100`, `concurrency: 4`).
+   */
+  outboxDrain?: OutboxDrainerOptions;
 }
 
 export interface SendOpts {
@@ -330,13 +344,13 @@ export interface SloProtocolStats {
  * via `sloWindowSamples` in `MessengerDeps`.
  */
 export const DEFAULT_SLO_WINDOW_SAMPLES = 1000;
-
 export class Messenger {
   private readonly router: ProtocolRouter;
   private readonly idempotencyStore?: MessageIdempotencyStore;
   private readonly outbox?: ProtocolOutbox;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
+  private readonly outboxDrainer?: OutboxDrainer<ProtocolOutboxEntry>;
 
   /**
    * Application handlers registered via `register`. Stored separately
@@ -420,6 +434,13 @@ export class Messenger {
     this.clock = deps.clock ?? (() => Date.now());
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
+    if (this.outbox) {
+      this.outboxDrainer = new OutboxDrainer(
+        (now, limit) => this.outbox!.duePage(now, limit),
+        (entry) => this.retryOutboxEntry(entry),
+        deps.outboxDrain,
+      );
+    }
   }
 
   /**
@@ -823,12 +844,18 @@ export class Messenger {
    * `dropExpired(now)` evicts it on age — recovering an encoding
    * bug requires operator action (manual replay or shutdown).
    */
-  async processOutboxTick(now: number): Promise<void> {
-    if (!this.outbox) return;
-    const due = this.outbox.due(now);
-    for (const entry of due) {
-      await this.retryOutboxEntry(entry);
-    }
+  processOutboxTick(now: number): Promise<void> {
+    return this.outboxDrainer?.tick(now) ?? Promise.resolve();
+  }
+
+  /** Await the currently active periodic drain during graceful shutdown. */
+  async waitForOutboxDrain(): Promise<void> {
+    await this.outboxDrainer?.wait();
+  }
+
+  /** Cancel the remainder of the loaded page and join already-started retries. */
+  async stopOutboxDrain(): Promise<void> {
+    await this.outboxDrainer?.stop();
   }
 
   private async retryOutboxEntry(entry: {
@@ -867,20 +894,20 @@ export class Messenger {
       this.clearDhtWalkRateLimitIfDrained(entry.peer);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      const updated = outbox.enqueueFailure(
+        entry.peer,
+        entry.protocol,
+        entry.messageId,
+        entry.payload,
+        errMsg,
+        this.clock(),
+      );
       if (isRecoverableMessengerSendError(err, errMsg)) {
-        const updated = outbox.enqueueFailure(
-          entry.peer,
-          entry.protocol,
-          entry.messageId,
-          entry.payload,
-          errMsg,
-          this.clock(),
-        );
         this.maybeScheduleDhtWalk(entry.peer, updated.attempts, errMsg);
       }
-      // Non-recoverable: leave the entry alone. `dropExpired` will
-      // age it out; an operator-facing diagnostic surface (PR-12)
-      // will surface stuck entries so a human can intervene.
+      // A non-recoverable retry remains visible for operator intervention, but
+      // advances on the backoff ladder so it cannot permanently occupy the
+      // front of every bounded due page and starve later deliverable rows.
     } finally {
       outbox.endAttempt(entry.peer, entry.protocol, entry.messageId);
     }
