@@ -1458,7 +1458,16 @@ describe('Relay watchdog: review-round-1 hardening', () => {
     await relay.start();
     const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
     const BUSY_PROTOCOL = '/dkg/test-decay/1.0.0';
-    await relay.libp2p.handle(BUSY_PROTOCOL, () => { /* hold open */ });
+    await relay.libp2p.handle(BUSY_PROTOCOL, async ({ stream }) => {
+      // Model a real request handler that owns the stream until the peer
+      // closes it. Returning immediately leaves libp2p's incoming-stream
+      // middleware to race a reset against connection teardown.
+      try {
+        for await (const _chunk of stream) { /* hold open */ }
+      } catch {
+        // Forced-redial teardown is the behavior under test.
+      }
+    });
 
     const edge = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -1497,7 +1506,15 @@ describe('Relay watchdog: review-round-1 hardening', () => {
     await relay.start();
     const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
     const BUSY_PROTOCOL = '/dkg/test-busy-cap/1.0.0';
-    await relay.libp2p.handle(BUSY_PROTOCOL, () => { /* hold the stream open */ });
+    await relay.libp2p.handle(BUSY_PROTOCOL, async ({ stream }) => {
+      // Keep ownership of the inbound stream through the forced close, as a
+      // production request handler does, and absorb the expected teardown.
+      try {
+        for await (const _chunk of stream) { /* hold open */ }
+      } catch {
+        // The deferral cap deliberately reaps this stream.
+      }
+    });
 
     const edge = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],

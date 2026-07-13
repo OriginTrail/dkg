@@ -1570,6 +1570,30 @@ export class DKGNode {
           this.relayForcedRedialState.set(relayPidStr, { ...redialState, strikes, busyDeferralTicks: 0 });
         }
 
+        // Past the busy-deferral cap, reap the stuck application streams while
+        // the transport is still writable. Letting `Connection.close()` abort
+        // them concurrently with the underlying socket close can make Yamux's
+        // reset frame race the socket teardown (`StreamStateError: Cannot write
+        // to a stream that is closing`). Besides surfacing as an unhandled
+        // rejection, that race defeats the cap's explicit stuck-stream-reaper
+        // purpose. Aborting first gives the reset a turn to flush before the
+        // connection itself is closed.
+        if (busyProtocols.length > 0) {
+          const reaped = new Set<unknown>();
+          for (const connection of [...conns, ...relayedConns]) {
+            for (const stream of connection.streams) {
+              if (reaped.has(stream) || !isWatchdogBusyProtocol(stream.protocol)) continue;
+              reaped.add(stream);
+              try {
+                stream.abort(new Error('relay watchdog busy-deferral cap reached'));
+              } catch {
+                // Best-effort; connection teardown below is the final reaper.
+              }
+            }
+          }
+          await new Promise(r => setTimeout(r, 0));
+        }
+
         for (const c of conns) {
           try {
             await c.close();
