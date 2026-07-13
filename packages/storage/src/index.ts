@@ -40,6 +40,7 @@ export {
 } from './shared-memory-literal-blob-store.js';
 export {
   DEFAULT_GRAPH_SET_REVALIDATE_MS,
+  DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS,
   GraphSetIndexStore,
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
