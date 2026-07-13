@@ -61,7 +61,6 @@ export class ChainRpcTransportError extends Error {
   readonly rpcUrls?: readonly string[];
 
   readonly txHash?: string;
-
   constructor(
     code: ChainRpcTransportCode,
     message: string,

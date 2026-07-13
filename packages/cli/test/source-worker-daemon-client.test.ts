@@ -17,7 +17,7 @@ describe('source worker daemon client (real daemon)', () => {
   let daemon: LiveDaemon;
 
   beforeAll(async () => {
-    daemon = await startLiveDaemon();
+    daemon = await startLiveDaemon({ publisherEnabled: true });
     const created = await postJson(daemon, '/api/context-graph/create', { id: CG, name: CG, accessPolicy: 0 });
     expect(created.status, `CG create failed: ${JSON.stringify(created.body)}`).toBeLessThan(300);
   }, 120_000);

@@ -102,17 +102,9 @@ export class ProtocolOutbox {
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
-   * same `(peer, protocol, messageId)`. Two trigger surfaces — the
-   * periodic tick (`Messenger.processOutboxTick`) and the
-   * opportunistic flush on `connection:open`
-   * (`Messenger.processOutboxOnConnect`) — can interleave: the tick
-   * starts the send for entry E, JS yields, `connection:open` fires,
-   * the on-connect handler reads `pendingFor(peer)` (entry E is still
-   * there — `markDelivered` hasn't fired yet because the in-flight
-   * send hasn't resolved), and would start a CONCURRENT second send
-   * for the same entry. Worst case both succeed and the receiver sees
-   * the same payload twice (receiver dedup absorbs it, but we waste
-   * a round-trip and amplify load).
+   * same `(peer, protocol, messageId)`. Overlapping scheduler callers or
+   * another explicit sender can otherwise interleave around a stale due
+   * snapshot and duplicate the same wire attempt.
    *
    * `tryBeginAttempt` is an atomic check-and-set: the second
    * concurrent attempter sees `false` and exits without dialing.
@@ -206,13 +198,8 @@ export class ProtocolOutbox {
     return this.store.due(now);
   }
 
-  /**
-   * All entries for `peer`, regardless of `nextAttemptAt`. Used by
-   * `Messenger.processOutboxOnConnect` for opportunistic flush on
-   * reconnection.
-   */
-  pendingFor(peer: string): ProtocolOutboxEntry[] {
-    return this.store.pendingFor(peer);
+  hasPendingFor(peer: string): boolean {
+    return this.store.hasPendingFor(peer);
   }
 
   /** Drop entries older than the store's configured max-age. */
@@ -327,11 +314,8 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     return this.entries.has(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
   }
 
-  pendingFor(peer: string): ProtocolOutboxEntry[] {
-    return Array.from(this.entries.values())
-      .filter((e) => e.peer === peer)
-      .sort((a, b) => a.firstFailureAt - b.firstFailureAt)
-      .map(cloneOutboxEntry);
+  hasPendingFor(peer: string): boolean {
+    return Array.from(this.entries.values()).some((entry) => entry.peer === peer);
   }
 
   due(now: number): ProtocolOutboxEntry[] {
@@ -356,12 +340,12 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   list(): ProtocolOutboxEntry[] {
-    return Array.from(this.entries.values()).map((e) => ({ ...e }));
+    return Array.from(this.entries.values()).map(cloneOutboxEntry);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
     const entry = this.entries.get(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
-    return entry ? { ...entry } : undefined;
+    return entry ? cloneOutboxEntry(entry) : undefined;
   }
 }
 

@@ -3,6 +3,7 @@ import {
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
 } from '../src/async-lift-publish-result.js';
+import { QuorumUnmetError } from '../src/ack-errors.js';
 
 describe('async lift publish result mapping', () => {
   it('maps tentative canonical publish into included LiftJob state', () => {
@@ -130,6 +131,52 @@ describe('async lift publish result mapping', () => {
       timeoutAt: 123,
       handling: 'check_chain_then_finalize_or_reset',
     });
+  });
+
+  it('classifies typed ACK quorum failures separately from RPC outages', () => {
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:quorum-unmet',
+    });
+
+    expect(failure.code).toBe('quorum_unmet');
+    expect(failure.retryable).toBe(true);
+    expect(failure.resolution).toBe('reset_to_accepted');
+  });
+
+  it('recognizes a rewrapped quorum failure from its legacy message', () => {
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new Error('QuorumUnmetError(collected=0/3, dialled=0)'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:rewrapped-quorum-unmet',
+    });
+
+    expect(failure.code).toBe('quorum_unmet');
+    expect(failure.retryable).toBe(true);
+    expect(failure.resolution).toBe('reset_to_accepted');
+  });
+
+  it('drops submit-timeout metadata from a quorum failure with legacy timeout text', () => {
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new QuorumUnmetError({
+        collected: 2,
+        required: 3,
+        dialled: 3,
+        legacyMessage: 'storage_ack_timeout: only 2/3 ACKs received',
+      }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:quorum-timeout',
+      timeout: {
+        timeoutMs: 30_000,
+        timeoutAt: 123,
+        handling: 'check_chain_then_finalize_or_reset',
+      },
+    });
+
+    expect(failure.code).toBe('quorum_unmet');
+    expect(failure.retryable).toBe(true);
+    expect(failure.timeout).toBeUndefined();
   });
 
   it('classifies a NO_FUNDED_PUBLISHER_WALLET error as a TERMINAL insufficient_funds failure (not retryable)', () => {

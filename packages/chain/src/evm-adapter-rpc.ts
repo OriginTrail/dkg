@@ -153,6 +153,14 @@ export function isRetryableRpcError(err: unknown): boolean {
     .test(msg);
 }
 
+/** Canonical classifier for provider throttling, shared by failover policy. */
+export function isThrottleRpcError(err: unknown): boolean {
+  if (err instanceof Error) enrichEvmError(err);
+  const status = errorStatus(err);
+  const message = errorMessage(err).toLowerCase();
+  return status === 429 || /\b429\b|too many requests|rate[ -]?limit|throttl/.test(message);
+}
+
 export function assertSuccessfulReceipt(receipt: ethers.TransactionReceipt, label: string): void {
   if (receipt.status !== 0) return;
   const err = new Error(`${label} tx ${receipt.hash} was mined but reverted (status=0)`);
