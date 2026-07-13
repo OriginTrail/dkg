@@ -18,6 +18,7 @@ describe('isExternalBackend', () => {
 
   it('returns false for the oxigraph family', () => {
     expect(isExternalBackend('oxigraph')).toBe(false);
+    expect(isExternalBackend('oxigraph-worker')).toBe(false);
     expect(isExternalBackend('oxigraph-persistent')).toBe(false);
   });
 

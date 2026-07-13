@@ -37,7 +37,7 @@ describe('checkExternalStoreReachable', () => {
   it('passes through with no I/O for local backends', async () => {
     const { fn, calls } = mockFetch(() => new Response(null, { status: 200 }));
     const result = await checkExternalStoreReachable({
-      storeConfig: { backend: 'oxigraph' },
+      storeConfig: { backend: 'oxigraph-worker' },
       fetch: fn,
     });
     expect(result.ok).toBe(true);

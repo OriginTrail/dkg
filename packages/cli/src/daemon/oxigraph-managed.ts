@@ -23,7 +23,6 @@
  * matching the Blazegraph-Docker provisioner's contract.
  */
 import { join } from 'node:path';
-import { MANAGED_DAEMON_STORE_BACKEND } from '../store-backends.js';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
   startOxigraphServer,
@@ -36,7 +35,7 @@ import {
 } from './oxigraph-launch-strategy.js';
 
 /** Config value that opts a node into the daemon-managed local server. */
-export { MANAGED_DAEMON_STORE_BACKEND as MANAGED_OXIGRAPH_BACKEND };
+export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
 
 /** Default loopback bind port. Override via `store.options.port`. */
 export const DEFAULT_OXIGRAPH_PORT = 7878;
@@ -145,7 +144,7 @@ export function planManagedOxigraph(
   config: ConfigLike,
   dataDir: string,
 ): ManagedOxigraphPlan | null {
-  if (config.store?.backend !== MANAGED_DAEMON_STORE_BACKEND) return null;
+  if (config.store?.backend !== MANAGED_OXIGRAPH_BACKEND) return null;
 
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);

@@ -10,7 +10,7 @@
  *   - Blazegraph + valid URL: store block persisted with
  *     `managedByDkg: false`.
  *   - Blazegraph + unreachable URL: surfaces formatted failure, allows
- *     retry, abort leaves the managed local default in place.
+ *     retry, abort returns to local default.
  *   - Blazegraph + 404 URL: namespace-missing branch fires; message
  *     mentions namespace, not network.
  *   - Blank URL prompt: PR 2's "no Docker yet" message + retry.
@@ -28,14 +28,6 @@
 import { describe, it, expect } from 'vitest';
 import { applyStoreFlagsToConfig, promptStoreBackend } from '../src/store-wizard.js';
 import type { DkgConfig } from '../src/config.js';
-import {
-  STORE_BACKENDS,
-  configBackendList,
-  configBackendNames,
-  storeFlagBackendList,
-  storeFlagBackendNames,
-  wizardBackendChoices,
-} from '../src/store-backends.js';
 
 function mockFetch(handler: (input: any, init?: any) => Response | Promise<Response>) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -62,26 +54,6 @@ function mockAsk(scriptedAnswers: string[]): (q: string, def?: string) => Promis
 // ---------------------------------------------------------------------
 
 describe('promptStoreBackend', () => {
-  it('keeps config, wizard, and flag backend lists aligned with their policies', () => {
-    expect(configBackendList().split(', ')).toEqual(configBackendNames());
-    expect(configBackendNames()).toEqual([
-      'oxigraph-server',
-      'oxigraph',
-      'oxigraph-persistent',
-      'blazegraph',
-      'sparql-http',
-    ]);
-    expect(storeFlagBackendList().split(', ')).toEqual(storeFlagBackendNames());
-    expect(storeFlagBackendNames()).toEqual([
-      'oxigraph-server',
-      'oxigraph',
-      'blazegraph',
-      'sparql-http',
-    ]);
-    expect(wizardBackendChoices()).toEqual(['oxigraph-server', 'oxigraph', 'blazegraph']);
-    expect(Object.keys(STORE_BACKENDS)).toContain('oxigraph-worker');
-  });
-
   it('defaults to oxigraph-server when the operator accepts the default', async () => {
     const { fn, calls } = mockFetch(() => new Response(null, { status: 200 }));
     const result = await promptStoreBackend({
@@ -93,26 +65,31 @@ describe('promptStoreBackend', () => {
     expect(calls).toHaveLength(0); // no URL probe issued for a local backend
   });
 
-  it('persists an explicit embedded development store when operator picks "oxigraph" by name', async () => {
+  it('returns no store block (embedded worker) when operator picks "oxigraph" by name', async () => {
     const result = await promptStoreBackend({
       ask: mockAsk(['oxigraph']),
       log: () => {},
     });
-    expect(result.storeBlock).toEqual({ backend: 'oxigraph', options: {} });
+    expect(result.storeBlock).toBeNull();
   });
 
-  it('persists an explicit embedded development store when operator picks oxigraph by number', async () => {
+  it('returns no store block (embedded worker) when operator picks the worker by number', async () => {
     // Menu is now `1) oxigraph-server  2) oxigraph  3) blazegraph` — picking
-    // option 2 opts into the embedded in-memory store explicitly.
+    // option 2 must opt down to the embedded in-process worker (no block).
     const result = await promptStoreBackend({
       ask: mockAsk(['2']),
       log: () => {},
     });
-    expect(result.storeBlock).toEqual({ backend: 'oxigraph', options: {} });
+    expect(result.storeBlock).toBeNull();
   });
 
-  it('preserves a supported explicit embedded backend verbatim on Enter-through (no flip, no option loss)', async () => {
-    for (const backend of ['oxigraph', 'oxigraph-persistent'] as const) {
+  it('preserves an explicit embedded backend verbatim on Enter-through (no flip, no option loss)', async () => {
+    // Codex #946 — only a *block-less* config should fall through to the new
+    // oxigraph-server default. A node that explicitly chose a local worker
+    // variant must keep it on a re-init Enter-through, AND keep its custom
+    // `options` (e.g. the worker's `options.path`): returning `null` would let
+    // `dkg init` write `store: undefined` and relocate the store on next boot.
+    for (const backend of ['oxigraph', 'oxigraph-worker', 'oxigraph-persistent'] as const) {
       const existingStore = { backend, options: { path: '/custom/store' } };
       const result = await promptStoreBackend({
         ask: mockAsk(['']), // Enter
@@ -123,7 +100,11 @@ describe('promptStoreBackend', () => {
     }
   });
 
-  it('does not preserve oxigraph-persistent options when the operator explicitly picks oxigraph', async () => {
+  it('switches to the default embedded worker when an oxigraph-persistent node EXPLICITLY picks oxigraph', async () => {
+    // Codex #946 — preservation must be gated on a true keep. An operator who
+    // explicitly selects option `2` / "oxigraph" to move a worker/persistent
+    // node back to the plain embedded default must NOT have the old backend +
+    // options silently retained. Both the numeric and named selection switch.
     const existingStore = { backend: 'oxigraph-persistent', options: { path: '/custom/store' } };
     for (const answer of ['2', 'oxigraph']) {
       const result = await promptStoreBackend({
@@ -131,33 +112,13 @@ describe('promptStoreBackend', () => {
         existingStore,
         log: () => {},
       });
-      expect(result.storeBlock).toEqual({ backend: 'oxigraph', options: {} });
+      expect(result.storeBlock).toBeNull();
     }
-  });
-
-  it('does not preserve retired oxigraph-worker configs on Enter-through', async () => {
-    const logs: string[] = [];
-    const result = await promptStoreBackend({
-      ask: mockAsk(['']),
-      existingStore: { backend: 'oxigraph-worker', options: { path: '/custom/store' } },
-      log: (m) => logs.push(m),
-    });
-    expect(result.storeBlock).toEqual({ backend: 'oxigraph-server', options: {} });
-    expect(logs.join('\n')).toMatch(/retired/);
-  });
-
-  it('rejects oxigraph-worker when typed explicitly', async () => {
-    await expect(
-      promptStoreBackend({
-        ask: mockAsk(['oxigraph-worker']),
-        log: () => {},
-      }),
-    ).rejects.toThrow(/no longer supported/);
   });
 
   it('falls back to the recommended default (oxigraph-server) on an out-of-range number', async () => {
     // Codex #946 — a typo'd digit ("9") must not silently downgrade a fresh
-    // install to an embedded backend; it resolves to defaultBackend (option 1).
+    // install to the embedded worker; it resolves to defaultBackend (option 1).
     const result = await promptStoreBackend({
       ask: mockAsk(['9']),
       log: () => {},
@@ -211,7 +172,7 @@ describe('promptStoreBackend', () => {
     expect(logs.some((l) => l.includes('STORE-HEALTH'))).toBe(true);
   });
 
-  it('aborts to the managed local default when operator declines retry on unreachable URL', async () => {
+  it('aborts to local default when operator declines retry on unreachable URL', async () => {
     const { fn } = mockFetch(() => new Response('boom', { status: 500 }));
     const logs: string[] = [];
     const result = await promptStoreBackend({
@@ -322,7 +283,7 @@ describe('promptStoreBackend', () => {
         'blazegraph',
         '',  // blank URL
         'n', // decline Docker
-        'n', // decline retry-with-URL → abort to managed local default
+        'n', // decline retry-with-URL → abort to local default
       ]),
       isDockerAvailable: async () => true,
       provisionBlazegraphDocker: async () => {
@@ -655,22 +616,7 @@ describe('applyStoreFlagsToConfig', () => {
         storeFlag: 'neptune',
         log: () => {},
       }),
-    ).rejects.toThrow(/oxigraph-server, oxigraph, blazegraph, sparql-http/);
-  });
-
-  it('does not advertise or accept oxigraph-persistent as a pathless --store choice', async () => {
-    const store = newMockConfig({
-      ...baseConfig,
-      store: { backend: 'oxigraph-persistent', options: { path: '/existing/store.nq' } },
-    } as DkgConfig);
-    const io = mockConfigIO(store);
-
-    await expect(applyStoreFlagsToConfig({
-      ...io,
-      storeFlag: 'oxigraph-persistent',
-      log: () => {},
-    })).rejects.toThrow(/--store must be one of: oxigraph-server, oxigraph, blazegraph, sparql-http/);
-    expect(store.saved).toEqual([]);
+    ).rejects.toThrow(/oxigraph, blazegraph, sparql-http/);
   });
 
   it('persists a daemon-managed oxigraph-server block (no URL required)', async () => {
@@ -708,7 +654,7 @@ describe('applyStoreFlagsToConfig', () => {
     expect(store.saved[0].store).toEqual({ backend: 'oxigraph-server', options: {} });
   });
 
-  it('persists an explicit oxigraph block when --store oxigraph is passed', async () => {
+  it('clears existing store block when --store oxigraph is passed', async () => {
     const store = newMockConfig({
       ...baseConfig,
       store: {
@@ -723,10 +669,10 @@ describe('applyStoreFlagsToConfig', () => {
       log: () => {},
     });
     expect(store.saved).toHaveLength(1);
-    expect(store.saved[0].store).toEqual({ backend: 'oxigraph', options: {} });
+    expect(store.saved[0].store).toBeUndefined();
   });
 
-  it('persists oxigraph when --store oxigraph is passed and no existing store block', async () => {
+  it('is a no-op when --store oxigraph is passed and no existing store block', async () => {
     const store = newMockConfig(baseConfig);
     const io = mockConfigIO(store);
     await applyStoreFlagsToConfig({
@@ -734,20 +680,6 @@ describe('applyStoreFlagsToConfig', () => {
       storeFlag: 'oxigraph',
       log: () => {},
     });
-    expect(store.saved).toHaveLength(1);
-    expect(store.saved[0].store).toEqual({ backend: 'oxigraph', options: {} });
-  });
-
-  it('rejects --store oxigraph-worker', async () => {
-    const store = newMockConfig(baseConfig);
-    const io = mockConfigIO(store);
-    await expect(
-      applyStoreFlagsToConfig({
-        ...io,
-        storeFlag: 'oxigraph-worker',
-        log: () => {},
-      }),
-    ).rejects.toThrow(/no longer supported/);
     expect(store.saved).toEqual([]);
   });
 

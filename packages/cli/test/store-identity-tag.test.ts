@@ -43,7 +43,7 @@ describe('checkOrSetStoreIdentity', () => {
   it('skips for local oxigraph backend', async () => {
     const { fn, calls } = mockFetch(() => new Response(null, { status: 200 }));
     const result = await checkOrSetStoreIdentity({
-      storeConfig: { backend: 'oxigraph' },
+      storeConfig: { backend: 'oxigraph-worker' },
       nodeName: 'mynode',
       fetch: fn,
     });
