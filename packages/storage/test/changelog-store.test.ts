@@ -610,6 +610,24 @@ describe('ChangelogStore — era foundation & reader capability', () => {
     await base.close();
   });
 
+  it('preserves cancellation on the query-free seeded head path', async () => {
+    const base = new OxigraphStore();
+    const spy = new SpyStore(base);
+    const log = new ChangelogStore(spy);
+
+    await log.changelogHead();
+    const durableHeadQueries = () => spy.queryCalls.filter((query) => query.includes('MAX(?seq)')).length;
+    expect(durableHeadQueries()).toBe(1);
+
+    const controller = new AbortController();
+    const reason = new Error('changelog head cancelled');
+    controller.abort(reason);
+
+    await expect(log.changelogHead({ signal: controller.signal })).rejects.toBe(reason);
+    expect(durableHeadQueries()).toBe(1); // cancellation must not restore the per-request aggregate
+    await base.close();
+  });
+
   it('reads the existing era rather than re-minting (a fresh store over the same log)', async () => {
     const base = new OxigraphStore();
     const minted = (await new ChangelogStore(base).changelogHead()).era;

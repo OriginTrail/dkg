@@ -397,7 +397,9 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
    * (`seq` < the requester's cursor). Establishes the era on first call.
    */
   async changelogHead(options?: QueryOptions): Promise<ChangelogHead> {
+    throwIfAborted(options?.signal);
     await this.ensureSeeded();
+    throwIfAborted(options?.signal);
     // All changelog writes pass through the serialized single-writer path and
     // advance `seq` only after their marker transaction commits. Once seeded,
     // this is therefore the authoritative live head; repeating MAX(?seq) for
@@ -784,6 +786,11 @@ function queryOptionsFromUpdateOptions(options?: UpdateOptions): QueryOptions | 
   if (!options) return undefined;
   const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
   return readOptions;
+}
+
+/** Preserve the caller's exact abort reason while keeping query-free reads cancellable. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason;
 }
 
 /**
