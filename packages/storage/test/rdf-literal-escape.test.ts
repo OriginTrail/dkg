@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
+import { formatAdapterRdfLiteralBinding } from '../src/adapters/rdf-literal-binding.js';
 import { formatSparqlJsonBindings } from '../src/adapters/sparql-json-results.js';
 
 const lexical = 'line1\nline2\tcontrol:\u0001 del:\u007F quote:" slash:\\ café Δ';
@@ -26,6 +27,19 @@ function selectResponse(): Response {
 }
 
 describe('RDF binding literal escaping', () => {
+  it('normalizes adapter literal metadata with explicit language precedence', () => {
+    expect(formatAdapterRdfLiteralBinding({ value: lexical })).toBe(expectedBindings[0].plain);
+    expect(formatAdapterRdfLiteralBinding({
+      value: lexical,
+      datatype: 'urn:test:datatype',
+    })).toBe(expectedBindings[0].typed);
+    expect(formatAdapterRdfLiteralBinding({
+      value: lexical,
+      language: 'en',
+      datatype: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString',
+    })).toBe(expectedBindings[0].language);
+  });
+
   it('converts complete adapter SPARQL JSON SELECT bindings in one shared boundary', () => {
     expect(formatSparqlJsonBindings({
       head: { vars: ['uri', 'blank', 'missing', 'plain', 'language', 'typed', 'xsdString'] },
