@@ -217,6 +217,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     ]);
 
     const cleanupCalls: any[][] = [];
+    const loadCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
     agent.chain = {};
@@ -228,12 +229,15 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       clearSwmShareComplete: async () => {},
       clearPublishedSwmRoots: async (...args: any[]) => { cleanupCalls.push(args); },
     };
-    agent._loadSelectedSWMQuads = async () => [{
-      subject: ROOT,
-      predicate: 'http://schema.org/name',
-      object: '"updated"',
-      graph: '',
-    }];
+    agent._loadSelectedSWMQuads = async (...args: any[]) => {
+      loadCalls.push(args);
+      return [{
+        subject: ROOT,
+        predicate: 'http://schema.org/name',
+        object: '"updated"',
+        graph: '',
+      }];
+    };
     agent._buildPrecomputedUpdateAttestationForSeal = async () => ({
       expectedNewMerkleRoot: MERKLE,
       authorAddress: AGENT_B,
@@ -252,6 +256,12 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
 
     expect(result.status).toBe('confirmed');
+    expect(loadCalls).toHaveLength(1);
+    expect(loadCalls[0].slice(0, 3)).toEqual([CG, { rootEntities: [ROOT] }, undefined]);
+    expect(loadCalls[0][3]).toEqual({
+      kind: 'named-lifecycle',
+      identity: { agentAddress: AGENT_B, kaNumber: 1n },
+    });
     expect(cleanupCalls).toHaveLength(1);
     expect(cleanupCalls[0].slice(0, 3)).toEqual([CG, [ROOT], undefined]);
     expect(cleanupCalls[0][4]).toEqual({

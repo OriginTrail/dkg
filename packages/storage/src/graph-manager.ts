@@ -242,12 +242,12 @@ export async function loadSelectedSharedMemoryQuads(
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(
+  return loadSharedMemoryQuadsForScope(
     store,
     bucketGraph,
     selection,
-    options,
     { kind: 'complete-family' },
+    options,
   );
 }
 
@@ -255,9 +255,9 @@ export async function loadSelectedSharedMemoryQuads(
  * Load the SWM quad slice pruned to ONE author's per-KA under-graphs (#1549).
  *
  * UNSAFE as a generic merkle accelerator. It is module-exported for direct
- * tests and internal imports, but is not re-exported from the package entrypoint;
- * only `loadNamedKnowledgeAssetSharedMemoryQuads` is public there. Generic
- * merkle callers must use the widening wrapper below. The
+ * tests and internal imports, but is not re-exported from the package entrypoint.
+ * Exact lifecycle callers use the scoped public loader below. Generic merkle
+ * callers must use the widening wrapper below. The
  * pruned graph set is a strict subset of the set `loadSelectedSharedMemoryQuads`
  * reads, and INV-1 — "a root's quads live only under its own KA number" — is
  * REFUTED under root recurrence, so this read can legitimately miss quads the
@@ -280,26 +280,19 @@ export async function loadKaBoundedSharedMemoryQuads(
 }
 
 /**
- * Load one exact named KA lifecycle from shared memory.
+ * Load shared memory through one explicit semantic scope.
  *
- * Unlike the deliberately private range primitive above, this public API cannot
- * express an arbitrary window: its identity is exactly one author + KA number.
- * It is intended only for flows that have already selected that named lifecycle
- * (publish/update/cleanup preflight). Those flows intentionally exclude foreign
- * co-resident per-KA graphs even when they contain the same root subject; generic
- * merkle or StorageACK reads must continue to use the complete/fallback APIs.
+ * Higher layers do not translate scope into concrete graph policy: complete
+ * family and exact named-lifecycle dispatch both stay owned by storage.
  */
-export async function loadNamedKnowledgeAssetSharedMemoryQuads(
+export async function loadSharedMemoryQuadsForScope(
   store: TripleStore,
   bucketGraph: string,
   selection: SharedMemoryReadSelection,
-  identity: NamedKnowledgeAssetGraphIdentity,
+  scope: SharedMemoryGraphScope,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
-    kind: 'named-lifecycle',
-    identity,
-  });
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, scope);
 }
 
 /** Resolve the concrete graph set for an explicit semantic SWM scope. */
@@ -330,6 +323,32 @@ export async function resolveSharedMemoryScopeGraphs(
   return matchingGraphs.length > 0
     ? matchingGraphs as NonEmptyGraphList
     : [exactGraph];
+}
+
+/** Resolve the single graph to WRITE for a semantic scope. */
+export async function resolveSharedMemoryScopeWriteGraph(
+  store: TripleStore,
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+  options?: QueryOptions,
+): Promise<string> {
+  assertSafeIri(bucketGraph);
+  if (scope.kind === 'complete-family') return bucketGraph;
+  const { agentAddress, kaNumber } = scope.identity;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
+    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
+  }
+  const exactGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
+  assertSafeIri(exactGraph);
+  const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
+    .filter((graph) => {
+      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
+      return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
+        && child.kaNumber === kaNumber;
+    });
+  return matchingGraphs.find((graph) => graph === exactGraph)
+    ?? matchingGraphs.slice().sort()[0]
+    ?? exactGraph;
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */

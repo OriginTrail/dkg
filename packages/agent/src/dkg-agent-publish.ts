@@ -101,7 +101,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadNamedKnowledgeAssetSharedMemoryQuads, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, resolveSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3330,15 +3330,7 @@ export class PublishMethods extends DKGAgentBase {
           : `_loadSelectedSWMQuads: no rootEntities supplied for context graph ${contextGraphId}`
       ),
     } as const;
-    return scope.kind === 'named-lifecycle'
-      ? loadNamedKnowledgeAssetSharedMemoryQuads(
-          this.store,
-          swmGraph,
-          selection,
-          scope.identity,
-          options,
-        )
-      : loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, options);
+    return loadSharedMemoryQuadsForScope(this.store, swmGraph, selection, scope, options);
   }
 
   /**
@@ -4806,7 +4798,7 @@ export class PublishMethods extends DKGAgentBase {
     scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<'all' | { rootEntities: string[] }> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-    const [catalogTargetGraph] = await resolveSharedMemoryScopeGraphs(
+    const catalogTargetGraph = await resolveSharedMemoryScopeWriteGraph(
       this.store,
       swmGraph,
       scope,

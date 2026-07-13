@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import * as storageIndex from '../src/index.js';
 import {
   createTripleStore,
-  loadNamedKnowledgeAssetSharedMemoryQuads,
+  loadSharedMemoryQuadsForScope,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
+  resolveSharedMemoryScopeWriteGraph,
   resolveSharedMemoryReadGraphs,
   type Quad,
   type SwmKaGraphBound,
@@ -248,13 +249,18 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
         { subject: root, predicate: 'urn:p', object: '"same-author-sibling"', graph: sameAuthorSibling },
       ]);
 
-      const quads = await loadNamedKnowledgeAssetSharedMemoryQuads(
+      const scope = {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: AUTHOR_A, kaNumber: 7n },
+      } as const;
+      const quads = await loadSharedMemoryQuadsForScope(
         store,
         swm,
         { rootEntities: [root] },
-        { agentAddress: AUTHOR_A, kaNumber: 7n },
+        scope,
       );
       expect(quads.map((quad) => quad.object)).toEqual(['"exact"']);
+      expect(await resolveSharedMemoryScopeWriteGraph(store, swm, scope)).toBe(exact);
     } finally {
       await store.close();
     }
@@ -323,9 +329,10 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     expect(storageIndex).not.toHaveProperty('resolveKaBoundedSharedMemoryReadGraphs');
     // The safe, fallback-owning primitive IS public.
     expect(typeof storageIndex.loadSharedMemorySliceWithKaBoundFallback).toBe('function');
-    // Named publish flows get a purpose-built exact identity API, not a generic
-    // range-pruning primitive.
-    expect(typeof storageIndex.loadNamedKnowledgeAssetSharedMemoryQuads).toBe('function');
+    // Named publish flows get a scoped API, not a second range-shaped loader.
+    expect(typeof storageIndex.loadSharedMemoryQuadsForScope).toBe('function');
+    expect(typeof storageIndex.resolveSharedMemoryScopeWriteGraph).toBe('function');
+    expect(storageIndex).not.toHaveProperty('loadNamedKnowledgeAssetSharedMemoryQuads');
   });
 });
 

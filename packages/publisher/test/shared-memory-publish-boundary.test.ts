@@ -288,6 +288,33 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(1);
   });
 
+  it('rejects a family-wide remaining clear for an exact named lifecycle', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    await store.insert([
+      q('urn:test:root:one', 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q('urn:test:root:two', 'http://schema.org/name', '"sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(
+      CONTEXT_GRAPH,
+      { rootEntities: ['urn:test:root:one'] },
+      {
+        clearSharedMemoryAfter: true,
+        sharedMemoryScope: {
+          kind: 'named-lifecycle',
+          identity: {
+            agentAddress: '0x1111111111111111111111111111111111111111',
+            kaNumber: 1n,
+          },
+        },
+      },
+    )).rejects.toThrow(/cannot be combined with a named-lifecycle/);
+
+    expect(publishSpy.calls).toHaveLength(0);
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH })).toBe(1);
+    expect(await store.deleteByPattern({ graph: SAME_AUTHOR_SIBLING_SWM_GRAPH })).toBe(1);
+  });
+
   it('loads selected data root plus generated private-CG catalog root and threads trusted floor', async () => {
     const { publisher, store, publishSpy } = await makePublisher(privatePolicyChain());
     const cgDid = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
