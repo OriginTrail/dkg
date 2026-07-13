@@ -58,6 +58,29 @@ function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   db?.close?.();
 }
 
+function managedOxigraphResult(dataDir: string) {
+  return {
+    handle: {
+      queryEndpoint: 'http://127.0.0.1:12001/query',
+      updateEndpoint: 'http://127.0.0.1:12001/update',
+      killSync: vi.fn(),
+    },
+    storeConfig: {
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: 'http://127.0.0.1:12001/query',
+        updateEndpoint: 'http://127.0.0.1:12001/update',
+        managedByDkg: true,
+      },
+    },
+    largeLiteralStorage: { enabled: true, directory: join(dataDir, 'literal-blobs') },
+    sharedMemoryPublicSnapshotStorage: {
+      enabled: true,
+      directory: join(dataDir, 'swm-public-snapshots'),
+    },
+  };
+}
+
 describe('daemon startup network validation', () => {
   let tempHome: string | undefined;
   let originalDkgHome: string | undefined;
@@ -139,19 +162,7 @@ describe('daemon startup network validation', () => {
     const stdoutSpy = await useTempHome('dkg-legacy-store-ack-');
     process.env.DKG_ACCEPT_STORE_RESET = '1';
     await writeFile(join(tempHome!, 'store.nq'), '<s> <p> <o> .');
-    mocks.startManagedOxigraph.mockResolvedValue({
-      handle: { queryEndpoint: 'http://127.0.0.1:12001/query', updateEndpoint: 'http://127.0.0.1:12001/update', killSync: vi.fn() },
-      storeConfig: {
-        backend: 'sparql-http',
-        options: {
-          queryEndpoint: 'http://127.0.0.1:12001/query',
-          updateEndpoint: 'http://127.0.0.1:12001/update',
-          managedByDkg: true,
-        },
-      },
-      largeLiteralStorage: { enabled: true, directory: join(tempHome!, 'literal-blobs') },
-      sharedMemoryPublicSnapshotStorage: { enabled: true, directory: join(tempHome!, 'swm-public-snapshots') },
-    });
+    mocks.startManagedOxigraph.mockResolvedValue(managedOxigraphResult(tempHome!));
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
 
     await expect(runDaemonInner(true, {
@@ -333,6 +344,7 @@ describe('daemon startup network validation', () => {
       defaultNodeRole: 'edge',
     });
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
+    mocks.startManagedOxigraph.mockResolvedValue(managedOxigraphResult(tempHome));
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
@@ -387,6 +399,7 @@ describe('daemon startup network validation', () => {
       defaultNodeRole: 'edge',
     });
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
+    mocks.startManagedOxigraph.mockResolvedValue(managedOxigraphResult(tempHome));
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
