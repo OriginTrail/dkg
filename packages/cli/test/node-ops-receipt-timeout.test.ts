@@ -108,6 +108,7 @@ describe('node-ops set-ask receipt deadline wiring', () => {
       urls: ['https://rpc.example'],
       providers: [{ id: 'write-provider' }],
       readProvider: { id: 'read-provider' },
+      receiptTimeoutMs: 725_000,
     });
     mocks.sendCliRawTransactionWithFailover.mockResolvedValue({ blockNumber: 42 });
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -125,12 +126,20 @@ describe('node-ops set-ask receipt deadline wiring', () => {
     await program.parseAsync(['set-ask', '2'], { from: 'user' });
 
     expect(mocks.sendCliRawTransactionWithFailover).toHaveBeenCalledTimes(1);
+    expect(mocks.createCliEvmProviders).toHaveBeenCalledWith(
+      'https://rpc.example',
+      undefined,
+      725_000,
+    );
     expect(mocks.sendCliRawTransactionWithFailover).toHaveBeenCalledWith(
-      [{ id: 'write-provider' }],
+      {
+        urls: ['https://rpc.example'],
+        providers: [{ id: 'write-provider' }],
+        readProvider: { id: 'read-provider' },
+        receiptTimeoutMs: 725_000,
+      },
       '0xsigned',
       '0xhash',
-      ['https://rpc.example'],
-      { receiptTimeoutMs: 725_000 },
     );
   });
 });

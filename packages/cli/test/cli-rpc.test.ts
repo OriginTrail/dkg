@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect, vi } from 'vitest';
 import {
+  createCliEvmProviders,
   isCliRetryableRpcError,
   isCliKnownTransactionError,
   sendCliRawTransactionWithFailover,
 } from '../src/cli-rpc.js';
 import { isRetryableRpcError, isKnownTransactionError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
+
+function writeContext(
+  providers: any[],
+  urls: string[] = providers.map((_, index) => `https://rpc-${index + 1}.example`),
+  receiptTimeoutMs = 600_000,
+) {
+  return { providers, urls, receiptTimeoutMs };
+}
 
 describe('cli-rpc classifier consolidation (W4)', () => {
   // Each case is a fresh object so the in-place enrichEvmError mutation that
@@ -57,7 +66,11 @@ describe('cli-rpc classifier consolidation (W4)', () => {
       },
     } as any;
     await expect(
-      sendCliRawTransactionWithFailover([failing, failing], '0xsigned', '0xhash', ['https://a.example', 'https://b.example']),
+      sendCliRawTransactionWithFailover(
+        writeContext([failing, failing], ['https://a.example', 'https://b.example']),
+        '0xsigned',
+        '0xhash',
+      ),
     ).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
   });
 
@@ -73,7 +86,11 @@ describe('cli-rpc classifier consolidation (W4)', () => {
       },
     } as any;
     await expect(
-      sendCliRawTransactionWithFailover([reverting, reverting], '0xsigned', '0xhash', ['https://a.example', 'https://b.example']),
+      sendCliRawTransactionWithFailover(
+        writeContext([reverting, reverting], ['https://a.example', 'https://b.example']),
+        '0xsigned',
+        '0xhash',
+      ),
     ).rejects.toMatchObject({ code: 'CALL_EXCEPTION' });
     // Only the first provider was tried — a revert is not retried on the backup.
     expect(calls).toBe(1);
@@ -87,11 +104,9 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     } as any;
 
     await expect(sendCliRawTransactionWithFailover(
-      [provider],
+      writeContext([provider], ['https://rpc.example'], 999),
       '0xsigned',
       '0xhash',
-      ['https://rpc.example'],
-      { receiptTimeoutMs: 999 },
     )).rejects.toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 
     expect(broadcastTransaction).not.toHaveBeenCalled();
@@ -112,10 +127,9 @@ describe('cli-rpc classifier consolidation (W4)', () => {
       },
     }) as any;
     const err = await sendCliRawTransactionWithFailover(
-      [provider(), provider()],
+      writeContext([provider(), provider()], ['https://a.example', 'https://b.example']),
       '0xsigned',
       '0xdeadbeef',
-      ['https://a.example', 'https://b.example'],
     ).catch((e) => e);
     expect(err.code).toBe('RPC_RECEIPT_LOOKUP_FAILED');
     expect(err.txHash).toBe('0xdeadbeef');
@@ -142,11 +156,13 @@ describe('cli-rpc classifier consolidation (W4)', () => {
         },
       } as any;
       const result = sendCliRawTransactionWithFailover(
-        [first, second],
+        writeContext(
+          [first, second],
+          ['https://first.example', 'https://second.example'],
+          1_000,
+        ),
         '0xsigned',
         '0xdeadline',
-        ['https://first.example', 'https://second.example'],
-        { receiptTimeoutMs: 1_000 },
       ).catch((err) => err);
 
       await vi.advanceTimersByTimeAsync(1_001);
@@ -158,15 +174,16 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     }
   });
 
-  it('uses the default overall receipt deadline when config omits it', async () => {
+  it('uses the factory-resolved default overall receipt deadline', async () => {
     vi.useFakeTimers();
     try {
+      expect(createCliEvmProviders('https://rpc.example').receiptTimeoutMs).toBe(600_000);
       const provider = {
         broadcastTransaction: async () => ({ hash: '0xdefault-deadline' }),
         getTransactionReceipt: async () => null,
       } as any;
       const result = sendCliRawTransactionWithFailover(
-        [provider],
+        writeContext([provider]),
         '0xsigned',
         '0xdefault-deadline',
       ).then(
@@ -212,11 +229,9 @@ describe('cli-rpc classifier consolidation (W4)', () => {
       } as any;
 
       const outcome = sendCliRawTransactionWithFailover(
-        [provider],
+        writeContext([provider], ['https://rpc.example'], 1_000),
         '0xsigned',
         '0xreverted',
-        undefined,
-        { receiptTimeoutMs: 1_000 },
       ).then(
         (value) => ({ status: 'fulfilled' as const, value }),
         (reason) => ({ status: 'rejected' as const, reason }),
