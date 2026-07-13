@@ -396,6 +396,42 @@ interface PublisherSigner {
   ): Promise<string>;
 }
 
+type PublisherPlanningState =
+  | {
+    kind: 'local';
+    contextGraphId?: bigint;
+    chainV10Ready: boolean;
+    publisherAddress: string;
+  }
+  | {
+    kind: 'legacy-on-chain';
+    contextGraphId: bigint;
+    chainV10Ready: true;
+    selection: PublisherAddressResolution;
+    initialSigner: PublisherSigner;
+  }
+  | {
+    kind: 'adapter-planned';
+    contextGraphId: bigint;
+    chainV10Ready: true;
+    selection: PublisherAddressResolution;
+  };
+
+type FinalizedPublisherPlan =
+  | {
+    kind: 'local';
+    publisherAddress: string;
+    publishEpochs: number;
+    tokenAmount: 0n;
+  }
+  | {
+    kind: 'on-chain';
+    signer: PublisherSigner;
+    publisherAddress: string;
+    publishEpochs: number;
+    tokenAmount: bigint;
+  };
+
 function isInternalOrigin(options: PublishOptions): boolean {
   return (options as InternalPublishOptions)[INTERNAL_ORIGIN_TOKEN] === true;
 }
@@ -1055,6 +1091,52 @@ export class DKGPublisher implements Publisher {
     };
   }
 
+  /**
+   * Resolve the one immutable planning mode used by the rest of publish().
+   * Adapter-owned planning deliberately skips the cursor-moving legacy address
+   * probe; legacy adapters still resolve a signer before payload preparation.
+   */
+  private async preparePublisherPlanning(
+    contextGraphId: bigint | undefined,
+  ): Promise<PublisherPlanningState> {
+    const chainV10Ready = await this.refreshChainV10Readiness();
+    if (contextGraphId === undefined || !chainV10Ready) {
+      const selection = await this.resolvePublisherAddressSelection(undefined, {
+        includeReservingPublisherProbe: false,
+        includeGenericSignMessageProbe: false,
+      });
+      return {
+        kind: 'local',
+        ...(contextGraphId === undefined ? {} : { contextGraphId }),
+        chainV10Ready,
+        publisherAddress: selection.address ?? this.localTentativePublisherAddress(),
+      };
+    }
+
+    const adapterOwnedPlanning = typeof this.chain.resolvePublisherPublishPlan === 'function';
+    const selection = await this.resolvePublisherAddressSelection(contextGraphId, {
+      includeReservingPublisherProbe: !adapterOwnedPlanning,
+    });
+
+    if (adapterOwnedPlanning) {
+      return {
+        kind: 'adapter-planned',
+        contextGraphId,
+        chainV10Ready: true,
+        selection,
+      };
+    }
+    const initialSigner = await this.getPublisherSigner(selection.address);
+    if (!initialSigner) throw new PublisherWalletRequiredError('publish');
+    return {
+      kind: 'legacy-on-chain',
+      contextGraphId,
+      chainV10Ready: true,
+      selection,
+      initialSigner,
+    };
+  }
+
   /** Finalize signer, lifetime, and price before any ACK-bound identity is derived. */
   private async resolveOnChainPublishPlan(input: {
     contextGraphId: bigint;
@@ -1123,6 +1205,36 @@ export class DKGPublisher implements Publisher {
       publishEpochs: resolvedPlan.publishEpochs,
       tokenAmount: resolvedPlan.tokenAmount,
     };
+  }
+
+  /** Finalize the planning state once the exact public/catalog byte size exists. */
+  private async finalizePublisherPlanning(
+    state: PublisherPlanningState,
+    input: {
+      explicitPublishEpochs: number | undefined;
+      effectiveByteSize: bigint;
+      ctx: OperationContext;
+    },
+  ): Promise<FinalizedPublisherPlan> {
+    if (state.kind === 'local') {
+      return {
+        kind: 'local',
+        publisherAddress: state.publisherAddress,
+        publishEpochs: input.explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS,
+        tokenAmount: 0n,
+      };
+    }
+
+    const plan = await this.resolveOnChainPublishPlan({
+      contextGraphId: state.contextGraphId,
+      initialSigner: state.kind === 'legacy-on-chain' ? state.initialSigner : undefined,
+      pinnedPublisherAddress: state.selection.planningPin,
+      pinnedPublisherLabel: state.selection.planningPinLabel,
+      explicitPublishEpochs: input.explicitPublishEpochs,
+      effectiveByteSize: input.effectiveByteSize,
+      ctx: input.ctx,
+    });
+    return { kind: 'on-chain', ...plan };
   }
 
   private isChainV10Ready(): boolean {
@@ -2211,32 +2323,9 @@ export class DKGPublisher implements Publisher {
     // can be resolved at all, the on-chain branch throws
     // `PublisherWalletRequiredError` instead of silently degrading.
     const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
-    const willAttemptOnChainPublish = publisherContextGraphId !== undefined;
-    const chainV10Ready = await this.refreshChainV10Readiness();
-    const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
-    const adapterOwnedPublishPlanningAvailable = canResolveOnChainPublisher
-      && typeof this.chain.resolvePublisherPublishPlan === 'function';
-    const resolvedPublisherSelection = canResolveOnChainPublisher
-      ? await this.resolvePublisherAddressSelection(publisherContextGraphId, {
-        // The adapter-owned plan below is the one cursor-moving selection for
-        // this publish. A prior getAuthorizedPublisherAddress probe would move
-        // the cursor once more and make two-wallet pools always submit from the
-        // second wallet. Legacy adapter surfaces still establish that a usable
-        // signer exists before payload preparation.
-        includeReservingPublisherProbe: !adapterOwnedPublishPlanningAvailable,
-      })
-      : await this.resolvePublisherAddressSelection(undefined, {
-        includeReservingPublisherProbe: false,
-        includeGenericSignMessageProbe: false,
-      });
-    const resolvedPublisherAddress = resolvedPublisherSelection.address;
-    let publisherSigner = canResolveOnChainPublisher
-      ? await this.getPublisherSigner(resolvedPublisherAddress)
-      : undefined;
-    let publisherAddress = resolvedPublisherAddress ?? this.localTentativePublisherAddress();
-    const canAttemptOnChainPublish = willAttemptOnChainPublish &&
-      chainV10Ready &&
-      (adapterOwnedPublishPlanningAvailable || publisherSigner !== undefined);
+    const publisherPlanning = await this.preparePublisherPlanning(publisherContextGraphId);
+    const chainV10Ready = publisherPlanning.chainV10Ready;
+    const canAttemptOnChainPublish = publisherPlanning.kind !== 'local';
 
     // RFC-001 §9.x — sign-at-creation. The publisher is a pure
     // transport layer for the AuthorAttestation: the seal is built at
@@ -2261,15 +2350,6 @@ export class DKGPublisher implements Publisher {
     }
     if (effectiveAccessPolicy !== 'allowList' && normalizedAllowedPeers.length > 0) {
       throw new Error('Publish rejected: "allowedPeers" is only valid when accessPolicy is "allowList"');
-    }
-
-    if (
-      willAttemptOnChainPublish
-      && chainV10Ready
-      && !adapterOwnedPublishPlanningAvailable
-      && !publisherSigner
-    ) {
-      throw new PublisherWalletRequiredError('publish');
     }
 
     onPhase?.('prepare', 'start');
@@ -2581,23 +2661,17 @@ export class DKGPublisher implements Publisher {
       ? catalogByteSize
       : publicByteSize;
     const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
-    const publishPlan = canAttemptOnChainPublish && publisherContextGraphId !== undefined
-      ? await this.resolveOnChainPublishPlan({
-        contextGraphId: publisherContextGraphId,
-        initialSigner: publisherSigner,
-        pinnedPublisherAddress: resolvedPublisherSelection.planningPin,
-        pinnedPublisherLabel: resolvedPublisherSelection.planningPinLabel,
-        explicitPublishEpochs,
-        effectiveByteSize,
-        ctx,
-      })
+    const finalizedPublisherPlan = await this.finalizePublisherPlanning(publisherPlanning, {
+      explicitPublishEpochs,
+      effectiveByteSize,
+      ctx,
+    });
+    const publisherSigner = finalizedPublisherPlan.kind === 'on-chain'
+      ? finalizedPublisherPlan.signer
       : undefined;
-    if (publishPlan) {
-      publisherSigner = publishPlan.signer;
-      publisherAddress = publishPlan.publisherAddress;
-    }
-    const publishEpochs = publishPlan?.publishEpochs ?? explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
-    const precomputedTokenAmount = publishPlan?.tokenAmount ?? 0n;
+    const publisherAddress = finalizedPublisherPlan.publisherAddress;
+    const publishEpochs = finalizedPublisherPlan.publishEpochs;
+    const precomputedTokenAmount = finalizedPublisherPlan.tokenAmount;
 
     let stagingQuads: Uint8Array | undefined;
     if (useEncryptedInline) {
