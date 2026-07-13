@@ -2702,6 +2702,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       return 'retryable';
     }
+
+    const membershipProbe = this.chain.isShardingTableMember?.bind(this.chain);
+    if (!membershipProbe) {
+      this.log.warn(
+        ctx,
+        'V10 Random Sampling requires isShardingTableMember(); disabling for this adapter',
+      );
+      return 'disabled';
+    }
+
+    try {
+      if (!(await membershipProbe(rsIdentityId))) {
+        if (logDisabled) {
+          this.log.info(
+            ctx,
+            `V10 Random Sampling prover waiting: identityId=${rsIdentityId} ` +
+              'is not in the active sharding table; will retry after staking/admission',
+          );
+        }
+        return 'retryable';
+      }
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `V10 Random Sampling eligibility lookup failed; prover bind will retry: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return 'retryable';
+    }
     if (!this.started) return 'disabled';
 
     try {

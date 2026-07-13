@@ -14,6 +14,46 @@ afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
 
+describe('Random Sampling lifecycle gating', () => {
+
+    it('defers Random Sampling until a profiled core enters the sharding table, then starts without restart', async () => {
+      const primary = ethers.Wallet.createRandom();
+      const chain = new MockChainAdapter('mock:31337', primary.address);
+      chain.seedIdentity(primary.address, 52n);
+      let sharded = false;
+      const membership = vi.spyOn(chain, 'isShardingTableMember')
+        .mockImplementation(async (identityId) => identityId === 52n && sharded);
+      const agent = await DKGAgent.create({
+        name: 'RsWaitsForStake',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainAdapter: chain,
+        nodeRole: 'core',
+        randomSamplingUseWorkerThread: false,
+        randomSamplingTickIntervalMs: 60_000,
+      });
+
+      try {
+        await agent.start();
+        expect(membership).toHaveBeenCalledWith(52n);
+        expect(agent.getRandomSamplingStatus().enabled).toBe(false);
+
+        sharded = true;
+        const result = await agent.tryStartRandomSamplingProver(
+          { operationId: 'rs-stake-recovery', operationName: 'system' },
+          false,
+        );
+        expect(result).toBe('started');
+        expect(agent.getRandomSamplingStatus()).toMatchObject({
+          enabled: true,
+          identityId: '52',
+        });
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+});
+
 describe('DKGAgent ACK signer gating', () => {
 
     it('allows core chainConfig without a profile admin key for existing no-admin identities', async () => {

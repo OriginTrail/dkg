@@ -9,7 +9,7 @@ doc_type: concept
 
 **Random Sampling** is the DKG's **Proof-of-Knowledge (PoK)** system: the mechanism that continuously verifies Core Nodes are actually storing the knowledge they claim to host, and that drives how network rewards are distributed.
 
-Random Sampling is Core-only. A node must run with `nodeRole: "core"` and have a non-zero on-chain node profile (`identityId`) before the prover can bind. See [Core Node Profile Registration](../use-dkg/run-node.md#core-node-profile-registration) for setup and recovery.
+Random Sampling is Core-only. A node must run with `nodeRole: "core"`, have a non-zero on-chain node profile (`identityId`), **and be admitted to the active sharding table** before the prover can bind. A profile by itself is not enough: staking or admission may still be incomplete. While waiting for admission, the node rechecks eligibility in the background, so the prover can start without a daemon restart. See [Core Node Profile Registration](../use-dkg/run-node.md#core-node-profile-registration) for setup and recovery.
 
 ## Why it exists
 
