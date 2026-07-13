@@ -477,17 +477,19 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Verify provisioned Blazegraph image platforms"
+      - name: "Verify provisioned Blazegraph image contract"
         run: |
           set -euo pipefail
-          image="$(node -e '
+          runtime="$(node -e '
             const fs = require("node:fs");
             const metadata = JSON.parse(fs.readFileSync("blazegraph-image.json", "utf8"));
             if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
-            process.stdout.write(metadata.image.trim());
+            if (!Number.isInteger(metadata.containerPort) || metadata.containerPort < 1 || metadata.containerPort > 65535) process.exit(1);
+            process.stdout.write(`${metadata.image.trim()}\t${metadata.containerPort}\n`);
           ')"
-          if [[ -z "$image" ]]; then
-            echo "::error::Could not read image from blazegraph-image.json"
+          IFS=$'\t' read -r image container_port <<< "$runtime"
+          if [[ -z "$image" || -z "$container_port" ]]; then
+            echo "::error::Could not read image contract from blazegraph-image.json"
             exit 1
           fi
           manifest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}')"
@@ -496,6 +498,25 @@ jobs:
             and
             ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | index("arm64") != null)
           '
+
+          container="dkg-ci-blazegraph-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$container" -p "127.0.0.1::${container_port}" "$image" >/dev/null
+          binding="$(docker port "$container" "${container_port}/tcp")"
+          host_port="${binding##*:}"
+          ready=0
+          for _ in $(seq 1 120); do
+            if curl -fsS --max-time 2 "http://127.0.0.1:${host_port}/bigdata/status" >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" != "1" ]]; then
+            docker logs "$container" || true
+            echo "::error::Pinned Blazegraph image did not serve /bigdata/status on declared container port ${container_port}"
+            exit 1
+          fi
       - name: "CLI tests"
         run: pnpm --filter @origintrail-official/dkg test
 

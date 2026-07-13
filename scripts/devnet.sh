@@ -361,12 +361,13 @@ deploy_contracts() {
 
 BLAZEGRAPH_AVAILABLE=false
 
-read_blazegraph_image() {
+read_blazegraph_metadata() {
   node -e '
     const fs = require("node:fs");
     const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
     if (typeof metadata.image !== "string" || metadata.image.trim() === "") process.exit(1);
-    process.stdout.write(metadata.image.trim());
+    if (!Number.isInteger(metadata.containerPort) || metadata.containerPort < 1 || metadata.containerPort > 65535) process.exit(1);
+    process.stdout.write(`${metadata.image.trim()}\t${metadata.containerPort}\n`);
   ' "$REPO_ROOT/blazegraph-image.json"
 }
 
@@ -392,15 +393,16 @@ start_blazegraph() {
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
   fi
 
-  local blazegraph_image
-  if ! blazegraph_image="$(read_blazegraph_image)"; then
+  local blazegraph_metadata blazegraph_image blazegraph_container_port
+  if ! blazegraph_metadata="$(read_blazegraph_metadata)"; then
     log "ERROR: Could not read the pinned Blazegraph image metadata"
     return 1
   fi
+  IFS=$'\t' read -r blazegraph_image blazegraph_container_port <<< "$blazegraph_metadata"
 
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
-    -p "127.0.0.1:$BLAZEGRAPH_PORT:8080" \
+    -p "127.0.0.1:$BLAZEGRAPH_PORT:$blazegraph_container_port" \
     "$blazegraph_image" > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
     return 0
@@ -2119,6 +2121,10 @@ cmd_stop_node() {
   stop_devnet_node_processes "$node_num"
   log "Node $node_num stopped."
 }
+
+if [ "${DEVNET_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "${1:-}" in
   start)            cmd_start ;;

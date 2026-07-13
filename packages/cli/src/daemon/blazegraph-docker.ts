@@ -59,22 +59,42 @@ export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="
  * Keep the OCI-index digest immutable: CI reads the same metadata file and
  * requires both linux/amd64 and linux/arm64 manifests.
  */
-export const BLAZEGRAPH_IMAGE = loadBlazegraphImage();
+interface BlazegraphImageMetadata {
+  image: string;
+  containerPort: number;
+}
 
-function loadBlazegraphImage(): string {
+function loadBlazegraphImageMetadata(): BlazegraphImageMetadata {
   for (const path of runtimeAssetPaths('blazegraph-image.json')) {
     try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { image?: unknown };
-      if (typeof parsed.image === 'string' && parsed.image.trim()) {
-        return parsed.image.trim();
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
+        image?: unknown;
+        containerPort?: unknown;
+      };
+      if (
+        typeof parsed.image === 'string' &&
+        parsed.image.trim() &&
+        Number.isInteger(parsed.containerPort) &&
+        Number(parsed.containerPort) > 0 &&
+        Number(parsed.containerPort) <= 65_535
+      ) {
+        return {
+          image: parsed.image.trim(),
+          containerPort: Number(parsed.containerPort),
+        };
       }
     } catch { /* try the packaged runtime asset */ }
   }
-  throw new Error('Could not load the pinned Blazegraph image from blazegraph-image.json');
+  throw new Error('Could not load the pinned Blazegraph image metadata from blazegraph-image.json');
 }
 
-/** Default container port that the Blazegraph image exposes. */
-const BLAZEGRAPH_CONTAINER_PORT = 8080;
+const BLAZEGRAPH_IMAGE_METADATA = loadBlazegraphImageMetadata();
+
+/** Immutable multi-architecture image reference selected for provisioning. */
+export const BLAZEGRAPH_IMAGE = BLAZEGRAPH_IMAGE_METADATA.image;
+
+/** Container HTTP port declared alongside the selected image. */
+export const BLAZEGRAPH_CONTAINER_PORT = BLAZEGRAPH_IMAGE_METADATA.containerPort;
 
 /** Default starting host port, matches devnet.sh and Blazegraph defaults. */
 const DEFAULT_HOST_PORT_START = 9999;

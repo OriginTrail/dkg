@@ -64,6 +64,9 @@ export function cliRuntimeAssetManifest({ rootDir = DEFAULT_ROOT_DIR } = {}) {
   try {
     const metadata = JSON.parse(fs.readFileSync(sourceBlazegraphImageJson, 'utf8'));
     if (typeof metadata.image !== 'string' || !metadata.image.trim()) throw new Error('missing image');
+    if (!Number.isInteger(metadata.containerPort) || metadata.containerPort < 1 || metadata.containerPort > 65535) {
+      throw new Error('invalid containerPort');
+    }
   } catch {
     throw new Error(
       `copy-cli-runtime-assets: valid repo-root blazegraph-image.json not found at ${sourceBlazegraphImageJson}`,

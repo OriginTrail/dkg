@@ -23,8 +23,10 @@
  * injectable; tests run in <50 ms.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runtimeAssetPaths } from '../src/runtime-assets.js';
 import {
@@ -32,12 +34,59 @@ import {
   normaliseBlazegraphNamespace,
   isDockerAvailable,
   BLAZEGRAPH_IMAGE,
+  BLAZEGRAPH_CONTAINER_PORT,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   type DockerRunner,
   type DockerCommandResult,
 } from '../src/daemon/blazegraph-docker.js';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+
+function runDevnetBlazegraphSmoke(metadata: string): {
+  status: number | null;
+  stderr: string;
+  dockerArgs: string[] | null;
+} {
+  const root = mkdtempSync(join(tmpdir(), 'dkg-devnet-blazegraph-'));
+  const capture = join(root, 'docker-run.args');
+  writeFileSync(join(root, 'blazegraph-image.json'), metadata);
+  const script = `
+    export DEVNET_SOURCE_ONLY=1
+    source ${JSON.stringify(resolve(REPO_ROOT, 'scripts/devnet.sh'))}
+    REPO_ROOT=${JSON.stringify(root)}
+    BLAZEGRAPH_PORT=19099
+    BLAZEGRAPH_CONTAINER=devnet-blazegraph-smoke
+    blazegraph_started=0
+    docker_responsive() { return 0; }
+    docker() {
+      case "$1" in
+        inspect) return 1 ;;
+        run)
+          printf '%s\\n' "$@" > ${JSON.stringify(capture)}
+          blazegraph_started=1
+          return 0
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    curl() {
+      [ "$blazegraph_started" = "1" ]
+    }
+    if start_blazegraph; then exit 0; else exit 42; fi
+  `;
+  try {
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf-8' });
+    return {
+      status: result.status,
+      stderr: result.stderr,
+      dockerArgs: existsSync(capture)
+        ? readFileSync(capture, 'utf-8').trim().split('\n')
+        : null,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 interface MockDockerScript {
   /**
@@ -88,7 +137,7 @@ function dockerInspectRunning(hostPort = 9999): DockerCommandResult {
         State: { Running: true },
         NetworkSettings: {
           Ports: {
-            '8080/tcp': [{ HostIp: '0.0.0.0', HostPort: String(hostPort) }],
+            [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: String(hostPort) }],
           },
         },
       },
@@ -104,7 +153,9 @@ function dockerInspectStopped(): DockerCommandResult {
       {
         State: { Running: false },
         NetworkSettings: {
-          Ports: { '8080/tcp': [{ HostIp: '0.0.0.0', HostPort: '9999' }] },
+          Ports: {
+            [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: '9999' }],
+          },
         },
       },
     ]),
@@ -291,25 +342,39 @@ describe('provisionBlazegraphDocker', () => {
     expect(result.port).toBe(10001);
     const runCall = calls.find((c) => c[0] === 'run');
     expect(runCall).toBeDefined();
-    expect(runCall).toContain('127.0.0.1:10001:8080');
+    expect(runCall).toContain(`127.0.0.1:10001:${BLAZEGRAPH_CONTAINER_PORT}`);
     expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
     const metadata = JSON.parse(
       readFileSync(resolve(REPO_ROOT, 'blazegraph-image.json'), 'utf-8'),
-    ) as { image: string };
+    ) as { image: string; containerPort: number };
     expect(BLAZEGRAPH_IMAGE).toBe(metadata.image);
+    expect(BLAZEGRAPH_CONTAINER_PORT).toBe(metadata.containerPort);
     expect(runtimeAssetPaths('blazegraph-image.json')[0]).toBe(
       resolve(REPO_ROOT, 'blazegraph-image.json'),
     );
   });
 
-  it('shares the pinned image metadata with the devnet Docker path', () => {
-    const devnet = readFileSync(resolve(REPO_ROOT, 'scripts/devnet.sh'), 'utf-8');
-    const startIndex = devnet.indexOf('start_blazegraph()');
-    const dockerCheckIndex = devnet.indexOf('if ! docker_responsive 3', startIndex);
-    const imageReadIndex = devnet.indexOf('blazegraph_image="$(read_blazegraph_image)"', startIndex);
-    expect(devnet).toContain('read_blazegraph_image()');
-    expect(imageReadIndex).toBeGreaterThan(dockerCheckIndex);
-    expect(devnet).toContain('"$blazegraph_image" > /dev/null 2>&1');
+  it('executes the devnet Docker path with the exact shared image and loopback port mapping', () => {
+    const image = 'example/blazegraph@sha256:smoke';
+    const result = runDevnetBlazegraphSmoke(JSON.stringify({ image, containerPort: 80 }));
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.dockerArgs).toEqual([
+      'run',
+      '-d',
+      '--name',
+      'devnet-blazegraph-smoke',
+      '-p',
+      '127.0.0.1:19099:80',
+      image,
+    ]);
+  });
+
+  it('fails closed before docker run when devnet image metadata is invalid', () => {
+    const result = runDevnetBlazegraphSmoke(JSON.stringify({ image: 'example/blazegraph' }));
+
+    expect(result.status).toBe(42);
+    expect(result.dockerArgs).toBeNull();
   });
 
   it('throws when every port in the scan range is taken', async () => {
