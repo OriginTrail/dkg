@@ -85,7 +85,17 @@ export const RPC_RECEIPT_ATTEMPT_TIMEOUT_MS = 5_000;
 
 export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 
-export const RPC_RECEIPT_TIMEOUT_MS = 180_000;
+export const RPC_RECEIPT_TIMEOUT_MS = 600_000;
+export const MIN_RPC_RECEIPT_TIMEOUT_MS = 1_000;
+
+/** Default an omitted deadline, but reject every explicitly invalid value. */
+export function resolveReceiptTimeoutMs(value: unknown): number {
+  if (value === undefined) return RPC_RECEIPT_TIMEOUT_MS;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < MIN_RPC_RECEIPT_TIMEOUT_MS) {
+    throw new Error(`chain.receiptTimeoutMs must be a finite number >= ${MIN_RPC_RECEIPT_TIMEOUT_MS}`);
+  }
+  return Math.floor(value);
+}
 
 /**
  * Bounded "retry the whole endpoint set" for the BROADCAST phase (S2). After a

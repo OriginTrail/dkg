@@ -1110,6 +1110,8 @@ export interface DKGAgentConfig {
     adminPrivateKey?: string;
     operationalKeys: string[];
     chainId?: string;
+    /** Overall submitted-transaction receipt deadline (default 10 minutes). */
+    receiptTimeoutMs?: number;
     /**
      * Optional V10 allowance-sizing policy. Threaded straight through to
      * the `EVMChainAdapter`; see `ApprovalPolicy` in

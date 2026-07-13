@@ -717,6 +717,7 @@ export class DKGAgent extends DKGAgentBase {
         hubAddress: config.chainConfig.hubAddress,
         tokenAddress: config.chainConfig.tokenAddress,
         chainId: config.chainConfig.chainId,
+        receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
         approvalPolicy: config.chainConfig.approvalPolicy,
         cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
         minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,

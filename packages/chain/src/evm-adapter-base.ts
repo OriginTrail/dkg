@@ -27,8 +27,9 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
-import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
+import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
+import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
@@ -37,7 +38,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -637,6 +638,7 @@ export class EVMChainAdapterBase {
   protected readonly rpcFailover: RpcFailoverClient;
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
+  protected readonly receiptTimeoutMs: number;
 
   protected readonly configuredStaticChainId?: bigint;
 
@@ -1020,6 +1022,7 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
+    this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
         .map((url) => typeof url === 'string' ? url.trim() : '')
@@ -1337,8 +1340,11 @@ export class EVMChainAdapterBase {
    * Thin delegator to `this.rpcFailover.getReceipt` — the per-endpoint receipt
    * loop. Used by `waitForReceiptWithFailover` and the `publish.ts` callers.
    */
-  protected getTransactionReceiptWithFailover(txHash: string): Promise<ethers.TransactionReceipt | null> {
-    return this.rpcFailover.getReceipt(txHash);
+  protected getTransactionReceiptWithFailover(
+    txHash: string,
+    options?: ReceiptLookupOptions,
+  ): Promise<ethers.TransactionReceipt | null> {
+    return this.rpcFailover.getReceipt(txHash, options);
   }
 
   /**
@@ -1448,26 +1454,16 @@ export class EVMChainAdapterBase {
     txHash: string,
     label: string,
   ): Promise<ethers.TransactionReceipt> {
-    const deadline = Date.now() + RPC_RECEIPT_TIMEOUT_MS;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      try {
-        const receipt = await this.getTransactionReceiptWithFailover(txHash);
-        if (receipt) {
-          assertSuccessfulReceipt(receipt, label);
-          return receipt;
-        }
-      } catch (err) {
-        if (!isRetryableRpcError(err)) throw err;
-        lastError = err;
-      }
-      await sleep(RPC_RECEIPT_POLL_INTERVAL_MS);
-    }
-    throw createRpcTimeoutError(
-      `${label} tx ${txHash} timed out waiting for a receipt after ${RPC_RECEIPT_TIMEOUT_MS}ms` +
-      (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
-      { cause: lastError, txHash },
-    );
+    return waitForReceiptWithDeadline({
+      txHash,
+      receiptTimeoutMs: this.receiptTimeoutMs,
+      pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
+      getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
+      assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
+      formatTimeoutMessage: ({ lastError }) =>
+        `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
+        (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
+    });
   }
 
   protected async signPopulatedTransaction(
