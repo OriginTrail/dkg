@@ -153,7 +153,11 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
-import { NetworkAdmissionCoordinator, NetworkAdmissionRejectedError } from './p2p/network-admission-coordinator.js';
+import {
+  NetworkAdmissionCoordinator,
+  NetworkAdmissionRejectedError,
+  translateNetworkAdmissionErrorAtProtocolBoundary,
+} from './p2p/network-admission-coordinator.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -890,17 +894,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     this.router = new ProtocolRouter(this.node, {
       peerResolver,
-      isPeerAccepted: (
+      isPeerAccepted: async (
         peerId: string,
         _protocolId: string,
-        _direction: 'inbound' | 'outbound',
+        direction: 'inbound' | 'outbound',
         options?: AdmissionCheckOptions,
-      ) =>
-        this.networkAdmissionCoordinator.ensureAdmitted(
-          peerId,
-          createOperationContext('connect'),
-          options,
-        ),
+      ) => {
+        try {
+          return await this.networkAdmissionCoordinator.ensureAdmitted(
+            peerId,
+            createOperationContext('connect'),
+            options,
+          );
+        } catch (error) {
+          throw translateNetworkAdmissionErrorAtProtocolBoundary(error, direction);
+        }
+      },
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
     // Default to in-memory substrate stores when no durable stores

@@ -29,12 +29,17 @@ const RELAY_DENIAL_LOG_CACHE_MAX = 128;
 export function buildActiveRelayNetworkPolicy(
   activeRelayPeerIds: ReadonlySet<string> | undefined,
   log: (message: string) => void = () => {},
+  now: () => number = Date.now,
 ): RelayNetworkPolicy | undefined {
   if (activeRelayPeerIds == null) return undefined;
+  // One policy owns one denial gate/logger. Both public policy surfaces adapt
+  // this exact gate so the same direction/relay cannot log twice merely
+  // because libp2p reached it through a different hook.
+  const relayPathGate = buildActiveRelayPathGate(activeRelayPeerIds, log, now);
   return {
     discoveryFilter: buildActiveRelayDiscoveryFilter(activeRelayPeerIds),
-    relayPathGate: buildActiveRelayPathGate(activeRelayPeerIds, log),
-    connectionGater: buildActiveRelayConnectionGater(activeRelayPeerIds, log),
+    relayPathGate,
+    connectionGater: adaptRelayPathGateToConnectionGater(relayPathGate),
   };
 }
 
@@ -102,6 +107,12 @@ export function buildActiveRelayConnectionGater(
   now: () => number = Date.now,
 ): RelayedConnectionGater {
   const relayPathGate = buildActiveRelayPathGate(activeRelayPeerIds, log, now);
+  return adaptRelayPathGateToConnectionGater(relayPathGate);
+}
+
+function adaptRelayPathGateToConnectionGater(
+  relayPathGate: RelayPathGate,
+): RelayedConnectionGater {
   return {
     denyInboundRelayedConnection: (relay, remotePeer) =>
       relayPathGate({

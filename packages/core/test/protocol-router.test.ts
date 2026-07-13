@@ -170,7 +170,7 @@ describe('ProtocolRouter', () => {
       expect(stream.aborted?.message).toMatch(/handler error/);
     });
 
-    it('quietly rejects inbound requests while a retryable identity probe is backed off', async () => {
+    it('quietly rejects inbound requests when the admission boundary returns a quiet retryable error', async () => {
       const originalError = console.error;
       const errorSpy = recorder((..._args: unknown[]) => undefined);
       console.error = errorSpy as unknown as typeof console.error;
@@ -187,9 +187,9 @@ describe('ProtocolRouter', () => {
         } as unknown as DKGNode;
         const router = new ProtocolRouter(node, {
           isPeerAccepted: async () => {
-            const err = new Error('Network identity probe failed: retryable probe backed off');
-            Object.assign(err, { code: 'NETWORK_ADMISSION_PROBE_FAILED' });
-            throw err;
+            throw new QuietRetryableHandlerError(
+              'Network identity probe failed: retryable probe backed off',
+            );
           },
         });
         router.register(PROTOCOL, async () => {

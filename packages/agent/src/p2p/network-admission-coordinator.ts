@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_NETWORK_IDENTITY,
+  QuietRetryableHandlerError,
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -128,6 +129,21 @@ export class NetworkAdmissionProbeError extends Error {
     super(`Network identity probe failed for ${peerId}: ${reason}`);
     this.name = 'NetworkAdmissionProbeError';
   }
+}
+
+/**
+ * Translate agent-owned probe backoff into the core router's generic quiet
+ * retryable concept at the admission boundary. Outbound callers retain the
+ * original error so connect/send diagnostics and retry policy stay unchanged.
+ */
+export function translateNetworkAdmissionErrorAtProtocolBoundary(
+  error: unknown,
+  direction: 'inbound' | 'outbound',
+): unknown {
+  if (direction === 'inbound' && error instanceof NetworkAdmissionProbeError) {
+    return new QuietRetryableHandlerError(error.message);
+  }
+  return error;
 }
 
 export class NetworkAdmissionRejectedError extends Error {

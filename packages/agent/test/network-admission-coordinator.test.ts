@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
-import { createOperationContext, ed25519Sign } from '@origintrail-official/dkg-core';
-import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
+import {
+  createOperationContext,
+  ed25519Sign,
+  QuietRetryableHandlerError,
+} from '@origintrail-official/dkg-core';
+import {
+  NetworkAdmissionCoordinator,
+  NetworkAdmissionProbeError,
+  NetworkAdmissionRejectedError,
+  translateNetworkAdmissionErrorAtProtocolBoundary,
+} from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService, type NetworkAdmissionOptions } from '../src/p2p/network-admission.js';
 import { signNetworkIdentityResponse } from '../src/p2p/network-identity-proof.js';
 
@@ -15,6 +24,20 @@ const identity = {
   networkId: 'network-a',
   genesisId: 'base-testnet',
 };
+
+describe('protocol admission error boundary', () => {
+  it('translates only inbound probe backoff into the core quiet-retryable type', () => {
+    const probeError = new NetworkAdmissionProbeError(REMOTE_PEER_ID, 'retryable probe backed off');
+    const inbound = translateNetworkAdmissionErrorAtProtocolBoundary(probeError, 'inbound');
+
+    expect(inbound).toBeInstanceOf(QuietRetryableHandlerError);
+    expect((inbound as Error).message).toBe(probeError.message);
+    expect(translateNetworkAdmissionErrorAtProtocolBoundary(probeError, 'outbound')).toBe(probeError);
+
+    const rejected = new NetworkAdmissionRejectedError(REMOTE_PEER_ID);
+    expect(translateNetworkAdmissionErrorAtProtocolBoundary(rejected, 'inbound')).toBe(rejected);
+  });
+});
 
 function buildCoordinator(input: {
   sendIdentityProbe: (...args: any[]) => Promise<Uint8Array>;

@@ -3,6 +3,7 @@ import {
   buildActiveRelayConnectionGater,
   buildActiveRelayDiscoveryFilter,
   buildActiveRelayNetworkPolicy,
+  buildActiveRelayPathGate,
 } from '../src/relay-network-policy.js';
 
 const RELAY_A = '12D3KooWRelayA';
@@ -22,6 +23,49 @@ describe('buildActiveRelayNetworkPolicy', () => {
     expect(
       policy!.connectionGater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_B}/p2p-circuit`),
     ).toBe(true);
+  });
+
+  it('shares denial-log suppression across the policy path gate and connection gater', () => {
+    const logs: string[] = [];
+    const policy = buildActiveRelayNetworkPolicy(
+      new Set([RELAY_A]),
+      message => logs.push(message),
+      () => 1_000,
+    )!;
+
+    expect(policy.relayPathGate({
+      direction: 'outbound',
+      relayPeerId: RELAY_B,
+      remotePeerId: REMOTE_A,
+    })).toBe(true);
+    expect(policy.connectionGater.denyDialMultiaddr(
+      `/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_B}/p2p-circuit/p2p/${REMOTE_B}`,
+    )).toBe(true);
+    expect(logs).toHaveLength(1);
+  });
+});
+
+describe('buildActiveRelayPathGate', () => {
+  it('evicts the oldest denial-log key when the bounded cache is full', () => {
+    const logs: string[] = [];
+    const gate = buildActiveRelayPathGate(
+      new Set([RELAY_A]),
+      message => logs.push(message),
+      () => 1_000,
+    );
+    const relays = Array.from({ length: 129 }, (_, index) => `12D3KooWForeignRelay${index}`);
+
+    for (const relayPeerId of relays) {
+      expect(gate({ direction: 'outbound', relayPeerId })).toBe(true);
+    }
+    expect(logs).toHaveLength(129);
+
+    // The first key was evicted by the 129th distinct relay, so it logs again
+    // inside the interval. The newest retained key remains suppressed.
+    expect(gate({ direction: 'outbound', relayPeerId: relays[0] })).toBe(true);
+    expect(logs).toHaveLength(130);
+    expect(gate({ direction: 'outbound', relayPeerId: relays[128] })).toBe(true);
+    expect(logs).toHaveLength(130);
   });
 });
 
