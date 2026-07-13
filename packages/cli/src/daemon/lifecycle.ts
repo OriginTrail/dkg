@@ -30,12 +30,10 @@ import {
   chmod,
   copyFile,
   mkdir,
-  readFile,
   rename,
   rm,
   stat,
   unlink,
-  writeFile,
 } from "node:fs/promises";
 import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -49,6 +47,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
+import { rotateDaemonLogIfNeeded } from './log-rotation.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -989,6 +988,10 @@ export async function runDaemonInner(
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
   const logFile = logPath();
+  // Rotate before installing the in-process stdout/stderr tee so startup does
+  // not race the truncation with fresh log appends. Existing logs survive
+  // upgrades/restarts and can already be multi-gigabyte at this point.
+  const startupLogRotation = await rotateDaemonLogIfNeeded(logFile).catch(() => null);
 
   // Tee all stdout/stderr (including structured Logger output) into the log file
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
@@ -1012,6 +1015,13 @@ export async function runDaemonInner(
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
     appendFile(logFile, line + "\n").catch(() => {});
+  }
+
+  if (startupLogRotation?.rotated) {
+    log(
+      `Rotated daemon.log during startup ` +
+      `(was ${(startupLogRotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
+    );
   }
 
   process.on("uncaughtException", (err) => {
@@ -2568,28 +2578,22 @@ export async function runDaemonInner(
     }
   }
 
-  const MAX_LOG_BYTES = 50 * 1024 * 1024; // 50 MB
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
-  const pruneTimer = setInterval(async () => {
+  const pruneRuntimeState = async (): Promise<void> => {
     try {
       dashDb.prune();
-      const st = await stat(logFile).catch(() => null);
-      if (st && st.size > MAX_LOG_BYTES) {
-        const tail = await readFile(logFile, "utf8");
-        const keepFrom = tail.length - Math.floor(MAX_LOG_BYTES * 0.7);
-        const newlineIdx = tail.indexOf("\n", keepFrom);
-        if (newlineIdx > 0) {
-          await writeFile(logFile, tail.slice(newlineIdx + 1));
-        } else {
-          await writeFile(logFile, tail.slice(keepFrom));
-        }
+      const rotation = await rotateDaemonLogIfNeeded(logFile);
+      if (rotation.rotated) {
         log(
-          `Rotated daemon.log (was ${(st.size / 1024 / 1024).toFixed(1)} MB)`,
+          `Rotated daemon.log (was ${(rotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
         );
       }
     } catch {
       /* never crash the daemon */
     }
+  };
+  const pruneTimer = setInterval(() => {
+    void pruneRuntimeState();
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
