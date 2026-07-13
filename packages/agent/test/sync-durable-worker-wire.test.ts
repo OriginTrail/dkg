@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
+import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 
 describe('durable sync worker result transport', () => {
   it('reuses caller-owned quads instead of structured-cloning verified payloads back', async () => {
@@ -112,5 +113,69 @@ describe('durable sync worker result transport', () => {
     } finally {
       await worker.close();
     }
+  });
+
+  it('records every source index when a system graph accepts a Merkle mismatch', async () => {
+    const worker = new SyncVerifyWorker();
+    const graph = 'did:dkg:context-graph:test/context/1';
+    const data: Quad = {
+      subject: 'urn:entity:mismatch',
+      predicate: 'http://schema.org/name',
+      object: '"accepted"',
+      graph,
+    };
+    const merkleRoot: Quad = {
+      subject: 'urn:ual:mismatch',
+      predicate: 'http://dkg.io/ontology/merkleRoot',
+      object: `"${'0'.repeat(64)}"`,
+      graph,
+    };
+    const rootEntity: Quad = {
+      subject: 'urn:ual:mismatch',
+      predicate: 'http://dkg.io/ontology/rootEntity',
+      object: '"urn:entity:mismatch"',
+      graph,
+    };
+    const retainedMeta: Quad = {
+      subject: 'urn:meta:retained',
+      predicate: 'http://schema.org/name',
+      object: '"retained"',
+      graph,
+    };
+
+    try {
+      const result = await worker.processDurableBatch(
+        [data],
+        [merkleRoot, rootEntity, retainedMeta],
+        true,
+      );
+
+      expect(result.rejectedKcs).toBe(0);
+      expect(result.verifiedData).toEqual([data]);
+      expect(result.verifiedMeta).toEqual([merkleRoot, rootEntity, retainedMeta]);
+      expect(result.verifiedData[0]).toBe(data);
+      expect(result.verifiedMeta[0]).toBe(merkleRoot);
+      expect(result.verifiedMeta[1]).toBe(rootEntity);
+      expect(result.verifiedMeta[2]).toBe(retainedMeta);
+      expect(result.logs.some(({ message }) => message.includes('Accepting 1 unverified KC'))).toBe(true);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('keeps verified Quad arrays off the raw worker response payload', () => {
+    const data: Quad = {
+      subject: 'urn:entity:wire',
+      predicate: 'http://schema.org/name',
+      object: '"wire"',
+      graph: 'did:dkg:context-graph:test/context/1',
+    };
+
+    const wireResult = processDurableBatchForWire([data], [], true);
+
+    expect(wireResult.verifiedDataIndexes).toEqual([0]);
+    expect(wireResult.verifiedMetaIndexes).toEqual([]);
+    expect(wireResult).not.toHaveProperty('verifiedData');
+    expect(wireResult).not.toHaveProperty('verifiedMeta');
   });
 });

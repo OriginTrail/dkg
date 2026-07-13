@@ -540,7 +540,7 @@ function processDurableBatch(
   };
 }
 
-function processDurableBatchForWire(
+export function processDurableBatchForWire(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
