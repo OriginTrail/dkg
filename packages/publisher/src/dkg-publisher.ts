@@ -1083,22 +1083,39 @@ export class DKGPublisher implements Publisher {
     const pinnedPublisherLabel = this.publisherWallet
       ? 'publisherPrivateKey'
       : 'configured publisherAddress';
-    const rejectedProvisionalSigners = new Map<string, unknown>();
+    const rejectedExactPlans = new Map<string, unknown>();
     for (;;) {
+      // A configured pin and an explicit lifetime already have a complete
+      // signer-independent quote. An unpinned implicit lifetime does not: use
+      // only the 1-wei PCA liveness probe (`requiredTracWei: 0n`) to discover a
+      // candidate, then validate that candidate's own lock-priced tuple below.
+      // Using the initial signer's default quote here would wrongly reject a
+      // valid shorter-lock PCA before its exact price can be computed.
+      const discoveryIsExact = pinnedPublisherAddress !== undefined
+        || input.explicitPublishEpochs !== undefined;
+      const discoveryRequiredTracWei = discoveryIsExact
+        ? initialPricing.precomputedTokenAmount
+        : 0n;
+      const discoveryPublishEpochs = discoveryIsExact
+        ? initialPricing.publishEpochs
+        : undefined;
       const reservedAddress = coercePublisherAddress(
         await this.chain.reservePublisherAddressForPublish({
           contextGraphId: input.contextGraphId,
-          requiredTracWei: initialPricing.precomputedTokenAmount,
-          // An omitted lifetime is deliberately provisional: a candidate PCA
-          // wallet may have a non-default lock that must drive the final quote.
-          // Explicit user lifetimes remain exact selection constraints.
-          publishEpochs: input.explicitPublishEpochs,
+          requiredTracWei: discoveryRequiredTracWei,
+          publishEpochs: discoveryPublishEpochs,
           publisherAddress: pinnedPublisherAddress,
+          // Candidate progress is part of the adapter contract. The publisher
+          // does not assume that repeated calls advance a hidden EVM cursor.
+          excludedPublisherAddresses: pinnedPublisherAddress
+            ? undefined
+            : [...rejectedExactPlans.keys()],
         }),
       );
       if (!reservedAddress) throw new PublisherWalletRequiredError('publish');
       const reservationKey = reservedAddress.toLowerCase();
-      const previousRejection = rejectedProvisionalSigners.get(reservationKey);
+      const previousRejection = rejectedExactPlans.get(reservationKey);
+      // A non-conforming/non-advancing adapter cannot make this loop spin.
       if (previousRejection !== undefined) throw previousRejection;
       if (
         pinnedPublisherAddress
@@ -1123,12 +1140,9 @@ export class DKGPublisher implements Publisher {
           effectiveByteSize: input.effectiveByteSize,
           ctx: input.ctx,
         });
-      const provisionalLifetime = input.explicitPublishEpochs === undefined;
-      if (
-        provisionalLifetime
-        || finalPricing.publishEpochs !== initialPricing.publishEpochs
-        || finalPricing.precomputedTokenAmount !== initialPricing.precomputedTokenAmount
-      ) {
+      const discoveryMatchesFinalPlan = discoveryPublishEpochs === finalPricing.publishEpochs
+        && discoveryRequiredTracWei === finalPricing.precomputedTokenAmount;
+      if (!discoveryMatchesFinalPlan) {
         // An implicit lifetime makes the first reservation provisional even if
         // its numeric quote happens to stay unchanged: a PCA candidate may
         // cover the default quote but have a mismatched lock. Pin and validate
@@ -1152,12 +1166,11 @@ export class DKGPublisher implements Publisher {
             );
           }
         } catch (error) {
-          // Signer-pool adapters advance their cursor during the provisional
-          // reservation. If that candidate cannot fund its own exact PCA plan,
-          // try the next candidate; a repeated address proves the eligible pool
-          // has been exhausted and terminates the loop above.
+          // If this candidate cannot fund its own exact PCA plan, explicitly
+          // exclude it from the next discovery request. This works for any
+          // adapter implementation; it does not depend on cursor side effects.
           if (!pinnedPublisherAddress && isNoFundedPublisherReservationError(error)) {
-            rejectedProvisionalSigners.set(reservationKey, error);
+            rejectedExactPlans.set(reservationKey, error);
             continue;
           }
           throw error;
@@ -2261,8 +2274,17 @@ export class DKGPublisher implements Publisher {
     const willAttemptOnChainPublish = publisherContextGraphId !== undefined;
     const chainV10Ready = await this.refreshChainV10Readiness();
     const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
+    const strictPublishReservationAvailable = canResolveOnChainPublisher
+      && typeof this.chain.reservePublisherAddressForPublish === 'function';
     const resolvedPublisherAddress = canResolveOnChainPublisher
-      ? await this.resolvePublisherAddress(publisherContextGraphId)
+      ? await this.resolvePublisherAddress(publisherContextGraphId, {
+        // The strict reservation below is the one cursor-moving selection for
+        // this publish. A prior getAuthorizedPublisherAddress probe would move
+        // the cursor once more and make two-wallet pools always submit from the
+        // second wallet. Non-reserving adapter surfaces still establish that a
+        // usable signer exists before payload preparation.
+        includeReservingPublisherProbe: !strictPublishReservationAvailable,
+      })
       : await this.resolvePublisherAddress(undefined, {
         includeReservingPublisherProbe: false,
         includeGenericSignMessageProbe: false,

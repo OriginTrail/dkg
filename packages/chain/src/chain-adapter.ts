@@ -1183,6 +1183,13 @@ export interface ChainAdapter {
     publishEpochs?: number;
     /** Exact signer pin for publishers backed by an explicit private key. */
     publisherAddress?: string;
+    /**
+     * Candidates whose signer-specific exact plan already failed validation.
+     * Unpinned reservation implementations must not return them again. This
+     * makes multi-candidate progress explicit instead of relying on hidden
+     * round-robin cursor side effects.
+     */
+    excludedPublisherAddresses?: string[];
   }): Promise<string>;
 
   /**

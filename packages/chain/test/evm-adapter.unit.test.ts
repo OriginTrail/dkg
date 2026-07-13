@@ -3912,6 +3912,19 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     })).resolves.toBe(walletA.address);
   });
 
+  it('explicitly excludes signers whose exact publish plan already failed', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 2_000n); tracByAddr.set(lc(walletB.address), 2_000n);
+
+    await expect(a.reservePublisherAddressForPublish({
+      contextGraphId: CG,
+      requiredTracWei: 1_000n,
+      publishEpochs: 2,
+      excludedPublisherAddresses: [walletA.address],
+    })).resolves.toBe(walletB.address);
+  });
+
   it('never rotates away from an explicitly pinned publisher during strict reservation', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
@@ -4083,6 +4096,29 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       requiredTracWei: 1_000n,
       publishEpochs: 5,
     })).resolves.toBe(walletB.address);
+  });
+
+  it('applies exact PCA lock matching on the public createKnowledgeAssets path', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
+    (a as any).convictionAccountCanCover = recorder(async () => true);
+
+    const params = makeV10PublishParams();
+    params.epochs = 5;
+    params.tokenAmount = 1_000n;
+    let chosenSigner: ethers.Wallet | undefined;
+    (a as any).signPopulatedTransaction = recorder(async (signer: ethers.Wallet) => {
+      chosenSigner = signer;
+      throw new Error('SENTINEL');
+    });
+
+    await expect(a.createKnowledgeAssets(params)).rejects.toThrow('SENTINEL');
+    expect(chosenSigner?.address).toBe(walletB.address);
   });
 
   it('lets an implicit publish lifetime select a covering PCA with a non-default lock, then validates the fixed plan', async () => {

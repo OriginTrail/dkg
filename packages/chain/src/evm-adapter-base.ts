@@ -1968,9 +1968,32 @@ export class EVMChainAdapterBase {
   protected async requireFundedPublisherSigner(
     contextGraphId: bigint,
     funding: NativeAndTracFundingMode,
+    options: { excludedPublisherAddresses?: readonly string[] } = {},
   ): Promise<Wallet> {
     return this._withSignerSelection(async (ordered) => {
-      const eligible = await this._authorizedPublisherSigners(ordered, contextGraphId);
+      const authorized = await this._authorizedPublisherSigners(ordered, contextGraphId);
+      const excluded = new Set(
+        (options.excludedPublisherAddresses ?? []).map((address) => address.toLowerCase()),
+      );
+      const eligible = authorized.filter((signer) => !excluded.has(signer.address.toLowerCase()));
+      if (eligible.length === 0) {
+        const diagnostics = await Promise.all(authorized.map(async (signer) => {
+          const fundingSnapshot = await this.getWalletFunding(signer.address, {
+            forceRefresh: true,
+            metrics: 'native+trac',
+          });
+          return {
+            address: signer.address,
+            nativeWei: fundingSnapshot.native,
+            tracWei: fundingSnapshot.trac,
+          };
+        }));
+        throw new InsufficientPublisherFundsError(
+          `Every authorized publisher wallet was rejected for its exact signer-specific publish plan. ` +
+          formatNoFundedPublisherWalletMessage(diagnostics),
+          diagnostics,
+        );
+      }
       return this.fundedWalletSelectionDisabled
         ? eligible[0]
         : this.selectFundedSignerOrThrow(eligible, funding, { preferIdle: false });

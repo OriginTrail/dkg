@@ -190,6 +190,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     requiredTracWei: bigint;
     publishEpochs?: number;
     publisherAddress?: string;
+    excludedPublisherAddresses?: string[];
   }): Promise<string> {
     await this.init();
     if (request.publisherAddress) {
@@ -222,6 +223,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           ? { kind: 'provisional-publish' }
           : { kind: 'publish', epochs: request.publishEpochs },
       },
+      { excludedPublisherAddresses: request.excludedPublisherAddresses },
     )).address;
   }
 
