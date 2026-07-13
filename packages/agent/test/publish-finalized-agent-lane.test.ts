@@ -51,7 +51,12 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       subGraphName?: string;
     }> = [];
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
-    const loadCalls: Array<{ contextGraphId: string; selection: any; subGraphName?: string }> = [];
+    const loadCalls: Array<{
+      contextGraphId: string;
+      selection: any;
+      subGraphName?: string;
+      namedKnowledgeAssetGraph?: { agentAddress: string; kaNumber: bigint };
+    }> = [];
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -78,8 +83,9 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       contextGraphId: string,
       selection: any,
       subGraphName?: string,
+      namedKnowledgeAssetGraph?: { agentAddress: string; kaNumber: bigint },
     ) => {
-      loadCalls.push({ contextGraphId, selection, subGraphName });
+      loadCalls.push({ contextGraphId, selection, subGraphName, namedKnowledgeAssetGraph });
       return [{
         subject: ROOT,
         predicate: 'http://schema.org/name',
@@ -116,6 +122,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       contextGraphId: CG,
       selection: { rootEntities: [ROOT] },
       subGraphName: undefined,
+      namedKnowledgeAssetGraph: { agentAddress: AGENT_B, kaNumber: 1n },
     }]);
     expect(publishCalls).toHaveLength(1);
     expect(publishCalls[0]).toMatchObject({
@@ -124,6 +131,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     });
     expect(publishCalls[0]?.opts).toMatchObject({
       reservedKaId: RESERVED_KA_ID,
+      namedKnowledgeAssetGraph: { agentAddress: AGENT_B, kaNumber: 1n },
       precomputedAttestation: {
         expectedMerkleRoot: MERKLE,
         authorAddress: AGENT_B,

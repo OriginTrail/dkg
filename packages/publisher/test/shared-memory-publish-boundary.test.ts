@@ -212,16 +212,16 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     await store.insert([
       q('urn:test:root:one', 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
       q('urn:test:root:one', 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
+      q('urn:test:root:one', 'http://schema.org/name', '"legacy-bucket"', SWM_GRAPH),
     ]);
 
     await publisher.publishFromSharedMemory(
       CONTEXT_GRAPH,
       { rootEntities: ['urn:test:root:one'] },
       {
-        swmKaGraphBound: {
+        namedKnowledgeAssetGraph: {
           agentAddress: '0x1111111111111111111111111111111111111111',
-          startNumber: 1n,
-          endNumber: 1n,
+          kaNumber: 1n,
         },
       },
     );
@@ -240,10 +240,9 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     ]);
 
     await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [root] }, {
-      swmKaGraphBound: {
+      namedKnowledgeAssetGraph: {
         agentAddress: '0x1111111111111111111111111111111111111111',
-        startNumber: 1n,
-        endNumber: 1n,
+        kaNumber: 1n,
       },
     });
 
@@ -265,10 +264,9 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     ]);
 
     await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [root] }, {
-      swmKaGraphBound: {
+      namedKnowledgeAssetGraph: {
         agentAddress: '0x1111111111111111111111111111111111111111',
-        startNumber: 1n,
-        endNumber: 1n,
+        kaNumber: 1n,
       },
     });
 

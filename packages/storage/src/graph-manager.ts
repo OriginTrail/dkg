@@ -243,9 +243,10 @@ export async function loadSelectedSharedMemoryQuads(
 /**
  * Load the SWM quad slice pruned to ONE author's per-KA under-graphs (#1549).
  *
- * UNSAFE as a generic merkle accelerator. It is publicly exported only for
- * callers that own an exact named-KA graph boundary; generic merkle callers
- * must use the widening wrapper below. The
+ * UNSAFE as a generic merkle accelerator. It is module-exported for direct
+ * tests and internal imports, but is not re-exported from the package entrypoint;
+ * only `loadNamedKnowledgeAssetSharedMemoryQuads` is public there. Generic
+ * merkle callers must use the widening wrapper below. The
  * pruned graph set is a strict subset of the set `loadSelectedSharedMemoryQuads`
  * reads, and INV-1 — "a root's quads live only under its own KA number" — is
  * REFUTED under root recurrence, so this read can legitimately miss quads the
@@ -261,7 +262,10 @@ export async function loadKaBoundedSharedMemoryQuads(
   kaGraphBound: SwmKaGraphBound,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, kaGraphBound);
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
+    kind: 'bounded',
+    bound: kaGraphBound,
+  });
 }
 
 /**
@@ -282,9 +286,8 @@ export async function loadNamedKnowledgeAssetSharedMemoryQuads(
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
   return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
-    agentAddress: identity.agentAddress,
-    startNumber: identity.kaNumber,
-    endNumber: identity.kaNumber,
+    kind: 'exact',
+    identity,
   });
 }
 
@@ -353,7 +356,10 @@ async function loadSharedMemoryQuadsInternal(
   bucketGraph: string,
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions,
-  kaGraphBound: SwmKaGraphBound | undefined,
+  graphScope:
+    | { kind: 'bounded'; bound: SwmKaGraphBound }
+    | { kind: 'exact'; identity: NamedKnowledgeAssetGraphIdentity }
+    | undefined,
 ): Promise<Quad[]> {
   let innerGraphPattern: string;
   if (selection === 'all') {
@@ -386,9 +392,27 @@ async function loadSharedMemoryQuadsInternal(
   }
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const swmGraphs = kaGraphBound
-    ? await resolveKaBoundedSharedMemoryReadGraphs(store, bucketGraph, kaGraphBound, queryOptions)
-    : await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  let swmGraphs: NonEmptyGraphList;
+  if (graphScope?.kind === 'bounded') {
+    swmGraphs = await resolveKaBoundedSharedMemoryReadGraphs(
+      store,
+      bucketGraph,
+      graphScope.bound,
+      queryOptions,
+    );
+  } else if (graphScope?.kind === 'exact') {
+    const { agentAddress, kaNumber } = graphScope.identity;
+    if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
+      throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
+    }
+    const exactGraph = `${bucketGraph}/${agentAddress.toLowerCase()}/${kaNumber.toString()}`;
+    assertSafeIri(exactGraph);
+    // Exact named lifecycle reads deliberately exclude the legacy bucket and
+    // every sibling graph, even when they contain the same root subject.
+    swmGraphs = [exactGraph];
+  } else {
+    swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  }
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }

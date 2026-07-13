@@ -101,7 +101,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadNamedKnowledgeAssetSharedMemoryQuads, loadSelectedSharedMemoryQuads, type SwmKaGraphBound, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadNamedKnowledgeAssetSharedMemoryQuads, loadSelectedSharedMemoryQuads, type NamedKnowledgeAssetGraphIdentity, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3317,7 +3317,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     subGraphName?: string,
-    swmKaGraphBound?: SwmKaGraphBound,
+    namedKnowledgeAssetGraph?: NamedKnowledgeAssetGraphIdentity,
   ): Promise<Quad[]> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
     const options = {
@@ -3330,11 +3330,14 @@ export class PublishMethods extends DKGAgentBase {
           : `_loadSelectedSWMQuads: no rootEntities supplied for context graph ${contextGraphId}`
       ),
     } as const;
-    return swmKaGraphBound
-      ? loadNamedKnowledgeAssetSharedMemoryQuads(this.store, swmGraph, selection, {
-          agentAddress: swmKaGraphBound.agentAddress,
-          kaNumber: swmKaGraphBound.startNumber,
-        }, options)
+    return namedKnowledgeAssetGraph
+      ? loadNamedKnowledgeAssetSharedMemoryQuads(
+          this.store,
+          swmGraph,
+          selection,
+          namedKnowledgeAssetGraph,
+          options,
+        )
       : loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, options);
   }
 
@@ -4273,12 +4276,11 @@ export class PublishMethods extends DKGAgentBase {
     }
     const namedKaId = seal.reservedKaId ?? packedKaId;
     const namedKaNumber = namedKaId === undefined ? undefined : namedKaId & ((1n << 96n) - 1n);
-    const namedKaGraphBound: SwmKaGraphBound | undefined = namedKaNumber === undefined
+    const namedKnowledgeAssetGraph: NamedKnowledgeAssetGraphIdentity | undefined = namedKaNumber === undefined
       ? undefined
       : {
           agentAddress: seal.authorAddress,
-          startNumber: namedKaNumber,
-          endNumber: namedKaNumber,
+          kaNumber: namedKaNumber,
         };
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
@@ -4295,7 +4297,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         { rootEntities: seal.rootEntities },
         opts?.subGraphName,
-        namedKaGraphBound,
+        namedKnowledgeAssetGraph,
       );
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
@@ -4323,12 +4325,12 @@ export class PublishMethods extends DKGAgentBase {
       // that mirrored the share), so SWM and VM permanently disagreed.
       if (result.status === 'confirmed') {
         try {
-          await publisher.clearPublishedSwmRoots(
+          await publisher.clearPublishedNamedKnowledgeAssetRoots(
             contextGraphId,
             seal.rootEntities,
             opts?.subGraphName,
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            namedKaGraphBound,
+            namedKnowledgeAssetGraph!,
           );
         } catch (err) {
           this.log.warn(
@@ -4415,7 +4417,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         { rootEntities: seal.rootEntities },
         opts?.subGraphName,
-        namedKaGraphBound,
+        namedKnowledgeAssetGraph,
       );
       if (sealedSwmQuads.length === 0) {
         throw new Error(
@@ -4433,7 +4435,7 @@ export class PublishMethods extends DKGAgentBase {
           publishEpochs: opts?.publishEpochs,
           clearSharedMemoryAfter: opts?.clearSharedMemoryAfter,
           reservedKaId: recoveredReservedKaId,
-          swmKaGraphBound: namedKaGraphBound,
+          namedKnowledgeAssetGraph,
           // Wired through to the inner publisher.publish() via
           // publishFromSharedMemory's `precomputedAttestation` option.
           // Skips the publisher's signing entirely.
@@ -4864,7 +4866,7 @@ export class PublishMethods extends DKGAgentBase {
        * publisher then keeps its existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
-      swmKaGraphBound?: SwmKaGraphBound;
+      namedKnowledgeAssetGraph?: NamedKnowledgeAssetGraphIdentity;
       /**
        * RFC-001 §9.x — pre-computed attestation captured by
        * `agent.assertion.finalize()`. When the caller has already
@@ -4961,7 +4963,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         selection,
         options?.subGraphName,
-        options?.swmKaGraphBound,
+        options?.namedKnowledgeAssetGraph,
       );
       if (swmQuads.length > 0) {
         resolvedSeal = await this._buildPrecomputedAttestationForSelection(
@@ -5041,7 +5043,7 @@ export class PublishMethods extends DKGAgentBase {
       precomputedAttestation: resolvedSeal,
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
-      swmKaGraphBound: options?.swmKaGraphBound,
+      namedKnowledgeAssetGraph: options?.namedKnowledgeAssetGraph,
       encryptInlinePayload,
       encryptInlineChunked,
     });

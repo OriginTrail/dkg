@@ -1,4 +1,4 @@
-import type { Quad, SwmKaGraphBound, TripleStore } from '@origintrail-official/dkg-storage';
+import type { NamedKnowledgeAssetGraphIdentity, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
@@ -1556,8 +1556,8 @@ export class DKGPublisher implements Publisher {
        * the existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
-      /** Exact local named-KA SWM graph scope; excludes foreign same-subject shares. */
-      swmKaGraphBound?: SwmKaGraphBound;
+      /** Exact local named-KA SWM graph identity; excludes bucket and sibling shares. */
+      namedKnowledgeAssetGraph?: NamedKnowledgeAssetGraphIdentity;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -1611,15 +1611,12 @@ export class DKGPublisher implements Publisher {
           : `No rootEntities provided for context graph ${contextGraphId}`
       ),
     };
-    const quads = options?.swmKaGraphBound
+    const quads = options?.namedKnowledgeAssetGraph
       ? await loadNamedKnowledgeAssetSharedMemoryQuads(
           this.store,
           swmGraph,
           selection,
-          {
-            agentAddress: options.swmKaGraphBound.agentAddress,
-            kaNumber: options.swmKaGraphBound.startNumber,
-          },
+          options.namedKnowledgeAssetGraph,
           loadOptions,
         )
       : await loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, loadOptions);
@@ -1905,13 +1902,22 @@ export class DKGPublisher implements Publisher {
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
       const kaMap = skolemizeByEntity(quads);
-      await this.clearPublishedSwmRoots(
-        contextGraphId,
-        [...kaMap.keys()],
-        options?.subGraphName,
-        ctx,
-        options?.swmKaGraphBound,
-      );
+      if (options?.namedKnowledgeAssetGraph) {
+        await this.clearPublishedNamedKnowledgeAssetRoots(
+          contextGraphId,
+          [...kaMap.keys()],
+          options.subGraphName,
+          ctx,
+          options.namedKnowledgeAssetGraph,
+        );
+      } else {
+        await this.clearPublishedSwmRoots(
+          contextGraphId,
+          [...kaMap.keys()],
+          options?.subGraphName,
+          ctx,
+        );
+      }
       // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
       // Default is false: unpublished entities stay in SWM for future publishes.
       if (options?.clearSharedMemoryAfter === true) {
@@ -5510,26 +5516,49 @@ export class DKGPublisher implements Publisher {
     rootEntities: string[],
     subGraphName: string | undefined,
     ctx: OperationContext,
-    swmKaGraphBound?: SwmKaGraphBound,
   ): Promise<void> {
     if (rootEntities.length === 0) return;
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+    await this.clearPublishedSwmRootsInGraphs(
+      contextGraphId,
+      rootEntities,
+      subGraphName,
+      ctx,
+      await this.swmGraphsUnder(swmGraph),
+      'always',
+    );
+  }
+
+  /** Drain exactly one named lifecycle without touching bucket or sibling data. */
+  async clearPublishedNamedKnowledgeAssetRoots(
+    contextGraphId: string,
+    rootEntities: string[],
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+    identity: NamedKnowledgeAssetGraphIdentity,
+  ): Promise<void> {
+    if (rootEntities.length === 0) return;
+    await this.clearPublishedSwmRootsInGraphs(
+      contextGraphId,
+      rootEntities,
+      subGraphName,
+      ctx,
+      [this.swmGraphUriFor(contextGraphId, identity.agentAddress, identity.kaNumber, subGraphName)],
+      'when-no-share-remains',
+    );
+  }
+
+  private async clearPublishedSwmRootsInGraphs(
+    contextGraphId: string,
+    rootEntities: string[],
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+    swmGraphsForClear: string[],
+    metadataPolicy: 'always' | 'when-no-share-remains',
+  ): Promise<void> {
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
     const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-    if (swmKaGraphBound && swmKaGraphBound.startNumber !== swmKaGraphBound.endNumber) {
-      throw new Error('clearPublishedSwmRoots named-KA bound must identify exactly one KA number');
-    }
-    const swmGraphsForClear = swmKaGraphBound
-      ? [
-          swmGraph,
-          this.swmGraphUriFor(
-            contextGraphId,
-            swmKaGraphBound.agentAddress,
-            swmKaGraphBound.startNumber,
-            subGraphName,
-          ),
-        ]
-      : await this.swmGraphsUnder(swmGraph);
     let ownerDeletedTotal = 0;
     for (const rootEntity of rootEntities) {
       for (const g of swmGraphsForClear) {
@@ -5543,12 +5572,12 @@ export class DKGPublisher implements Publisher {
       // still contains that root. Exact cleanup preserves it for a real foreign
       // co-resident share, but removes it when the consumed named KA was the last
       // copy so a future peer is not blocked by a stale owner.
-      const shouldClearRootMetadata = !swmKaGraphBound || (
+      const shouldClearRootMetadata = metadataPolicy === 'always' || (
         await loadSelectedSharedMemoryQuads(
           this.store,
           swmGraph,
           { rootEntities: [rootEntity] },
-          { querySource: 'publisher.clearPublishedSwmRoots.reconcileOwnership' },
+          { querySource: 'publisher.clearPublishedNamedKnowledgeAssetRoots.reconcileOwnership' },
         )
       ).length === 0;
       if (shouldClearRootMetadata) {
