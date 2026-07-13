@@ -47,25 +47,14 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
-interface StoreOperationResponse {
-  readonly ok: boolean;
-  readonly status: number;
-  text(): Promise<string>;
-  textOrEmpty(): Promise<string>;
-  json<T>(): Promise<T>;
-}
-
-type StoreOperationRequest = (
-  input: string | URL | Request,
-  init?: Omit<RequestInit, 'signal'>,
-) => Promise<StoreOperationResponse>;
-
 interface StoreOperationDeadline {
   readonly signal: AbortSignal;
-  readonly request: StoreOperationRequest;
+  race<T>(work: Promise<T>): Promise<T>;
   check(): void;
   dispose(): void;
 }
+
+type StoreOperationCompletion = 'deadline-bound' | 'confirmed-write';
 
 function createStoreOperationDeadline(timeoutMs: number, callerSignal?: AbortSignal): StoreOperationDeadline {
   const controller = new AbortController();
@@ -99,7 +88,7 @@ function createStoreOperationDeadline(timeoutMs: number, callerSignal?: AbortSig
     controller.abort(error);
     throw error;
   };
-  const waitFor = async <T>(work: Promise<T>): Promise<T> => {
+  const race = async <T>(work: Promise<T>): Promise<T> => {
     let result: T;
     try {
       result = await raceAgainstAbort(work, controller.signal);
@@ -110,26 +99,10 @@ function createStoreOperationDeadline(timeoutMs: number, callerSignal?: AbortSig
     check();
     return result;
   };
-  const request: StoreOperationRequest = async (input, init) => {
-    const response = await waitFor(fetch(input, {
-      ...init,
-      signal: controller.signal,
-    }));
-    return {
-      ok: response.ok,
-      status: response.status,
-      text: () => waitFor(response.text()),
-      // Catch only the underlying body-read failure. A deadline failure from
-      // waitFor must still propagate instead of being rewritten as an empty
-      // HTTP error body.
-      textOrEmpty: () => waitFor(response.text().catch(() => '')),
-      json: <T>() => waitFor(response.json() as Promise<T>),
-    };
-  };
 
   return {
     signal: controller.signal,
-    request,
+    race,
     check,
     dispose: () => {
       if (timer) {
@@ -139,6 +112,40 @@ function createStoreOperationDeadline(timeoutMs: number, callerSignal?: AbortSig
       detachCaller();
     },
   };
+}
+
+function fetchWithDeadline(
+  deadline: StoreOperationDeadline,
+  input: string | URL | Request,
+  init?: Omit<RequestInit, 'signal'>,
+): Promise<Response> {
+  return deadline.race(fetch(input, {
+    ...init,
+    signal: deadline.signal,
+  }));
+}
+
+function readResponseTextWithDeadline(
+  deadline: StoreOperationDeadline,
+  response: Response,
+): Promise<string> {
+  return deadline.race(response.text());
+}
+
+function readErrorTextWithDeadline(
+  deadline: StoreOperationDeadline,
+  response: Response,
+): Promise<string> {
+  // Catch only the underlying body-read failure. A deadline failure from
+  // deadline.race must still propagate instead of being rewritten as empty.
+  return deadline.race(response.text().catch(() => ''));
+}
+
+function readResponseJsonWithDeadline<T>(
+  deadline: StoreOperationDeadline,
+  response: Response,
+): Promise<T> {
+  return deadline.race(response.json() as Promise<T>);
 }
 
 function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -281,7 +288,8 @@ export class SparqlHttpStore implements TripleStore {
   private runStoreWorkWithinDeadline<T>(
     operation: string,
     options: QueryOptions | undefined,
-    work: (request: StoreOperationRequest) => Promise<T>,
+    work: (deadline: StoreOperationDeadline) => Promise<T>,
+    completion: StoreOperationCompletion = 'deadline-bound',
   ): Promise<T> {
     const deadline = createStoreOperationDeadline(this.timeout, options?.signal);
     const scheduled = externalStorePriorityScheduler.run(
@@ -289,8 +297,11 @@ export class SparqlHttpStore implements TripleStore {
       options?.source ?? `sparql-http.${operation}`,
       async () => {
         deadline.check();
-        const result = await work(deadline.request);
-        deadline.check();
+        const result = await work(deadline);
+        // A successful mutation response means the endpoint may already have
+        // committed. Turning that success into a timeout here invites retries
+        // that can apply a non-idempotent raw UPDATE twice.
+        if (completion === 'deadline-bound') deadline.check();
         return result;
       },
       deadline.signal,
@@ -310,8 +321,8 @@ export class SparqlHttpStore implements TripleStore {
   private async postQuery(
     sparql: string,
     accept: string,
-    request: StoreOperationRequest,
-  ): Promise<StoreOperationResponse> {
+    deadline: StoreOperationDeadline,
+  ): Promise<Response> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
     // data. Form-encoded bodies (`query=...`) are parsed by the server's
@@ -323,7 +334,7 @@ export class SparqlHttpStore implements TripleStore {
     // Content-Type lacks a charset parameter as ISO-8859-1 (servlet default),
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
-    return request(this.queryEndpoint, {
+    return fetchWithDeadline(deadline, this.queryEndpoint, {
       method: 'POST',
       headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
       body: sparql,
@@ -338,20 +349,20 @@ export class SparqlHttpStore implements TripleStore {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
-    return this.runStoreWorkWithinDeadline(operation, options, async (request) => {
+    return this.runStoreWorkWithinDeadline(operation, options, async (deadline) => {
       // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
-      const response = await request(this.updateEndpoint, {
+      const response = await fetchWithDeadline(deadline, this.updateEndpoint, {
         method: 'POST',
         headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
         body: update,
       });
       if (!response.ok) {
-        const text = await response.textOrEmpty();
+        const text = await readErrorTextWithDeadline(deadline, response);
         throw new Error(`SPARQL HTTP ${operation} failed (${response.status}): ${text.slice(0, 300)}`);
       }
-    });
+    }, 'confirmed-write');
   }
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
@@ -472,7 +483,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
-    return this.runStoreWorkWithinDeadline('query', options, async (request) => {
+    return this.runStoreWorkWithinDeadline('query', options, async (deadline) => {
       const startedAt = this.now();
       const trimmed = sparql.trim();
       const upper = trimmed.toUpperCase();
@@ -482,16 +493,19 @@ export class SparqlHttpStore implements TripleStore {
 
       try {
         if (isConstruct) {
-          return await this.queryConstruct(trimmed, request);
+          return await this.queryConstruct(trimmed, deadline);
         }
 
-        const res = await this.postQuery(trimmed, 'application/sparql-results+json', request);
+        const res = await this.postQuery(trimmed, 'application/sparql-results+json', deadline);
         if (!res.ok) {
-          const text = await res.textOrEmpty();
+          const text = await readErrorTextWithDeadline(deadline, res);
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = await res.json<W3CSelectResponse | W3CAskResponse>();
+        const json = await readResponseJsonWithDeadline<W3CSelectResponse | W3CAskResponse>(
+          deadline,
+          res,
+        );
 
         if (isAsk || 'boolean' in json) {
           return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
@@ -521,14 +535,14 @@ export class SparqlHttpStore implements TripleStore {
 
   private async queryConstruct(
     sparql: string,
-    request: StoreOperationRequest,
+    deadline: StoreOperationDeadline,
   ): Promise<ConstructResult> {
-    const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', request);
+    const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', deadline);
     if (!res.ok) {
-      const text = await res.textOrEmpty();
+      const text = await readErrorTextWithDeadline(deadline, res);
       throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    const text = await res.text();
+    const text = await readResponseTextWithDeadline(deadline, res);
     const quads = parseNQuadsText(text);
     return { type: 'quads', quads };
   }

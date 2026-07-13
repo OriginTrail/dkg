@@ -339,6 +339,40 @@ describe('SparqlHttpStore deadlines and cancellation', () => {
     }
   });
 
+  it('keeps a confirmed successful insert successful when response inspection crosses the deadline', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      get ok() {
+        const busyUntil = Date.now() + 25;
+        while (Date.now() < busyUntil) {
+          // Model synchronous response inspection after the endpoint has
+          // already confirmed that it committed the mutation.
+        }
+        return true;
+      },
+      status: 204,
+    }) as Response) as typeof fetch;
+
+    try {
+      const graph = 'http://ex.org/confirmed-write';
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://deadline.test/query',
+        updateEndpoint: 'http://deadline.test/update',
+        timeout: 5,
+      });
+
+      await expect(store.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph,
+      }])).resolves.toBeUndefined();
+      expect(store.getWriteGen(graph)).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('composes caller abort signals into in-flight SELECT and CONSTRUCT fetches', async () => {
     const originalFetch = globalThis.fetch;
     const seenSignals: AbortSignal[] = [];
