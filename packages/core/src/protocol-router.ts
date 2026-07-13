@@ -155,6 +155,12 @@ export class QuietRetryableHandlerError extends Error {
   }
 }
 
+function isRetryableAdmissionProbeError(err: unknown): err is Error & { code: string } {
+  return err instanceof Error
+    && 'code' in err
+    && (err as Error & { code?: unknown }).code === 'NETWORK_ADMISSION_PROBE_FAILED';
+}
+
 export class ProtocolRouter {
   private readonly node: DKGNode;
   private readonly peerResolver?: PeerResolver;
@@ -215,7 +221,21 @@ export class ProtocolRouter {
     options?: AdmissionCheckOptions,
   ): Promise<void> {
     if (!this.isPeerAccepted || this.admissionExemptProtocols.has(protocolId)) return;
-    const accepted = await this.isPeerAccepted(peerId, protocolId, direction, options);
+    let accepted: boolean;
+    try {
+      accepted = await this.isPeerAccepted(peerId, protocolId, direction, options);
+    } catch (err) {
+      // A retryable identity-probe backoff is expected admission control, not
+      // an application-handler failure. Inbound peers can keep sending while
+      // their probe is suppressed; logging every duplicate as a router error
+      // produced thousands of identical lines per node. Preserve the error for
+      // outbound callers, while making inbound one-shot and pooled handlers
+      // reject quietly through their existing retryable-error paths.
+      if (direction === 'inbound' && isRetryableAdmissionProbeError(err)) {
+        throw new QuietRetryableHandlerError(err.message);
+      }
+      throw err;
+    }
     if (accepted) return;
     throw new Error(
       `peer ${peerId.slice(-8)} is not admitted for ${direction} protocol ${protocolId}`,

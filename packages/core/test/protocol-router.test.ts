@@ -170,6 +170,50 @@ describe('ProtocolRouter', () => {
       expect(stream.aborted?.message).toMatch(/handler error/);
     });
 
+    it('quietly rejects inbound requests while a retryable identity probe is backed off', async () => {
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
+      try {
+        let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+        let handlerCalls = 0;
+        const node = {
+          libp2p: {
+            handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+              inbound = handler;
+            },
+            unhandle: () => undefined,
+          },
+        } as unknown as DKGNode;
+        const router = new ProtocolRouter(node, {
+          isPeerAccepted: async () => {
+            const err = new Error('Network identity probe failed: retryable probe backed off');
+            Object.assign(err, { code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+            throw err;
+          },
+        });
+        router.register(PROTOCOL, async () => {
+          handlerCalls += 1;
+          return new Uint8Array([0xaa]);
+        });
+
+        const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+        await inbound!(stream, {
+          remotePeer: {
+            toString: () => REMOTE_PEER,
+            toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+          },
+        });
+
+        expect(handlerCalls).toBe(0);
+        expect(stream.sent).toBeNull();
+        expect(stream.aborted?.message).toContain('retryable probe backed off');
+        expect(errorSpy.calls).toEqual([]);
+      } finally {
+        console.error = originalError;
+      }
+    });
+
     it('awaits async inbound admission before dispatching the handler', async () => {
       let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
       let admitted = false;
