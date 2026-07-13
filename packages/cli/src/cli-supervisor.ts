@@ -9,8 +9,9 @@ import {
   isLivenessProbeEnabled, startLivenessWatcher, LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
 } from './daemon/supervisor-liveness.js';
 import {
-  sleep, resolveDaemonEntryPoint, withSelectedDkgHome, selectedDkgHomeForEnv, probeHostForApiHost,
+  sleep, withSelectedDkgHome, selectedDkgHomeForEnv, probeHostForApiHost,
 } from './cli-helpers.js';
+import { resolveDaemonNodeCommand } from './daemon-entrypoint.js';
 
 async function appendSupervisorLog(message: string): Promise<void> {
   await ensureDkgDir();
@@ -99,9 +100,10 @@ async function runDaemonSupervisor(): Promise<void> {
         `[supervisor] could not clear stale api.port before spawn: ${err?.message ?? String(err)}`,
       );
     });
+    const daemonCommand = resolveDaemonNodeCommand('daemon-worker');
     const child = spawn(
-      process.execPath,
-      [...process.execArgv, resolveDaemonEntryPoint(), 'daemon-worker'],
+      daemonCommand.executable,
+      daemonCommand.args,
       {
         stdio: ['ignore', 'ignore', 'ignore'],
         env: withSelectedDkgHome(process.env),
@@ -164,9 +166,10 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
       );
     });
 
+    const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
     currentChild = spawn(
-      process.execPath,
-      [...process.execArgv, resolveDaemonEntryPoint(), 'daemon-foreground-worker'],
+      daemonCommand.executable,
+      daemonCommand.args,
       {
         stdio: 'inherit',
         env: childEnv,
@@ -214,4 +217,3 @@ export {
   runDaemonSupervisor,
   runForegroundSupervisor,
 };
-

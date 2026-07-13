@@ -86,14 +86,9 @@ import {
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
 } from '../cli-rpc.js';
 import {
   appendSupervisorLog,
@@ -250,7 +245,12 @@ program
         process.exit(1);
       }
 
-      const { urls, providers, readProvider } = createCliEvmProviders(rpcUrl, chainResolved?.rpcUrls);
+      const rpcContext = createCliEvmProviders(
+        rpcUrl,
+        chainResolved?.rpcUrls,
+        chainResolved.receiptTimeoutMs,
+      );
+      const { readProvider } = rpcContext;
       const wallet = new ethers.Wallet(opWallets.wallets[0].privateKey, readProvider);
 
       const hub = new ethers.Contract(hubAddress, [
@@ -302,7 +302,11 @@ program
       const signedTx = await wallet.signTransaction(filled);
       const txHash = ethers.Transaction.from(signedTx).hash ?? '0x';
       console.log(`  TX: ${txHash}`);
-      const receipt = await sendCliRawTransactionWithFailover(providers, signedTx, txHash, urls);
+      const receipt = await sendCliRawTransactionWithFailover(
+        rpcContext,
+        signedTx,
+        txHash,
+      );
       console.log(`  Confirmed in block ${receipt.blockNumber}`);
       console.log(`  New ask: ${amount} TRAC`);
     } catch (err) {

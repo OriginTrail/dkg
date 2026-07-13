@@ -20,19 +20,37 @@ cleanup() {
 trap cleanup EXIT INT TERM
 . "$ROOT/scripts/devnet-lib.sh"
 
+PROTOCOL_STORAGE_ACK="$(protocol_const PROTOCOL_STORAGE_ACK)"
+PROTOCOL_STORAGE_ACK_V2="$(protocol_const PROTOCOL_STORAGE_ACK_V2)"
+PROTOCOL_STORAGE_UPDATE_ACK="$(protocol_const PROTOCOL_STORAGE_UPDATE_ACK)"
+[[ -n "$PROTOCOL_STORAGE_ACK" ]] || fail "canonical PROTOCOL_STORAGE_ACK is unavailable"
+[[ -n "$PROTOCOL_STORAGE_ACK_V2" ]] || fail "canonical PROTOCOL_STORAGE_ACK_V2 is unavailable"
+[[ -n "$PROTOCOL_STORAGE_UPDATE_ACK" ]] || fail "canonical PROTOCOL_STORAGE_UPDATE_ACK is unavailable"
+
 for n in 1 2 3 4 5; do
   [[ "$(code_of "$(api "$n" GET /api/status)")" == 200 ]] || fail "node$n is not ready (need 4 cores + edge)"
 done
 [[ -f "$DB" ]] || fail "publisher database missing: $DB"
 
 count_ack_rows() {
-  DB="$DB" node --input-type=module <<'NODE'
+  (
+    cd "$ROOT/packages/cli"
+    DB="$DB" \
+      PROTOCOL_STORAGE_ACK="$PROTOCOL_STORAGE_ACK" \
+      PROTOCOL_STORAGE_ACK_V2="$PROTOCOL_STORAGE_ACK_V2" \
+      PROTOCOL_STORAGE_UPDATE_ACK="$PROTOCOL_STORAGE_UPDATE_ACK" \
+      node --input-type=module <<'NODE'
 import Database from 'better-sqlite3';
 const db = new Database(process.env.DB, { readonly: true });
 const row = db.prepare(`SELECT COUNT(*) AS n FROM protocol_outbox
-  WHERE protocol IN ('/dkg/10.0.1/storage-ack','/dkg/10.0.2/storage-ack','/dkg/10.0.1/storage-update-ack')`).get();
+  WHERE protocol IN (?, ?, ?)`).get(
+    process.env.PROTOCOL_STORAGE_ACK,
+    process.env.PROTOCOL_STORAGE_ACK_V2,
+    process.env.PROTOCOL_STORAGE_UPDATE_ACK,
+  );
 process.stdout.write(String(row.n)); db.close();
 NODE
+  )
 }
 baseline="$(count_ack_rows)"
 

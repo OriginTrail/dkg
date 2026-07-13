@@ -13,7 +13,7 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { DKGPublisher, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
-import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
+import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, createPublisherWalletChain, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
 import { parseOptionalPositiveInteger, parsePositiveIntegerOption, parsePositiveMsOption } from '../src/cli-option-parsers.js';
 
 let _fileSnapshot: string;
@@ -29,6 +29,15 @@ afterAll(async () => {
 });
 
 describe('publisher wallets', () => {
+  it('passes the configured receipt timeout into async publisher wallet adapters', () => {
+    const wallet = ethers.Wallet.createRandom();
+    const chain = createPublisherWalletChain({
+      rpcUrl: 'http://127.0.0.1:8545',
+      hubAddress: '0x1111111111111111111111111111111111111111',
+      receiptTimeoutMs: 1_200_000,
+    }, wallet.privateKey);
+    expect((chain as any).receiptTimeoutMs).toBe(1_200_000);
+  });
   it('adds, loads, and removes publisher wallets', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-wallets-'));
     const wallet = ethers.Wallet.createRandom();

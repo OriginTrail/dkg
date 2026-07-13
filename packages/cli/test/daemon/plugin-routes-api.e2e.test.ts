@@ -49,6 +49,7 @@ async function writeDaemonConfig(
   home: string,
   apiPort: number,
   listenPort: number,
+  publisherEnabled: boolean,
 ): Promise<void> {
   const { rpcUrl, hubAddress } = getSharedContext();
   await writeFile(
@@ -73,6 +74,7 @@ async function writeDaemonConfig(
       },
       contextGraphs: [],
       routePlugins: [ECHO_FIXTURE, THROW_FIXTURE],
+      ...(publisherEnabled ? { publisher: { enabled: true } } : {}),
     }),
   );
   const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
@@ -83,9 +85,18 @@ async function writeDaemonConfig(
     }, null, 2) + '\n',
     { mode: 0o600 },
   );
+  if (publisherEnabled) {
+    await writeFile(
+      join(home, 'publisher-wallets.json'),
+      JSON.stringify({
+        wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }],
+      }, null, 2) + '\n',
+      { mode: 0o600 },
+    );
+  }
 }
 
-async function startDaemon(): Promise<Daemon> {
+async function startDaemon(publisherEnabled = false): Promise<Daemon> {
   if (!existsSync(CLI_ENTRY)) {
     throw new Error(
       `CLI not built at ${CLI_ENTRY}. Run "pnpm --filter @origintrail-official/dkg build" first.`,
@@ -97,7 +108,7 @@ async function startDaemon(): Promise<Daemon> {
   const home = await mkdtemp(join(tmpdir(), 'dkg-plugin-routes-e2e-'));
   const apiPort = uniquePort(API_PORT_BASE);
   const listenPort = uniquePort(LISTEN_PORT_BASE);
-  await writeDaemonConfig(home, apiPort, listenPort);
+  await writeDaemonConfig(home, apiPort, listenPort, publisherEnabled);
 
   // Pipe daemon stdio to a file so startup failures (port bind, plugin load, chain init) surface in error messages.
   const stdioLog = join(home, 'daemon-stdio.log');
@@ -170,6 +181,23 @@ async function startDaemon(): Promise<Daemon> {
     if (!token) throw new Error('No auth token found in auth.token');
     daemon.token = token;
 
+    if (publisherEnabled) {
+      for (let i = 0; i < 60; i += 1) {
+        const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
+        const body = await res.json().catch(() => ({})) as {
+          asyncPublisher?: { available?: boolean; reason?: string };
+        };
+        if (body.asyncPublisher?.available === true) break;
+        if (body.asyncPublisher?.reason !== 'publisher_starting') {
+          throw new Error(
+            `Async publisher failed readiness: ${body.asyncPublisher?.reason ?? res.status}`,
+          );
+        }
+        await sleep(100);
+        if (i === 59) throw new Error('Async publisher did not become ready in time');
+      }
+    }
+
     return daemon;
   } catch (err) {
     // Both fields null = still alive; signal-exits leave exitCode null but set signalCode.
@@ -203,21 +231,61 @@ async function stopDaemon(d: Daemon | null): Promise<void> {
 }
 
 let daemon: Daemon | null = null;
+let publisherDaemon: Daemon | null = null;
 
 beforeAll(async () => {
   daemon = await startDaemon();
+  publisherDaemon = await startDaemon(true);
 }, 90_000);
 
 afterAll(async () => {
   await stopDaemon(daemon);
+  await stopDaemon(publisherDaemon);
   daemon = null;
+  publisherDaemon = null;
 }, 20_000);
 
-function urlFor(path: string): string {
-  return `http://127.0.0.1:${daemon!.apiPort}${path}`;
+function urlFor(path: string, target = daemon): string {
+  return `http://127.0.0.1:${target!.apiPort}${path}`;
 }
 
 describe('Route plugins — live daemon E2E', () => {
+  it.each([
+    {
+      name: 'disabled',
+      target: () => daemon,
+      runtimePresent: false,
+      availability: {
+        available: false,
+        reason: 'publisher_disabled',
+        retryable: false,
+        operatorActionRequired: true,
+      },
+    },
+    {
+      name: 'ready',
+      target: () => publisherDaemon,
+      runtimePresent: true,
+      availability: { available: true },
+    },
+  ])('adapts canonical publisher state to legacy aliases through handleRequest ($name)', async ({
+    target,
+    runtimePresent,
+    availability,
+  }) => {
+    const selected = target();
+    const res = await fetch(urlFor('/api/sample-fixture/publisher-context', selected), {
+      headers: { Authorization: `Bearer ${selected!.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      publisherRuntimePresent: runtimePresent,
+      publisherAvailability: availability,
+      runtimeAliasMatchesCanonical: true,
+      availabilityAliasMatchesCanonical: true,
+    });
+  });
+
   it('echo plugin handles POST /api/sample-fixture/echo with the request body', async () => {
     const res = await fetch(urlFor('/api/sample-fixture/echo'), {
       method: 'POST',

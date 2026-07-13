@@ -77,8 +77,25 @@ export interface RandomSamplingStatus {
   enabled: boolean;
   role: AgentRole;
   identityId: string;
+  /**
+   * Additive diagnostic field. Optional so consumers compiled against the
+   * earlier public status shape can keep constructing compatible mocks.
+   * Built-in agent handles always populate it.
+   */
+  disabledReason?: RandomSamplingDisabledReason | null;
   loop: ProverLoopStatus | null;
 }
+
+export type RandomSamplingDisabledReason =
+  | 'not_started'
+  | 'edge_node'
+  | 'no_identity'
+  | 'awaiting_sharding_table'
+  | 'identity_lookup_failed'
+  | 'eligibility_lookup_failed'
+  | 'unsupported_chain'
+  | 'contracts_not_deployed'
+  | 'bind_failed';
 
 /**
  * Handle returned by {@link bindRandomSampling}. The agent owns its
@@ -104,7 +121,11 @@ export async function bindRandomSampling(
   opts: RandomSamplingBindOptions,
 ): Promise<RandomSamplingHandle> {
   if (opts.role !== 'core' || opts.identityId === 0n) {
-    return makeNoopHandle(opts.role, opts.identityId);
+    return makeNoopHandle(
+      opts.role,
+      opts.identityId,
+      opts.role !== 'core' ? 'edge_node' : 'no_identity',
+    );
   }
 
   // Validate the chain adapter has the methods the prover needs.
@@ -123,14 +144,14 @@ export async function bindRandomSampling(
   );
   if (missing.length > 0) {
     opts.log?.warn('rs.bind.missing-methods', { missing });
-    return makeNoopHandle(opts.role, opts.identityId);
+    return makeNoopHandle(opts.role, opts.identityId, 'unsupported_chain');
   }
   const readiness = (opts.chain as { isRandomSamplingReady?: () => boolean }).isRandomSamplingReady;
   if (typeof readiness === 'function' && !readiness.call(opts.chain)) {
     opts.log?.warn('rs.bind.not-deployed', {
       reason: 'RandomSampling/RandomSamplingStorage not resolved on chain adapter',
     });
-    return makeNoopHandle(opts.role, opts.identityId);
+    return makeNoopHandle(opts.role, opts.identityId, 'contracts_not_deployed');
   }
 
   const wal: ProverWal = opts.walPath
@@ -165,12 +186,17 @@ export async function bindRandomSampling(
       enabled: true,
       role: opts.role,
       identityId: opts.identityId.toString(),
+      disabledReason: null,
       loop: loop.getStatus(),
     }),
   };
 }
 
-function makeNoopHandle(role: AgentRole, identityId: bigint): RandomSamplingHandle {
+function makeNoopHandle(
+  role: AgentRole,
+  identityId: bigint,
+  disabledReason: RandomSamplingDisabledReason,
+): RandomSamplingHandle {
   return {
     enabled: false,
     start: () => undefined,
@@ -179,6 +205,7 @@ function makeNoopHandle(role: AgentRole, identityId: bigint): RandomSamplingHand
       enabled: false,
       role,
       identityId: identityId.toString(),
+      disabledReason,
       loop: null,
     }),
   };
