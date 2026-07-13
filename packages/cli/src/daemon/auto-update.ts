@@ -1561,7 +1561,6 @@ export async function performNpmUpdateEdge(
   targetVersion: string,
   currentVersion: string | null,
   log: (msg: string) => void,
-  restartCommand: EdgeRestartCommand = currentEdgeRestartCommand(),
 ): Promise<UpdateStatus> {
   if (_updateInProgress) {
     log("Auto-update (npm-edge): another update is already in progress, skipping");
@@ -1574,7 +1573,12 @@ export async function performNpmUpdateEdge(
     return "failed";
   }
   try {
-    return await _performNpmUpdateInnerEdge(targetVersion, currentVersion, log, restartCommand);
+    return await _performNpmUpdateInnerEdge(
+      targetVersion,
+      currentVersion,
+      log,
+      _autoUpdateIo.edgeRestartCommand(),
+    );
   } finally {
     await releaseUpdateLock();
     _updateInProgress = false;
@@ -1654,29 +1658,7 @@ async function _performNpmUpdateInnerEdge(
 
 type EdgeExec = typeof _autoUpdateIo.exec;
 type EdgeExecFile = typeof _autoUpdateIo.execFile;
-
-/** The exact Node/module command the supervisor will use for the next worker. */
-export interface EdgeRestartCommand {
-  nodeExecutable: string;
-  nodeExecArgv: readonly string[];
-  restartEntryPoint: string;
-}
-
-function currentEdgeRestartCommand(): EdgeRestartCommand {
-  // Edge workers are spawned as `process.execPath + process.execArgv +
-  // resolveDaemonEntryPoint()`. Inside that worker argv[1] is therefore the
-  // concrete module the already-running supervisor will resolve again after
-  // the in-place global install, even when another `dkg` shadows it on PATH.
-  const restartEntryPoint = process.argv[1];
-  if (!restartEntryPoint) {
-    throw new Error('Cannot verify Edge update: current CLI restart entry point is unavailable.');
-  }
-  return {
-    nodeExecutable: process.execPath,
-    nodeExecArgv: process.execArgv,
-    restartEntryPoint,
-  };
-}
+type EdgeRestartCommand = ReturnType<typeof _autoUpdateIo.edgeRestartCommand>;
 
 function globalCliInstallCommand(version: string): string {
   return `npm install -g ${CLI_NPM_PACKAGE}@${version}`;

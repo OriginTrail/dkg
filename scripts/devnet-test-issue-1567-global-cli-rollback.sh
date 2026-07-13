@@ -32,16 +32,17 @@ result="$(
   FAKE_DKG_RESTART_ENTRY="$tmp/restart-entry.mjs" \
   node --input-type=module <<'NODE'
 import { performNpmUpdateEdge } from './packages/cli/dist/daemon/auto-update.js';
+import { _autoUpdateIo } from './packages/cli/dist/daemon/manifest.js';
+_autoUpdateIo.edgeRestartCommand = () => ({
+  nodeExecutable: process.execPath,
+  nodeExecArgv: [],
+  restartEntryPoint: process.env.FAKE_DKG_RESTART_ENTRY,
+});
 const logs = [];
 const result = await performNpmUpdateEdge(
   '10.0.0-rc.1',
   '10.0.0-rc.0',
   (line) => logs.push(line),
-  {
-    nodeExecutable: process.execPath,
-    nodeExecArgv: [],
-    restartEntryPoint: process.env.FAKE_DKG_RESTART_ENTRY,
-  },
 );
 process.stdout.write(JSON.stringify({ result, logs }));
 NODE

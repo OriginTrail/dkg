@@ -234,6 +234,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       operations.push(`${file} ${args.join(' ')}`);
       return Promise.resolve({ stdout: 'dkg 10.0.0-rc.12', stderr: '' });
     }) as any;
+    _autoUpdateIo.edgeRestartCommand = () => restartCommand;
   });
 
   afterEach(() => {
@@ -246,7 +247,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       '10.0.0-rc.11',
       log.fn,
-      restartCommand,
     );
 
     expect(result).toBe('updated');
@@ -269,7 +269,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
 
   it('warns when current version is unknown but still attempts the install', async () => {
     const log = makeLog();
-    const result = await performNpmUpdateEdge('10.0.0-rc.12', null, log.fn, restartCommand);
+    const result = await performNpmUpdateEdge('10.0.0-rc.12', null, log.fn);
 
     expect(result).toBe('updated');
     expect(existsSync(join(dkgHome, 'previous-version'))).toBe(false);
@@ -285,7 +285,7 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
     }) as any;
 
     const log = makeLog();
-    const result = await performNpmUpdateEdge('99.99.99', '10.0.0-rc.11', log.fn, restartCommand);
+    const result = await performNpmUpdateEdge('99.99.99', '10.0.0-rc.11', log.fn);
 
     expect(result).toBe('failed');
     expect(log.calls.some((m) => m.includes('npm install -g failed'))).toBe(true);
@@ -310,7 +310,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       '10.0.0-rc.11',
       log.fn,
-      restartCommand,
     );
     expect(result).toBe('failed');
     const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
@@ -339,7 +338,6 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.1',
       '10.0.0-rc.0',
       log.fn,
-      restartCommand,
     );
     expect(result).toBe('failed');
     const restartProbe = `${restartCommand.nodeExecutable} ${restartCommand.nodeExecArgv.join(' ')} ${restartCommand.restartEntryPoint} --version`;
@@ -364,12 +362,25 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
       '10.0.0-rc.12',
       '10.0.0-rc.11',
       log.fn,
-      restartCommand,
     );
 
     expect(result).toBe('failed');
     expect(log.calls.some((m) => m.includes('EACCES'))).toBe(true);
     expect(log.calls.some((m) => m.includes('npm config set prefix'))).toBe(true);
+  });
+
+  it('derives the default self-check from the current Node process command', async () => {
+    _autoUpdateIo.edgeRestartCommand = origIo.edgeRestartCommand;
+    const log = makeLog();
+
+    const result = await performNpmUpdateEdge('10.0.0-rc.12', '10.0.0-rc.11', log.fn);
+
+    expect(result).toBe('updated');
+    expect(execFileCalls).toEqual([{
+      file: process.execPath,
+      args: [...process.execArgv, process.argv[1], '--version'],
+      opts: { encoding: 'utf-8', timeout: 30_000 },
+    }]);
   });
 
   // Concurrent-update locking is exercised by the existing
