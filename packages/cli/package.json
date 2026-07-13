@@ -39,7 +39,6 @@
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-epcis": "workspace:*",
-    "@iarna/toml": "^2.2.5",
     "@origintrail-official/dkg-mcp": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",

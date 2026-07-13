@@ -625,6 +625,7 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
+  "drag": { "networkServing": true, "reasoning": true },
   ${swm_sync_block}
   "publisher": {
     "enabled": true,

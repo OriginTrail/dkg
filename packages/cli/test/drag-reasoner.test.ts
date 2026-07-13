@@ -70,7 +70,7 @@ describe('DragReasoner — EYE over verified facts', () => {
     const affected = concl('affectedBy').map((d) => d.conclusion.subject);
     expect(affected).toEqual(expect.arrayContaining([iri('validateToken'), iri('handleAuth'), iri('apiGateway')]));
 
-    // PROOF-CARRYING: D1's violation cites the body facts (all verified), and the
+    // EVIDENCE-CARRYING: D1's violation cites relevant verified facts, and the
     // support is drawn from the real input citations (not fabricated).
     const d1 = concl('violatesReviewPolicy').find((d) => d.conclusion.subject === iri('D1'))!;
     const supportKas = d1.support.map((c) => (c as unknown as { kaId: string }).kaId);

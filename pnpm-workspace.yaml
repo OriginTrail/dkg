@@ -11,6 +11,8 @@ packages:
   - "devnet/v10-stress"
   - "devnet/conviction-emission-bell"
   - "devnet/rfc51-publishing-allocation"
+  - "devnet/drag-reason"
+  - "devnet/drag-v1"
   - "devnet/edge-update-flow"
   - "devnet/greenfield-10min"
   - "devnet/mixed-version"

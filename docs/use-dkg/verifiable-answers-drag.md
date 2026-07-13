@@ -3,7 +3,7 @@
 dRAG (OT-RFC-55) answers a natural-language question over a context graph and
 returns **grounded, individually verifiable citations** — every fact comes with
 a proof that it is really published on the DKG (V10 Merkle inclusion + the
-on-chain root + the author's EIP-712 seal). No LLM is required to produce the
+live on-chain root/author, plus an EIP-712 seal when available). No LLM is required to produce the
 answer; an LLM is an optional synthesis layer on top of facts that are already
 proven.
 
@@ -31,16 +31,18 @@ Response:
   "answer": "…a short grounded digest…",
   "facts":   [{ "subject": "...", "predicate": "...", "object": "..." }],
   "citations": [{ "triple": {...}, "kaId": "...", "proof": {...}, "checks": { "verified": true } }],
-  "stats": { "retrieval": "vector:Xenova/all-MiniLM-L6-v2", "factsCited": 7, "citationsVerified": 7 },
+  "stats": { "retrieval": "vector:Xenova/all-MiniLM-L6-v2", "factsCited": 7, "verified": 7 },
   "perNode": [ /* present for scope:network */ ]
 }
 ```
 
-Each citation is **independently auditable** — `verifyCitationProof(citation)`
-(exported from `@origintrail-official/dkg-core`) recomputes the Merkle root from
-the triple and checks it against the chain. In `scope:network`, the asking node
-re-verifies every remote citation against its **own** view of the chain before
-returning it, so you never trust the serving node.
+Each citation is **independently auditable**. `verifyCitationProof(citation)`
+(exported from `@origintrail-official/dkg-core`) recomputes the carried Merkle
+root from the triple and proof; a complete verifier must also read the KA's
+current root, leaf count, and author from the chain. The agent does all of those
+live reads before setting `checks.verified`. In `scope:network`, the asking node
+also proves the graph is currently public, checks each KA belongs to the exact
+requested graph, and re-verifies the citation against its **own** chain view.
 
 Agents reach the same capability through the **`dkg_answer`** MCP tool (same
 `scope` / `retrieval` parameters).
@@ -49,8 +51,8 @@ Agents reach the same capability through the **`dkg_answer`** MCP tool (same
 
 | `retrieval` | What it does | When to use |
 |-------------|--------------|-------------|
-| `keyword` | Substring match over literals. Predictable, zero-dependency, but misses paraphrases. | Exact terms, codes, IDs. |
-| `semantic` | Embeds the question and ANN-searches the CG's entities by **meaning**, then graph-expands one hop. Finds facts that never use the question's words. | Discovery, fuzzy questions, real prose. |
+| `keyword` | Uses literal substring matches to select entities, then returns a bounded set of those entities' attribute and relationship facts. Predictable and zero-dependency, but misses paraphrases. | Exact terms, codes, IDs. |
+| `semantic` | Embeds the question and vector-searches the CG's entities by **meaning**, then graph-expands one hop. Finds facts that never use the question's words. | Discovery, fuzzy questions, real prose. |
 | `default` | The node's configured embedder (`config.drag.embedder`); keyword if none. | Let the operator decide. |
 
 `semantic` resolves a model **hard**: it uses the configured embedder if it is
@@ -97,13 +99,20 @@ The `DKG_DRAG_EMBEDDER` environment variable overrides `config.drag.embedder`
 for quick experiments. `hashing` is a zero-dependency lexical baseline kept as a
 contrast control for testing — not for production.
 
+Private context graphs use keyword retrieval and reject synthesis/semantic
+requests by default, so graph text cannot silently leave the node through a
+configured model endpoint. An operator who has reviewed that endpoint (for
+example a loopback Ollama instance) can opt in with
+`drag.allowPrivateModelCalls: true`.
+
 ## Payments (off by default)
 
-Answers are **free** unless you enable `config.drag.payments.enabled`. The x402
-wire format (`402 → X-PAYMENT → 200 + receipt`) and a pluggable
-`PaymentVerifier` are wired so monetization is one swap away; real per-CG pricing
-and the live facilitator are deferred. The `simulatePrice` request knob is a
-dev/test affordance honoured only under `config.drag.experimentalOverrides`.
+Answers are **free** unless you enable `config.drag.payments.enabled`. V1 has a
+replay-safe, request-bound `402 → X-PAYMENT → 200` development seam with a
+bounded single-use challenge store. Its bundled verifier produces a synthetic
+receipt; it does **not** settle funds. Production monetization still requires a
+real facilitator/verifier and pricing policy. The `simulatePrice` request knob
+is a dev/test affordance honoured only under `config.drag.experimentalOverrides`.
 
 ## Grounded synthesis (optional)
 
@@ -119,20 +128,23 @@ falls back to the structured digest. Default off.
 
 - `GET /api/answer/metrics` — in-process counters: `answersServed`, `byMode`
   (keyword/semantic/network), `citationsVerified`, `retrievalDegraded`,
-  `synthesized`.
+  `synthesized`, `reasoned`.
 - Each answer carries `stats.latencyMs`.
+- Network answers also carry `scopeVerified`, `rejected`, `notEvaluated`, and
+  `peersSkipped`, so consumers can distinguish verified facts from complete
+  network coverage.
 - `stats.retrievalDegraded: true` means semantic retrieval was requested but **no
   embedding model was reachable** — an actionable signal that is distinct from a
   genuine "no matches" empty result. Configure `config.drag.embedder` to fix it.
 
-## Reasoning — derive proof-carrying conclusions (EYE)
+## Reasoning — derive conclusions with verified evidence (EYE)
 
-`retrieve → verify → **reason** → prove`. With `"reason": true`, dRAG runs the
+`retrieve → verify → **reason** → derive`. With `"reason": true`, dRAG runs the
 **EYE** N3 reasoner (`eyereasoner`, in-process WebAssembly — an optional
 dependency) over the context graph's **verified** facts, applying N3 rules to
 **derive new conclusions** — the things vectors and SPARQL can't do: **negation**
 (`log:notIncludes` / `collectAllIn`), **transitive inference**, and conditional /
-policy logic — with an **auditable derivation** an LLM cannot give you.
+policy logic — with auditable, verified supporting facts.
 
 ```jsonc
 "reasoning": {
@@ -140,8 +152,8 @@ policy logic — with an **auditable derivation** an LLM cannot give you.
   "rules": [{ "kaId": "...", "checks": { "verified": true } }],   // rules are themselves verifiable KAs
   "derived": [
     { "conclusion": { "subject": "...D1", "predicate": "...violatesReviewPolicy", "object": "\"true\"" },
-      "proof": { "rule": "{ … } => { … } .",
-                 "support": [ /* the chain-verified facts the rule fired on */ ] } }
+      "rule": "{ … } => { … } .",
+      "support": [ /* verified, rule-scoped supporting evidence */ ] }
   ]
 }
 ```
@@ -152,26 +164,27 @@ Two invariants make this trustworthy:
    whose merkle/chain/seal citation verified — the trust gate. A bad rule can
    mis-derive, but it can never reason from an unproven fact.
 2. **Derived ≠ published.** Conclusions are returned in `reasoning.derived`,
-   never mixed into `facts`/`citations`. Each derived conclusion is
-   **proof-carrying**: its `support` is the set of chain-verified citations the
-   rule fired on (the proof leaves), plus the rule. So the *whole* answer is
-   auditable — re-check the merkle proofs of the leaves, re-run the rule.
+   never mixed into `facts`/`citations`. `support` is a bounded, rule-scoped set
+   of chain-verified evidence. It is not claimed to be an exact or minimal EYE
+   derivation proof; re-run the rule when that stronger property is required.
 
 **Rules are verifiable too.** A rule is N3; publish it as a KA whose object is the
 rule body under predicate `…/drag/reasoning#ruleN3`, and dRAG auto-discovers it.
-Now **verified facts + verified rules → verifiable derivations** — a conclusion's
-trust decomposes fully into *which facts, which rule, which proof*. Rules may also
+Now **verified facts + verified rules → conclusions with verified supporting
+evidence**. The response identifies the rule and a bounded, rule-scoped evidence
+set; it does not claim that set is the exact or minimal derivation. Rules may also
 be passed per-request (`"rules": "<n3>"`).
 
-**Closed-world caveat.** Negation-as-failure is closed-world — "no senior review
-*in the facts EYE saw*." dRAG reasons over the CG's **complete** verified fact set
-(bounded by `config.drag.reasoningMaxKas`), so for a single CG the negation is
-sound; treat a NAF conclusion as scoped to that fact set.
+**Closed-world caveat.** Negation-as-failure means "no senior review *in the
+facts EYE saw*." The route refuses to run EYE if its KA/fact bounds were hit or
+any graph could not be verified. That prevents silently reasoning over a known
+partial set, but it does not turn one CG into a statement about the whole world.
 
-Reasoning is single-node (`scope:local`), opt-in per request, and disabled with
-`config.drag.reasoning: false`. See `scripts/drag-reason-demo.mjs` for a
+Reasoning is single-node (`scope:local`) and requires both request
+`"reason": true` and explicit operator opt-in `config.drag.reasoning: true`.
+See `scripts/drag-reason-demo.mjs` for a
 multi-agent code-graph example (a change that violates the review policy, derived
-with negation + transitivity, proven).
+with negation + transitivity and accompanied by verified evidence).
 
 **Known limitations (V1).**
 - **Untrusted rules + compute.** Auto-discovered rule-KAs are author-untrusted (any
@@ -180,7 +193,7 @@ with negation + transitivity, proven).
   are hard-capped, but an adversarial rule's *runtime* is not bounded. **Until EYE
   runs in a worker-thread with a hard timeout, set `config.drag.reasoning: false`
   on nodes that expose the API beyond loopback or reason over untrusted public CGs.**
-- **Proof is best-effort.** `support` is a sound set of verified facts in the
+- **Evidence attribution is best-effort.** `support` is a set of verified facts in the
   conclusion's rule-scoped neighbourhood — every leaf is a real chain-verified
   citation (never fabricated), but the *set* may include a sibling-branch fact or
   omit a body fact anchored on a shared object. The exact rule-instance proof
@@ -190,9 +203,9 @@ with negation + transitivity, proven).
 
 1. **Index** (semantic only): each entity in the CG's verifiable memory is
    rendered to a short text signature (label + its facts) and embedded into a
-   per-node SQLite vector store. Indexing is incremental — only new entities are
-   embedded — and warmed right after a publish.
-2. **Retrieve**: the question is embedded and ANN-searched (brute-force cosine;
+   per-node SQLite vector store. Indexing is incremental for newly observed
+   graph/entity pairs and warmed right after a publish.
+2. **Retrieve**: the question is embedded and vector-searched (brute-force cosine;
    fine to ~100k vectors/node — upgrade to `sqlite-vec`/`pgvector` for scale),
    yielding ranked anchor entities, then expanded one hop along the graph.
 3. **Cite**: for each retrieved entity, the matching triples are turned into
@@ -209,8 +222,16 @@ correctness.
   thousands of entities per node; the embedding step (not the search) dominates.
   For larger graphs, swap the `VectorStore` search for `sqlite-vec` (ANN) behind
   the same interface.
-- Cross-node `semantic` requires each serving node to have a model configured;
-  decentralized semantic routing over the public catalog is a later phase.
+- Cross-node serving is explicit operator opt-in (`drag.networkServing: true`),
+  public-only, rate/concurrency bounded, and forces keyword retrieval so an
+  unauthenticated peer cannot trigger model calls or whole-index construction.
+  The asker queries at most 12 serving peers and allocates its verification budget
+  round-robin; `peersSkipped`/`notEvaluated` expose partial coverage. Decentralized
+  semantic routing over the public catalog is a later phase.
+- **Index freshness is entity-count based in V1.** Publishing new facts for an
+  already-indexed graph/entity pair does not yet invalidate its stored embedding.
+  This can reduce recall until the index is rebuilt, but cannot make an unverified
+  fact authoritative because citation verification remains the trust gate.
 - **Retrieval precision is a known limitation.** Retrieval returns a ranked
   top-K (with only a conservative absolute floor, not a tuned similarity cutoff),
   so on small or ambiguous graphs a weakly-related entity can appear among the

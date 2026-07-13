@@ -15,6 +15,7 @@ export interface RegisteredTool {
 
 export interface ToolResult {
   content: Array<{ type: 'text'; text: string }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
 
@@ -130,6 +131,7 @@ export class FakeClient {
   // so tests can assert the EXPLICIT alsoShareSwm value the tool forwarded.
   readonly createKnowledgeAssetCalls: Array<Record<string, unknown>> = [];
   readonly queryCalls: Array<Record<string, unknown>> = [];
+  readonly answerCalls: Array<Parameters<DkgClient['answer']>[0]> = [];
 
   /** Per-layer hits used by memory-search tests. Keys are
    * `${contextGraphId}::${view}`. */
@@ -441,6 +443,14 @@ export class FakeClient {
     const key = `${cgId}::${view}`;
     const bindings = this.memoryFixtures.get(key) ?? [];
     return { bindings };
+  }
+
+  async answer(
+    args: Parameters<DkgClient['answer']>[0],
+  ): Promise<Awaited<ReturnType<DkgClient['answer']>>> {
+    this.answerCalls.push(args);
+    if (this.overrides.answer) return this.overrides.answer.call(this, args);
+    throw new Error('No dRAG answer fixture configured');
   }
 
   async getAgentIdentity() {

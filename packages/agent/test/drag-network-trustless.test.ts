@@ -24,6 +24,7 @@ import type { DKGAgent } from '../src/dkg-agent.js';
 
 const CHAIN_ID = 31337n;
 const KAV10 = '0x0000000000000000000000000000000000000042';
+const KNOWLEDGE_ASSETS = '0x0000000000000000000000000000000000000999';
 const TRIPLES: CitationTriple[] = [
   { subject: 'urn:supplier:northwind', predicate: 'http://schema.org/name', object: '"Northwind Components"' },
   { subject: 'urn:supplier:northwind', predicate: 'http://schema.org/auditStatus', object: '"flagged"' },
@@ -79,7 +80,7 @@ async function buildSignedCitation(
   const seal = await signSeal(wallet, root);
   const citation: VerifiableCitation = {
     ual: 'did:dkg:context-graph:drag-test/0x00/1',
-    kaId: '1',
+    kaId: seal.reservedKaId,
     contextGraphId: '3',
     servingNode: '12D3KooWServer',
     triple: cited,
@@ -118,6 +119,7 @@ function makeAsker(opts: {
 }): DKGAgent {
   return {
     peerId: '12D3KooWAsker',
+    isContextGraphPublicOnChain: async () => true,
     getContextGraphOnChainId: async () => opts.askedCgId.toString(),
     discovery: { findNodesServingCG: async () => [...opts.remote.keys()] },
     dragAnswerRemote: async (peer: string) => {
@@ -126,6 +128,9 @@ function makeAsker(opts: {
       return r;
     },
     chain: {
+      chainId: `hardhat:${CHAIN_ID}`,
+      getEvmChainId: async () => CHAIN_ID,
+      getDKGKnowledgeAssetsAddress: async () => KNOWLEDGE_ASSETS,
       getLatestMerkleRoot: async () => opts.root,
       getMerkleLeafCount: async () => opts.leafCount,
       getLatestMerkleRootAuthor: async () => opts.author,
@@ -226,6 +231,54 @@ describe('dRAG P3 — trustless aggregation (asker re-verifies, never trusts a p
     expect(res.stats.verified).toBe(1);
   });
 
+  it('normalizes peer-controlled UAL and chain labels from the asker chain', async () => {
+    const wallet = ethers.Wallet.createRandom() as unknown as ethers.Wallet;
+    const { citation, root } = await buildSignedCitation(wallet, 0);
+    const mislabeled: VerifiableCitation = {
+      ...citation,
+      ual: 'did:dkg:attacker/fake/source',
+      onChain: { ...citation.onChain, chainId: '1' },
+    };
+    const asker = makeAsker({
+      remote: new Map([['peerMislabeled', peerResult([mislabeled])]]),
+      root,
+      author: wallet.address,
+      leafCount: citation.proof.leafCount,
+      kaScope: 1n,
+      askedCgId: 1n,
+    });
+
+    const res = await run(asker, ['peerMislabeled']);
+
+    expect(res.citations).toHaveLength(1);
+    expect(res.citations[0].ual).toBe(
+      `did:dkg:hardhat:${CHAIN_ID}/${KNOWLEDGE_ASSETS.toLowerCase()}/${citation.kaId}`,
+    );
+    expect(res.citations[0].onChain.chainId).toBe(CHAIN_ID.toString());
+  });
+
+  it('canonicalizes decimal KA ids before deduplicating facts', async () => {
+    const wallet = ethers.Wallet.createRandom() as unknown as ethers.Wallet;
+    const { citation, root } = await buildSignedCitation(wallet, 0);
+    const leadingZero = { ...citation, kaId: `0${citation.kaId}` };
+    const asker = makeAsker({
+      remote: new Map([
+        ['peerA', peerResult([citation])],
+        ['peerB', peerResult([leadingZero])],
+      ]),
+      root,
+      author: wallet.address,
+      leafCount: citation.proof.leafCount,
+      kaScope: 1n,
+      askedCgId: 1n,
+    });
+
+    const res = await run(asker, ['peerA', 'peerB']);
+
+    expect(res.citations).toHaveLength(1);
+    expect(res.citations[0].kaId).toBe(citation.kaId);
+  });
+
   it('verified facts win the citation cap over an earlier peer\'s unverified junk', async () => {
     const wallet = ethers.Wallet.createRandom() as unknown as ethers.Wallet;
     const { citation, root } = await buildSignedCitation(wallet, 1);
@@ -258,6 +311,38 @@ describe('dRAG P3 — trustless aggregation (asker re-verifies, never trusts a p
     expect(res.citations[0].checks.verified).toBe(true); // verified fact won the single slot
   });
 
+  it('allocates the global verification budget fairly so early peers cannot starve a later honest peer', async () => {
+    const wallet = ethers.Wallet.createRandom() as unknown as ethers.Wallet;
+    const { citation, root } = await buildSignedCitation(wallet, 1);
+    const junk = (peer: number): VerifiableCitation[] => Array.from({ length: 24 }, (_, i) => ({
+      ...citation,
+      triple: { ...citation.triple, object: `"junk-${peer}-${i}"` },
+      checks: { merkle: true, onChain: true, authorSig: true, verified: true },
+    }));
+    const remote = new Map<string, unknown>([
+      ['peerJunk1', peerResult(junk(1))],
+      ['peerJunk2', peerResult(junk(2))],
+      ['peerJunk3', peerResult(junk(3))],
+      ['peerJunk4', peerResult(junk(4))],
+      ['peerHonest', peerResult([citation])],
+    ]);
+    const asker = makeAsker({
+      remote,
+      root,
+      author: wallet.address,
+      leafCount: citation.proof.leafCount,
+      kaScope: 1n,
+      askedCgId: 1n,
+    });
+
+    const res = await run(asker, [...remote.keys()]);
+
+    expect(res.citations).toHaveLength(1);
+    expect(res.citations[0].checks.verified).toBe(true);
+    expect(res.perNode.find((p) => p.peerId === 'peerHonest')?.verified).toBe(1);
+    expect(res.stats.notEvaluated).toBeGreaterThan(0);
+  });
+
   it('rejects a SPARQL-injection contextGraphId before it reaches any SPARQL sink', async () => {
     let sinkCalled = false;
     const asker = {
@@ -283,6 +368,36 @@ describe('dRAG P3 — trustless aggregation (asker re-verifies, never trusts a p
     expect(sinkCalled).toBe(false); // the crafted id never reached getContextGraphOnChainId/findNodesServingCG
     expect(res.citations).toHaveLength(0);
     expect(res.answer).toMatch(/invalid context graph id/i);
+  });
+
+  it('fails closed before fan-out when the asked graph is not proven public', async () => {
+    let fannedOut = false;
+    const asker = {
+      peerId: '12D3KooWAsker',
+      isContextGraphPublicOnChain: async () => false,
+      getContextGraphOnChainId: async () => '1',
+      discovery: { findNodesServingCG: async () => { fannedOut = true; return ['peer']; } },
+      chain: { getKAContextGraphId: async () => 1n },
+    } as unknown as DKGAgent;
+    const res = await run(asker, ['peer']);
+    expect(fannedOut).toBe(false);
+    expect(res.stats.scopeVerified).toBe(false);
+    expect(res.answer).toMatch(/failed closed/i);
+  });
+
+  it('fails closed when KA-to-context-graph membership cannot be checked', async () => {
+    let fannedOut = false;
+    const asker = {
+      peerId: '12D3KooWAsker',
+      isContextGraphPublicOnChain: async () => true,
+      getContextGraphOnChainId: async () => '1',
+      discovery: { findNodesServingCG: async () => { fannedOut = true; return ['peer']; } },
+      chain: {},
+    } as unknown as DKGAgent;
+    const res = await run(asker, ['peer']);
+    expect(fannedOut).toBe(false);
+    expect(res.stats.scopeVerified).toBe(false);
+    expect(res.answer).toMatch(/on-chain identity.*failed closed/i);
   });
 
   it('accepts an honest peer (sanity: a valid in-scope citation verifies true)', async () => {

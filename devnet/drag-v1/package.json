@@ -1,0 +1,12 @@
+{
+  "name": "@origintrail-official/dkg-devnet-drag-v1",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:devnet": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

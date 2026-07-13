@@ -85,7 +85,7 @@ async function buildSignedCitation(
 
   const citation: VerifiableCitation = {
     ual: 'did:dkg:context-graph:drag-test/0x00/1',
-    kaId: '1',
+    kaId: seal.reservedKaId,
     contextGraphId: '3',
     servingNode: '12D3KooWTest',
     triple: cited,
@@ -129,11 +129,11 @@ describe('dRAG citation — EIP-712 author seal', () => {
 });
 
 describe('dRAG citation — verifyVerifiableCitation', () => {
-  it('verifies a well-formed signed citation (offline, carried values)', async () => {
+  it('validates the proof and author seal offline without claiming a chain re-anchor', async () => {
     const wallet = ethers.Wallet.createRandom();
     const { citation } = await buildSignedCitation(wallet as unknown as ethers.Wallet, TRIPLES, 0);
     const checks = await verifyVerifiableCitation(citation);
-    expect(checks).toMatchObject({ merkle: true, authorSig: true, verified: true });
+    expect(checks).toEqual({ merkle: true, onChain: null, authorSig: true, verified: false });
   });
 
   it('verifies against a live chain (re-anchor root + leaf count + author)', async () => {
@@ -174,6 +174,32 @@ describe('dRAG citation — verifyVerifiableCitation', () => {
     expect(checks.verified).toBe(false);
   });
 
+  it('fails authorSig when a valid seal is replayed onto a different KA id', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const { citation, root } = await buildSignedCitation(wallet as unknown as ethers.Wallet, TRIPLES, 0);
+    const wrongKa: VerifiableCitation = { ...citation, kaId: (BigInt(citation.kaId) + 1n).toString() };
+    const checks = await verifyVerifiableCitation(wrongKa, {
+      chain: mockChain(root, wallet.address, citation.proof.leafCount),
+    });
+    expect(checks.authorSig).toBe(false);
+    expect(checks.verified).toBe(false);
+  });
+
+  it('fails the chain verdict when a peer carries a false author for a sealless citation', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const { citation, root } = await buildSignedCitation(wallet as unknown as ethers.Wallet, TRIPLES, 0);
+    const forged: VerifiableCitation = {
+      ...citation,
+      seal: undefined,
+      onChain: { ...citation.onChain, author: '0x000000000000000000000000000000000000dEaD' },
+    };
+    const checks = await verifyVerifiableCitation(forged, {
+      chain: mockChain(root, wallet.address, citation.proof.leafCount),
+    });
+    expect(checks.onChain).toBe(false);
+    expect(checks.verified).toBe(false);
+  });
+
   it('content-binding: a swapped triple object fails merkle even with a valid seal', async () => {
     const wallet = ethers.Wallet.createRandom();
     const { citation } = await buildSignedCitation(wallet as unknown as ethers.Wallet, TRIPLES, 0);
@@ -183,11 +209,13 @@ describe('dRAG citation — verifyVerifiableCitation', () => {
     expect(checks.verified).toBe(false);
   });
 
-  it('falls back to onChain author (authorSig=null) when no seal is present', async () => {
+  it('falls back to the live on-chain author (authorSig=null) when no seal is present', async () => {
     const wallet = ethers.Wallet.createRandom();
-    const { citation } = await buildSignedCitation(wallet as unknown as ethers.Wallet, TRIPLES, 0);
+    const { citation, root } = await buildSignedCitation(wallet as unknown as ethers.Wallet, TRIPLES, 0);
     const sealless: VerifiableCitation = { ...citation, seal: undefined };
-    const checks = await verifyVerifiableCitation(sealless);
+    const checks = await verifyVerifiableCitation(sealless, {
+      chain: mockChain(root, wallet.address, citation.proof.leafCount),
+    });
     expect(checks.authorSig).toBeNull();
     expect(checks.merkle).toBe(true);
     expect(checks.verified).toBe(true); // chain-verified author still trusted

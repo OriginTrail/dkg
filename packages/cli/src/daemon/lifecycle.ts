@@ -1541,6 +1541,7 @@ export async function runDaemonInner(
   const agent = await DKGAgent.create({
     kaNumberAllocator,
     name: config.name,
+    dragNetworkServing: config.drag?.networkServing === true,
     genesisId: network?.genesisId,
     networkIdentity: {
       genesisId: network?.genesisId,
@@ -3090,8 +3091,9 @@ export async function runDaemonInner(
   }
 
   // OT-RFC-55 Phase 1: attach a semantic entry-point retriever to the agent so
-  // dRAG uses embed→ANN→anchor→graph-expand instead of keyword scans (both the
-  // local route AND the network serving handler). Embedder selection
+  // dRAG uses embed→ANN→anchor→graph-expand instead of keyword scans on the
+  // authenticated local route. The opt-in unauthenticated network responder
+  // always forces its bounded keyword path. Embedder selection
   // (config.drag.embedder, overridable by the DKG_DRAG_EMBEDDER env var):
   //   local   → offline MiniLM (needs `npm i @huggingface/transformers`)
   //   openai  → the configured OpenAI-compatible model (e.g. local Ollama)

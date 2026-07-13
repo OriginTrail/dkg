@@ -5,7 +5,8 @@
  * answer over the verifiable-memory of one Context Graph held on THIS node:
  *
  *   question → keyword retrieval over per-KA VM graphs → canonical triples →
- *   a {@link VerifiableCitation} per cited fact (Merkle + on-chain + author seal).
+ *   a {@link VerifiableCitation} per cited fact (Merkle + live chain anchor,
+ *   with an author seal when available).
  *
  * V1 retrieval is KEYWORD/STRUCTURAL — no LLM is required, which is the
  * demoable baseline (LLM synthesis is an optional enhancement, gated on a
@@ -25,6 +26,7 @@ import {
 } from './drag/citation.js';
 import { PROTOCOL_DRAG_ANSWER, validateContextGraphId } from '@origintrail-official/dkg-core';
 import type { VerifiableCitation, CitationTriple, CitationChecks } from '@origintrail-official/dkg-core';
+import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import type { EntityRetriever, RetrievedAnchor } from './drag/retriever.js';
 
 /** Per-KA VM graph: `…/_verifiable_memory/<author>/<number>` → {author, number}. */
@@ -42,7 +44,7 @@ export interface DragFact {
   subject: string;
   predicate: string;
   object: string;
-  /** Index (1-based) of the source KA in the answer's Sources list. */
+  /** Index (1-based) of the source KA in the citation list/UI source cards. */
   source: number;
 }
 
@@ -95,10 +97,34 @@ export interface DragNetworkAnswerResult {
     nodesAnswered: number;
     factsCited: number;
     verified: number;
+    /** The asker proved both public policy and KA -> requested-CG membership. */
+    scopeVerified: boolean;
+    /** Remote citations rejected before they could become answer facts. */
+    rejected: number;
+    /** Remote citations left unexamined because a per-peer/global safety bound was reached. */
+    notEvaluated: number;
+    /** Serving peers not queried because the bounded fan-out was full. */
+    peersSkipped: number;
     /** End-to-end answer latency in ms (set by the route for observability). */
     latencyMs?: number;
   };
 }
+
+export interface GatheredVerifiedFacts {
+  facts: Array<{ triple: CitationTriple; citation: VerifiableCitation }>;
+  /** False whenever a bound was hit or any graph/fact could not be verified. */
+  complete: boolean;
+  graphsSeen: number;
+  graphsSkipped: number;
+  truncated: boolean;
+}
+
+const MAX_FANOUT_PEERS = 12;
+const MAX_CITATIONS_PER_PEER = 24;
+const MAX_TOTAL_VERIFICATIONS = 96;
+const FANOUT_CONCURRENCY = 4;
+const MAX_REMOTE_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_UINT256 = (1n << 256n) - 1n;
 
 /** Extract content keywords from a question (lowercase, drop stopwords + short tokens). */
 export function extractKeywords(question: string): string[] {
@@ -126,28 +152,6 @@ function displayObject(o: string): string {
   if (lit) return lit[1].replace(/\\"/g, '"');
   const iri = o.match(/^<(.+)>$/);
   return iri ? iri[1] : o;
-}
-
-function shortKa(kaId: string): string {
-  // kaId = (author<<96)|number — show author tail + number.
-  try {
-    const v = BigInt(kaId);
-    const author = '0x' + (v >> 96n).toString(16).padStart(40, '0');
-    const number = (v & ((1n << 96n) - 1n)).toString();
-    return `${author.slice(0, 6)}…${author.slice(-4)}/${number}`;
-  } catch {
-    return kaId.slice(0, 12);
-  }
-}
-
-function shortHex(h: string): string {
-  return h.length > 14 ? `${h.slice(0, 8)}…${h.slice(-4)}` : h;
-}
-
-function flag(v: boolean | null): string {
-  if (v === true) return '✓';
-  if (v === false) return '✗';
-  return '~'; // null = trusted-via-chain but not independently re-derived
 }
 
 function objectMatchesKeyword(object: string, keywords: string[]): boolean {
@@ -258,17 +262,24 @@ export class DragMethods extends DKGAgentBase {
       const kwFilter = keywords
         .map((kw) => `CONTAINS(LCASE(STR(?o)), "${kw.replace(/["\\]/g, '')}")`)
         .join(' || ');
-      const sparql = `SELECT DISTINCT ?g WHERE {
+      const sparql = `SELECT DISTINCT ?g ?s WHERE {
         GRAPH ?g { ?s ?p ?o . FILTER(isLiteral(?o)) FILTER(${kwFilter}) }
         FILTER(STRSTARTS(STR(?g), "${vmPrefix}"))
       } LIMIT ${maxKas}`;
       const result = await this.store.query(sparql);
-      const graphs =
+      const matches =
         result.type === 'bindings'
-          ? result.bindings.map((b) => (b['g'] ?? '').replace(/^<|>$/g, '')).filter(Boolean)
+          ? result.bindings
+              .map((b) => ({
+                sourceGraph: (b['g'] ?? '').replace(/^<|>$/g, ''),
+                entityUri: (b['s'] ?? '').replace(/^<|>$/g, ''),
+              }))
+              .filter((x) => x.sourceGraph && x.entityUri)
           : [];
-      if (graphs.length === 0) return empty(`No verifiable facts found for: ${keywords.join(', ')}.`, retrieval);
-      selections = graphs.map((g) => ({ sourceGraph: g }));
+      if (matches.length === 0) return empty(`No verifiable facts found for: ${keywords.join(', ')}.`, retrieval);
+      // A keyword hit selects the entity, not only the matching literal. This
+      // keeps the relationship/"why" facts around that entity in the answer.
+      selections = matches;
     }
 
     // ── Shared citation loop: per KA prepare once, cite the chosen triples. ──
@@ -304,9 +315,14 @@ export class DragMethods extends DKGAgentBase {
         kasMatched++;
       }
       const chosen = sel.entityUri
-        ? prepared.triples.filter((t) => t.subject === sel.entityUri && isLiteralObject(t.object))
+        ? prepared.triples
+            .filter((t) => t.subject === sel.entityUri)
+            .sort((a, b) => Number(objectMatchesKeyword(b.object, keywords)) - Number(objectMatchesKeyword(a.object, keywords)))
         : prepared.triples.filter((t) => objectMatchesKeyword(t.object, keywords));
-      for (const triple of chosen) {
+      // Diversify a bounded answer across matching entities instead of letting
+      // the first large entity consume every citation slot.
+      const perSelectionCap = Math.max(2, Math.ceil(maxCitations / Math.min(selections.length, maxCitations)));
+      for (const triple of chosen.slice(0, perSelectionCap)) {
         if (citations.length >= maxCitations) break;
         const fk = `${kaKey}|${triple.subject}|${triple.predicate}|${triple.object}`;
         if (seenFact.has(fk)) continue;
@@ -316,6 +332,9 @@ export class DragMethods extends DKGAgentBase {
         } catch {
           continue;
         }
+        // Facts/citations are the authoritative API surface. Never let a failed
+        // verification become prose or reach optional synthesis/reasoning.
+        if (!citation.checks.verified) continue;
         seenFact.add(fk);
         let idx = kaIndex.get(citation.kaId);
         if (idx === undefined) {
@@ -328,7 +347,7 @@ export class DragMethods extends DKGAgentBase {
     }
 
     const verified = citations.filter((c) => c.checks.verified).length;
-    const answer = renderAnswer(args.question, facts, citations, kaIndex);
+    const answer = renderAnswer(args.question, facts, kaIndex);
 
     return {
       question: args.question,
@@ -355,11 +374,14 @@ export class DragMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     opts?: { cap?: number; maxTriples?: number },
-  ): Promise<Array<{ triple: CitationTriple; citation: VerifiableCitation }>> {
+  ): Promise<GatheredVerifiedFacts> {
+    const empty = (complete = false): GatheredVerifiedFacts => ({
+      facts: [], complete, graphsSeen: 0, graphsSkipped: 0, truncated: false,
+    });
     const idCheck = validateContextGraphId(contextGraphId);
-    if (!idCheck.valid) return [];
+    if (!idCheck.valid) return empty();
     const onChainIdStr = await this.getContextGraphOnChainId(contextGraphId).catch(() => null);
-    if (!onChainIdStr || !/^\d+$/.test(onChainIdStr) || BigInt(onChainIdStr) === 0n) return [];
+    if (!onChainIdStr || !/^\d+$/.test(onChainIdStr) || BigInt(onChainIdStr) === 0n) return empty();
     const cgOnChainId = BigInt(onChainIdStr);
     const vmPrefix = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/`;
     const cap = Math.max(1, Math.min(opts?.cap ?? 200, 1000));
@@ -368,13 +390,16 @@ export class DragMethods extends DKGAgentBase {
     const maxTriples = Math.max(1, Math.min(opts?.maxTriples ?? 10000, 100000));
 
     const result = await this.store
-      .query(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) } LIMIT ${cap}`)
+      .query(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) } LIMIT ${cap + 1}`)
       .catch(() => null);
+    if (!result || result.type !== 'bindings') return empty();
     const graphs =
       result && result.type === 'bindings'
         ? result.bindings.map((b) => (b['g'] ?? '').replace(/^<|>$/g, '')).filter(Boolean)
         : [];
-    if (graphs.length === 0) return [];
+    if (graphs.length === 0) return empty(true);
+    const graphTruncated = graphs.length > cap;
+    const boundedGraphs = graphs.slice(0, cap);
 
     const chain: CitationChainReads = {
       getLatestMerkleRoot: (kaId) => this.chain.getLatestMerkleRoot!(kaId),
@@ -386,33 +411,44 @@ export class DragMethods extends DKGAgentBase {
 
     const out: Array<{ triple: CitationTriple; citation: VerifiableCitation }> = [];
     const seen = new Set<string>();
-    for (const g of graphs) {
-      if (out.length >= maxTriples) break;
+    let graphsSkipped = 0;
+    let tripleTruncated = false;
+    for (const g of boundedGraphs) {
+      if (out.length >= maxTriples) { tripleTruncated = true; break; }
       const m = g.match(VM_GRAPH_RE);
-      if (!m) continue;
+      if (!m) { graphsSkipped++; continue; }
       const kaId = (BigInt(m[1]) << 96n) | BigInt(m[2]);
       let prepared: PreparedKaCitation;
       try {
         prepared = await prepareKaCitation(deps, { contextGraphId: cgOnChainId, kaId });
       } catch {
+        graphsSkipped++;
         continue; // not anchored / not synced — skip, never fabricate
       }
       for (const triple of prepared.triples) {
-        if (out.length >= maxTriples) break;
+        if (out.length >= maxTriples) { tripleTruncated = true; break; }
         const fk = `${triple.subject}|${triple.predicate}|${triple.object}`;
         if (seen.has(fk)) continue;
         let citation: VerifiableCitation;
         try {
           citation = citeTriple(prepared, triple as CitationTriple);
         } catch {
+          graphsSkipped++;
           continue; // un-citeable (not a real public leaf) — skip
         }
-        if (!citation.checks.verified) continue; // trust gate: reasoning sees verified facts only
+        if (!citation.checks.verified) { graphsSkipped++; continue; } // trust gate
         seen.add(fk);
         out.push({ triple: { subject: triple.subject, predicate: triple.predicate, object: triple.object }, citation });
       }
     }
-    return out;
+    const truncated = graphTruncated || tripleTruncated;
+    return {
+      facts: out,
+      complete: !truncated && graphsSkipped === 0,
+      graphsSeen: boundedGraphs.length,
+      graphsSkipped,
+      truncated,
+    };
   }
 
   /** Attach (or clear) the semantic entry-point retriever used by `dragAnswerLocal`. */
@@ -472,11 +508,13 @@ export class DragMethods extends DKGAgentBase {
         maxKas: args.maxKas,
       }),
     );
-    const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_DRAG_ANSWER, payload);
-    if (!sendResult.delivered) {
-      throw new Error(`dRAG remote to ${peerId.slice(-8)} not delivered (queued): ${sendResult.error ?? 'unknown'}`);
+    // A dRAG answer is owned by this request. Raw request/response avoids
+    // durable outbox retries and retained large responses after the caller left.
+    const response = await this.messenger.sendToPeer(peerId, PROTOCOL_DRAG_ANSWER, payload, { timeoutMs: 15_000 });
+    if (response.byteLength > MAX_REMOTE_RESPONSE_BYTES) {
+      throw new Error(`peer ${peerId.slice(-8)} returned an oversized dRAG response`);
     }
-    const decoded: unknown = JSON.parse(new TextDecoder().decode(sendResult.response));
+    const decoded: unknown = JSON.parse(new TextDecoder().decode(response));
     if (decoded && typeof decoded === 'object' && 'error' in decoded) {
       throw new Error(`peer ${peerId.slice(-8)}: ${String((decoded as { error: unknown }).error)}`);
     }
@@ -531,8 +569,14 @@ export class DragMethods extends DKGAgentBase {
         citations: [],
         facts: [],
         perNode: [],
-        stats: { keywords, servingNodes: 0, nodesAnswered: 0, factsCited: 0, verified: 0 },
+        stats: { keywords, servingNodes: 0, nodesAnswered: 0, factsCited: 0, verified: 0, scopeVerified: false, rejected: 0, notEvaluated: 0, peersSkipped: 0 },
       };
+    }
+    // Cross-node answering is public-only. Re-check the live chain policy on
+    // the asking node too: explicit peers and includeSelf must not bypass it.
+    if (!(await this.isContextGraphPublicOnChain(args.contextGraphId))) {
+      return emptyNetworkResult(args.question, args.contextGraphId, keywords,
+        `Context graph "${args.contextGraphId}" is not proven public on-chain; network answering failed closed.`);
     }
     // Bind the answer to the asked CG: only credit a citation whose KA belongs
     // to THIS on-chain CG — defends the cross-CG scope-swap (a peer could
@@ -540,11 +584,31 @@ export class DragMethods extends DKGAgentBase {
     const askedCgIdStr = await this.getContextGraphOnChainId(args.contextGraphId).catch(() => null);
     const askedCgId =
       askedCgIdStr && /^\d+$/.test(askedCgIdStr) && BigInt(askedCgIdStr) > 0n ? BigInt(askedCgIdStr) : null;
+    if (askedCgId === null || typeof this.chain.getKAContextGraphId !== 'function') {
+      return emptyNetworkResult(args.question, args.contextGraphId, keywords,
+        `Could not prove the requested context graph's on-chain identity; network answering failed closed.`);
+    }
+    const liveChainId = await this.chain.getEvmChainId().catch(() => null);
+    if (liveChainId === null) {
+      return emptyNetworkResult(args.question, args.contextGraphId, keywords,
+        `Could not resolve the live chain identity; network answering failed closed.`);
+    }
+    const knowledgeAssetsAddress = await (
+      this.chain.getDKGKnowledgeAssetsAddress
+        ? this.chain.getDKGKnowledgeAssetsAddress()
+        : this.chain.getKnowledgeAssetsLifecycleAddress()
+    ).catch(() => null);
+    if (!knowledgeAssetsAddress || !/^0x[0-9a-fA-F]{40}$/.test(knowledgeAssetsAddress)) {
+      return emptyNetworkResult(args.question, args.contextGraphId, keywords,
+        `Could not resolve the live Knowledge Assets contract; network answering failed closed.`);
+    }
 
     const discovered = await this.discovery
       .findNodesServingCG(args.contextGraphId)
       .catch((): string[] => []);
-    const allPeers = Array.from(new Set([...discovered, ...(args.peers ?? [])]));
+    // Caller-supplied known serving nodes are intentional and should not be
+    // crowded out by a long/stale discovery list.
+    const allPeers = Array.from(new Set([...(args.peers ?? []), ...discovered]));
     const myPeerId = this.peerId ?? 'local';
     const includeSelf = args.includeSelf ?? allPeers.includes(myPeerId);
     // Cap the fan-out so a caller-supplied peer list can't make this node a
@@ -589,77 +653,102 @@ export class DragMethods extends DKGAgentBase {
     // verdict for the same fact.
     const verdictCache = new Map<string, CitationChecks>();
     const kaScopeCache = new Map<string, boolean>(); // kaId -> belongs to asked CG?
-    // Dedup by fact, keeping the BEST citation per fact (a verified one always
-    // beats an unverified one). The cap is applied AFTER, verified-first, so one
-    // early peer's unverified junk cannot starve honest verified facts out of it.
+    const canonicalUalCache = new Map<string, string>();
+    // Only verified citations enter this map; deduplication and the caller's
+    // output cap happen after the independent trust checks.
     const byFact = new Map<string, VerifiableCitation>();
-    let droppedOffScope = 0;
+    const verifiedByNode = new Array<number>(nodeResults.length).fill(0);
+    const evaluatedByNode = new Array<number>(nodeResults.length).fill(0);
+    type Candidate = { nodeIndex: number; citation: VerifiableCitation };
+    const candidates: Candidate[] = [];
 
-    for (const nr of nodeResults) {
+    // Allocate the global verification budget round-robin. Every responding
+    // peer gets one candidate considered before any peer gets a second, so an
+    // early malicious/stale peer cannot starve a later honest responder.
+    candidateRounds:
+    for (let round = 0; round < MAX_CITATIONS_PER_PEER; round++) {
+      for (let nodeIndex = 0; nodeIndex < nodeResults.length; nodeIndex++) {
+        const citation = nodeResults[nodeIndex].result?.citations[round];
+        if (!citation) continue;
+        if (candidates.length >= MAX_TOTAL_VERIFICATIONS) break candidateRounds;
+        candidates.push({ nodeIndex, citation });
+        evaluatedByNode[nodeIndex]++;
+      }
+    }
+
+    let rejected = 0;
+    for (const { nodeIndex, citation: c } of candidates) {
+      const nr = nodeResults[nodeIndex];
+      try {
+        const canonicalKaId = BigInt(c.kaId).toString();
+        // CG-scope binding — only credit KAs that belong to the asked CG.
+        let inScope = kaScopeCache.get(canonicalKaId);
+        if (inScope === undefined) {
+          const resolvedScope = await this.chain
+            .getKAContextGraphId(BigInt(canonicalKaId))
+            .then((id) => id === askedCgId)
+            .catch(() => false);
+          inScope = resolvedScope === true;
+          kaScopeCache.set(canonicalKaId, inScope);
+        }
+        if (!inScope) {
+          rejected++;
+          continue;
+        }
+
+        const proofKey = JSON.stringify({ k: canonicalKaId, t: c.triple, p: c.proof, o: c.onChain, s: c.seal });
+        let checks = verdictCache.get(proofKey);
+        if (!checks) {
+          checks = await verifyVerifiableCitation(c, { chain }).catch(
+            (): CitationChecks => ({ merkle: false, onChain: false, authorSig: false, verified: false }),
+          );
+          verdictCache.set(proofKey, checks);
+        }
+        if (!checks.verified) {
+          rejected++;
+          continue;
+        }
+
+        let ual = canonicalUalCache.get(canonicalKaId);
+        if (!ual) {
+          ual = buildKnowledgeAssetUal(this.chain.chainId, knowledgeAssetsAddress, BigInt(canonicalKaId));
+          canonicalUalCache.set(canonicalKaId, ual);
+        }
+        verifiedByNode[nodeIndex]++;
+
+        // A valid proof authenticates the fact/root/author, not peer-carried
+        // labels. Rebuild provenance from the asker's chain and requested CG.
+        const recited: VerifiableCitation = {
+          ...c,
+          kaId: canonicalKaId,
+          ual,
+          contextGraphId: askedCgId.toString(),
+          servingNode: nr.peerId,
+          onChain: { ...c.onChain, chainId: liveChainId.toString() },
+          checks,
+        };
+        const factKey = `${canonicalKaId}|${c.triple.subject}|${c.triple.predicate}|${c.triple.object}`;
+        if (!byFact.has(factKey)) byFact.set(factKey, recited);
+      } catch {
+        // Skip a single malformed citation — never let it abort the answer.
+        rejected++;
+      }
+    }
+
+    let notEvaluated = 0;
+    for (let i = 0; i < nodeResults.length; i++) {
+      const nr = nodeResults[i];
       if (nr.error || !nr.result) {
         perNode.push({ peerId: nr.peerId, factsCited: 0, verified: 0, error: nr.error ?? 'no result' });
         continue;
       }
-      let nodeVerified = 0;
-      let processed = 0;
-      for (const c of nr.result.citations) {
-        // Cap per-peer work so one peer's large response can't exhaust the
-        // asker's chain-RPC budget before the dedup gate.
-        if (processed >= MAX_CITATIONS_PER_PEER) break;
-        processed++;
-        try {
-          // CG-scope binding — only credit KAs that belong to the asked CG.
-          if (askedCgId !== null && typeof this.chain.getKAContextGraphId === 'function') {
-            let inScope = kaScopeCache.get(c.kaId);
-            if (inScope === undefined) {
-              inScope = await this.chain
-                .getKAContextGraphId(BigInt(c.kaId))
-                .then((id) => id === askedCgId)
-                .catch(() => false);
-              kaScopeCache.set(c.kaId, inScope);
-            }
-            if (!inScope) {
-              droppedOffScope++;
-              continue;
-            }
-          }
-
-          const proofKey = JSON.stringify({ k: c.kaId, t: c.triple, p: c.proof, o: c.onChain, s: c.seal });
-          let checks = verdictCache.get(proofKey);
-          if (!checks) {
-            checks = await verifyVerifiableCitation(c, { chain }).catch(
-              (): CitationChecks => ({ merkle: false, onChain: false, authorSig: false, verified: false }),
-            );
-            verdictCache.set(proofKey, checks);
-          }
-          if (checks.verified) nodeVerified++;
-
-          // Never trust the remote's contextGraphId/ual for scope — stamp the
-          // asker-derived CG + the asker's own verdict.
-          const recited: VerifiableCitation = {
-            ...c,
-            contextGraphId: askedCgId !== null ? askedCgId.toString() : c.contextGraphId,
-            servingNode: nr.peerId,
-            checks,
-          };
-          const factKey = `${c.kaId}|${c.triple.subject}|${c.triple.predicate}|${c.triple.object}`;
-          const existing = byFact.get(factKey);
-          if (!existing || (!existing.checks.verified && checks.verified)) {
-            byFact.set(factKey, recited);
-          }
-        } catch {
-          // Skip a single malformed citation — never let it abort the answer.
-          continue;
-        }
-      }
-      perNode.push({ peerId: nr.peerId, factsCited: nr.result.citations.length, verified: nodeVerified });
+      notEvaluated += Math.max(0, nr.result.citations.length - evaluatedByNode[i]);
+      perNode.push({ peerId: nr.peerId, factsCited: nr.result.citations.length, verified: verifiedByNode[i] });
     }
 
-    // Verified-first, then truncate to the cap → honest verified facts win the
-    // slot budget over any peer's (deduped) unverified citations.
-    const ranked = [...byFact.values()].sort(
-      (a, b) => Number(b.checks.verified) - Number(a.checks.verified),
-    );
+    // Every entry is independently verified; truncate only after fair evaluation
+    // and fact deduplication.
+    const ranked = [...byFact.values()];
     for (const c of ranked.slice(0, maxCitations)) {
       let idx = kaIndex.get(c.kaId);
       if (idx === undefined) {
@@ -672,15 +761,8 @@ export class DragMethods extends DKGAgentBase {
 
     const verified = citations.filter((c) => c.checks.verified).length;
     const nodesAnswered = perNode.filter((p) => !p.error).length;
-    const answer = renderNetworkAnswer(args.question, facts, citations, kaIndex, perNode, {
-      truncatedPeers,
-      droppedOffScope,
-      // Scope is enforced only when the asker can resolve the CG's on-chain id
-      // (synced network-wide via the ontology system CG). If it cannot, the
-      // facts are still cryptographically verified but their CG provenance is
-      // unconfirmed — surface that rather than failing open silently.
-      scopeEnforced: askedCgId !== null,
-    });
+    const answer = renderNetworkAnswer(args.question, facts, kaIndex, perNode);
+    const servingNodes = new Set([...allPeers, ...(includeSelf ? [myPeerId] : [])]).size;
 
     return {
       question: args.question,
@@ -691,14 +773,28 @@ export class DragMethods extends DKGAgentBase {
       citations,
       facts,
       perNode,
-      stats: { keywords, servingNodes: allPeers.length, nodesAnswered, factsCited: citations.length, verified },
+      stats: {
+        keywords, servingNodes, nodesAnswered,
+        factsCited: citations.length, verified, scopeVerified: true,
+        rejected, notEvaluated,
+        peersSkipped: truncatedPeers,
+      },
     };
   }
 }
 
-const MAX_FANOUT_PEERS = 24;
-const MAX_CITATIONS_PER_PEER = 64;
-const FANOUT_CONCURRENCY = 8;
+function emptyNetworkResult(
+  question: string,
+  contextGraphId: string,
+  keywords: string[],
+  answer: string,
+): DragNetworkAnswerResult {
+  return {
+    question, contextGraphId, scope: 'network', answer, llm: false,
+    citations: [], facts: [], perNode: [],
+    stats: { keywords, servingNodes: 0, nodesAnswered: 0, factsCited: 0, verified: 0, scopeVerified: false, rejected: 0, notEvaluated: 0, peersSkipped: 0 },
+  };
+}
 
 /** Run thunks with a bounded number in flight; preserves input order. Thunks must not throw. */
 async function runWithConcurrency<T>(thunks: Array<() => Promise<T>>, limit: number): Promise<T[]> {
@@ -720,13 +816,37 @@ function isValidCitation(c: unknown): c is VerifiableCitation {
   const t = x.triple as Record<string, unknown> | undefined;
   const p = x.proof as Record<string, unknown> | undefined;
   const oc = x.onChain as Record<string, unknown> | undefined;
+  const checks = x.checks as Record<string, unknown> | undefined;
+  const seal = x.seal as Record<string, unknown> | undefined;
+  const bounded = (value: unknown, max: number): value is string => typeof value === 'string' && value.length <= max;
+  const decimal = (value: unknown): value is string => {
+    if (!bounded(value, 78) || !/^\d+$/.test(value)) return false;
+    try {
+      return BigInt(value) <= MAX_UINT256;
+    } catch {
+      return false;
+    }
+  };
+  const hex32 = (value: unknown): value is string => bounded(value, 66) && /^0x[0-9a-fA-F]{64}$/.test(value);
+  const address = (value: unknown): value is string => bounded(value, 42) && /^0x[0-9a-fA-F]{40}$/.test(value);
+  const validSeal =
+    seal === undefined ||
+    (
+      hex32(seal.merkleRoot) && address(seal.authorAddress) && hex32(seal.r) && hex32(seal.vs) &&
+      typeof seal.schemeVersion === 'number' && Number.isSafeInteger(seal.schemeVersion) && seal.schemeVersion >= 0 &&
+      decimal(seal.chainId) && address(seal.kav10Address) && decimal(seal.reservedKaId)
+    );
   return (
-    typeof x.kaId === 'string' &&
-    !!t && typeof t.subject === 'string' && typeof t.predicate === 'string' && typeof t.object === 'string' &&
-    !!p && typeof p.content === 'string' && typeof p.leaf === 'string' && Array.isArray(p.siblings) &&
-    typeof p.chunkId === 'number' && typeof p.leafCount === 'number' &&
-    !!oc && typeof oc.merkleRoot === 'string' && typeof oc.author === 'string' &&
-    !!x.checks && typeof x.checks === 'object'
+    decimal(x.kaId) && bounded(x.ual, 2_048) && bounded(x.contextGraphId, 128) && bounded(x.servingNode, 256) &&
+    !!t && bounded(t.subject, 65_536) && bounded(t.predicate, 65_536) && bounded(t.object, 65_536) &&
+    !!p && bounded(p.content, 262_144) && hex32(p.leaf) && Array.isArray(p.siblings) && p.siblings.length <= 64 &&
+    p.siblings.every(hex32) && typeof p.chunkId === 'number' && Number.isSafeInteger(p.chunkId) && p.chunkId >= 0 &&
+    typeof p.leafCount === 'number' && Number.isSafeInteger(p.leafCount) && p.leafCount > p.chunkId &&
+    !!oc && hex32(oc.merkleRoot) && address(oc.author) && decimal(oc.chainId) &&
+    !!checks && typeof checks.merkle === 'boolean' &&
+    (typeof checks.onChain === 'boolean' || checks.onChain === null) &&
+    (typeof checks.authorSig === 'boolean' || checks.authorSig === null) &&
+    typeof checks.verified === 'boolean' && validSeal
   );
 }
 
@@ -734,14 +854,18 @@ function isValidCitation(c: unknown): c is VerifiableCitation {
 function isValidDragAnswerResult(d: unknown): d is DragAnswerResult {
   if (!d || typeof d !== 'object') return false;
   const x = d as Record<string, unknown>;
-  return Array.isArray(x.citations) && x.citations.every(isValidCitation);
+  return (
+    x.scope === 'local' &&
+    Array.isArray(x.citations) &&
+    x.citations.length <= MAX_CITATIONS_PER_PEER &&
+    x.citations.every(isValidCitation)
+  );
 }
 
 /** Render a human-readable, audit-flagged answer (no LLM). */
 function renderAnswer(
   question: string,
   facts: DragFact[],
-  citations: VerifiableCitation[],
   kaIndex: Map<string, number>,
 ): string {
   if (facts.length === 0) return `No verifiable facts found for "${question}".`;
@@ -754,11 +878,11 @@ function renderAnswer(
     bySubject.set(f.subject, arr);
   }
 
-  const lines: string[] = [];
-  lines.push(
-    `## Answer\n\nGrounded in ${facts.length} verifiable fact${facts.length === 1 ? '' : 's'} ` +
-      `from ${kaIndex.size} source${kaIndex.size === 1 ? '' : 's'} on this node.\n`,
-  );
+  const lines: string[] = [
+    `Grounded in ${facts.length} verified fact${facts.length === 1 ? '' : 's'} ` +
+      `from ${kaIndex.size} Knowledge Asset${kaIndex.size === 1 ? '' : 's'}.`,
+    '',
+  ];
   for (const [subject, group] of bySubject) {
     lines.push(`**${subject}**`);
     for (const f of group) {
@@ -767,21 +891,9 @@ function renderAnswer(
     lines.push('');
   }
 
-  // One Sources entry per cited KA (citations of the same KA share verdict).
-  lines.push('## Sources');
-  const seenKa = new Set<string>();
-  for (const c of citations) {
-    if (seenKa.has(c.kaId)) continue;
-    seenKa.add(c.kaId);
-    const idx = kaIndex.get(c.kaId);
-    const ch = c.checks;
-    lines.push(
-      `[${idx}] KA ${shortKa(c.kaId)} · cg ${c.contextGraphId} · @${c.servingNode.slice(0, 12)}` +
-        `  ${flag(ch.authorSig)} author-sig  ${flag(ch.merkle)} merkle  ${flag(ch.onChain)} on-chain`,
-    );
-    lines.push(`     UAL: ${c.ual}`);
-    lines.push(`     root: ${shortHex(c.onChain.merkleRoot)}  author: ${c.onChain.author}`);
-  }
+  // Proofs, sources, and node diagnostics stay in their typed fields. Keeping
+  // them out of presentation text prevents UI/MCP consumers from parsing
+  // markdown sentinels as an accidental wire protocol.
   return lines.join('\n');
 }
 
@@ -789,14 +901,8 @@ function renderAnswer(
 function renderNetworkAnswer(
   question: string,
   facts: DragFact[],
-  citations: VerifiableCitation[],
   kaIndex: Map<string, number>,
   perNode: DragPerNode[],
-  notes: { truncatedPeers: number; droppedOffScope: number; scopeEnforced: boolean } = {
-    truncatedPeers: 0,
-    droppedOffScope: 0,
-    scopeEnforced: true,
-  },
 ): string {
   const answered = perNode.filter((p) => !p.error).length;
   if (facts.length === 0) {
@@ -805,27 +911,7 @@ function renderNetworkAnswer(
       `(${answered}/${perNode.length} serving node${perNode.length === 1 ? '' : 's'} answered).`
     );
   }
-  const base = renderAnswer(question, facts, citations, kaIndex);
-  const lines: string[] = ['', '## Network'];
-  lines.push(
-    `Assembled across ${answered} of ${perNode.length} serving node${perNode.length === 1 ? '' : 's'}; ` +
-      `every citation re-verified independently against the chain by this node.`,
-  );
-  for (const p of perNode) {
-    lines.push(
-      p.error
-        ? `- @${p.peerId.slice(0, 12)} — error: ${p.error}`
-        : `- @${p.peerId.slice(0, 12)} — ${p.factsCited} fact${p.factsCited === 1 ? '' : 's'} offered, ${p.verified} verified`,
-    );
-  }
-  if (notes.droppedOffScope > 0) {
-    lines.push(`(${notes.droppedOffScope} citation${notes.droppedOffScope === 1 ? '' : 's'} dropped: KA not in the requested context graph)`);
-  }
-  if (notes.truncatedPeers > 0) {
-    lines.push(`(fan-out capped at ${MAX_FANOUT_PEERS} peers; ${notes.truncatedPeers} additional serving node${notes.truncatedPeers === 1 ? '' : 's'} not queried)`);
-  }
-  if (!notes.scopeEnforced) {
-    lines.push('(⚠ context-graph scope NOT enforced: could not resolve the CG on-chain id — facts are cryptographically verified but their CG provenance is unconfirmed)');
-  }
-  return `${base}\n${lines.join('\n')}`;
+  // Per-node and trust/completeness counters are structured response fields;
+  // consumers render them without scraping prose.
+  return renderAnswer(question, facts, kaIndex);
 }

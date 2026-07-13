@@ -89,6 +89,14 @@ function eqHex(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+function eqDecimalBigInt(a: string, b: bigint | string): boolean {
+  try {
+    return BigInt(a) === BigInt(b);
+  } catch {
+    return false;
+  }
+}
+
 function stripAngle(iri: string): string {
   const m = iri.match(/^<(.+)>$/);
   return m ? m[1] : iri;
@@ -150,6 +158,7 @@ async function loadSealByMerkleRoot(
   store: TripleStore,
   contextGraphName: string,
   contextGraphIdStr: string,
+  kaId: bigint,
   merkleRoot: Uint8Array,
 ): Promise<AssertionSeal | undefined> {
   const rootLexical = bytesToHex0x(merkleRoot).slice(2).toLowerCase(); // xsd:hexBinary lexical (no 0x)
@@ -183,7 +192,13 @@ async function loadSealByMerkleRoot(
       } catch {
         seal = undefined; // partial/corrupt seal — skip, fall back to on-chain author
       }
-      if (seal && eqHex(bytesToHex0x(seal.merkleRoot), bytesToHex0x(merkleRoot))) return seal;
+      if (
+        seal &&
+        seal.reservedKaId === kaId &&
+        eqHex(bytesToHex0x(seal.merkleRoot), bytesToHex0x(merkleRoot))
+      ) {
+        return seal;
+      }
     }
   }
   return undefined;
@@ -247,6 +262,7 @@ export async function prepareKaCitation(
     store,
     kc.contextGraphName,
     contextGraphId.toString(),
+    kaId,
     merkleRoot,
   ).catch(() => undefined);
   if (loaded) {
@@ -258,7 +274,10 @@ export async function prepareKaCitation(
       recovered = '';
     }
     authorSig =
-      isNonZeroAddress(recovered) && eqHex(recovered, author) && eqHex(seal.merkleRoot, bytesToHex0x(merkleRoot));
+      isNonZeroAddress(recovered) &&
+      eqHex(recovered, author) &&
+      eqHex(seal.merkleRoot, bytesToHex0x(merkleRoot)) &&
+      eqDecimalBigInt(seal.reservedKaId, kaId);
   } else {
     authorSig = isNonZeroAddress(author) ? null : false;
   }
@@ -351,7 +370,10 @@ export async function verifyVerifiableCitation(
 ): Promise<CitationChecks> {
   const merkle = verifyCitationProof(citation);
 
-  let onChain: boolean | null = citation.checks.onChain;
+  // Never inherit the producer's self-reported chain verdict. Without a live
+  // chain adapter we can prove only Merkle/content consistency against the
+  // carried root, not that the root/author are actually on-chain.
+  let onChain: boolean | null = null;
   let expectedAuthor = citation.onChain.author;
   if (opts?.chain) {
     const [liveRoot, liveLeafCount, liveAuthor] = await Promise.all([
@@ -362,7 +384,11 @@ export async function verifyVerifiableCitation(
     // Re-anchor BOTH the root and the leaf count to the live chain — the pure
     // verifier checks proof.leafCount against itself (tautological), so the
     // chain read is what actually validates the carried leaf count.
-    onChain = eqHex(bytesToHex0x(liveRoot), citation.onChain.merkleRoot) && liveLeafCount === citation.proof.leafCount;
+    onChain =
+      eqHex(bytesToHex0x(liveRoot), citation.onChain.merkleRoot) &&
+      liveLeafCount === citation.proof.leafCount &&
+      isNonZeroAddress(liveAuthor) &&
+      eqHex(liveAuthor, citation.onChain.author);
     expectedAuthor = liveAuthor;
   }
 
@@ -377,7 +403,8 @@ export async function verifyVerifiableCitation(
     authorSig =
       isNonZeroAddress(recovered) &&
       eqHex(recovered, expectedAuthor) &&
-      eqHex(citation.seal.merkleRoot, citation.onChain.merkleRoot);
+      eqHex(citation.seal.merkleRoot, citation.onChain.merkleRoot) &&
+      eqDecimalBigInt(citation.seal.reservedKaId, citation.kaId);
   } else {
     authorSig = isNonZeroAddress(expectedAuthor) ? null : false;
   }
@@ -386,6 +413,6 @@ export async function verifyVerifiableCitation(
     merkle,
     onChain,
     authorSig,
-    verified: merkle && onChain !== false && authorSig !== false,
+    verified: merkle && onChain === true && authorSig !== false,
   };
 }

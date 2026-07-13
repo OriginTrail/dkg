@@ -106,18 +106,18 @@ sequenceDiagram
 
     par fan-out to each serving peer
         A->>P: PROTOCOL_DRAG_ANSWER {q, cg} (libp2p)
-        Note over P: wire handler validateContextGraphId + public-only gate
-        P->>P: dragAnswerLocal(q, cg)
+        Note over P: operator opt-in + public-only + rate/concurrency gates
+        P->>P: dragAnswerLocal(q, cg, forceKeyword=true)
         P-->>A: DragAnswerResult { citations }
     end
 
-    loop per remote citation — TRUST NO PEER
+    loop citations in round-robin peer order — TRUST NO PEER
         A->>CH: getKAContextGraphId(kaId) — belongs to this CG?
         A->>CH: getLatestMerkleRoot(kaId)
         A->>A: verifyVerifiableCitation vs OWN chain (full-proof verdict key)
         A->>A: byFact dedup, keep the verified one
     end
-    A->>A: verified-first, then cap to maxCitations
+    A->>A: discard every failed/off-scope citation, expose skipped work, then cap
     A-->>R: result + perNode (offered vs verified)
     R-->>U: 200 {answer, citations, perNode}
 ```
@@ -127,9 +127,10 @@ sequenceDiagram
   every citation with its *own* `verifyVerifiableCitation` result.
 - The CG-scope check (`getKAContextGraphId`) drops a genuinely-verifiable fact that
   belongs to a *different* CG (the scope-swap defense).
-- The verdict cache is keyed on the **full proof**, and the citation cap is filled
-  **verified-first**, so one malicious/early peer can neither poison an honest
-  verdict nor starve honest verified facts out of the answer.
+- The verdict cache is keyed on the **full proof**, and the bounded verification
+  budget is allocated round-robin across peers before the output cap is applied.
+  One malicious early peer can therefore neither poison an honest verdict nor
+  consume the budget before later responders are examined.
 
 ---
 
@@ -143,10 +144,11 @@ not apply here.
 
 ---
 
-## 3. Reasoning — `reason:true` (retrieve · verify · **reason** · prove)
+## 3. Reasoning — `reason:true` (retrieve · verify · **reason** · derive)
 
-The EYE reasoner derives *new* conclusions over the verified facts, each carrying a
-proof = {the chain-verified support facts} + {the rule}.
+The EYE reasoner derives *new* conclusions over the verified facts. Each carries
+verified supporting evidence plus the rule; this evidence is not presented as an
+exact or minimal EYE derivation proof.
 
 ```mermaid
 sequenceDiagram
@@ -166,13 +168,17 @@ sequenceDiagram
         A->>CH: getLatestMerkleRoot(kaId)
         A->>A: merkle + on-chain + seal → keep only checks.verified
     end
-    A-->>R: verified facts (+ rule-KAs auto-discovered, verifiable)
+    A-->>R: verified facts + completeness status
+    alt set truncated or any KA/fact skipped
+        R-->>U: reasoning refused (incomplete verified fact set)
+    else complete within configured bounds
     R->>E: n3reasoner(verified facts + rules)
     E-->>R: derived facts (negation / transitivity / policy)
     loop per derived conclusion
-        R->>R: reconstruct proof — match rule-body facts back to their citations
+        R->>R: collect bounded rule-scoped supporting citations
     end
-    R-->>U: { facts, citations, reasoning: { derived: [{conclusion, proof: {rule, support}}] } }
+    R-->>U: { facts, citations, reasoning: { derived: [{conclusion, rule, support}] } }
+    end
 ```
 
 Note the trust gates: only `checks.verified` facts ever reach EYE (step 9), and a

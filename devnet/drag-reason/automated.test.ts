@@ -5,11 +5,13 @@ import { resolve } from 'node:path';
 // dRAG reasoning release-gate suite (OT-RFC-55 + EYE). Requires a live devnet
 // (`./scripts/devnet.sh start 4`) and the optional `eyereasoner` dependency.
 
-const TOKEN = readFileSync(resolve(import.meta.dirname, '../../.devnet/node1/auth.token'), 'utf8')
+const DEVNET_DIR = process.env.DEVNET_DIR ?? resolve(import.meta.dirname, '../../.devnet');
+const API_PORT_BASE = Number(process.env.API_PORT_BASE ?? 9201);
+const TOKEN = readFileSync(resolve(DEVNET_DIR, 'node1/auth.token'), 'utf8')
   .split('\n')
   .filter((l) => l && !l.startsWith('#'))[0]
   .trim();
-const N1 = 'http://127.0.0.1:9201';
+const N1 = `http://127.0.0.1:${API_PORT_BASE}`;
 const CG = `code-reason-${Date.now().toString(36)}`;
 const NS = 'http://ex/code#';
 const RULE_PRED = 'https://ontology.origintrail.io/drag/reasoning#ruleN3';
@@ -109,7 +111,7 @@ beforeAll(async () => {
 const subjectsFor = (pred: string): string[] =>
   (reasoning?.derived ?? []).filter((d: Json) => String(d.conclusion.predicate).endsWith(pred)).map((d: Json) => String(d.conclusion.subject));
 
-describe('dRAG reasoning — EYE derives proof-carrying governance conclusions', () => {
+describe('dRAG reasoning — EYE derives governance conclusions with verified evidence', () => {
   it('derives the review-policy violation via NEGATION: D1 violates, D2 (senior review) does not', (ctx) => {
     if (!reasoningAvailable) ctx.skip(); // optional eyereasoner dep absent → SKIPPED
     const violations = subjectsFor('violatesReviewPolicy');
@@ -117,12 +119,13 @@ describe('dRAG reasoning — EYE derives proof-carrying governance conclusions',
     expect(violations).not.toContain(NS + 'D2');
   });
 
-  it('every derived conclusion is proof-carrying: the support is chain-verified citations', (ctx) => {
+  it('every derived conclusion carries chain-verified supporting citations', (ctx) => {
     if (!reasoningAvailable) ctx.skip();
     const d1 = (reasoning!.derived as Json[]).find((d) => String(d.conclusion.predicate).endsWith('violatesReviewPolicy') && d.conclusion.subject === NS + 'D1')!;
     expect(d1.support.length).toBeGreaterThan(0);
     expect(d1.support.every((c: Json) => c.checks?.verified)).toBe(true);
-    // the proof contains the load-bearing facts (the change + the critical module + the only-standard review)
+    // The bounded evidence neighborhood contains the load-bearing facts here;
+    // it is not claimed to be an exact/minimal EYE derivation proof.
     const proofPreds = d1.support.map((c: Json) => String(c.triple.predicate).split(/[/#]/).pop());
     expect(proofPreds).toEqual(expect.arrayContaining(['changes', 'securityCritical', 'clearance']));
   });

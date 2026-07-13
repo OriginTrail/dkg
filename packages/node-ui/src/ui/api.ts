@@ -76,13 +76,30 @@ export interface DragCitation {
   servingNode: string;
   ual: string;
   triple: { subject: string; predicate: string; object: string };
+  proof: {
+    content: string;
+    leaf: string;
+    siblings: string[];
+    chunkId: number;
+    leafCount: number;
+  };
   onChain: { merkleRoot: string; author: string; chainId: string };
+  seal?: {
+    merkleRoot: string;
+    authorAddress: string;
+    r: string;
+    vs: string;
+    schemeVersion: number;
+    chainId: string;
+    kav10Address: string;
+    reservedKaId: string;
+  };
   checks: { merkle: boolean; onChain: boolean | null; authorSig: boolean | null; verified: boolean };
 }
 
 export interface DragPerNode { peerId: string; factsCited: number; verified: number; error?: string }
 
-/** A conclusion DERIVED by EYE over the verified facts, with its proof (support citations). */
+/** A conclusion derived by EYE with verified supporting citations (not an exact/minimal proof). */
 export interface DragDerived {
   conclusion: { subject: string; predicate: string; object: string };
   rule?: string;
@@ -107,7 +124,19 @@ export interface DragAnswer {
   perNode?: DragPerNode[];
   reasoning?: DragReasoning;
   settlement?: { ok: boolean; asset: string; amount: string; payTo: string; txRef?: string };
-  stats: { keywords: string[]; verified: number; factsCited: number; [k: string]: unknown };
+  stats: {
+    keywords: string[];
+    verified: number;
+    factsCited: number;
+    servingNodes?: number;
+    nodesAnswered?: number;
+    scopeVerified?: boolean;
+    rejected?: number;
+    notEvaluated?: number;
+    peersSkipped?: number;
+    retrieval?: string;
+    [k: string]: unknown;
+  };
 }
 
 export interface DragAnswerRequest {
@@ -116,29 +145,23 @@ export interface DragAnswerRequest {
   scope?: 'local' | 'network';
   /** Retrieval mode (public, local scope): default | keyword | semantic. Omit = node default. */
   retrieval?: 'default' | 'keyword' | 'semantic';
-  /** Run the EYE reasoning tier (local scope): derive proof-carrying conclusions over the verified facts. */
+  /** Run EYE locally and return conclusions with verified supporting evidence. */
   reason?: boolean;
   /** Optional N3 rules to apply (in addition to any verifiable rule-KAs in the CG). */
   rules?: string;
-  /** Demo the x402 paywall: the call performs the 402 → pay → 200 round-trip (only when the node enables payments). */
-  pay?: boolean;
 }
 
-async function rawAnswer(body: unknown, xPayment?: string): Promise<{ status: number; body: any }> {
+async function rawAnswer(body: unknown): Promise<{ status: number; body: any }> {
   const res = await fetch(`${BASE}/api/answer`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(xPayment ? { 'X-PAYMENT': xPayment } : {}) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
   const parsed = await res.json().catch(() => ({}));
   return { status: res.status, body: parsed };
 }
 
-/**
- * Ask a dRAG question. When `pay` is set, exercises the x402 wire format end to
- * end: a first request returns HTTP 402 + a challenge, then we attach an
- * `X-PAYMENT` header and retry to get the answer + a settlement receipt.
- */
+/** Ask a dRAG question through the production answer surface. */
 export async function answerQuestion(req: DragAnswerRequest): Promise<DragAnswer> {
   const base: Record<string, unknown> = { question: req.question, contextGraphId: req.contextGraphId };
   if (req.scope) base.scope = req.scope;
@@ -146,27 +169,9 @@ export async function answerQuestion(req: DragAnswerRequest): Promise<DragAnswer
   if (req.reason) base.reason = true;
   if (req.rules && req.rules.trim()) base.rules = req.rules;
 
-  if (!req.pay) {
-    const { status, body } = await rawAnswer(base);
-    if (status !== 200) throw new HttpError(status, body?.error ?? `HTTP ${status}`, body);
-    return body as DragAnswer;
-  }
-
-  const priced = { ...base, simulatePrice: '0.01 USDC' };
-  const first = await rawAnswer(priced);
-  if (first.status === 200) return first.body as DragAnswer; // node charges nothing
-  if (first.status !== 402 || !first.body?.accepts?.[0]) {
-    throw new HttpError(first.status, first.body?.error ?? `HTTP ${first.status}`, first.body);
-  }
-  const ch = first.body.accepts[0];
-  const xPayment = btoa(JSON.stringify({
-    x402Version: 1, scheme: ch.scheme, network: ch.network, asset: ch.asset,
-    amount: ch.amount, payTo: ch.payTo, nonce: ch.nonce,
-    from: '0xA9e1000000000000000000000000000000DEMO00',
-  }));
-  const paid = await rawAnswer(priced, xPayment);
-  if (paid.status !== 200) throw new HttpError(paid.status, paid.body?.error ?? `HTTP ${paid.status}`, paid.body);
-  return paid.body as DragAnswer;
+  const { status, body } = await rawAnswer(base);
+  if (status !== 200) throw new HttpError(status, body?.error ?? `HTTP ${status}`, body);
+  return body as DragAnswer;
 }
 
 // --- Status ---

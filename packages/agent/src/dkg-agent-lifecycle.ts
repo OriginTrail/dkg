@@ -13,7 +13,7 @@ import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_DRAG_ANSWER, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
-  PROTOCOL_NETWORK_IDENTITY, validateContextGraphId,
+  PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -35,7 +35,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri, RateLimiter,
+  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -426,6 +426,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { createDragRemoteHandler } from './drag/remote-handler.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 type InFlightSyncPageFetch = {
@@ -998,62 +999,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       };
       return queryRemoteHandler.handler(data, peerIdObj);
     });
-    // OT-RFC-55 dRAG (P3): answer a peer's NL question over a PUBLIC context
-    // graph with grounded, verifiable citations. ACL = the SAME on-chain
-    // public gate as query-remote (isContextGraphPublicOnChain, fail-closed),
-    // so a private/curated/unregistered CG is never answered remotely.
-    //
-    // libp2p peers carry no daemon token, so this verb is unauthenticated —
-    // it is therefore (a) per-peer rate limited and (b) bounded to a SMALL
-    // remote-path cost ceiling (the answer body runs a store scan + chain reads
-    // per KA), to deny the amplification-DoS the local path would otherwise expose.
-    const dragAnswerRateLimiter = new RateLimiter({ maxPerWindow: 30, windowMs: 60_000 });
-    const DRAG_REMOTE_MAX_KAS = 15;
-    const DRAG_REMOTE_MAX_CITATIONS = 15;
-    this.messenger.register(PROTOCOL_DRAG_ANSWER, async (data, peerId) => {
-      const encode = (obj: unknown) => new TextEncoder().encode(JSON.stringify(obj));
-      if (peerId && !dragAnswerRateLimiter.allow(peerId)) {
-        return encode({ error: 'dRAG: rate limited' });
-      }
-      let req: { question?: string; contextGraphId?: string; maxCitations?: number; maxKas?: number };
-      try {
-        req = JSON.parse(new TextDecoder().decode(data));
-      } catch {
-        return encode({ error: 'invalid dRAG request payload' });
-      }
-      const question = req.question;
-      const contextGraphId = req.contextGraphId;
-      if (typeof question !== 'string' || !question || typeof contextGraphId !== 'string' || !contextGraphId) {
-        return encode({ error: 'dRAG request requires question + contextGraphId' });
-      }
-      // Validate BEFORE isContextGraphPublicOnChain — it reaches getContextGraphOnChainId,
-      // which interpolates the id into a SPARQL IRI. Without this a remote peer could
-      // inject SPARQL via a crafted contextGraphId even for a non-public/garbage id.
-      const idCheck = validateContextGraphId(contextGraphId);
-      if (!idCheck.valid) {
-        return encode({ error: `dRAG: invalid contextGraphId — ${idCheck.reason ?? 'rejected'}` });
-      }
-      try {
-        const isPublic = await this.isContextGraphPublicOnChain(
-          contextGraphId,
-          createOperationContext('query'),
-        );
-        if (!isPublic) {
-          return encode({ error: `context graph "${contextGraphId}" is not public — dRAG fan-out is public-only in V1` });
-        }
-        const result = await this.dragAnswerLocal({
-          question,
-          contextGraphId,
-          // Clamp the remote path well below the local ceilings (50/100): a peer
-          // pays for an answer, not for an unbounded scan.
-          maxCitations: Math.min(req.maxCitations ?? DRAG_REMOTE_MAX_CITATIONS, DRAG_REMOTE_MAX_CITATIONS),
-          maxKas: Math.min(req.maxKas ?? DRAG_REMOTE_MAX_KAS, DRAG_REMOTE_MAX_KAS),
-        });
-        return encode(result);
-      } catch (e) {
-        return encode({ error: e instanceof Error ? e.message : String(e) });
-      }
-    });
+    // OT-RFC-55 dRAG (P3): raw, request/response-only protocol. It deliberately
+    // bypasses the durable messenger/outbox: an answer is a one-shot response,
+    // so retrying it after the request owner has gone would waste work and retain
+    // large responses in the idempotency DB. Serving is explicit operator opt-in.
+    if (this.config.dragNetworkServing === true) {
+      const dragRemoteHandler = createDragRemoteHandler({
+        isContextGraphPublic: (contextGraphId) =>
+          this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        answerLocal: (request, options) => this.dragAnswerLocal(request, options),
+      });
+      this.router.register(PROTOCOL_DRAG_ANSWER, (data, peerId) =>
+        dragRemoteHandler(data, peerId.toString()));
+    }
     // PROTOCOL_SWM_SENDER_KEY migrated onto the substrate in rc.9 PR-8.
     // messenger.register handles envelope unwrap + receiver dedup
     // before the in-process handleSwmSenderKeyPackage call.

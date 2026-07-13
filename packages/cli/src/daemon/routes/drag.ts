@@ -8,28 +8,29 @@
 //     -> { answer, citations[], facts[], stats, perNode?, settlement? }
 //
 // Every citation is independently auditable against the chain (V10 Merkle
-// inclusion + on-chain root + EIP-712 author seal). Retrieval is `keyword`
+// inclusion + live on-chain root/author, with an EIP-712 seal when available).
+// Retrieval is `keyword`
 // (substring) or `semantic` (embedding ANN over the CG's entities); `default`
 // uses the node's configured embedder (config.drag.embedder).
 //
-// `retrieval` applies to scope:"local". For scope:"network" each serving peer
-// answers with its OWN configured retrieval (a peer can't be forced to load a
-// model), so the caller's `retrieval` choice is not propagated over the wire.
+// `retrieval` applies to scope:"local". Network responders use a bounded
+// keyword path so unauthenticated peers cannot trigger model/index work.
 //
 // PAYMENT (§5.4) is OFF by default (answers are free); enable with
-// config.drag.payments.enabled. The x402 wire format + a pluggable
-// PaymentVerifier are wired so monetization is one swap away.
+// config.drag.payments.enabled. V1's bundled verifier returns synthetic receipts
+// for integration testing; production settlement needs a real facilitator.
 //
 // Dev/test knobs (`embedder`, `simulatePrice`) are honoured ONLY when
 // config.drag.experimentalOverrides is set — they are kept out of the public
 // answer contract.
 
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { RequestContext } from './context.js';
 import type { EntityRetriever } from '@origintrail-official/dkg-agent';
 import { jsonResponse, readBody } from '../http-utils.js';
 import {
   MockPaymentVerifier,
+  InMemoryPaymentChallengeStore,
   parsePrice,
   resolvePayment,
   build402Body,
@@ -41,12 +42,15 @@ import { VectorEntityRetriever } from '../drag-retriever.js';
 import { buildEmbedder, resolveSemanticEmbedder, type EmbedderKind } from '../drag-embedder.js';
 import { synthesizeAnswer } from '../drag-synthesize.js';
 import { DragReasoner, DRAG_RULE_PREDICATE, type ReasoningResult } from '../drag-reasoner.js';
-import type { VerifiableCitation, CitationTriple } from '@origintrail-official/dkg-core';
+import { validateContextGraphId, type VerifiableCitation, type CitationTriple } from '@origintrail-official/dkg-core';
 
-// V1 default verifier. The real Coinbase/USDC facilitator drops in behind this
-// same interface (config-gated) without touching the route.
+// Development verifier only: exercises the request-bound x402 challenge flow
+// but never settles funds.
 const dragPaymentVerifier: PaymentVerifier = new MockPaymentVerifier();
+const dragPaymentChallenges = new InMemoryPaymentChallengeStore();
 const dragReasoner = new DragReasoner();
+const MAX_ANSWER_BODY_BYTES = 96 * 1024;
+const MAX_QUESTION_CHARS = 2_000;
 
 // ── observability: lightweight in-process counters (GET /api/answer/metrics) ──
 const dragMetrics = {
@@ -85,7 +89,7 @@ function resolveRules(
   // RUNTIME; EYE runs in-process and an in-process timeout cannot interrupt the
   // blocking WASM (worker-thread isolation is the planned hardening — see the
   // dRAG guide). Operators exposing the API beyond loopback, or reasoning over
-  // untrusted public CGs, should set `config.drag.reasoning: false`.
+  // untrusted public CGs, should leave the default `config.drag.reasoning: false`.
   const parts: string[] = [];
   const ruleCitations: VerifiableCitation[] = [];
   let bytes = 0;
@@ -94,8 +98,11 @@ function resolveRules(
     if (f.triple.predicate === DRAG_RULE_PREDICATE) {
       const n3 = unquoteLiteral(f.triple.object);
       if (n3) {
-        parts.push(n3);
-        bytes += n3.length;
+        const room = MAX_RULES_BYTES - bytes;
+        if (room <= 0) break;
+        const bounded = n3.slice(0, room);
+        parts.push(bounded);
+        bytes += bounded.length;
         ruleCitations.push(f.citation);
       }
     }
@@ -104,21 +111,28 @@ function resolveRules(
   return { rulesN3: parts.join('\n'), ruleCitations };
 }
 
-// Cache retrievers by embedder model so a model (esp. the local one) loads once.
-const retrieverCache = new Map<string, VectorEntityRetriever>();
+// Cache within one daemon/vector store. A process-global model-only map could
+// accidentally reuse another daemon's triple store or a same-named provider.
+const retrieverCache = new WeakMap<object, Map<string, VectorEntityRetriever>>();
 
 function retrieverFor(embedder: EmbeddingProvider | null, ctx: RequestContext): EntityRetriever | undefined {
   if (!embedder) return undefined;
-  let r = retrieverCache.get(embedder.model);
+  let daemonCache = retrieverCache.get(ctx.vectorStore);
+  if (!daemonCache) {
+    daemonCache = new Map<string, VectorEntityRetriever>();
+    retrieverCache.set(ctx.vectorStore, daemonCache);
+  }
+  const providerKey = embedder.cacheKey ?? `${embedder.constructor.name}:${embedder.model}:${embedder.dimensions}`;
+  let r = daemonCache.get(providerKey);
   if (!r) {
     r = new VectorEntityRetriever(ctx.vectorStore, embedder, ctx.agent.store);
-    retrieverCache.set(embedder.model, r);
+    daemonCache.set(providerKey, r);
   }
   return r;
 }
 
 export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, path, opWallets, config } = ctx;
+  const { req, res, agent, path, opWallets, config, requestAgentAddress } = ctx;
 
   // GET /api/answer/metrics — dRAG observability counters.
   if (req.method === 'GET' && path === '/api/answer/metrics') {
@@ -129,24 +143,129 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
   if (req.method === 'POST' && path === '/api/answer') {
     let parsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(await readBody(req));
+      parsed = JSON.parse(await readBody(req, MAX_ANSWER_BODY_BYTES));
     } catch {
       jsonResponse(res, 400, { error: 'invalid JSON body' });
       return;
     }
     const question = parsed.question;
     const contextGraphId = (parsed.contextGraphId ?? parsed.projectId) as unknown;
-    if (typeof question !== 'string' || !question.trim()) {
-      jsonResponse(res, 400, { error: 'Missing "question"' });
+    if (typeof question !== 'string' || !question.trim() || question.length > MAX_QUESTION_CHARS) {
+      jsonResponse(res, 400, { error: `"question" must be a non-empty string no longer than ${MAX_QUESTION_CHARS} characters` });
       return;
     }
     if (typeof contextGraphId !== 'string' || !contextGraphId) {
       jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "projectId")' });
       return;
     }
+    const contextGraphIdCheck = validateContextGraphId(contextGraphId);
+    if (!contextGraphIdCheck.valid) {
+      jsonResponse(res, 400, { error: `Invalid context graph id: ${contextGraphIdCheck.reason ?? 'rejected'}` });
+      return;
+    }
 
+    const scopeValue = parsed.scope ?? 'local';
+    if (scopeValue !== 'local' && scopeValue !== 'network') {
+      jsonResponse(res, 400, { error: '"scope" must be "local" or "network"' });
+      return;
+    }
+    const scope: 'local' | 'network' = scopeValue;
     const experimental = config.drag?.experimentalOverrides === true;
     const paymentsEnabled = config.drag?.payments?.enabled === true;
+    if (parsed.reason !== undefined && typeof parsed.reason !== 'boolean') {
+      jsonResponse(res, 400, { error: '"reason" must be a boolean' });
+      return;
+    }
+    if (parsed.synthesize !== undefined && typeof parsed.synthesize !== 'boolean') {
+      jsonResponse(res, 400, { error: '"synthesize" must be a boolean' });
+      return;
+    }
+    if (parsed.rules !== undefined && parsed.reason !== true) {
+      jsonResponse(res, 400, { error: '"rules" requires "reason": true' });
+      return;
+    }
+    if (parsed.embedder !== undefined && !experimental) {
+      jsonResponse(res, 400, { error: 'per-request "embedder" requires config.drag.experimentalOverrides=true' });
+      return;
+    }
+    if (parsed.simulatePrice !== undefined && (!experimental || !paymentsEnabled)) {
+      jsonResponse(res, 400, {
+        error: '"simulatePrice" requires experimental overrides and dRAG payments to be enabled',
+      });
+      return;
+    }
+    if (parsed.simulatePrice !== undefined && typeof parsed.simulatePrice !== 'string') {
+      jsonResponse(res, 400, { error: '"simulatePrice" must be a price string such as "0.01 USDC"' });
+      return;
+    }
+    const retrievalValue = parsed.retrieval ?? 'default';
+    if (!['default', 'keyword', 'semantic'].includes(String(retrievalValue))) {
+      jsonResponse(res, 400, { error: '"retrieval" must be "default", "keyword", or "semantic"' });
+      return;
+    }
+    if (scope === 'network' && retrievalValue !== 'default') {
+      jsonResponse(res, 400, { error: '"retrieval" applies only to local scope; network responders use bounded keyword retrieval' });
+      return;
+    }
+    if (scope === 'network' && (parsed.reason === true || parsed.synthesize === true || parsed.rules !== undefined)) {
+      jsonResponse(res, 400, { error: 'reasoning, rules, and synthesis currently require local scope' });
+      return;
+    }
+    const boundedInteger = (value: unknown, max: number): number | undefined | 'invalid' => {
+      if (value === undefined) return undefined;
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > max) return 'invalid';
+      return value;
+    };
+    const requestedMaxCitations = boundedInteger(parsed.maxCitations, 50);
+    const requestedMaxKas = boundedInteger(parsed.maxKas, 100);
+    if (requestedMaxCitations === 'invalid' || requestedMaxKas === 'invalid') {
+      jsonResponse(res, 400, { error: '"maxCitations" must be 1..50 and "maxKas" must be 1..100' });
+      return;
+    }
+    let peers: string[] | undefined;
+    if (parsed.peers !== undefined) {
+      if (scope !== 'network' || !Array.isArray(parsed.peers) || parsed.peers.length > 24 ||
+          parsed.peers.some((p) => typeof p !== 'string' || !p.trim() || p.length > 256)) {
+        jsonResponse(res, 400, { error: '"peers" must be an array of at most 24 bounded peer IDs in network scope' });
+        return;
+      }
+      peers = [...new Set((parsed.peers as string[]).map((peer) => peer.trim()))];
+    }
+    if (parsed.rules !== undefined && (typeof parsed.rules !== 'string' || parsed.rules.length > MAX_RULES_BYTES)) {
+      jsonResponse(res, 400, { error: `"rules" must be a string no larger than ${MAX_RULES_BYTES} bytes` });
+      return;
+    }
+    if (
+      experimental && parsed.embedder !== undefined &&
+      (typeof parsed.embedder !== 'string' || !['keyword', 'hashing', 'local', 'openai'].includes(parsed.embedder))
+    ) {
+      jsonResponse(res, 400, { error: 'experimental "embedder" must be "keyword", "hashing", "local", or "openai"' });
+      return;
+    }
+
+    // dRAG reads the same private VM graphs as query. Enforce the caller's CG
+    // membership before retrieval, model calls, reasoning, or payment.
+    const canRead = await agent.canReadContextGraph(contextGraphId, {
+      callerAgentAddress: requestAgentAddress || undefined,
+    }).catch(() => false);
+    if (!canRead) {
+      jsonResponse(res, 403, { error: `Not authorized to read context graph "${contextGraphId}"` });
+      return;
+    }
+    const privateContextGraph = scope === 'local'
+      ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
+      : false;
+    if (
+      privateContextGraph &&
+      config.drag?.allowPrivateModelCalls !== true &&
+      (retrievalValue === 'semantic' || parsed.synthesize === true ||
+        (experimental && typeof parsed.embedder === 'string' && !['keyword', 'hashing'].includes(parsed.embedder)))
+    ) {
+      jsonResponse(res, 400, {
+        error: 'private context graph model calls are disabled; use keyword retrieval or set config.drag.allowPrivateModelCalls=true',
+      });
+      return;
+    }
 
     // ── payment gate — OFF by default. `simulatePrice` is an experimental knob;
     // real per-CG pricing is deferred, so payment only triggers when both
@@ -164,14 +283,30 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
       }
       const payTo =
         opWallets?.adminWallet?.address ?? opWallets?.wallets?.[0]?.address ?? '0x000000000000000000000000000000000000dEaD';
+      const resourceDigest = createHash('sha256')
+        .update(JSON.stringify({
+          callerAgentAddress: requestAgentAddress,
+          question,
+          contextGraphId,
+          scope,
+          retrieval: retrievalValue,
+          peers,
+          maxCitations: requestedMaxCitations,
+          maxKas: requestedMaxKas,
+          synthesize: parsed.synthesize === true,
+          reason: parsed.reason === true,
+          rules: typeof parsed.rules === 'string' ? parsed.rules : undefined,
+          embedder: experimental && typeof parsed.embedder === 'string' ? parsed.embedder : undefined,
+        }))
+        .digest('hex');
       const pay = await resolvePayment({
         price,
         network: 'base-sepolia',
         payTo,
-        resource: '/api/answer',
-        nonce: randomUUID(),
+        resource: `/api/answer#${resourceDigest}`,
         xPaymentHeader: req.headers['x-payment'],
         verifier: dragPaymentVerifier,
+        challengeStore: dragPaymentChallenges,
       });
       if (pay.kind === 'challenge') {
         jsonResponse(res, 402, { ...build402Body(pay.required), ...(pay.reason ? { reason: pay.reason } : {}) });
@@ -183,7 +318,7 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
     // ── retrieval selection ──
     // Public: retrieval = "default" | "keyword" | "semantic".
     // Experimental (gated): raw `embedder` = "keyword"|"hashing"|"local"|"openai".
-    const retrievalMode = typeof parsed.retrieval === 'string' ? parsed.retrieval : undefined;
+    const retrievalMode = retrievalValue as 'default' | 'keyword' | 'semantic';
     const rawEmbedder = experimental && typeof parsed.embedder === 'string' ? (parsed.embedder as EmbedderKind) : undefined;
     let retriever: EntityRetriever | undefined;
     let forceKeyword = false;
@@ -194,16 +329,20 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
     } else if (retrievalMode === 'semantic') {
       retriever = retrieverFor(resolveSemanticEmbedder(config), ctx);
     } // else "default"/undefined → the agent's attached default (config.drag.embedder)
+    // A private CG with default retrieval must not inherit a node-wide hosted
+    // embedder unless the operator explicitly enabled private model calls.
+    if (privateContextGraph && config.drag?.allowPrivateModelCalls !== true) {
+      retriever = undefined;
+      forceKeyword = true;
+    }
 
     // ── answer ──
     const common = {
       question,
       contextGraphId,
-      maxCitations: typeof parsed.maxCitations === 'number' ? parsed.maxCitations : config.drag?.maxCitations,
-      maxKas: typeof parsed.maxKas === 'number' ? parsed.maxKas : config.drag?.maxKas,
+      maxCitations: requestedMaxCitations ?? config.drag?.maxCitations,
+      maxKas: requestedMaxKas ?? config.drag?.maxKas,
     };
-    const scope = parsed.scope === 'network' ? 'network' : 'local';
-    const peers = Array.isArray(parsed.peers) ? parsed.peers.filter((p): p is string => typeof p === 'string') : undefined;
     const t0 = Date.now();
     try {
       const result =
@@ -215,7 +354,11 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
       // NEVER mutates facts/citations — those stay the authoritative answer.
       let synthesized = false;
       if (parsed.synthesize === true && scope === 'local' && config.llm && result.facts.length > 0) {
-        const prose = await synthesizeAnswer(question, result.facts, config.llm);
+        const verifiedFacts = result.citations
+          .map((citation, index) => ({ citation, index }))
+          .filter(({ citation }) => citation.checks.verified === true)
+          .map(({ citation, index }) => ({ ...citation.triple, source: result.facts[index]?.source ?? index + 1 }));
+        const prose = await synthesizeAnswer(question, verifiedFacts, config.llm);
         if (prose) {
           result.answer = prose;
           result.llm = true;
@@ -224,17 +367,29 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
       }
 
       // ── REASON (opt-in; local scope) — EYE over the CG's VERIFIED facts ──
-      // derive proof-carrying conclusions (negation, transitivity, policy logic).
+      // derive conclusions with verified supporting evidence (negation,
+      // transitivity, policy logic).
       // Kept SEPARATE from result.facts/citations: derived ≠ published.
       let reasoning: ReasoningResult | undefined;
-      if (parsed.reason === true && scope === 'local' && config.drag?.reasoning !== false) {
-        const facts = await agent.gatherVerifiedFacts(contextGraphId, { cap: config.drag?.reasoningMaxKas });
-        const { rulesN3, ruleCitations } = resolveRules(facts, typeof parsed.rules === 'string' ? parsed.rules : undefined);
-        if (rulesN3) {
-          reasoning = await dragReasoner.reason(facts, rulesN3);
-          if (ruleCitations.length) reasoning.rules = ruleCitations;
+      if (parsed.reason === true && scope === 'local') {
+        if (config.drag?.reasoning !== true) {
+          reasoning = { engine: 'eye-js', derived: [], note: 'reasoning is disabled; set config.drag.reasoning=true to opt in' };
         } else {
-          reasoning = { engine: 'eye-js', derived: [], note: 'no rules found — publish a rule KA (predicate ' + DRAG_RULE_PREDICATE + ') or pass `rules` N3' };
+          const gathered = await agent.gatherVerifiedFacts(contextGraphId, { cap: config.drag?.reasoningMaxKas });
+          if (!gathered.complete) {
+            reasoning = {
+              engine: 'eye-js', derived: [],
+              note: `reasoning refused: verified fact set is incomplete (${gathered.graphsSkipped} skipped, truncated=${gathered.truncated})`,
+            };
+          } else {
+            const { rulesN3, ruleCitations } = resolveRules(gathered.facts, typeof parsed.rules === 'string' ? parsed.rules : undefined);
+            if (rulesN3) {
+              reasoning = await dragReasoner.reason(gathered.facts, rulesN3);
+              if (ruleCitations.length) reasoning.rules = ruleCitations;
+            } else {
+              reasoning = { engine: 'eye-js', derived: [], note: 'no rules found — publish a rule KA (predicate ' + DRAG_RULE_PREDICATE + ') or pass `rules` N3' };
+            }
+          }
         }
         dragMetrics.reasoned++;
       }

@@ -16,6 +16,8 @@
     "agent-provenance",
     "conviction-emission-bell",
     "core-peers-features",
+    "drag-reason",
+    "drag-v1",
     "edge-update-flow",
     "greenfield-10min",
     "mixed-version",

@@ -8,11 +8,13 @@ import { verifyCitationProof, type VerifiableCitation } from '../../packages/cor
 // dRAG V1 release-gate integration suite (OT-RFC-55). Requires a live 4-node
 // devnet: `./scripts/devnet.sh start 4`.
 
-const TOKEN = readFileSync(resolve(import.meta.dirname, '../../.devnet/node1/auth.token'), 'utf8')
+const DEVNET_DIR = process.env.DEVNET_DIR ?? resolve(import.meta.dirname, '../../.devnet');
+const API_PORT_BASE = Number(process.env.API_PORT_BASE ?? 9201);
+const TOKEN = readFileSync(resolve(DEVNET_DIR, 'node1/auth.token'), 'utf8')
   .split('\n')
   .filter((l) => l && !l.startsWith('#'))[0]
   .trim();
-const N = (i: number) => `http://127.0.0.1:${9200 + i}`;
+const N = (i: number) => `http://127.0.0.1:${API_PORT_BASE + i - 1}`;
 const CG = `drag-it-${Date.now().toString(36)}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

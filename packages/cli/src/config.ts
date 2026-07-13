@@ -365,6 +365,14 @@ export interface LlmConfig {
 
 /** dRAG (OT-RFC-55) — verifiable answering over context graphs. */
 export interface DragConfig {
+  /** Serve public-CG dRAG requests to remote peers. Explicit opt-in; default false. */
+  networkServing?: boolean;
+  /**
+   * Permit semantic embedding/synthesis over private CG content. Default false:
+   * operators must explicitly accept that a configured model endpoint may see
+   * the question and context-graph entity text used for indexing/synthesis.
+   */
+  allowPrivateModelCalls?: boolean;
   /**
    * Retrieval strategy. `keyword` (default) is a predictable substring match;
    * `local` runs an offline MiniLM model (needs the optional
@@ -387,8 +395,9 @@ export interface DragConfig {
   /** Default cap on cited facts per answer (default 12). */
   maxCitations?: number;
   /**
-   * EYE reasoning tier (retrieve→verify→reason→prove). Runs per-request when an
-   * answer is requested with `reason:true`; set false to disable entirely. Needs
+   * EYE reasoning tier (retrieve→verify→reason→derive). Runs per-request when an
+   * answer is requested with `reason:true`; explicit operator opt-in, default
+   * false. Needs
    * the optional `eyereasoner` dependency + rules (a rule-KA in the CG or request N3).
    */
   reasoning?: boolean;

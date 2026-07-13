@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { MarkdownMessage } from '../components/chat/MarkdownMessage.js';
-import { answerQuestion, type DragAnswer } from '../api.js';
+import { answerQuestion, type DragAnswer, type DragAnswerRequest } from '../api.js';
 import { useProjectsStore } from '../stores/projects.js';
 
 // dRAG Ask panel (OT-RFC-55). Type a question, get a grounded answer where every
 // fact carries a chain-anchored citation; answer on this node or across the
-// network; optionally exercise the x402 paywall.
+// network; optionally derive conclusions over verified facts with EYE.
 
 function Badge({ label, state }: { label: string; state: boolean | null }) {
   const cls = state === true ? 'ok' : state === false ? 'bad' : 'warn';
@@ -49,6 +49,25 @@ function retrievalLabel(r: string): string {
   return r;
 }
 
+export function buildDragAskRequest(input: {
+  question: string;
+  contextGraphId: string;
+  scope: 'local' | 'network';
+  retrieval: '' | 'keyword' | 'semantic';
+  reason: boolean;
+  rules: string;
+}): DragAnswerRequest {
+  const localReasoning = input.scope === 'local' && input.reason;
+  return {
+    question: input.question,
+    contextGraphId: input.contextGraphId.trim(),
+    scope: input.scope,
+    retrieval: input.scope === 'local' ? (input.retrieval || undefined) : undefined,
+    reason: localReasoning,
+    rules: localReasoning ? (input.rules.trim() || undefined) : undefined,
+  };
+}
+
 export function DragAskView() {
   const activeProjectId = useProjectsStore((s) => s.activeProjectId);
   const [question, setQuestion] = useState('Which suppliers were flagged in the 2026 Q1 audit, and why?');
@@ -57,7 +76,6 @@ export function DragAskView() {
   const [retrieval, setRetrieval] = useState<'' | 'keyword' | 'semantic'>(''); // '' = node default
   const [reason, setReason] = useState(false);
   const [rules, setRules] = useState('');
-  const [pay, setPay] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<DragAnswer | null>(null);
@@ -67,15 +85,14 @@ export function DragAskView() {
     setError(null);
     try {
       setResult(
-        await answerQuestion({
+        await answerQuestion(buildDragAskRequest({
           question,
           contextGraphId: cg.trim(),
           scope,
-          pay,
-          retrieval: retrieval || undefined,
-          reason: reason && scope === 'local',
-          rules: rules.trim() || undefined,
-        }),
+          retrieval,
+          reason,
+          rules,
+        })),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -85,10 +102,23 @@ export function DragAskView() {
     }
   };
 
-  // The answer markdown already renders the prose; strip the trailing Sources/
-  // Network sections since we render those as structured cards below.
-  const prose = result ? result.answer.split('\n## Sources')[0].split('\n## Network')[0] : '';
+  // Preserve the daemon's answer verbatim. In particular, do not discard trust,
+  // scope, or network warnings by parsing presentation headings.
+  const answer = result?.answer ?? '';
   const allVerified = !!result && result.stats.factsCited > 0 && result.stats.verified === result.stats.factsCited;
+  const isNetwork = result?.scope === 'network';
+  const servingNodes = Number(result?.stats.servingNodes ?? result?.perNode?.length ?? 0);
+  const nodesAnswered = Number(result?.stats.nodesAnswered ?? result?.perNode?.filter((p) => !p.error).length ?? 0);
+  const rejected = Number(result?.stats.rejected ?? 0);
+  const notEvaluated = Number(result?.stats.notEvaluated ?? 0);
+  const peersSkipped = Number(result?.stats.peersSkipped ?? 0);
+  const networkComplete = !isNetwork || (
+    result?.stats.scopeVerified === true &&
+    nodesAnswered === servingNodes &&
+    notEvaluated === 0 &&
+    peersSkipped === 0
+  );
+  const verdictOk = allVerified && networkComplete;
 
   return (
     <div className="v10-drag-ask">
@@ -103,6 +133,7 @@ export function DragAskView() {
         <textarea
           className="v10-drag-q"
           rows={2}
+          maxLength={2000}
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           placeholder="Ask a question…"
@@ -124,12 +155,13 @@ export function DragAskView() {
             value={retrieval}
             onChange={(e) => setRetrieval(e.target.value as '' | 'keyword' | 'semantic')}
             title="Retrieval method (this node only)"
+            disabled={scope === 'network'}
           >
             <option value="">retrieval: default</option>
             <option value="keyword">keyword (substring)</option>
             <option value="semantic">semantic (by meaning)</option>
           </select>
-          <label className="v10-drag-pay" title={scope === 'network' ? 'reasoning runs on this node only' : 'derive proof-carrying conclusions with EYE'}>
+          <label className="v10-drag-option" title={scope === 'network' ? 'reasoning runs on this node only' : 'derive conclusions with verified supporting evidence'}>
             <input
               type="checkbox"
               checked={reason}
@@ -137,9 +169,6 @@ export function DragAskView() {
               onChange={(e) => setReason(e.target.checked)}
             />{' '}
             🧠 reason (EYE)
-          </label>
-          <label className="v10-drag-pay">
-            <input type="checkbox" checked={pay} onChange={(e) => setPay(e.target.checked)} /> charge 0.01 USDC (x402)
           </label>
           <button
             className="v10-drag-ask-btn"
@@ -164,27 +193,40 @@ export function DragAskView() {
 
       {result && (
         <div className="v10-drag-result">
-          <div className={`v10-drag-verdict ${allVerified ? 'ok' : 'warn'}`}>
-            <span className="mark">{allVerified ? '✓' : '⚠'}</span>
+          <div className={`v10-drag-verdict ${verdictOk ? 'ok' : 'warn'}`}>
+            <span className="mark">{verdictOk ? '✓' : '⚠'}</span>
             <span>
               <strong>{result.stats.verified}/{result.stats.factsCited}</strong> facts verified against the chain
             </span>
             <span className="v10-drag-chip">
-              {result.scope === 'network'
-                ? `network · ${result.perNode?.filter((p) => !p.error).length ?? 0} node(s)`
+              {isNetwork
+                ? `network · ${nodesAnswered}/${servingNodes} node(s)`
                 : 'this node'}
             </span>
             {retrievalLabel(String(result.stats.retrieval ?? '')) && (
               <span className="v10-drag-chip">{retrievalLabel(String(result.stats.retrieval ?? ''))}</span>
             )}
-            {result.settlement?.ok && (
-              <span className="v10-drag-chip paid">paid {result.settlement.amount} {result.settlement.asset} · x402</span>
-            )}
           </div>
 
-          {prose.trim() && (
+          {isNetwork && (
+            <div className={`v10-drag-network-status ${networkComplete ? 'ok' : 'warn'}`}>
+              <Badge label="public scope" state={result.stats.scopeVerified === true} />
+              <span className="v10-drag-chip">{rejected} rejected</span>
+              <span className={`v10-drag-chip ${notEvaluated > 0 ? 'warn' : ''}`}>
+                {notEvaluated} not evaluated
+              </span>
+              <span className={`v10-drag-chip ${peersSkipped > 0 ? 'warn' : ''}`}>
+                {peersSkipped} peers skipped
+              </span>
+              {!networkComplete && (
+                <span className="v10-drag-network-note">Partial network coverage — treat this as verified evidence, not a complete network answer.</span>
+              )}
+            </div>
+          )}
+
+          {answer.trim() && (
             <div className="v10-drag-answer">
-              <MarkdownMessage content={prose} />
+              <MarkdownMessage content={answer} />
             </div>
           )}
 
@@ -212,7 +254,7 @@ export function DragAskView() {
           {result.reasoning && result.reasoning.derived.length > 0 && (
             <div className="v10-drag-reason">
               <div className="v10-drag-cites-title">
-                🧠 Derived · {result.reasoning.derived.length} proof-carrying conclusion{result.reasoning.derived.length === 1 ? '' : 's'}
+                🧠 Derived · {result.reasoning.derived.length} conclusion{result.reasoning.derived.length === 1 ? '' : 's'} with verified supporting evidence
                 <span className="v10-drag-chip">{result.reasoning.engine}</span>
                 {result.reasoning.rules && result.reasoning.rules.length > 0 && (
                   <span className="v10-drag-chip">{result.reasoning.rules.length} verifiable rule{result.reasoning.rules.length === 1 ? '' : 's'}</span>
@@ -224,7 +266,7 @@ export function DragAskView() {
                     <span className="s">{shortPred(d.conclusion.subject)}</span>
                     <span className="p">{shortPred(d.conclusion.predicate)}</span>
                     {term(d.conclusion.object) !== 'true' && <span className="o">{term(d.conclusion.object)}</span>}
-                    <span className="cnt">proof · {d.support.length} fact{d.support.length === 1 ? '' : 's'}</span>
+                    <span className="cnt">evidence · {d.support.length} fact{d.support.length === 1 ? '' : 's'}</span>
                   </summary>
                   <div className="v10-drag-proof">
                     {d.support.map((c, j) => (
@@ -239,7 +281,7 @@ export function DragAskView() {
                 </details>
               ))}
               <div className="v10-drag-reason-foot">
-                derived ≠ published — EYE infers these over <strong>only chain-verified facts</strong>; every proof leaf is itself a verified citation.
+                derived ≠ published — EYE infers these over <strong>only chain-verified facts</strong>. The listed citations are verified supporting evidence, not an exact or minimal derivation proof.
               </div>
             </div>
           )}
@@ -257,12 +299,6 @@ export function DragAskView() {
             </div>
           )}
 
-          {result.settlement && (
-            <div className="v10-drag-receipt">
-              <div className="v10-drag-cites-title">x402 settlement receipt</div>
-              <code>{JSON.stringify(result.settlement)}</code>
-            </div>
-          )}
         </div>
       )}
     </div>

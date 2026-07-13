@@ -26,14 +26,33 @@ export interface QueryResponse {
   phases?: Record<string, number>;
 }
 
-/** A verifiable citation in a dRAG answer (subset surfaced to the MCP layer). */
+/** A complete verifiable citation in a dRAG answer. */
 export interface DragCitation {
   ual: string;
   kaId: string;
   contextGraphId: string;
   servingNode: string;
   triple: { subject: string; predicate: string; object: string };
+  /** Merkle inclusion material required for independent proof verification. */
+  proof: {
+    content: string;
+    leaf: string;
+    siblings: string[];
+    chunkId: number;
+    leafCount: number;
+  };
   onChain: { merkleRoot: string; author: string; chainId: string };
+  /** Optional EIP-712 author seal carried by the source Knowledge Asset. */
+  seal?: {
+    merkleRoot: string;
+    authorAddress: string;
+    r: string;
+    vs: string;
+    schemeVersion: number;
+    chainId: string;
+    kav10Address: string;
+    reservedKaId: string;
+  };
   checks: { merkle: boolean; onChain: boolean | null; authorSig: boolean | null; verified: boolean };
 }
 
@@ -56,6 +75,13 @@ export interface DragAnswerResult {
     kasMatched?: number;
     servingNodes?: number;
     nodesAnswered?: number;
+    scopeVerified?: boolean;
+    rejected?: number;
+    notEvaluated?: number;
+    peersSkipped?: number;
+    retrieval?: string;
+    retrievalDegraded?: boolean;
+    latencyMs?: number;
   };
 }
 
@@ -467,12 +493,13 @@ export class DkgClient {
   }
 
   /**
-   * dRAG single-node grounded answer (OT-RFC-55). Returns a keyword/structural
-   * answer over one Context Graph's verifiable memory, with a verifiable
-   * citation per cited fact. POST /api/answer.
+   * dRAG grounded answer (OT-RFC-55). Returns an answer over one Context
+   * Graph's verifiable memory, with a complete verifiable citation per cited
+   * fact. `scope:"network"` aggregates answers from serving peers. POST
+   * /api/answer.
    *
    * `retrieval` applies to scope:"local"; with scope:"network" each serving peer
-   * uses its own configured retrieval and the caller's choice is not propagated.
+   * uses its bounded keyword responder; the caller's choice is not propagated.
    */
   async answer(args: {
     question: string;

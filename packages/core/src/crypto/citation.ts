@@ -97,7 +97,7 @@ export interface CitationChecks {
    * `null` ⇒ not checked (no seal present, or no secp256k1 recovery available).
    */
   authorSig: boolean | null;
-  /** `merkle && onChain !== false && authorSig !== false`. */
+  /** `merkle && onChain === true && authorSig !== false`. Offline proof checks are never labelled chain-verified. */
   verified: boolean;
 }
 
@@ -106,7 +106,7 @@ export interface CitationChecks {
  * (which holds the KA + a chain adapter); verifiable by anyone.
  */
 export interface VerifiableCitation {
-  /** UAL of the source Knowledge Asset (`did:dkg:context-graph:…`). */
+  /** Canonical on-chain Knowledge Asset UAL (`did:dkg:{chain}/{contract}/{kaId}`). */
   ual: string;
   /** On-chain numeric KA id (packed `reservedKaId`), decimal string. */
   kaId: string;

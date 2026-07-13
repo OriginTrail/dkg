@@ -49,6 +49,8 @@ export interface EmbeddingProvider {
   embed(text: string): Promise<number[]>;
   readonly model: string;
   readonly dimensions: number;
+  /** Process-local identity for safely reusing a retriever/provider instance. */
+  readonly cacheKey?: string;
 }
 
 export class VectorStore {
@@ -251,6 +253,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
 export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
+  readonly cacheKey: string;
   private readonly apiKey: string;
   private readonly baseURL: string;
 
@@ -259,6 +262,7 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     this.model = opts.model ?? 'text-embedding-3-small';
     this.dimensions = opts.dimensions ?? 1536;
     this.baseURL = (opts.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
+    this.cacheKey = `openai:${this.baseURL}:${this.model}:${this.dimensions}`;
   }
 
   async embed(text: string): Promise<number[]> {
@@ -294,8 +298,10 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
 export class HashingEmbeddingProvider implements EmbeddingProvider {
   readonly model = 'hashing-v1';
   readonly dimensions: number;
+  readonly cacheKey: string;
   constructor(dimensions = 256) {
     this.dimensions = dimensions;
+    this.cacheKey = `hashing:${this.model}:${this.dimensions}`;
   }
   async embed(text: string): Promise<number[]> {
     const vec = new Array(this.dimensions).fill(0);
@@ -332,12 +338,14 @@ function djb2(s: string): number {
 export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
+  readonly cacheKey: string;
   private extractor: ((text: string, opts: unknown) => Promise<{ data: ArrayLike<number> }>) | null = null;
   private loading: Promise<void> | null = null;
 
   constructor(opts: { model?: string; dimensions?: number } = {}) {
     this.model = opts.model ?? 'Xenova/all-MiniLM-L6-v2';
     this.dimensions = opts.dimensions ?? 384;
+    this.cacheKey = `local:${this.model}:${this.dimensions}`;
   }
 
   private async ensureLoaded(): Promise<void> {

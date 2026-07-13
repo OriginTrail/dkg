@@ -1,18 +1,18 @@
 // daemon/drag-reasoner.ts
 //
-// dRAG REASONING tier (OT-RFC-55): retrieve → verify → REASON → prove.
+// dRAG REASONING tier (OT-RFC-55): retrieve → verify → REASON → derive.
 //
 // Runs the EYE N3 reasoner (eyereasoner, in-process WebAssembly) over the
 // VERIFIED facts only, applying N3 rules to DERIVE new conclusions — negation
 // (log:collectAllIn / list:length), transitive inference, conditional/policy
-// logic — things vectors and SPARQL cannot do. Each derived conclusion is
-// proof-carrying: its support is the set of chain-verified facts (the rule's
-// body), so the whole answer is auditable.
+// logic — things vectors and SPARQL cannot do. Each derived conclusion carries
+// a bounded rule-scoped neighborhood of chain-verified supporting facts. This
+// evidence is auditable but is not claimed to be an exact/minimal EYE proof.
 //
 // Two invariants:
 //   1. EYE only ever sees VERIFIED facts (the trust gate).
 //   2. Derived conclusions are NEVER citations — they are labelled `derived`
-//      and carry their supporting verified citations as proof. A reasoner can
+//      and carry bounded, verified supporting evidence. A reasoner can
 //      mis-derive (a bad rule), but it can never forge a published fact.
 //
 // eyereasoner is an OPTIONAL dependency, loaded by dynamic import so the base
@@ -22,8 +22,8 @@ import { tripleContentV10, type CitationTriple, type VerifiableCitation } from '
 
 /**
  * Predicate that carries an N3 rule body as a verified literal — so RULES are
- * themselves chain-published, verifiable KAs ("verifiable facts + verifiable
- * rules → verifiable derivations"). A CG's rules are auto-discovered from facts
+ * themselves chain-published, verifiable KAs ("verified facts + verified rules
+ * → conclusions with verified evidence"). A CG's rules are auto-discovered from facts
  * with this predicate.
  */
 export const DRAG_RULE_PREDICATE = 'https://ontology.origintrail.io/drag/reasoning#ruleN3';
@@ -37,14 +37,14 @@ export interface DerivedConclusion {
   conclusion: CitationTriple;
   /** The rule(s) whose head produced this conclusion (best-effort attribution). */
   rule?: string;
-  /** Verified citations for the facts that justify the conclusion (its proof). */
+  /** Verified, rule-scoped supporting evidence; not an exact/minimal proof. */
   support: VerifiableCitation[];
 }
 
 export interface ReasoningResult {
   engine: 'eye-js';
   derived: DerivedConclusion[];
-  /** Provenance of the rules applied — citations for rule-KAs (verifiable rules). */
+  /** Citations for the rule-KAs applied (when rules came from the graph). */
   rules?: VerifiableCitation[];
   /** Set when reasoning could not run (e.g. optional dependency missing, no rules). */
   note?: string;
@@ -90,7 +90,7 @@ function termToObject(term: RdfTerm): string {
 export class DragReasoner {
   /**
    * Reason over `facts` (already verified) with `rulesN3`, returning derived,
-   * proof-carrying conclusions. `neighborhoodDepth` bounds how far the proof
+   * conclusions with verified evidence. `neighborhoodDepth` bounds how far the support
    * traversal follows the rule chain from a conclusion's subject (default 4).
    */
   async reason(
@@ -134,7 +134,7 @@ export class DragReasoner {
       return { engine: 'eye-js', derived: [], note: `reasoning error: ${e instanceof Error ? e.message : String(e)}` };
     }
 
-    // ── 3. each derived quad → a proof-carrying conclusion (bounded) ──
+    // ── 3. each derived quad → a conclusion with bounded verified evidence ──
     const ruleClauses = splitRules(rulesN3);
     const depth = Math.max(1, Math.min(opts?.neighborhoodDepth ?? 4, 8));
     const MAX_DERIVED = 2000;
@@ -159,7 +159,7 @@ export class DragReasoner {
   }
 
   /**
-   * Proof support: verified facts that justify the conclusion under its rule. A
+   * Evidence attribution: verified facts related to the conclusion and rule. A
    * bounded FORWARD traversal from the seed entities (the conclusion's subject,
    * plus its IRI object so an `f affectedBy D1` reaches the justifying
    * `D1 changes f`), keeping ONLY facts whose predicate appears in the rule body
@@ -169,7 +169,7 @@ export class DragReasoner {
    *
    * BEST-EFFORT, not a minimal proof: every returned citation is a REAL verified
    * fact (matched from the INPUT set by canonical N-Triple, never EYE's
-   * re-serialized output — so a leaf is never fabricated), but the SET is a sound
+   * re-serialized output — so a leaf is never fabricated), but the SET is a bounded
    * heuristic — for some rule shapes it can include a sibling-branch fact or omit
    * a body fact anchored on a shared object. The exact rule-instance proof (EYE's
    * justification output) is a planned enhancement; the trust guarantee (real

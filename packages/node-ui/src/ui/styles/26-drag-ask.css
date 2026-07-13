@@ -54,7 +54,7 @@
 }
 .v10-drag-seg button.active { background: var(--bg-active); color: var(--text-primary); font-weight: 600; }
 
-.v10-drag-pay { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.v10-drag-option { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
 
 .v10-drag-ask-btn {
   margin-left: auto;
@@ -104,7 +104,21 @@
   padding: 2px 10px;
   font-size: 11px;
 }
-.v10-drag-chip.paid { border-color: var(--accent-blue); color: var(--text-info); background: rgba(59, 130, 246, 0.1); }
+.v10-drag-chip.warn { color: var(--accent-amber); border-color: rgba(245, 158, 11, 0.45); }
+
+.v10-drag-network-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: -8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+.v10-drag-network-status.warn { border-color: rgba(245, 158, 11, 0.45); }
+.v10-drag-network-note { width: 100%; color: var(--text-secondary); font-size: 11px; }
 
 .v10-drag-answer {
   border: 1px solid var(--border-default);
@@ -165,14 +179,6 @@
   font-family: monospace;
 }
 .v10-drag-node.bad { color: var(--text-danger); border-color: rgba(239, 68, 68, 0.3); }
-
-.v10-drag-receipt {
-  border: 1px solid var(--accent-blue);
-  background: rgba(59, 130, 246, 0.06);
-  border-radius: 8px;
-  padding: 10px 14px;
-}
-.v10-drag-receipt code { font-size: 11px; color: var(--text-info); word-break: break-all; }
 
 /* ── reasoning tier (EYE) ───────────────────────────────────────────────────── */
 .v10-drag-rules {
