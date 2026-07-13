@@ -196,7 +196,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   private readonly onAppend?: (record: ChangeRecord) => void;
   private readonly eraGuard?: ChangelogEraGuard;
 
-  /** Last ALLOCATED seq (0 = none). Next seq is `seq + 1`. */
+  /** Last durably committed seq (0 = none). Next seq is `seq + 1`. */
   private seq = 0;
   /** Log generation id, established (read or minted) on seed. Null until then. */
   private eraValue: string | null = null;
@@ -398,11 +398,15 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
    */
   async changelogHead(options?: QueryOptions): Promise<ChangelogHead> {
     await this.ensureSeeded();
-    const seq = await this.headSeq(options);
-    return { era: this.eraValue as string, seq };
+    // All changelog writes pass through the serialized single-writer path and
+    // advance `seq` only after their marker transaction commits. Once seeded,
+    // this is therefore the authoritative live head; repeating MAX(?seq) for
+    // every sync request only adds an expensive store read under contention.
+    // Keep headSeq() below as the explicit durable diagnostic/restart primitive.
+    return { era: this.eraValue as string, seq: this.seq };
   }
 
-  /** Highest seq durably present in the log (0 if empty). */
+  /** Highest seq durably present in the log (0 if empty); always queries storage. */
   async headSeq(options?: QueryOptions): Promise<number> {
     const res = await this.inner.query(
       `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${CHANGELOG_GRAPH}> { ?e <${P_SEQ}> ?seq } }`,

@@ -35,6 +35,7 @@ function q(subject: string, graph: string, object = '"x"'): Quad {
 /** Delegating TripleStore that records insert() call shapes and can inject failures. */
 class SpyStore implements TripleStore {
   readonly insertCalls: Quad[][] = [];
+  readonly queryCalls: string[] = [];
   failNextInsert = false;
   constructor(private readonly inner: TripleStore) {}
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -48,7 +49,10 @@ class SpyStore implements TripleStore {
   delete(quads: Quad[], options?: QueryOptions) { return this.inner.delete(quads, options); }
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions) { return this.inner.deleteByPattern(pattern, options); }
   deleteBySubjectPrefix(g: string, p: string, options?: QueryOptions) { return this.inner.deleteBySubjectPrefix(g, p, options); }
-  query(sparql: string, options?: QueryOptions): Promise<QueryResult> { return this.inner.query(sparql, options); }
+  query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    this.queryCalls.push(sparql);
+    return this.inner.query(sparql, options);
+  }
   hasGraph(g: string, options?: QueryOptions) { return this.inner.hasGraph(g, options); }
   createGraph(g: string) { return this.inner.createGraph(g); }
   dropGraph(g: string, options?: QueryOptions) { return this.inner.dropGraph(g, options); }
@@ -583,6 +587,26 @@ describe('ChangelogStore — era foundation & reader capability', () => {
     const h2 = await log.changelogHead();
     expect(h2.era).toBe(h1.era); // era is immutable while the log lives
     expect(h2.seq).toBe(2);
+    await base.close();
+  });
+
+  it('serves the seeded live head from memory while headSeq remains a durable diagnostic', async () => {
+    const base = new OxigraphStore();
+    const spy = new SpyStore(base);
+    const log = new ChangelogStore(spy);
+
+    expect((await log.changelogHead()).seq).toBe(0);
+    const durableHeadQueries = () => spy.queryCalls.filter((query) => query.includes('MAX(?seq)')).length;
+    expect(durableHeadQueries()).toBe(1); // one-time restart seed
+
+    await log.insert([q('http://ex.org/a', G1)]);
+    await log.insert([q('http://ex.org/b', G2)]);
+    expect((await log.changelogHead()).seq).toBe(2);
+    expect((await log.changelogHead()).seq).toBe(2);
+    expect(durableHeadQueries()).toBe(1); // no per-request SPARQL aggregation
+
+    expect(await log.headSeq()).toBe(2);
+    expect(durableHeadQueries()).toBe(2); // explicit diagnostic still reads storage
     await base.close();
   });
 
