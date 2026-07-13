@@ -72,7 +72,6 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { requireStorageAdapterBackend } from '../store-backends.js';
 import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
@@ -1577,7 +1576,7 @@ export async function runDaemonInner(
     // operator could not toggle the strip via config (the rung-1 inert-flag bug).
     swmHostMode: config.swmHostMode,
     storeConfig: runtimeStore ? {
-      backend: requireStorageAdapterBackend(runtimeStore.backend),
+      backend: runtimeStore.backend,
       options: runtimeStore.options,
       graphSetIndex: runtimeStore.graphSetIndex,
       // OT-RFC-59: operator opt-in to the append-only change log (default OFF).

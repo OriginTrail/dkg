@@ -18,7 +18,8 @@ export const STORE_BACKENDS = {
     adapter: false,
     retired: false,
     default: true,
-    menu: true,
+    wizard: true,
+    storeFlag: true,
     label: 'oxigraph-server  (managed local server — recommended)',
   },
   oxigraph: {
@@ -26,7 +27,8 @@ export const STORE_BACKENDS = {
     adapter: true,
     retired: false,
     default: false,
-    menu: true,
+    wizard: true,
+    storeFlag: true,
     label: 'oxigraph         (embedded in-memory store — development only)',
   },
   'oxigraph-persistent': {
@@ -34,14 +36,16 @@ export const STORE_BACKENDS = {
     adapter: true,
     retired: false,
     default: false,
-    menu: false,
+    wizard: false,
+    storeFlag: false,
   },
   blazegraph: {
     ...STORAGE_ADAPTERS.blazegraph,
     adapter: true,
     retired: false,
     default: false,
-    menu: true,
+    wizard: true,
+    storeFlag: true,
     label: 'blazegraph       (external SPARQL endpoint)',
   },
   'sparql-http': {
@@ -49,14 +53,16 @@ export const STORE_BACKENDS = {
     adapter: true,
     retired: false,
     default: false,
-    menu: false,
+    wizard: false,
+    storeFlag: true,
   },
   'oxigraph-worker': {
     kind: 'retired',
     adapter: false,
     retired: true,
     default: false,
-    menu: false,
+    wizard: false,
+    storeFlag: false,
   },
 } as const;
 
@@ -68,7 +74,7 @@ export type StoreBackendOfKind<Kind extends StoreBackendKind> = {
     ? Backend
     : never;
 }[StoreBackend];
-export type SupportedStoreBackend = {
+export type ConfigStoreBackend = {
   [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { retired: false }
     ? Backend
     : never;
@@ -83,8 +89,13 @@ export type DefaultStoreBackend = {
     ? Backend
     : never;
 }[StoreBackend];
-export type MenuStoreBackend = {
-  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { menu: true }
+export type WizardStoreBackend = {
+  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { wizard: true }
+    ? Backend
+    : never;
+}[StoreBackend];
+export type StoreFlagBackend = {
+  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { storeFlag: true }
     ? Backend
     : never;
 }[StoreBackend];
@@ -123,9 +134,9 @@ export const MANAGED_DAEMON_STORE_BACKEND: ManagedLocalStoreBackend = requireSin
 export const DEFAULT_STORE_BACKEND = DEFAULT_DAEMON_STORE_BACKEND;
 export const MANAGED_LOCAL_STORE_BACKEND = MANAGED_DAEMON_STORE_BACKEND;
 
-export function supportedBackendNames(): SupportedStoreBackend[] {
+export function configBackendNames(): ConfigStoreBackend[] {
   return storeBackendNames().filter(
-    (backend): backend is SupportedStoreBackend => !STORE_BACKENDS[backend].retired,
+    (backend): backend is ConfigStoreBackend => !STORE_BACKENDS[backend].retired,
   );
 }
 
@@ -135,15 +146,26 @@ export function retiredBackendNames(): RetiredStoreBackend[] {
   );
 }
 
-export function supportedBackendList(separator = ', '): string {
-  return supportedBackendNames().join(separator);
+export function configBackendList(separator = ', '): string {
+  return configBackendNames().join(separator);
 }
 
-export function menuBackendChoices(): MenuStoreBackend[] {
+export function wizardBackendChoices(): WizardStoreBackend[] {
   return storeBackendNames().filter(
-    (backend): backend is MenuStoreBackend =>
-      !STORE_BACKENDS[backend].retired && STORE_BACKENDS[backend].menu,
+    (backend): backend is WizardStoreBackend =>
+      !STORE_BACKENDS[backend].retired && STORE_BACKENDS[backend].wizard,
   );
+}
+
+export function storeFlagBackendNames(): StoreFlagBackend[] {
+  return storeBackendNames().filter(
+    (backend): backend is StoreFlagBackend =>
+      !STORE_BACKENDS[backend].retired && STORE_BACKENDS[backend].storeFlag,
+  );
+}
+
+export function storeFlagBackendList(separator = ', '): string {
+  return storeFlagBackendNames().join(separator);
 }
 
 export function isKnownStoreBackend(
@@ -158,10 +180,18 @@ export function getStoreBackendPolicy(
   return isKnownStoreBackend(backend) ? STORE_BACKENDS[backend] : undefined;
 }
 
-export function isSupportedStoreBackend(
+export function isConfigStoreBackend(
   backend: string | undefined | null,
-): backend is SupportedStoreBackend {
+): backend is ConfigStoreBackend {
   return isKnownStoreBackend(backend) && !STORE_BACKENDS[backend].retired;
+}
+
+export function isStoreFlagBackend(
+  backend: string | undefined | null,
+): backend is StoreFlagBackend {
+  return isKnownStoreBackend(backend)
+    && !STORE_BACKENDS[backend].retired
+    && STORE_BACKENDS[backend].storeFlag;
 }
 
 export function isRetiredStoreBackend(

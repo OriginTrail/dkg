@@ -12,12 +12,13 @@ import {
   DEFAULT_DAEMON_STORE_BACKEND,
   MANAGED_DAEMON_STORE_BACKEND,
   STORE_BACKENDS,
+  configBackendNames,
   isManagedLocalBackend,
   isRetiredStoreBackend,
-  menuBackendChoices,
   requireStorageAdapterBackend,
+  storeFlagBackendNames,
   storeBackendNames,
-  supportedBackendNames,
+  wizardBackendChoices,
   type StoreBackend,
 } from '../src/store-backends.js';
 import { checkExternalStoreReachable } from '../src/daemon/store-health-check.js';
@@ -40,18 +41,20 @@ function configForBackend(backend: StoreBackend): DkgConfig {
 
 describe('canonical store backend taxonomy', () => {
   it('drives config validation and wizard discovery for every registered backend', () => {
-    const supported = supportedBackendNames();
-    const menu = menuBackendChoices();
+    const configBackends = configBackendNames();
+    const wizardBackends = wizardBackendChoices();
+    const flagBackends = storeFlagBackendNames();
 
     for (const backend of storeBackendNames()) {
       const policy = STORE_BACKENDS[backend];
       const errors = validateStoreConfig(configForBackend(backend));
 
-      expect((supported as readonly StoreBackend[]).includes(backend), backend).toBe(!policy.retired);
-      expect((menu as readonly StoreBackend[]).includes(backend), backend).toBe(!policy.retired && policy.menu);
+      expect((configBackends as readonly StoreBackend[]).includes(backend), backend).toBe(!policy.retired);
+      expect((wizardBackends as readonly StoreBackend[]).includes(backend), backend).toBe(!policy.retired && policy.wizard);
+      expect((flagBackends as readonly StoreBackend[]).includes(backend), backend).toBe(!policy.retired && policy.storeFlag);
       expect(errors.some((error) => error.field === 'store.backend'), backend).toBe(policy.retired);
       if (!policy.retired) expect(errors, backend).toEqual([]);
-      if (policy.menu) expect('label' in policy && policy.label.length > 0, backend).toBe(true);
+      if (policy.wizard) expect('label' in policy && policy.label.length > 0, backend).toBe(true);
     }
   });
 

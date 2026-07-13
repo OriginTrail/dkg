@@ -326,6 +326,14 @@ describe('createTripleStore factory', () => {
     );
   });
 
+  it('gives runtime migration guidance to legacy oxigraph-worker callers', async () => {
+    await expect(createTripleStore({
+      backend: 'oxigraph-worker' as any,
+    })).rejects.toThrow(
+      /oxigraph-worker.*no longer supported.*sparql-http.*oxigraph-persistent/,
+    );
+  });
+
   it('classifies only factory adapters and leaves daemon policy names outside storage', async () => {
     expect(classifyTripleStoreBackend('oxigraph')).toEqual({
       kind: 'adapter',

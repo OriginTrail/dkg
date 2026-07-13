@@ -23,7 +23,7 @@ import {
   getStoreBackendPolicy,
   isExternalStoreBackend,
   isRetiredStoreBackend,
-  supportedBackendList,
+  configBackendList,
 } from './store-backends.js';
 
 /**
@@ -1842,7 +1842,7 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
       field: 'store.backend',
       message:
         `${EXTERNAL_VALIDATION_PREFIX} "${backend}" is no longer supported. ` +
-        `Use one of: ${supportedBackendList()}.`,
+        `Use one of: ${configBackendList()}.`,
     }];
   }
   if (!isExternalStoreBackend(backend)) return errors;

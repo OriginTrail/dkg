@@ -28,7 +28,14 @@
 import { describe, it, expect } from 'vitest';
 import { applyStoreFlagsToConfig, promptStoreBackend } from '../src/store-wizard.js';
 import type { DkgConfig } from '../src/config.js';
-import { STORE_BACKENDS, menuBackendChoices, supportedBackendList, supportedBackendNames } from '../src/store-backends.js';
+import {
+  STORE_BACKENDS,
+  configBackendList,
+  configBackendNames,
+  storeFlagBackendList,
+  storeFlagBackendNames,
+  wizardBackendChoices,
+} from '../src/store-backends.js';
 
 function mockFetch(handler: (input: any, init?: any) => Response | Promise<Response>) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -55,12 +62,23 @@ function mockAsk(scriptedAnswers: string[]): (q: string, def?: string) => Promis
 // ---------------------------------------------------------------------
 
 describe('promptStoreBackend', () => {
-  it('keeps the advertised backend list aligned with the parser policy', () => {
-    const advertised = supportedBackendList().split(', ');
-    expect(advertised).toEqual(supportedBackendNames());
-    expect(advertised).toEqual(['oxigraph-server', 'oxigraph', 'oxigraph-persistent', 'blazegraph', 'sparql-http']);
-    expect(advertised).not.toContain('oxigraph-worker');
-    expect(menuBackendChoices()).toEqual(['oxigraph-server', 'oxigraph', 'blazegraph']);
+  it('keeps config, wizard, and flag backend lists aligned with their policies', () => {
+    expect(configBackendList().split(', ')).toEqual(configBackendNames());
+    expect(configBackendNames()).toEqual([
+      'oxigraph-server',
+      'oxigraph',
+      'oxigraph-persistent',
+      'blazegraph',
+      'sparql-http',
+    ]);
+    expect(storeFlagBackendList().split(', ')).toEqual(storeFlagBackendNames());
+    expect(storeFlagBackendNames()).toEqual([
+      'oxigraph-server',
+      'oxigraph',
+      'blazegraph',
+      'sparql-http',
+    ]);
+    expect(wizardBackendChoices()).toEqual(['oxigraph-server', 'oxigraph', 'blazegraph']);
     expect(Object.keys(STORE_BACKENDS)).toContain('oxigraph-worker');
   });
 
@@ -637,7 +655,22 @@ describe('applyStoreFlagsToConfig', () => {
         storeFlag: 'neptune',
         log: () => {},
       }),
-    ).rejects.toThrow(/oxigraph-server, oxigraph, oxigraph-persistent, blazegraph, sparql-http/);
+    ).rejects.toThrow(/oxigraph-server, oxigraph, blazegraph, sparql-http/);
+  });
+
+  it('does not advertise or accept oxigraph-persistent as a pathless --store choice', async () => {
+    const store = newMockConfig({
+      ...baseConfig,
+      store: { backend: 'oxigraph-persistent', options: { path: '/existing/store.nq' } },
+    } as DkgConfig);
+    const io = mockConfigIO(store);
+
+    await expect(applyStoreFlagsToConfig({
+      ...io,
+      storeFlag: 'oxigraph-persistent',
+      log: () => {},
+    })).rejects.toThrow(/--store must be one of: oxigraph-server, oxigraph, blazegraph, sparql-http/);
+    expect(store.saved).toEqual([]);
   });
 
   it('persists a daemon-managed oxigraph-server block (no URL required)', async () => {

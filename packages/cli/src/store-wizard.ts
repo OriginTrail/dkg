@@ -30,13 +30,16 @@ import {
   DEFAULT_STORE_BACKEND,
   MANAGED_LOCAL_STORE_BACKEND,
   STORE_BACKENDS,
+  configBackendList,
+  isConfigStoreBackend,
   isRetiredStoreBackend,
-  isSupportedStoreBackend,
-  menuBackendChoices,
-  supportedBackendList,
+  isStoreFlagBackend,
+  storeFlagBackendList,
+  wizardBackendChoices,
+  type ConfigStoreBackend,
   type ExternalStoreBackend,
-  type MenuStoreBackend,
-  type SupportedStoreBackend,
+  type StoreFlagBackend,
+  type WizardStoreBackend,
 } from './store-backends.js';
 
 export interface PromptStoreBackendOptions {
@@ -141,28 +144,29 @@ function externalStoreBlock(
   };
 }
 
-function isSupportedExistingBackend(backend: string | undefined): backend is SupportedStoreBackend {
-  return isSupportedStoreBackend(backend);
+function isSupportedExistingBackend(backend: string | undefined): backend is ConfigStoreBackend {
+  return isConfigStoreBackend(backend);
 }
 
 function retiredBackendError(source: string, backend: string): Error {
+  const choices = source === '--store' ? storeFlagBackendList() : configBackendList();
   return new Error(
     `${source} "${backend}" is no longer supported. ` +
-      `Use one of: ${supportedBackendList()}.`,
+      `Use one of: ${choices}.`,
   );
 }
 
 function unknownBackendError(source: 'prompt' | '--store', backend: string): Error {
   if (source === '--store') {
-    return new Error(`--store must be one of: ${supportedBackendList()} (got "${backend}")`);
+    return new Error(`--store must be one of: ${storeFlagBackendList()} (got "${backend}")`);
   }
-  return new Error(`Unknown store backend "${backend}". Expected one of: ${supportedBackendList()}.`);
+  return new Error(`Unknown store backend "${backend}". Expected one of: ${configBackendList()}.`);
 }
 
 function parseBackendAnswer(
   input: string,
   defaultBackend: string,
-  choices: readonly MenuStoreBackend[],
+  choices: readonly WizardStoreBackend[],
 ): string {
   return /^\d+$/.test(input)
     ? (choices[parseInt(input, 10) - 1] ?? defaultBackend)
@@ -199,11 +203,18 @@ export async function promptStoreBackend(
   if (isRetiredStoreBackend(existingBackend)) {
     log(`  Existing store.backend "${existingBackend}" is retired; defaulting to oxigraph-server.`);
   }
-  const defaultBackend = opts.flagBackend
+  const flagBackend = opts.flagBackend?.trim().toLowerCase();
+  if (flagBackend && !isStoreFlagBackend(flagBackend)) {
+    if (isRetiredStoreBackend(flagBackend)) {
+      throw retiredBackendError('--store', flagBackend);
+    }
+    throw unknownBackendError('--store', flagBackend);
+  }
+  const defaultBackend = flagBackend
     ?? (isSupportedExistingBackend(existingBackend)
       ? existingBackend
       : DEFAULT_STORE_BACKEND);
-  const backendChoices = menuBackendChoices();
+  const backendChoices = wizardBackendChoices();
   // `sparql-http` is intentionally not listed (advanced bring-your-own-server
   // option) but is still accepted when typed or inherited from an existing
   // config / `--store` flag. Resolve the default *answer* by name for unlisted
@@ -421,7 +432,7 @@ export async function applyStoreFlagsToConfig(
   if (isRetiredStoreBackend(backend)) {
     throw retiredBackendError('--store', backend);
   }
-  if (!isSupportedExistingBackend(backend)) {
+  if (!isStoreFlagBackend(backend)) {
     throw unknownBackendError('--store', backend);
   }
   const backendPolicy = STORE_BACKENDS[backend];
@@ -430,19 +441,8 @@ export async function applyStoreFlagsToConfig(
   // embedded development store. Persist it because an omitted store block now
   // means the managed `oxigraph-server` default.
   if (backendPolicy.kind === 'local') {
-    const localBackend = backend as LocalStoreBlock['backend'];
+    const localBackend = backend as Extract<StoreFlagBackend, LocalStoreBlock['backend']>;
     const existing = await load();
-    if (STORE_BACKENDS[localBackend].requiresExistingPath) {
-      if (existing.store?.backend === localBackend && hasStorePath(existing.store)) {
-        await save({ ...existing, store: { backend: localBackend, options: existing.store.options } });
-        log(`  Store configured: ${localBackend}.`);
-        return;
-      }
-      throw new Error(
-        `--store ${localBackend} requires an existing store.options.path; ` +
-          'set it manually in config.json or use --store oxigraph-server.',
-      );
-    }
     await save({ ...existing, store: { backend: localBackend, options: {} } });
     if (localBackend === 'oxigraph') {
       log('  Store configured: oxigraph (embedded development store).');

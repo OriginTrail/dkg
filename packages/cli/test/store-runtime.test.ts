@@ -1,13 +1,15 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   resolveDaemonStoreBootPlan,
+  resolveDaemonStoreRuntime,
   type DaemonStoreBootDecision,
   type DaemonStoreBootPlan,
 } from '../src/daemon/store-runtime.js';
 import { saveConfig, type DkgConfig } from '../src/config.js';
+import type { StorageAdapterBackend } from '@origintrail-official/dkg-storage';
 
 function mk(overrides: Partial<DkgConfig> = {}): DkgConfig {
   return {
@@ -48,6 +50,34 @@ describe('resolveDaemonStoreBootPlan', () => {
     expect(plan.operatorConfig.store).toBeUndefined();
     expect(plan.effectiveConfig.store).toEqual({ backend: 'oxigraph-server', options: {} });
     expect(plan.effectiveStore).toEqual({ backend: 'oxigraph-server', options: {} });
+  });
+
+  it('fails at runtime-plan construction when a managed store was not materialized', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-store-runtime-unmaterialized-'));
+    const plan = resolveDaemonStoreBootPlan({
+      config: mk(),
+      dataDir,
+      acceptStoreReset: false,
+    });
+
+    expectBootable(plan);
+    expect(() => resolveDaemonStoreRuntime(plan, null)).toThrow(
+      /oxigraph-server.*not materialized to a storage adapter/,
+    );
+  });
+
+  it('refines a live runtime store to a constructible adapter backend', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-store-runtime-adapter-'));
+    const plan = resolveDaemonStoreBootPlan({
+      config: mk({ store: { backend: 'oxigraph', options: {} } }),
+      dataDir,
+      acceptStoreReset: false,
+    });
+
+    expectBootable(plan);
+    const runtime = resolveDaemonStoreRuntime(plan, null);
+    expect(runtime.runtimeStore.backend).toBe('oxigraph');
+    expectTypeOf(runtime.runtimeStore.backend).toMatchTypeOf<StorageAdapterBackend>();
   });
 
   it('does not persist the materialized store default during an unrelated config save', async () => {

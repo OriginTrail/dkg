@@ -36,7 +36,7 @@ import {
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
-import { supportedBackendList } from '../store-backends.js';
+import { storeFlagBackendList } from '../store-backends.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
@@ -217,7 +217,7 @@ program
   )
   .option(
     '--store <backend>',
-    `Pre-fill the triple-store backend prompt (${supportedBackendList(' | ')}).`,
+    `Pre-fill the triple-store backend prompt (${storeFlagBackendList(' | ')}).`,
   )
   .option(
     '--store-url <url>',

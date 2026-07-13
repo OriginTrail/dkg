@@ -280,6 +280,15 @@ type AdapterFactory = (
 
 const adapterRegistry = new Map<string, AdapterFactory>();
 
+// Runtime compatibility guard for callers compiled before the worker adapter
+// was removed. This is intentionally not part of STORAGE_ADAPTERS: it provides
+// a migration error without making retired daemon/config policy constructible.
+const REMOVED_ADAPTER_GUIDANCE: Readonly<Record<string, string>> = {
+  'oxigraph-worker':
+    'Use "sparql-http" or "blazegraph" for an HTTP store, or ' +
+    '"oxigraph-persistent" for embedded persistence.',
+};
+
 export function registerTripleStoreAdapter<Backend extends string>(
   name: Backend,
   factory: AdapterFactory,
@@ -291,6 +300,12 @@ export function registerTripleStoreAdapter<Backend extends string>(
 export async function createTripleStore(
   config: TripleStoreFactoryConfig,
 ): Promise<TripleStore> {
+  const removedGuidance = REMOVED_ADAPTER_GUIDANCE[config.backend];
+  if (removedGuidance) {
+    throw new Error(
+      `TripleStore backend "${config.backend}" is no longer supported. ${removedGuidance}`,
+    );
+  }
   const factory = adapterRegistry.get(config.backend);
   if (!factory) {
     throw new Error(

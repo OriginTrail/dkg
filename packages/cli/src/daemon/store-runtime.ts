@@ -4,12 +4,17 @@ import {
   DEFAULT_DAEMON_STORE_BACKEND,
   isManagedLocalBackend,
   isRetiredStoreBackend,
+  requireStorageAdapterBackend,
+  type StorageAdapterBackend,
 } from '../store-backends.js';
 import type { DkgConfig } from '../config.js';
 import { readPersistedStoreBackend } from './daemon-state.js';
 import type { ManagedOxigraphResult } from './oxigraph-managed.js';
 
 type StoreConfig = NonNullable<DkgConfig['store']>;
+export type RuntimeStoreConfig = Omit<StoreConfig, 'backend'> & {
+  backend: StorageAdapterBackend;
+};
 
 interface DaemonStoreOperatorContext {
   /** Operator-facing config exactly as loaded from disk / CLI. */
@@ -42,7 +47,7 @@ export type DaemonStoreBootDecision =
 
 export interface DaemonStoreRuntimePlan extends DaemonStoreBootPlan {
   /** Store config consumed by validation, health probes, wipe, and the agent. */
-  runtimeStore: StoreConfig;
+  runtimeStore: RuntimeStoreConfig;
   /** Config view with runtime store/blob/snapshot values swapped in. */
   runtimeConfig: DkgConfig;
   runtimeLargeLiteralStorage: DkgConfig['largeLiteralStorage'];
@@ -56,7 +61,7 @@ export interface StoreRuntimeContext {
   /** Daemon-facing backend after defaults and acknowledged migrations. */
   effectiveStore: StoreConfig;
   /** Constructible live adapter config after managed-store materialization. */
-  runtimeStore: StoreConfig;
+  runtimeStore: RuntimeStoreConfig;
 }
 
 export function resolveEffectiveDaemonStore(config: Pick<DkgConfig, 'store'>): StoreConfig {
@@ -136,7 +141,16 @@ export function resolveDaemonStoreRuntime(
   bootPlan: DaemonStoreBootPlan,
   managed: ManagedOxigraphResult | null,
 ): DaemonStoreRuntimePlan {
-  const runtimeStore = managed?.storeConfig ?? bootPlan.effectiveStore;
+  if (isManagedLocalBackend(bootPlan.effectiveStore.backend) && !managed) {
+    throw new Error(
+      `Managed daemon store "${bootPlan.effectiveStore.backend}" was not materialized to a storage adapter`,
+    );
+  }
+  const candidateStore = managed?.storeConfig ?? bootPlan.effectiveStore;
+  const runtimeStore: RuntimeStoreConfig = {
+    ...candidateStore,
+    backend: requireStorageAdapterBackend(candidateStore.backend),
+  };
   const runtimeLargeLiteralStorage =
     managed?.largeLiteralStorage ?? bootPlan.operatorConfig.largeLiteralStorage;
   const runtimeSnapshotStorage =
