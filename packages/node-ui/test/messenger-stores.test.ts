@@ -237,7 +237,8 @@ describe('SqliteProtocolOutboxStore', () => {
     store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 1_000);
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
 
-    expect(store.due(6_000, 2).map((entry) => [entry.peer, entry.messageId])).toEqual([
+    expect(store.due(6_000, 3).map((entry) => [entry.peer, entry.messageId])).toEqual([
+      [PEER_B, MSG_2],
       [PEER_A, MSG_1],
       [PEER_A, MSG_2],
     ]);
