@@ -2586,29 +2586,12 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    // Pre-compute tokenAmount and epochs so they can be included in the
-    // H5-prefixed publish ACK digest (incl. merkleLeafCount) — matches
-    // `packages/core/src/crypto/ack.ts:computePublishACKDigest` and
-    // `KnowledgeAssetsV10._executePublishCore`.
-    //
-    // PCA discount eligibility (`KnowledgeAssetsV10.publish`): the
-    // contract takes the PCA branch only when (1) the wallet is a
-    // registered PCA agent, (2) the PCA is not expired, AND
-    // (3) `p.epochs == lockDurationEpochs`. Any miss silently falls
-    // through to direct spend at FULL price. To make sure registered
-    // agents actually get the discount they paid for, we probe for the
-    // PCA mapping and snap `publishEpochs` to the PCA's
-    // `lockDurationEpochs` when one is found AND the caller did not
-    // explicitly override the publish lifetime. Wallets without a PCA
-    // (direct-spend branch) use the ordinary default lifetime.
-    // OT-RFC-49 / WS-D: pricing follows the byteSize that gets signed into the
-    // V10 digest. For a curated CG that's the PUBLIC `_catalog` footprint
-    // (`catalogByteSize`, flowed in via `stagingByteSize` above — derived from
-    // the SAME committed leaf-set as `catalogRoot`, so byteSize and the
-    // commitment cannot desync across fundability, tokenAmount, ACK digest, and
-    // chain byteSize); for public CGs it stays plaintext bytes. Single source
-    // of truth so ACK pricing == chain tx pricing. Resolved BEFORE the PCA
-    // coercion below so the fundability probe can price the lock-lifetime publish.
+    // The adapter-owned plan above has already finalized signer, lifetime, and
+    // exact token amount before encryption or ACK collection. Those same values
+    // feed the H5-prefixed ACK digest and the chain call. For curated CGs the
+    // priced byte size is the committed public catalog footprint; for public
+    // CGs it is the plaintext footprint. This keeps fundability, pricing, ACK,
+    // and transaction inputs on one coherent plan.
     // Identifier split for V10 publishes.
     //
     //   `contextGraphId` (outer) = the SWM graph id the publisher reads
