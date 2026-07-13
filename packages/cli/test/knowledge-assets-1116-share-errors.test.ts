@@ -69,6 +69,26 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     config: Record<string, unknown> = {},
     publisherAvailability: AsyncPublisherAvailability = { available: true },
   ) {
+    const publisherState = publisherAvailability.available
+      ? {
+          status: 'started' as const,
+          runtime: publisherRuntime,
+          availability: publisherAvailability,
+        }
+      : {
+          status: publisherAvailability.reason === 'publisher_disabled'
+            ? 'disabled' as const
+            : publisherAvailability.reason === 'publisher_starting'
+              ? 'starting' as const
+              : publisherAvailability.reason === 'no_publisher_wallets'
+                ? 'no_publisher_wallets' as const
+                : 'failed' as const,
+          runtime: null,
+          availability: publisherAvailability,
+          ...(publisherAvailability.reason === 'publisher_startup_failed'
+            ? { error: new Error('test publisher startup failure') }
+            : {}),
+        };
     const agent = {
       async listContextGraphs() {
         return [{
@@ -96,9 +116,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           res,
           agent,
           publisherControl,
-          publisherRuntime,
+          publisherState,
           config,
-          publisherAvailability,
           startedAt: Date.now(),
           dashDb: { insertNotification: () => 1 },
           opWallets: {},

@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   resolveAsyncPublisherAvailability,
   startPublisherRuntimeWithOutcome,
@@ -56,5 +59,32 @@ describe('resolveAsyncPublisherAvailability', () => {
         operatorActionRequired: true,
       },
     });
+  });
+
+  it('converts a real publisher bootstrap exception into the failed state', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-startup-failure-'));
+    try {
+      // Exercise the production bootstrap path with a non-wallet-absence error:
+      // malformed persisted configuration throws before a runtime can start.
+      await writeFile(join(dataDir, 'publisher-wallets.json'), '{ not-json');
+      const outcome = await startPublisherRuntimeWithOutcome({
+        dataDir,
+        config: { publisher: { enabled: true } },
+      } as Parameters<typeof startPublisherRuntimeWithOutcome>[0]);
+
+      expect(outcome).toMatchObject({
+        status: 'failed',
+        runtime: null,
+        availability: {
+          available: false,
+          reason: 'publisher_startup_failed',
+          retryable: false,
+          operatorActionRequired: true,
+        },
+      });
+      expect(outcome.status === 'failed' ? outcome.error : undefined).toBeInstanceOf(SyntaxError);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 });

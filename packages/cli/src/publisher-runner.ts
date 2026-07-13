@@ -48,9 +48,7 @@ export function resolveAsyncPublisherAvailability(args: {
   config: DkgConfig;
   runtime: PublisherRuntime | null;
   lifecycleReason?: AsyncPublisherUnavailableReason;
-  lifecycleAvailability?: AsyncPublisherAvailability;
 }): AsyncPublisherAvailability {
-  if (args.lifecycleAvailability) return args.lifecycleAvailability;
   if (args.runtime?.walletIds.length) return { available: true };
   const reason = args.lifecycleReason
     ?? (args.runtime
@@ -154,6 +152,49 @@ export type PublisherStartupOutcome =
       error: unknown;
     };
 
+export type PublisherState =
+  | PublisherStartupOutcome
+  | {
+      status: 'starting';
+      runtime: null;
+      availability: Extract<AsyncPublisherAvailability, { available: false }>;
+    };
+
+function resolveUnavailablePublisherAvailability(
+  config: DkgConfig,
+  reason: AsyncPublisherUnavailableReason,
+): Extract<AsyncPublisherAvailability, { available: false }> {
+  const availability = resolveAsyncPublisherAvailability({
+    config,
+    runtime: null,
+    lifecycleReason: reason,
+  });
+  if (availability.available) {
+    throw new Error(`Publisher state invariant violated for ${reason}`);
+  }
+  return availability;
+}
+
+/**
+ * Initial daemon state before the deferred publisher bootstrap settles. Routes
+ * receive this whole discriminated value, so runtime and readiness cannot
+ * disagree in a request context.
+ */
+export function createInitialPublisherState(config: DkgConfig): PublisherState {
+  if (!config.publisher?.enabled) {
+    return {
+      status: 'disabled',
+      runtime: null,
+      availability: resolveUnavailablePublisherAvailability(config, 'publisher_disabled'),
+    };
+  }
+  return {
+    status: 'starting',
+    runtime: null,
+    availability: resolveUnavailablePublisherAvailability(config, 'publisher_starting'),
+  };
+}
+
 /**
  * Explicit daemon-startup boundary. The compatibility helper above retains its
  * historical nullable return, while lifecycle code consumes this discriminant
@@ -162,20 +203,11 @@ export type PublisherStartupOutcome =
 export async function startPublisherRuntimeWithOutcome(
   args: Parameters<typeof startPublisherRuntimeIfEnabled>[0],
 ): Promise<PublisherStartupOutcome> {
-  const unavailable = (
-    reason: Exclude<AsyncPublisherUnavailableReason, 'publisher_starting'>,
-  ): Extract<AsyncPublisherAvailability, { available: false }> => ({
-    available: false,
-    reason,
-    retryable: false,
-    operatorActionRequired: true,
-  });
-
   if (!args.config.publisher?.enabled) {
     return {
       status: 'disabled',
       runtime: null,
-      availability: unavailable('publisher_disabled'),
+      availability: resolveUnavailablePublisherAvailability(args.config, 'publisher_disabled'),
     };
   }
 
@@ -185,7 +217,7 @@ export async function startPublisherRuntimeWithOutcome(
       return {
         status: 'no_publisher_wallets',
         runtime: null,
-        availability: unavailable('no_publisher_wallets'),
+        availability: resolveUnavailablePublisherAvailability(args.config, 'no_publisher_wallets'),
       };
     }
     return { status: 'started', runtime, availability: { available: true } };
@@ -193,7 +225,7 @@ export async function startPublisherRuntimeWithOutcome(
     return {
       status: 'failed',
       runtime: null,
-      availability: unavailable('publisher_startup_failed'),
+      availability: resolveUnavailablePublisherAvailability(args.config, 'publisher_startup_failed'),
       error,
     };
   }

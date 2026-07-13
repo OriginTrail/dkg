@@ -397,7 +397,6 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
-    publisherRuntime,
     config,
     startedAt,
     dashDb,
@@ -490,7 +489,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
 
   // POST /api/epcis/capture  { contextGraphId?, subGraphName?, epcisDocument, publishOptions? }
   if (req.method === "POST" && path === "/api/epcis/capture") {
-    const publisherAvailability = ctx.publisherAvailability;
+    const publisherAvailability = ctx.publisherState.availability;
     if (!publisherAvailability.available && publisherAvailability.reason === 'publisher_disabled') {
       return jsonResponse(res, 503, {
         error: "PublisherDisabled",
