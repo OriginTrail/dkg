@@ -53,6 +53,11 @@ export interface NamedKnowledgeAssetGraphIdentity {
   kaNumber: bigint;
 }
 
+/** Semantic SWM read boundary: either the complete family or one named lifecycle. */
+export type SharedMemoryGraphScope =
+  | { kind: 'complete-family' }
+  | { kind: 'named-lifecycle'; identity: NamedKnowledgeAssetGraphIdentity };
+
 const SWM_CHILD_AGENT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SWM_CHILD_KA_NUMBER = /^\d+$/;
 
@@ -237,7 +242,13 @@ export async function loadSelectedSharedMemoryQuads(
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, undefined);
+  return loadSharedMemoryQuadsInternal(
+    store,
+    bucketGraph,
+    selection,
+    options,
+    { kind: 'complete-family' },
+  );
 }
 
 /**
@@ -286,9 +297,39 @@ export async function loadNamedKnowledgeAssetSharedMemoryQuads(
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
   return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
-    kind: 'exact',
+    kind: 'named-lifecycle',
     identity,
   });
+}
+
+/** Resolve the concrete graph set for an explicit semantic SWM scope. */
+export async function resolveSharedMemoryScopeGraphs(
+  store: TripleStore,
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+  options?: QueryOptions,
+): Promise<NonEmptyGraphList> {
+  if (scope.kind === 'complete-family') {
+    return resolveSharedMemoryReadGraphs(store, bucketGraph, options);
+  }
+  const { agentAddress, kaNumber } = scope.identity;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
+    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
+  }
+  const exactGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
+  assertSafeIri(exactGraph);
+  const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
+    .filter((graph) => {
+      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
+      return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
+        && child.kaNumber === kaNumber;
+    });
+  // Preserve the writer's checksum casing while matching EVM identity
+  // case-insensitively. An absent lifecycle still resolves to its canonical
+  // candidate so the caller gets a safe empty result.
+  return matchingGraphs.length > 0
+    ? matchingGraphs as NonEmptyGraphList
+    : [exactGraph];
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */
@@ -358,8 +399,7 @@ async function loadSharedMemoryQuadsInternal(
   options: LoadSelectedSharedMemoryQuadsOptions,
   graphScope:
     | { kind: 'bounded'; bound: SwmKaGraphBound }
-    | { kind: 'exact'; identity: NamedKnowledgeAssetGraphIdentity }
-    | undefined,
+    | SharedMemoryGraphScope,
 ): Promise<Quad[]> {
   let innerGraphPattern: string;
   if (selection === 'all') {
@@ -400,28 +440,13 @@ async function loadSharedMemoryQuadsInternal(
       graphScope.bound,
       queryOptions,
     );
-  } else if (graphScope?.kind === 'exact') {
-    const { agentAddress, kaNumber } = graphScope.identity;
-    if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
-      throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
-    }
-    const exactGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
-    assertSafeIri(exactGraph);
-    const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, queryOptions))
-      .filter((graph) => {
-        const child = parseBoundableSwmChildGraph(bucketGraph, graph);
-        return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
-          && child.kaNumber === kaNumber;
-      });
-    // Exact named lifecycle reads deliberately exclude the legacy bucket and
-    // every sibling graph, even when they contain the same root subject. Graph
-    // discovery preserves the writer's checksum casing while identity matching
-    // remains EVM-address case-insensitive.
-    swmGraphs = matchingGraphs.length > 0
-      ? matchingGraphs as NonEmptyGraphList
-      : [exactGraph];
   } else {
-    swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+    swmGraphs = await resolveSharedMemoryScopeGraphs(
+      store,
+      bucketGraph,
+      graphScope,
+      queryOptions,
+    );
   }
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {

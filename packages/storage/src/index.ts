@@ -74,6 +74,7 @@ export {
   loadSelectedSharedMemoryQuads,
   loadNamedKnowledgeAssetSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
+  resolveSharedMemoryScopeGraphs,
   loadSelectedVerifiableMemoryQuads,
   resolveSharedMemoryReadGraphs,
   resolveVerifiableMemoryReadGraphs,
@@ -82,6 +83,7 @@ export {
   type NonEmptyGraphList,
   type NamedKnowledgeAssetGraphIdentity,
   type SharedMemoryReadSelection,
+  type SharedMemoryGraphScope,
   type SwmKaGraphBound,
   type SwmSliceSourceTags,
 } from './graph-manager.js';

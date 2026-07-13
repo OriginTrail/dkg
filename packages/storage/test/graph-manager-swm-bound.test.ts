@@ -240,10 +240,12 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     const swm = contextGraphSharedMemoryUri('named-exact-casing');
     const root = 'urn:test:named:root';
     const exact = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const sameAuthorSibling = `${swm}/${AUTHOR_A_MIXED}/8`;
     try {
       await store.insert([
         { subject: root, predicate: 'urn:p', object: '"bucket"', graph: swm },
         { subject: root, predicate: 'urn:p', object: '"exact"', graph: exact },
+        { subject: root, predicate: 'urn:p', object: '"same-author-sibling"', graph: sameAuthorSibling },
       ]);
 
       const quads = await loadNamedKnowledgeAssetSharedMemoryQuads(

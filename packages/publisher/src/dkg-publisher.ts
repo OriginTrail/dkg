@@ -1,9 +1,9 @@
-import type { NamedKnowledgeAssetGraphIdentity, Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, loadNamedKnowledgeAssetSharedMemoryQuads, loadSelectedSharedMemoryQuads } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadNamedKnowledgeAssetSharedMemoryQuads, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -1556,8 +1556,8 @@ export class DKGPublisher implements Publisher {
        * the existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
-      /** Exact local named-KA SWM graph identity; excludes bucket and sibling shares. */
-      namedKnowledgeAssetGraph?: NamedKnowledgeAssetGraphIdentity;
+      /** Explicit graph-family boundary; named lifecycles exclude bucket and siblings. */
+      sharedMemoryScope?: SharedMemoryGraphScope;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -1611,12 +1611,14 @@ export class DKGPublisher implements Publisher {
           : `No rootEntities provided for context graph ${contextGraphId}`
       ),
     };
-    const quads = options?.namedKnowledgeAssetGraph
+    const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
+      ?? { kind: 'complete-family' };
+    const quads = sharedMemoryScope.kind === 'named-lifecycle'
       ? await loadNamedKnowledgeAssetSharedMemoryQuads(
           this.store,
           swmGraph,
           selection,
-          options.namedKnowledgeAssetGraph,
+          sharedMemoryScope.identity,
           loadOptions,
         )
       : await loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, loadOptions);
@@ -1860,22 +1862,13 @@ export class DKGPublisher implements Publisher {
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
       const kaMap = skolemizeByEntity(quads);
-      if (options?.namedKnowledgeAssetGraph) {
-        await this.clearPublishedNamedKnowledgeAssetRoots(
-          contextGraphId,
-          [...kaMap.keys()],
-          options.subGraphName,
-          ctx,
-          options.namedKnowledgeAssetGraph,
-        );
-      } else {
-        await this.clearPublishedSwmRoots(
-          contextGraphId,
-          [...kaMap.keys()],
-          options?.subGraphName,
-          ctx,
-        );
-      }
+      await this.clearPublishedSwmRoots(
+        contextGraphId,
+        [...kaMap.keys()],
+        options?.subGraphName,
+        ctx,
+        sharedMemoryScope,
+      );
       // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
       // Default is false: unpublished entities stay in SWM for future publishes.
       if (options?.clearSharedMemoryAfter === true) {
@@ -5474,6 +5467,7 @@ export class DKGPublisher implements Publisher {
     rootEntities: string[],
     subGraphName: string | undefined,
     ctx: OperationContext,
+    scope: SharedMemoryGraphScope = { kind: 'complete-family' },
   ): Promise<void> {
     if (rootEntities.length === 0) return;
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
@@ -5482,27 +5476,8 @@ export class DKGPublisher implements Publisher {
       rootEntities,
       subGraphName,
       ctx,
-      await this.swmGraphsUnder(swmGraph),
-      'always',
-    );
-  }
-
-  /** Drain exactly one named lifecycle without touching bucket or sibling data. */
-  async clearPublishedNamedKnowledgeAssetRoots(
-    contextGraphId: string,
-    rootEntities: string[],
-    subGraphName: string | undefined,
-    ctx: OperationContext,
-    identity: NamedKnowledgeAssetGraphIdentity,
-  ): Promise<void> {
-    if (rootEntities.length === 0) return;
-    await this.clearPublishedSwmRootsInGraphs(
-      contextGraphId,
-      rootEntities,
-      subGraphName,
-      ctx,
-      [this.swmGraphUriFor(contextGraphId, identity.agentAddress, identity.kaNumber, subGraphName)],
-      'when-no-share-remains',
+      await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope),
+      scope.kind === 'complete-family' ? 'always' : 'when-no-share-remains',
     );
   }
 

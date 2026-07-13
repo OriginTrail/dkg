@@ -23,6 +23,7 @@ const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const SWM_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/1`;
+const SAME_AUTHOR_SIBLING_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/2`;
 const FOREIGN_PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x2222222222222222222222222222222222222222/9`;
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const ON_CHAIN_ID_PREDICATE = 'https://dkg.network/ontology#ContextGraphOnChainId';
@@ -211,6 +212,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const { publisher, store, publishSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one', 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q('urn:test:root:one', 'http://schema.org/name', '"same-author-sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
       q('urn:test:root:one', 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
       q('urn:test:root:one', 'http://schema.org/name', '"legacy-bucket"', SWM_GRAPH),
     ]);
@@ -219,9 +221,12 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       CONTEXT_GRAPH,
       { rootEntities: ['urn:test:root:one'] },
       {
-        namedKnowledgeAssetGraph: {
-          agentAddress: '0x1111111111111111111111111111111111111111',
-          kaNumber: 1n,
+        sharedMemoryScope: {
+          kind: 'named-lifecycle',
+          identity: {
+            agentAddress: '0x1111111111111111111111111111111111111111',
+            kaNumber: 1n,
+          },
         },
       },
     );
@@ -240,9 +245,12 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     ]);
 
     await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [root] }, {
-      namedKnowledgeAssetGraph: {
-        agentAddress: '0x1111111111111111111111111111111111111111',
-        kaNumber: 1n,
+      sharedMemoryScope: {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+        },
       },
     });
 
@@ -259,18 +267,23 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const root = 'urn:test:root:one';
     await store.insert([
       q(root, 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q(root, 'http://schema.org/name', '"same-author-sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
       q(root, 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
       q(root, WORKSPACE_OWNER_PREDICATE, '"peer-foreign"', SWM_META_GRAPH),
     ]);
 
     await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [root] }, {
-      namedKnowledgeAssetGraph: {
-        agentAddress: '0x1111111111111111111111111111111111111111',
-        kaNumber: 1n,
+      sharedMemoryScope: {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+        },
       },
     });
 
     expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteByPattern({ graph: SAME_AUTHOR_SIBLING_SWM_GRAPH, subject: root })).toBe(1);
     expect(await store.deleteByPattern({ graph: FOREIGN_PER_KA_SWM_GRAPH, subject: root })).toBe(1);
     expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(1);
   });
