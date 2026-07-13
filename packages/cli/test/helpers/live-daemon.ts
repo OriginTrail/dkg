@@ -162,10 +162,13 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   }
   if (opts.publisherEnabled) {
     // `/api/status` becomes ready before the zero-delay publisher startup task.
-    // Poll the real async-ingress gate so tests never race `publisher_starting`.
+    // Poll an async-ingress route that checks publisher availability before it
+    // validates the deliberately empty probe body. The knowledge-asset publish
+    // route first resolves its context graph, so a fake probe graph can 4xx and
+    // look ready while the publisher is still in `publisher_starting`.
     for (let i = 0; i < 60; i += 1) {
       const res = await fetch(
-        `${daemon.base}/api/knowledge-assets/publisher-readiness/wm/probe/vm/publish-async`,
+        `${daemon.base}/api/epcis/capture`,
         {
           method: 'POST',
           headers: {
@@ -175,8 +178,8 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
           body: '{}',
         },
       );
-      const body = await res.json().catch(() => ({})) as { code?: string; reason?: string };
-      if (body.code !== 'async_publisher_unavailable') break;
+      const body = await res.json().catch(() => ({})) as { error?: string; reason?: string };
+      if (body.error !== 'PublisherUnavailable' && body.error !== 'PublisherDisabled') break;
       if (body.reason !== 'publisher_starting') {
         throw new Error(`Async publisher failed readiness: ${body.reason ?? res.status}`);
       }
