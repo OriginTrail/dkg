@@ -49,7 +49,6 @@ import {
   SMALL_BODY_BYTES,
 } from "../http-utils.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
-import { resolveAsyncPublisherAvailability } from "../../publisher-runner.js";
 import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
 import {
   handleKaImportArtifactResolve,
@@ -1348,11 +1347,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // to 400 (parity with the legacy publish path).
     if (layer === "vm" && verb === "publish-async") {
       try {
-        const publisherAvailability = resolveAsyncPublisherAvailability({
-          config: ctx.config,
-          runtime: ctx.publisherRuntime,
-          lifecycleAvailability: ctx.publisherAvailability,
-        });
+        const publisherAvailability = ctx.publisherState.availability;
         if (!publisherAvailability.available) {
           return jsonResponse(res, 503, {
             code: "async_publisher_unavailable",

@@ -717,6 +717,7 @@ export class DKGAgent extends DKGAgentBase {
         hubAddress: config.chainConfig.hubAddress,
         tokenAddress: config.chainConfig.tokenAddress,
         chainId: config.chainConfig.chainId,
+        receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
         approvalPolicy: config.chainConfig.approvalPolicy,
         cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
         minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
@@ -1490,7 +1491,7 @@ export class DKGAgent extends DKGAgentBase {
   /**
    * Snapshot of the V10 Random Sampling prover's recent activity.
    * Returns a disabled-handle status when the prover never started
-   * (edge node, no identity, missing chain methods). Used by the
+   * (edge node, no identity, awaiting admission, missing chain methods). Used by the
    * daemon's `/api/random-sampling/status` route + the CLI's
    * `random-sampling status` subcommand.
    */
@@ -1499,7 +1500,8 @@ export class DKGAgent extends DKGAgentBase {
     return {
       enabled: false,
       role: (this.config.nodeRole ?? 'edge') as 'core' | 'edge',
-      identityId: '0',
+      identityId: this.randomSamplingIdentityId.toString(),
+      disabledReason: this.randomSamplingDisabledReason,
       loop: null,
     };
   }

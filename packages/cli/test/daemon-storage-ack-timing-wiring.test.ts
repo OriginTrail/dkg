@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   createServer: vi.fn(),
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
-  startPublisherRuntimeIfEnabled: vi.fn(),
+  startPublisherRuntimeWithOutcome: vi.fn(),
 }));
 
 vi.mock('node:http', () => ({
@@ -46,7 +46,7 @@ vi.mock('../src/publisher-runner.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/publisher-runner.js')>();
   return {
     ...actual,
-    startPublisherRuntimeIfEnabled: mocks.startPublisherRuntimeIfEnabled,
+    startPublisherRuntimeWithOutcome: mocks.startPublisherRuntimeWithOutcome,
   };
 });
 
@@ -98,7 +98,15 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     sigtermListeners = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
 
     mocks.createServer.mockImplementation(createFakeServer);
-    mocks.startPublisherRuntimeIfEnabled.mockResolvedValue(null);
+    mocks.startPublisherRuntimeWithOutcome.mockResolvedValue({
+      runtime: null,
+      availability: {
+        available: false,
+        reason: 'no_publisher_wallets',
+        retryable: false,
+        operatorActionRequired: true,
+      },
+    });
     mocks.loadNetworkConfig.mockResolvedValue({
       networkName: 'DKG V10 Gnosis Mainnet',
       genesisId: 'gnosis-mainnet',
@@ -153,6 +161,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         rpcUrl: 'https://private-rpc.example',
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'evm:100',
+        receiptTimeoutMs: 1_200_000,
       },
       ...configOverrides,
     } as any, Date.now())).rejects.toThrow('after-agent-create');
@@ -169,6 +178,11 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(createArg.storageAckTiming).toEqual({
       handlerDeadlineMs: 15_000,
       sendTimeoutMs: 20_000,
+    });
+    expect(createArg.chainConfig).toMatchObject({
+      rpcUrl: 'https://private-rpc.example',
+      hubAddress: '0x1234567890123456789012345678901234567890',
+      receiptTimeoutMs: 1_200_000,
     });
   });
 
@@ -295,19 +309,21 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         rpcUrl: 'https://private-rpc.example',
         hubAddress: '0x1234567890123456789012345678901234567890',
         chainId: 'evm:100',
+        receiptTimeoutMs: 1_200_000,
       },
     } as any, Date.now());
 
     await new Promise((resolve) => realSetTimeout(resolve, 0));
     await new Promise((resolve) => realSetTimeout(resolve, 0));
 
-    expect(mocks.startPublisherRuntimeIfEnabled).toHaveBeenCalledTimes(1);
+    expect(mocks.startPublisherRuntimeWithOutcome).toHaveBeenCalledTimes(1);
     expect(createACKTransportFactory).toHaveBeenCalledWith(expect.objectContaining({
       sendTimeoutMs: 60_000,
       log: expect.any(Function),
     }));
 
-    const startupArg = mocks.startPublisherRuntimeIfEnabled.mock.calls[0]?.[0] as any;
+    const startupArg = mocks.startPublisherRuntimeWithOutcome.mock.calls[0]?.[0] as any;
+    expect(startupArg.chainBase).toMatchObject({ receiptTimeoutMs: 1_200_000 });
     const transport = startupArg.ackTransportFactory();
 
     await expect(transport.sendP2P('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);

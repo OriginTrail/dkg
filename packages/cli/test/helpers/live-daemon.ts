@@ -162,23 +162,18 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
   }
   if (opts.publisherEnabled) {
     // `/api/status` becomes ready before the zero-delay publisher startup task.
-    // Poll the real async-ingress gate so tests never race `publisher_starting`.
+    // Poll its explicit readiness field rather than fabricating a business
+    // publish request whose validation order could change independently.
     for (let i = 0; i < 60; i += 1) {
-      const res = await fetch(
-        `${daemon.base}/api/knowledge-assets/publisher-readiness/wm/probe/vm/publish-async`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(daemon.token ? { Authorization: `Bearer ${daemon.token}` } : {}),
-          },
-          body: '{}',
-        },
-      );
-      const body = await res.json().catch(() => ({})) as { code?: string; reason?: string };
-      if (body.code !== 'async_publisher_unavailable') break;
-      if (body.reason !== 'publisher_starting') {
-        throw new Error(`Async publisher failed readiness: ${body.reason ?? res.status}`);
+      const res = await fetch(`${daemon.base}/api/status`, {
+        headers: daemon.token ? { Authorization: `Bearer ${daemon.token}` } : {},
+      });
+      const body = await res.json().catch(() => ({})) as {
+        asyncPublisher?: { available?: boolean; reason?: string };
+      };
+      if (body.asyncPublisher?.available === true) break;
+      if (body.asyncPublisher?.reason !== 'publisher_starting') {
+        throw new Error(`Async publisher failed readiness: ${body.asyncPublisher?.reason ?? res.status}`);
       }
       await sleep(100);
       if (i === 59) throw new Error('Async publisher did not become ready in time');

@@ -1,9 +1,8 @@
 import { Command } from 'commander';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
@@ -23,12 +22,12 @@ import {
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
-  releasesDir, activeSlot, swapSlot,
-  slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
+  activeSlot, swapSlot,
+  isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
-  readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from './config.js';
+import { resolveDaemonEntryPoint } from './daemon-entrypoint.js';
 import { ApiClient } from './api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from './cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from './store-wizard.js';
@@ -181,47 +180,6 @@ async function loadQuadsFromInput(
 
   console.error(`Provide --file (${rdfParser.supportedExtensions().join(', ')}), --triples, or --subject/--predicate/--object`);
   process.exit(1);
-}
-
-/**
- * Resolve the daemon entry point passed to spawned worker processes.
- *
- * OT-RFC-41 §4.1 / Bundle B1a: Edge nodes run from the npm-global
- * install (`import.meta.url`). Core nodes keep using blue-green
- * slots (`~/.dkg/releases/current`). The role gate is applied here
- * because the supervisor spawns workers via this entry point on
- * every restart — without the gate, an Edge node that had legacy
- * slots from a pre-rc.12 install would keep running the stale slot
- * forever even after `npm install -g` updated the global.
- */
-/**
- * Absolute path to THIS CLI's own entrypoint module, used to respawn the
- * daemon worker. `resolveDaemonEntryPoint` lives in `cli-helpers`, a sibling
- * of the entry module (`cli.ts` → `cli.js` after `tsc`), so the entry is
- * resolved relative to this file and the extension that actually exists is
- * picked: a built install runs `cli.js`, while running from source (tsx /
- * ts-node) runs `cli.ts`. Hardcoding `.js` would respawn a nonexistent
- * `src/cli.js` under source mode (#962 review). This mirrors the pre-split
- * behavior where the helper lived in `cli.ts` and returned its own
- * `import.meta.url` — i.e. the real current entrypoint in either mode.
- */
-function cliEntryPointPath(): string {
-  const builtEntry = fileURLToPath(new URL('./cli.js', import.meta.url));
-  if (existsSync(builtEntry)) return builtEntry;
-  const sourceEntry = fileURLToPath(new URL('./cli.ts', import.meta.url));
-  if (existsSync(sourceEntry)) return sourceEntry;
-  return builtEntry;
-}
-
-function resolveDaemonEntryPoint(): string {
-  if (process.env.DKG_NO_BLUE_GREEN) return cliEntryPointPath();
-  if (readNodeRoleFromConfigSync() === 'edge') return cliEntryPointPath();
-  const rDir = releasesDir();
-  if (existsSync(rDir)) {
-    const entry = slotEntryPoint(join(rDir, 'current'));
-    if (entry) return entry;
-  }
-  return cliEntryPointPath();
 }
 
 function probeHostForApiHost(apiHost: string | undefined): string {
@@ -442,4 +400,3 @@ export {
   stopDaemonIfRunning,
 };
 export type { ActionOpts, CatchupStatusCommandOptions };
-

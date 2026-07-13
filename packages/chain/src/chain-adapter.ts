@@ -10,11 +10,31 @@ import type { RpcUsageWindow } from './rpc-usage.js';
  */
 export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
+  getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number>;
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
   requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
+}
+
+/** Inputs for one adapter-owned, cost-aware publisher planning decision. */
+export interface PublisherPublishPlanRequest {
+  contextGraphId: bigint;
+  effectiveByteSize: bigint;
+  /** Caller override. When omitted, a covering PCA may select its own lock. */
+  explicitPublishEpochs?: number;
+  /** Direct-spend lifetime used when no covering PCA-specific plan applies. */
+  defaultPublishEpochs: number;
+  /** Exact signer pin for an explicit publisher address/private key. */
+  publisherAddress?: string;
+}
+
+/** Final signer-dependent values that must be fixed before publish side effects. */
+export interface PublisherPublishPlan {
+  publisherAddress: string;
+  publishEpochs: number;
+  tokenAmount: bigint;
 }
 
 /** A PCA the node relates to (GAP-1): `owned` (a node wallet holds the NFT),
@@ -1068,7 +1088,7 @@ export interface ChainAdapter {
    * squat, or any account short for this specific publish) keeps the
    * caller's requested lifetime instead of snapping to the PCA lock and
    * direct-spending at that lifetime/full price. Adapters that omit this
-   * method preserve the legacy unconditional coercion.
+   * method cannot prove coverage and therefore remain on direct spend.
    */
   convictionAccountCanCover?(accountId: bigint, baseCost: bigint): Promise<boolean>;
 
@@ -1157,14 +1177,22 @@ export interface ChainAdapter {
   ): Promise<string>;
 
   /**
-   * Reserve the adapter signer that should be used for a publish to the given
-   * context graph and return its address. Signer-pool implementations should
-   * advance their cursor atomically here so concurrent publishers do not bind
-   * multiple off-chain signatures to the same tx signer by accident. Used by
-   * publishers that need the off-chain signature address to match the eventual
-   * tx signer.
+   * Return an authorized signer for early, cost-independent publisher work.
+   * This does not prove that the signer can fund a later publish. Once the
+   * payload size exists, publishers should use
+   * {@link resolvePublisherPublishPlan} before binding signatures.
    */
   getAuthorizedPublisherAddress?(contextGraphId: bigint): Promise<string>;
+
+  /**
+   * Resolve authorization, candidate-specific PCA lifetime/pricing, strict
+   * fundability, and signer-pool rotation as one adapter-owned operation.
+   * Publishers call this before ACK collection or encrypted staging so no
+   * publish-bound identity is derived from a provisional signer.
+   */
+  resolvePublisherPublishPlan?(
+    request: PublisherPublishPlanRequest,
+  ): Promise<PublisherPublishPlan>;
 
   /**
    * Sign with a specific adapter-held address. Adapters with signer pools

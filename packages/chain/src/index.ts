@@ -1,4 +1,14 @@
 export * from './chain-adapter.js';
+export {
+  resolveQuotedPublisherCandidatePricing,
+  resolveLegacyPublisherCandidatePricing,
+  type QuotedPublisherCandidatePricing,
+  type QuotedPublisherCandidatePricingRequest,
+  type LegacyPublisherCandidatePricing,
+  type LegacyPublisherCandidatePricingRequest,
+  type PublisherConvictionPlanReader,
+  type LegacyPublisherConvictionPlanReader,
+} from './publisher-plan.js';
 // RPC-usage accounting: ONLY the typed window contract is public API (consumed
 // by the ChainAdapter.drainRpcUsage capability, the agent boundary, and the
 // daemon's rpc_usage log emission). The parsing/label-bounding helpers stay
@@ -56,3 +66,13 @@ export {
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
+export {
+  MIN_RPC_RECEIPT_TIMEOUT_MS,
+  RPC_RECEIPT_TIMEOUT_MS,
+  resolveReceiptTimeoutMs,
+} from './evm-adapter-constants.js';
+export {
+  waitForTransactionReceiptWithFailover,
+  type TransactionReceiptEndpoint,
+  type TransactionReceiptWaitOptions,
+} from './rpc-failover-client.js';

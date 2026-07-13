@@ -3,6 +3,11 @@ import type { ServerResponse } from 'node:http';
 import type { RequestContext } from '../../../src/daemon/routes/context.js';
 import type { RoutePlugin } from '../../../src/daemon/plugin-api.js';
 import { handlePluginRoutes } from '../../../src/daemon/routes/plugins.js';
+import {
+  createInitialPublisherState,
+  type PublisherRuntime,
+  type PublisherState,
+} from '../../../src/publisher-runner.js';
 
 interface FakeRes {
   writableEnded: boolean;
@@ -57,7 +62,11 @@ function makeRes(): FakeRes {
   return res;
 }
 
-function makeCtx(routePlugins: RoutePlugin[], res = makeRes()): {
+function makeCtx(
+  routePlugins: RoutePlugin[],
+  res = makeRes(),
+  publisherState: PublisherState = createInitialPublisherState({}),
+): {
   ctx: RequestContext;
   res: FakeRes;
 } {
@@ -66,6 +75,7 @@ function makeCtx(routePlugins: RoutePlugin[], res = makeRes()): {
     res: res as unknown as ServerResponse,
     routePlugins,
     path: '/api/test',
+    publisherState,
   } as unknown as RequestContext;
   return { ctx, res };
 }
@@ -358,5 +368,63 @@ describe('handlePluginRoutes', () => {
     expect(calls).toEqual(['skip', 'handler']);
     expect(res.statusCode).toBe(201);
     expect(res.body).toBe('done');
+  });
+
+  it.each([
+    {
+      name: 'disabled',
+      state: createInitialPublisherState({}),
+      expectedRuntime: null,
+      expectedAvailability: {
+        available: false,
+        reason: 'publisher_disabled',
+        retryable: false,
+        operatorActionRequired: true,
+      },
+    },
+    {
+      name: 'ready',
+      state: {
+        runtime: { walletIds: ['0xpublisher'] } as unknown as PublisherRuntime,
+        availability: { available: true },
+      } satisfies PublisherState,
+      expectedRuntime: { walletIds: ['0xpublisher'] },
+      expectedAvailability: { available: true },
+    },
+  ])('materializes legacy publisher aliases only at the plugin boundary ($name)', async ({
+    state,
+    expectedRuntime,
+    expectedAvailability,
+  }) => {
+    let observed: {
+      runtime: unknown;
+      availability: unknown;
+      canonicalState: PublisherState;
+    } | undefined;
+    const plugin: RoutePlugin = {
+      name: 'legacy-publisher-context',
+      handle(ctx) {
+        observed = {
+          runtime: ctx.publisherRuntime,
+          availability: ctx.publisherAvailability,
+          canonicalState: ctx.publisherState,
+        };
+        ctx.res.writeHead(204);
+        ctx.res.end();
+      },
+    };
+    const { ctx } = makeCtx([plugin], makeRes(), state);
+
+    expect('publisherRuntime' in ctx).toBe(false);
+    expect('publisherAvailability' in ctx).toBe(false);
+    await handlePluginRoutes(ctx);
+
+    expect(observed).toEqual({
+      runtime: expectedRuntime,
+      availability: expectedAvailability,
+      canonicalState: state,
+    });
+    expect('publisherRuntime' in ctx).toBe(false);
+    expect('publisherAvailability' in ctx).toBe(false);
   });
 });
