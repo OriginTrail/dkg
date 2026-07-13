@@ -23,6 +23,26 @@ export function escapeRdfLiteral(value: string): string {
   });
 }
 
+export interface RdfLiteralTermInput {
+  value: string;
+  language?: string;
+  datatype?: string;
+}
+
+const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+
+/** Serialize an RDF literal binding as the N-Triples-style term used by DKG APIs. */
+export function formatRdfLiteralTerm({
+  value,
+  language,
+  datatype,
+}: RdfLiteralTermInput): string {
+  const escaped = escapeRdfLiteral(value);
+  if (language) return `"${escaped}"@${language}`;
+  if (datatype && datatype !== XSD_STRING) return `"${escaped}"^^<${datatype}>`;
+  return `"${escaped}"`;
+}
+
 /** Return whether a string already represents an RDF term accepted by DKG publishers. */
 export function isRdfTerm(value: string): boolean {
   return (

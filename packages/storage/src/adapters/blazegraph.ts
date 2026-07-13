@@ -11,7 +11,7 @@ import type {
   ConstructResult,
   AskResult,
 } from '../triple-store.js';
-import { escapeRdfLiteral as escapeNQuadsLiteral } from '@origintrail-official/dkg-rdf-utils';
+import { formatRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
@@ -518,12 +518,11 @@ interface BlazeAskResponse {
 function blazeTermToString(t: BlazeTermValue): string {
   if (t.type === 'bnode') return `_:${t.value}`;
   if (t.type === 'literal' || t.type === 'typed-literal') {
-    const escaped = escapeNQuadsLiteral(t.value);
-    if (t['xml:lang']) return `"${escaped}"@${t['xml:lang']}`;
-    if (t.datatype && t.datatype !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${escaped}"^^<${t.datatype}>`;
-    }
-    return `"${escaped}"`;
+    return formatRdfLiteralTerm({
+      value: t.value,
+      language: t['xml:lang'],
+      datatype: t.datatype,
+    });
   }
   return t.value;
 }

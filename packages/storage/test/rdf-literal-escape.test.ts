@@ -3,8 +3,8 @@ import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 
-const lexical = 'line1\nline2\tcontrol:\u0001 del:\u007F café Δ';
-const escaped = 'line1\\nline2\\tcontrol:\\u0001 del:\\u007F café Δ';
+const lexical = 'line1\nline2\tcontrol:\u0001 del:\u007F quote:" slash:\\ café Δ';
+const escaped = 'line1\\nline2\\tcontrol:\\u0001 del:\\u007F quote:\\" slash:\\\\ café Δ';
 const expectedBindings = [{
   plain: `"${escaped}"`,
   language: `"${escaped}"@en`,

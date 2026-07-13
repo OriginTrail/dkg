@@ -13,7 +13,7 @@ import type {
   TripleStoreQueryOptions,
   UpdateOptions,
 } from '../triple-store.js';
-import { escapeRdfLiteral as escapeNQuadsLiteral } from '@origintrail-official/dkg-rdf-utils';
+import { formatRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
@@ -536,15 +536,11 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
 function termToString(t: OxTerm): string {
   if (t.termType === 'Literal') {
     const lit = t as oxigraph.Literal;
-    const escaped = escapeNQuadsLiteral(lit.value);
-    if (lit.language) return `"${escaped}"@${lit.language}`;
-    if (
-      lit.datatype &&
-      lit.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string'
-    ) {
-      return `"${escaped}"^^<${lit.datatype.value}>`;
-    }
-    return `"${escaped}"`;
+    return formatRdfLiteralTerm({
+      value: lit.value,
+      language: lit.language || undefined,
+      datatype: lit.datatype?.value,
+    });
   }
   if (t.termType === 'BlankNode') return `_:${t.value}`;
   return t.value;

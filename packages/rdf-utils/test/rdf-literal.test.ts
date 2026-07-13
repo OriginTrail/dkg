@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { escapeRdfLiteral, isRdfTerm, normalizeRdfObject } from '../src/index.js';
+import {
+  escapeRdfLiteral,
+  formatRdfLiteralTerm,
+  isRdfTerm,
+  normalizeRdfObject,
+} from '../src/index.js';
 
 describe('escapeRdfLiteral', () => {
   it('escapes quotes, backslashes, ECHAR controls, remaining C0 controls, and DEL', () => {
@@ -15,5 +20,21 @@ describe('escapeRdfLiteral', () => {
     expect(normalizeRdfObject('urn:test:entity')).toBe('urn:test:entity');
     expect(normalizeRdfObject('a "quote"\u0000')).toBe('"a \\"quote\\"\\u0000"');
     expect(normalizeRdfObject(null)).toBe('""');
+  });
+});
+
+describe('formatRdfLiteralTerm', () => {
+  const value = 'café "quote" \\ tab:\t control:\u0001 del:\u007F';
+  const body = 'café \\"quote\\" \\\\ tab:\\t control:\\u0001 del:\\u007F';
+
+  it('owns plain, language-tagged, and typed binding formatting', () => {
+    expect(formatRdfLiteralTerm({ value })).toBe(`"${body}"`);
+    expect(formatRdfLiteralTerm({ value, language: 'en' })).toBe(`"${body}"@en`);
+    expect(formatRdfLiteralTerm({ value, datatype: 'urn:test:datatype' }))
+      .toBe(`"${body}"^^<urn:test:datatype>`);
+    expect(formatRdfLiteralTerm({
+      value,
+      datatype: 'http://www.w3.org/2001/XMLSchema#string',
+    })).toBe(`"${body}"`);
   });
 });
