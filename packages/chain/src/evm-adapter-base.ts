@@ -2322,7 +2322,7 @@ export class EVMChainAdapterBase {
       };
     }
 
-    return this._withSignerSelection(async (ordered) => {
+    const selectedPlan = await this._withSignerSelection(async (ordered) => {
       const authorized = await this._authorizedPublisherSigners(ordered, request.contextGraphId);
       const plans = await Promise.all(
         authorized.map((signer) => this._publisherCandidatePlan(signer, request, quote)),
@@ -2349,6 +2349,12 @@ export class EVMChainAdapterBase {
         diagnostics,
       );
     });
+    // Do not expose the internal Wallet carried only for cursor advancement.
+    return {
+      publisherAddress: selectedPlan.publisherAddress,
+      publishEpochs: selectedPlan.publishEpochs,
+      tokenAmount: selectedPlan.tokenAmount,
+    };
   }
 
   /**

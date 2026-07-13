@@ -3932,12 +3932,14 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     tracByAddr.set(lc(walletA.address), 1n); tracByAddr.set(lc(walletB.address), 2_000n);
     (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
 
-    await expect(a.resolvePublisherPublishPlan({
+    const plan = await a.resolvePublisherPublishPlan({
       contextGraphId: CG,
       effectiveByteSize: 100n,
       explicitPublishEpochs: 2,
       defaultPublishEpochs: 12,
-    })).resolves.toMatchObject({ publisherAddress: walletB.address, publishEpochs: 2, tokenAmount: 1_000n });
+    });
+    expect(plan).toEqual({ publisherAddress: walletB.address, publishEpochs: 2, tokenAmount: 1_000n });
+    expect((plan as { signer?: unknown }).signer).toBeUndefined();
   });
 
   it('never rotates away from an explicitly pinned publisher during strict reservation', async () => {
