@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runRuntimePackageBuild } from '../../build-runtime-packages.mjs';
 import {
   RUNTIME_BUILD_EXCLUSIONS,
   runtimeBuildPnpmArgs,
@@ -40,6 +41,49 @@ test('public runtime build script delegates to the checked build plan', () => {
     'node scripts/build-runtime-packages.mjs',
     'pnpm run build:runtime:packages must use the entrypoint backed by runtimeBuildPnpmArgs',
   );
+});
+
+test('runtime build entrypoint invokes pnpm with the checked plan and forwards extra arguments', () => {
+  let invocation;
+  const status = runRuntimePackageBuild({
+    extraArgs: ['--force', '--log-order=stream'],
+    platform: 'linux',
+    spawn(command, args, options) {
+      invocation = { command, args, options };
+      return { status: 0, signal: null };
+    },
+    reportError(message) {
+      assert.fail(`successful runtime build must not report an error: ${message}`);
+    },
+  });
+
+  assert.equal(status, 0);
+  assert.deepEqual(invocation, {
+    command: 'pnpm',
+    args: runtimeBuildPnpmArgs(['run', 'build', '--force', '--log-order=stream']),
+    options: { stdio: 'inherit', shell: false },
+  });
+});
+
+test('runtime build entrypoint propagates process failures', () => {
+  const messages = [];
+  const reportError = (message) => messages.push(message);
+
+  assert.equal(runRuntimePackageBuild({
+    spawn: () => ({ status: 23, signal: null }),
+    reportError,
+  }), 23);
+  assert.equal(runRuntimePackageBuild({
+    spawn: () => ({ status: null, signal: null, error: new Error('spawn failed') }),
+    reportError,
+  }), 1);
+  assert.equal(runRuntimePackageBuild({
+    spawn: () => ({ status: null, signal: 'SIGTERM' }),
+    reportError,
+  }), 1);
+
+  assert.equal(messages[0], 'spawn failed');
+  assert.match(messages[1], /exited via SIGTERM$/);
 });
 
 test('release runtime build plan includes workspace dependencies but excludes Hardhat', () => {
