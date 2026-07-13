@@ -193,7 +193,7 @@ export async function startOxigraphServer(
       spawnSpec.command,
       spawnSpec.args,
       {
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: spawnSpec.stdio ?? ['ignore', 'pipe', 'pipe'],
         ...(spawnSpec.environment
           ? { env: { ...process.env, ...spawnSpec.environment } }
           : {}),

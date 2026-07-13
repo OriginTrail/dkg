@@ -148,7 +148,48 @@ async function linuxProcessTree(rootPid: number): Promise<Set<number>> {
   return pids;
 }
 
-async function windowsListenOwnerPid(pid: number, port: number): Promise<number | null> {
+async function windowsProcessTree(rootPid: number): Promise<Set<number>> {
+  const pids = new Set<number>([rootPid]);
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Get-CimInstance Win32_Process | ForEach-Object { "{0} {1}" -f $_.ProcessId,$_.ParentProcessId }',
+      ],
+      { timeout: 3_000 },
+    );
+    const children = new Map<number, number[]>();
+    for (const line of stdout.split('\n')) {
+      const [rawPid, rawParentPid] = line.trim().split(/\s+/);
+      const pid = Number(rawPid);
+      const parentPid = Number(rawParentPid);
+      if (!Number.isInteger(pid) || !Number.isInteger(parentPid)) continue;
+      const list = children.get(parentPid) ?? [];
+      list.push(pid);
+      children.set(parentPid, list);
+    }
+    const pending = [rootPid];
+    while (pending.length > 0) {
+      for (const childPid of children.get(pending.pop()!) ?? []) {
+        if (pids.has(childPid)) continue;
+        pids.add(childPid);
+        pending.push(childPid);
+      }
+    }
+  } catch {
+    // Fall back to the wrapper PID. Readiness then fails closed rather than
+    // trusting an unrelated listener on the configured port.
+  }
+  return pids;
+}
+
+async function windowsListenOwnerPid(
+  pids: ReadonlySet<number>,
+  port: number,
+): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync('netstat', ['-ano'], { timeout: 3_000 });
     const suffix = `:${port}`;
@@ -156,7 +197,7 @@ async function windowsListenOwnerPid(pid: number, port: number): Promise<number 
       if (!line.includes('LISTENING') || !line.includes(suffix)) continue;
       const parts = line.trim().split(/\s+/);
       const rowPid = Number(parts[parts.length - 1]);
-      if (rowPid === pid) return pid;
+      if (pids.has(rowPid)) return rowPid;
     }
     return null;
   } catch {
@@ -181,12 +222,16 @@ export async function findListenOwnerPid(
   if (host !== '127.0.0.1' && host !== 'localhost') return child.pid;
 
   const pid = child.pid;
-  const pids = ownership === 'process-tree' && process.platform === 'linux'
-    ? await linuxProcessTree(pid)
+  const pids = ownership === 'process-tree'
+    ? process.platform === 'linux'
+      ? await linuxProcessTree(pid)
+      : process.platform === 'win32'
+        ? await windowsProcessTree(pid)
+        : new Set([pid])
     : new Set([pid]);
 
   if (process.platform === 'win32') {
-    return windowsListenOwnerPid(pid, port);
+    return windowsListenOwnerPid(pids, port);
   }
 
   const lsofOwner = await lsofListenOwnerPid(pids, port);

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { PassThrough } from 'node:stream';
 import {
   conventionalSignalExitCode,
   parseOxigraphParentWatchdogArgs,
@@ -69,6 +70,23 @@ describe('Oxigraph parent watchdog', () => {
     expect(result.parentLost).toBe(false);
     expect(result.signal).toBe('SIGTERM');
     expect(result.oomKilled).toBe(false);
+  });
+
+  it('treats inherited parent-pipe EOF as authoritative worker death', async () => {
+    const parentPipe = new PassThrough();
+    const handle = startOxigraphParentWatchdog({
+      parentPid: 42,
+      parentIdentity: 'pipe:3',
+      parentPipe,
+      command: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      stopGraceMs: 100,
+    });
+    parentPipe.end();
+
+    const result = await handle.result;
+    expect(result.parentLost).toBe(true);
+    expect(result.signal).toBe('SIGTERM');
   });
 
   it('escalates to SIGKILL when the child ignores SIGTERM', async () => {

@@ -1,4 +1,4 @@
-import type { ChildProcess } from 'node:child_process';
+import type { ChildProcess, StdioOptions } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
 import {
@@ -15,6 +15,7 @@ export interface OxigraphSpawnSpec {
   command: string;
   args: string[];
   environment?: NodeJS.ProcessEnv;
+  stdio?: StdioOptions;
 }
 
 export type ListenOwnerResolver = (
@@ -25,7 +26,7 @@ export type ListenOwnerResolver = (
 ) => Promise<number | null>;
 
 export interface OxigraphLaunchStrategy {
-  readonly mode: 'direct' | 'systemd-scope';
+  readonly mode: 'direct' | 'parent-watchdog' | 'systemd-scope';
   nextSpawnSpec(binaryPath: string, binaryArgs: string[]): OxigraphSpawnSpec;
   resolveListenerPid(
     child: ChildProcess,
@@ -83,6 +84,34 @@ export function createOxigraphLaunchStrategy(opts: {
   parentIdentity?: string;
 }): OxigraphLaunchStrategy {
   if (!opts.memoryLimits) {
+    if (opts.platform === 'win32') {
+      const watchdogPath = opts.watchdogPath ?? fileURLToPath(
+        new URL('./oxigraph-parent-watchdog.js', import.meta.url),
+      );
+      const nodeExecutable = opts.nodeExecutable ?? process.execPath;
+      return {
+        mode: 'parent-watchdog',
+        nextSpawnSpec: (binaryPath, binaryArgs) => ({
+          command: nodeExecutable,
+          args: [
+            watchdogPath,
+            String(opts.parentPid),
+            // fd 3 is an inherited parent-owned pipe. EOF is authoritative
+            // worker death and is immune to PID reuse.
+            'pipe:3',
+            binaryPath,
+            ...binaryArgs,
+          ],
+          stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+        }),
+        resolveListenerPid: (child, port, host, resolver) =>
+          resolver(child, port, host, 'process-tree'),
+        observeStderr: () => {},
+        classifyOomExit: cgroupEvidenceIncremented,
+        logSummary: () =>
+          'Starting Oxigraph behind a parent-pipe watchdog (Windows kill-on-parent-exit fallback).',
+      };
+    }
     return {
       mode: 'direct',
       nextSpawnSpec: (binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }),

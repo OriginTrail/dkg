@@ -137,6 +137,34 @@ describe('buildOxigraphSpawnSpec', () => {
       .toEqual({ command: '/opt/oxigraph', args: ['serve'] });
   });
 
+  it('uses an inherited parent-pipe watchdog on Windows', async () => {
+    const strategy = createOxigraphLaunchStrategy({
+      platform: 'win32',
+      parentPid: 42,
+      uid: -1,
+      nodeExecutable: 'C:\\node.exe',
+      watchdogPath: 'C:\\oxigraph-parent-watchdog.js',
+    });
+    const spec = strategy.nextSpawnSpec('C:\\oxigraph.exe', ['serve']);
+    expect(spec).toEqual({
+      command: 'C:\\node.exe',
+      args: [
+        'C:\\oxigraph-parent-watchdog.js',
+        '42',
+        'pipe:3',
+        'C:\\oxigraph.exe',
+        'serve',
+      ],
+      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    });
+    let ownership: string | undefined;
+    await strategy.resolveListenerPid({} as never, 7878, '127.0.0.1', async (_child, _port, _host, policy) => {
+      ownership = policy;
+      return 99;
+    });
+    expect(ownership).toBe('process-tree');
+  });
+
   it('wraps Oxigraph in a finite systemd user scope', () => {
     const strategy = createOxigraphLaunchStrategy({
       memoryLimits: { highMiB: 2048, maxMiB: 3072 },
