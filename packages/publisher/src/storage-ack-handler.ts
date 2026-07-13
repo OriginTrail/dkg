@@ -5,6 +5,7 @@ import {
   type Quad,
   type QueryOptions,
   type StorePressureSnapshot,
+  tryUpdateWithTouchedGraphs,
 } from '@origintrail-official/dkg-storage';
 import type {
   EventBus,
@@ -35,6 +36,7 @@ import {
   contextGraphCatalogUri,
   isSwmMerkleExcludedQuad,
   STORAGE_ACK_MAX_STAGING_BYTES,
+  sparqlIri,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -615,6 +617,10 @@ export class StorageACKHandler {
   /**
    * REPLACE-persist a verified public `_catalog` into `<cg>/_catalog`:
    * clear each subject then insert the catalog quads under `catalogGraph`.
+   * Production stores support server-side UPDATE, so clear every subject in
+   * one targeted DELETE/WHERE instead of calling deleteByPattern per subject
+   * (the HTTP adapters bracket each such call with two full-graph COUNTs).
+   * Stores without update() retain the existing per-subject fallback.
    * Used by BOTH the curated publish and curated update paths (identical
    * store shape). The caller MUST have already run `assertSafeIri(catalogGraph)`
    * (malformed-request → reset stays outside the store-op wrapper).
@@ -631,11 +637,29 @@ export class StorageACKHandler {
     assertPersistQuadTermsSafe(parsedCatalog);
     const result = await this.runStoreOpOrDecline(cgId, async () => {
       const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
-      for (const subject of catalogSubjects) {
-        await this.store.deleteByPattern(
-          { graph: catalogGraph, subject },
-          ackStoreOptions('storage-ack.persistCatalog.deleteByPattern', signal),
-        );
+      // Blank-node labels cannot be safely used as cross-operation identities
+      // in a SPARQL UPDATE. Catalog subjects are canonical IRIs in production;
+      // preserve the legacy fallback for any non-canonical input rather than
+      // silently changing its deletion semantics.
+      const iriSubjects = [...catalogSubjects].filter((subject) => !subject.startsWith('_:'));
+      const canUseTargetedUpdate = iriSubjects.length === catalogSubjects.size;
+      const usedTargetedUpdate = canUseTargetedUpdate && await tryUpdateWithTouchedGraphs(
+        this.store,
+        `DELETE { GRAPH ${sparqlIri(catalogGraph)} { ?s ?p ?o } }
+WHERE { GRAPH ${sparqlIri(catalogGraph)} {
+  VALUES ?s { ${iriSubjects.map((subject) => sparqlIri(subject)).join(' ')} }
+  ?s ?p ?o
+} }`,
+        [catalogGraph],
+        ackStoreOptions('storage-ack.persistCatalog.update', signal),
+      );
+      if (!usedTargetedUpdate) {
+        for (const subject of catalogSubjects) {
+          await this.store.deleteByPattern(
+            { graph: catalogGraph, subject },
+            ackStoreOptions('storage-ack.persistCatalog.deleteByPattern', signal),
+          );
+        }
       }
       await this.store.insert(
         parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
