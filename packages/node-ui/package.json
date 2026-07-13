@@ -49,7 +49,7 @@
     "@types/better-sqlite3": "^7",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@types/three": "^0.183.1",
+    "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "^4",
     "@vitest/coverage-v8": "^4.0.18",
     "cross-env": "^10.1.0",
@@ -58,7 +58,7 @@
     "react-dom": "^19",
     "react-router-dom": "^7",
     "recharts": "^2",
-    "three": "^0.184.0",
+    "three": "^0.185.1",
     "typescript": "^5.7",
     "vite": "^6",
     "vitest": "^4.0.18"
