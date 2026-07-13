@@ -21,6 +21,10 @@ export {
   type SparqlEndpoint,
 } from './triple-store.js';
 export {
+  UnsupportedTripleStoreCapabilityError,
+  type TripleStoreCapability,
+} from './unsupported-capability-error.js';
+export {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
   externalStorePriorityScheduler,

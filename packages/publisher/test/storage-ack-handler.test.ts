@@ -11,7 +11,7 @@ import {
   isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot, Logger,
 } from '@origintrail-official/dkg-core';
 import { TypedEventBus, rebuildMetrics } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { GraphSetIndexStore, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { metrics } from '@opentelemetry/api';
@@ -40,12 +40,12 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
  * hitting the live store. Mirrors `storeWithFailingOps` in
  * storage-ack-core-unavailable.test.ts — the curated-catalog store-failure
  * regressions below need the SAME real-store-with-armed-failure model so
- * they exercise the actual persist path (parse → verify → deleteByPattern →
+ * they exercise the actual persist path (parse → verify → targeted update →
  * insert) up to the failing store call.
  */
 function storeWithFailingOps(
   base: OxigraphStore,
-  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'flush')[],
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'update' | 'flush')[],
 ): TripleStore {
   return new Proxy(base as unknown as TripleStore, {
     get(target, prop, receiver) {
@@ -1004,13 +1004,12 @@ describe('StorageACKHandler', () => {
     // throw the classic 'store is closed' mid-restart error, reusing the
     // curated fixtures above. The catalog is VALID (root/leaf/byteSize all
     // check out) so the handler reaches the `<cg>/_catalog` persist —
-    // deleteByPattern + insert — which is the store-outage catch path this
+    // targeted update + insert — which is the store-outage catch path this
     // regression pins (otReviewAgent #1408:650).
-    async function curatedHandlerWithFailingStore(
-      failingOps: readonly ('deleteByPattern' | 'insert' | 'flush')[],
+    function curatedHandlerWithStore(
+      store: TripleStore,
       configOverrides: Partial<StorageACKHandlerConfig> = {},
     ) {
-      const base = new OxigraphStore();
       const config: StorageACKHandlerConfig = {
         nodeRole: 'core',
         nodeIdentityId: coreIdentityId,
@@ -1022,20 +1021,179 @@ describe('StorageACKHandler', () => {
         isCgCurated: async () => true,
         ...configOverrides,
       };
-      return new StorageACKHandler(
+      return new StorageACKHandler(store as any, config, new TypedEventBus() as any);
+    }
+
+    async function curatedHandlerWithFailingStore(
+      failingOps: readonly ('deleteByPattern' | 'update' | 'insert' | 'flush')[],
+      configOverrides: Partial<StorageACKHandlerConfig> = {},
+    ) {
+      const base = new OxigraphStore();
+      return curatedHandlerWithStore(
         storeWithFailingOps(base, failingOps) as any,
-        config,
-        new TypedEventBus() as any,
+        configOverrides,
       );
     }
 
-    it('curated catalog persist / deleteByPattern throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+    it('uses one targeted update with graph hints, avoids deleteByPattern counts, and preserves unrelated subjects', async () => {
+      const catalogGraph = `${cgDid}/_catalog`;
+      const unrelatedSubject = 'urn:test:unrelated-catalog-subject';
+      const stalePredicate = 'urn:test:stale-catalog-predicate';
+      const base = new OxigraphStore();
+      await base.insert([
+        { subject: cgDid, predicate: stalePredicate, object: '"stale"', graph: catalogGraph },
+        { subject: unrelatedSubject, predicate: 'urn:test:kept', object: '"yes"', graph: catalogGraph },
+      ]);
+      const updates: Array<{ sparql: string; options?: { source?: string; priority?: string; touchedGraphs?: readonly string[] } }> = [];
+      let deleteByPatternCalls = 0;
+      const store = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') {
+            return async (sparql: string, options?: { source?: string; priority?: string; touchedGraphs?: readonly string[] }) => {
+              updates.push({ sparql, options });
+              return target.update!.call(target, sparql, options);
+            };
+          }
+          if (prop === 'deleteByPattern') {
+            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+              deleteByPatternCalls += 1;
+              return target.deleteByPattern.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(deleteByPatternCalls).toBe(0);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.sparql).toContain(`VALUES ?s { <${cgDid}> }`);
+      expect(updates[0]?.options).toMatchObject({
+        source: 'storage-ack.persistCatalog.update',
+        priority: 'ack',
+        touchedGraphs: [catalogGraph],
+      });
+      const stale = await base.query(`ASK { GRAPH <${catalogGraph}> { <${cgDid}> <${stalePredicate}> ?o } }`);
+      expect(stale).toMatchObject({ type: 'boolean', value: false });
+      const unrelated = await base.query(`ASK { GRAPH <${catalogGraph}> { <${unrelatedSubject}> ?p ?o } }`);
+      expect(unrelated).toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('falls back to per-subject deleteByPattern when update() is unavailable', async () => {
+      const base = new OxigraphStore();
+      let deleteByPatternCalls = 0;
+      const store = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') return undefined;
+          if (prop === 'deleteByPattern') {
+            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+              deleteByPatternCalls += 1;
+              return target.deleteByPattern.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(deleteByPatternCalls).toBe(1);
+    });
+
+    it('falls back through a decorator whose inner store does not support update()', async () => {
+      const base = new OxigraphStore();
+      let deleteByPatternCalls = 0;
+      const innerWithoutUpdate = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') return undefined;
+          if (prop === 'deleteByPattern') {
+            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+              deleteByPatternCalls += 1;
+              return target.deleteByPattern.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const decoratedStore = new GraphSetIndexStore(innerWithoutUpdate);
+      expect(typeof decoratedStore.update).toBe('function');
+      const handler = curatedHandlerWithStore(decoratedStore);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(deleteByPatternCalls).toBe(1);
+      await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(catalogTriples.length);
+    });
+
+    it('skips targeted update and deletes by pattern for a blank-node catalog subject', async () => {
+      const blankCatalogTriples = [{
+        subject: '_:catalog',
+        predicate: 'urn:test:catalog-predicate',
+        object: '"blank-subject"',
+      }];
+      const blankCatalogNquads = '_:catalog <urn:test:catalog-predicate> "blank-subject" .';
+      const blankCatalogBytes = new TextEncoder().encode(blankCatalogNquads);
+      const blankCatalogRoot = computeCatalogRoot(blankCatalogTriples);
+      const base = new OxigraphStore();
+      let updateCalls = 0;
+      const deletedPatterns: Array<Partial<Quad>> = [];
+      const store = new Proxy(base as unknown as TripleStore, {
+        get(target, prop, receiver) {
+          if (prop === 'update') {
+            return async (...args: Parameters<NonNullable<TripleStore['update']>>) => {
+              updateCalls += 1;
+              return target.update!.call(target, ...args);
+            };
+          }
+          if (prop === 'deleteByPattern') {
+            return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+              deletedPatterns.push(args[0]);
+              // This regression targets the ACK routing policy. Blank-node
+              // labels are operation-local, so the spy records the requested
+              // legacy delete without asking the embedded backend to resolve
+              // that label in a separate operation.
+              if (args[0].subject?.startsWith('_:')) return 0;
+              return target.deleteByPattern.call(target, ...args);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent({
+        stagingQuads: blankCatalogBytes,
+        publicByteSize: blankCatalogBytes.length,
+        catalogRoot: blankCatalogRoot.root,
+        catalogLeafCount: blankCatalogRoot.leafCount,
+      }), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      expect(updateCalls).toBe(0);
+      expect(deletedPatterns).toEqual([{
+        graph: `${cgDid}/_catalog`,
+        subject: '_:catalog',
+      }]);
+      await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(1);
+    });
+
+    it('curated catalog persist / targeted update throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
       // Dead-air regression: a curated encrypted publish with a VALID catalog
-      // root whose `<cg>/_catalog` REPLACE (deleteByPattern) hits a closed
+      // root whose `<cg>/_catalog` targeted DELETE update hits a closed
       // store used to throw out of the handler → stream reset → publisher
       // no_response. It must instead reply with the transient decline.
       const onDecline = vi.fn();
-      const handler = await curatedHandlerWithFailingStore(['deleteByPattern'], { onDecline });
+      const handler = await curatedHandlerWithFailingStore(['update'], { onDecline });
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(true);
