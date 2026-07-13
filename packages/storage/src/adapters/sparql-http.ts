@@ -32,6 +32,7 @@ import type {
   AskResult,
   StorePressureSnapshot,
 } from '../triple-store.js';
+import { escapeNQuadsLiteral } from '../rdf-literal-escape.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
@@ -666,10 +667,6 @@ interface W3CSelectResponse {
 
 interface W3CAskResponse {
   boolean: boolean;
-}
-
-function escapeNQuadsLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 }
 
 function w3cTermToString(t: W3CTerm): string {

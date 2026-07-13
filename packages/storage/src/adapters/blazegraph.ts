@@ -11,6 +11,7 @@ import type {
   ConstructResult,
   AskResult,
 } from '../triple-store.js';
+import { escapeNQuadsLiteral } from '../rdf-literal-escape.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
@@ -512,10 +513,6 @@ interface BlazeSelectResponse {
 
 interface BlazeAskResponse {
   boolean: boolean;
-}
-
-function escapeNQuadsLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 }
 
 function blazeTermToString(t: BlazeTermValue): string {

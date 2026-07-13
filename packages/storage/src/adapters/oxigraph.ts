@@ -13,6 +13,7 @@ import type {
   TripleStoreQueryOptions,
   UpdateOptions,
 } from '../triple-store.js';
+import { escapeNQuadsLiteral } from '../rdf-literal-escape.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
@@ -530,10 +531,6 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
     graph:
       oxq.graph.termType === 'DefaultGraph' ? '' : oxq.graph.value,
   };
-}
-
-function escapeNQuadsLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 }
 
 function termToString(t: OxTerm): string {
