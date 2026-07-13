@@ -8,6 +8,7 @@
 export const STORE_BACKENDS = {
   'oxigraph-server': {
     kind: 'managed-local',
+    adapter: false,
     retired: false,
     default: true,
     menu: true,
@@ -15,6 +16,7 @@ export const STORE_BACKENDS = {
   },
   oxigraph: {
     kind: 'local',
+    adapter: true,
     retired: false,
     default: false,
     menu: true,
@@ -23,6 +25,7 @@ export const STORE_BACKENDS = {
   },
   'oxigraph-persistent': {
     kind: 'local',
+    adapter: true,
     retired: false,
     default: false,
     menu: false,
@@ -30,6 +33,7 @@ export const STORE_BACKENDS = {
   },
   blazegraph: {
     kind: 'external',
+    adapter: true,
     retired: false,
     default: false,
     menu: true,
@@ -39,6 +43,7 @@ export const STORE_BACKENDS = {
   },
   'sparql-http': {
     kind: 'external',
+    adapter: true,
     retired: false,
     default: false,
     menu: false,
@@ -48,49 +53,66 @@ export const STORE_BACKENDS = {
   },
   'oxigraph-worker': {
     kind: 'retired',
+    adapter: false,
     retired: true,
     default: false,
     menu: false,
   },
 } as const;
 
-export type StoreBackend = keyof typeof STORE_BACKENDS;
-export type StoreBackendPolicy = (typeof STORE_BACKENDS)[StoreBackend];
+export type KnownStoreBackend = keyof typeof STORE_BACKENDS;
+export type StoreBackendPolicy = (typeof STORE_BACKENDS)[KnownStoreBackend];
 export type StoreBackendKind = StoreBackendPolicy['kind'];
 export type StoreBackendOfKind<Kind extends StoreBackendKind> = {
-  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { kind: Kind }
+  [Backend in KnownStoreBackend]: typeof STORE_BACKENDS[Backend] extends { kind: Kind }
     ? Backend
     : never;
-}[StoreBackend];
-export type SupportedStoreBackend = {
-  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { retired: false }
+}[KnownStoreBackend];
+export type SupportedDaemonStoreBackend = {
+  [Backend in KnownStoreBackend]: typeof STORE_BACKENDS[Backend] extends { retired: false }
     ? Backend
     : never;
-}[StoreBackend];
+}[KnownStoreBackend];
 export type RetiredStoreBackend = {
-  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { retired: true }
+  [Backend in KnownStoreBackend]: typeof STORE_BACKENDS[Backend] extends { retired: true }
     ? Backend
     : never;
-}[StoreBackend];
-export type DefaultStoreBackend = {
-  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { default: true }
+}[KnownStoreBackend];
+export type DefaultDaemonStoreBackend = {
+  [Backend in KnownStoreBackend]: typeof STORE_BACKENDS[Backend] extends { default: true }
     ? Backend
     : never;
-}[StoreBackend];
+}[KnownStoreBackend];
 export type MenuStoreBackend = {
-  [Backend in StoreBackend]: typeof STORE_BACKENDS[Backend] extends { menu: true }
+  [Backend in KnownStoreBackend]: typeof STORE_BACKENDS[Backend] extends { menu: true }
     ? Backend
     : never;
-}[StoreBackend];
+}[KnownStoreBackend];
+export type StorageAdapterBackend = {
+  [Backend in KnownStoreBackend]: typeof STORE_BACKENDS[Backend] extends { adapter: true }
+    ? Backend
+    : never;
+}[KnownStoreBackend];
 export type ExternalStoreBackend = StoreBackendOfKind<'external'>;
 export type LocalStoreBackend = StoreBackendOfKind<'local'>;
 export type ManagedLocalStoreBackend = StoreBackendOfKind<'managed-local'>;
 
-export function storeBackendNames(): StoreBackend[] {
-  return Object.keys(STORE_BACKENDS) as StoreBackend[];
+declare const CUSTOM_TRIPLE_STORE_BACKEND: unique symbol;
+export type CustomTripleStoreBackend = string & {
+  readonly [CUSTOM_TRIPLE_STORE_BACKEND]: true;
+};
+
+export type ClassifiedTripleStoreBackend =
+  | { kind: 'adapter'; backend: StorageAdapterBackend }
+  | { kind: 'managed-local'; backend: ManagedLocalStoreBackend }
+  | { kind: 'retired'; backend: RetiredStoreBackend }
+  | { kind: 'custom'; backend: CustomTripleStoreBackend };
+
+export function storeBackendNames(): KnownStoreBackend[] {
+  return Object.keys(STORE_BACKENDS) as KnownStoreBackend[];
 }
 
-function requireSingleBackend<Backend extends StoreBackend>(
+function requireSingleBackend<Backend extends KnownStoreBackend>(
   backends: readonly Backend[],
   description: string,
 ): Backend {
@@ -100,23 +122,23 @@ function requireSingleBackend<Backend extends StoreBackend>(
   return backends[0];
 }
 
-export const DEFAULT_STORE_BACKEND: DefaultStoreBackend = requireSingleBackend(
+export const DEFAULT_DAEMON_STORE_BACKEND: DefaultDaemonStoreBackend = requireSingleBackend(
   storeBackendNames().filter(
-    (backend): backend is DefaultStoreBackend => STORE_BACKENDS[backend].default,
+    (backend): backend is DefaultDaemonStoreBackend => STORE_BACKENDS[backend].default,
   ),
   'default',
 );
 
-export const MANAGED_LOCAL_STORE_BACKEND: ManagedLocalStoreBackend = requireSingleBackend(
+export const MANAGED_DAEMON_STORE_BACKEND: ManagedLocalStoreBackend = requireSingleBackend(
   storeBackendNames().filter(
     (backend): backend is ManagedLocalStoreBackend => STORE_BACKENDS[backend].kind === 'managed-local',
   ),
   'managed-local',
 );
 
-export function supportedBackendNames(): SupportedStoreBackend[] {
+export function supportedBackendNames(): SupportedDaemonStoreBackend[] {
   return storeBackendNames().filter(
-    (backend): backend is SupportedStoreBackend => !STORE_BACKENDS[backend].retired,
+    (backend): backend is SupportedDaemonStoreBackend => !STORE_BACKENDS[backend].retired,
   );
 }
 
@@ -139,7 +161,7 @@ export function menuBackendChoices(): MenuStoreBackend[] {
 
 export function isKnownStoreBackend(
   backend: string | undefined | null,
-): backend is StoreBackend {
+): backend is KnownStoreBackend {
   return backend != null && Object.prototype.hasOwnProperty.call(STORE_BACKENDS, backend);
 }
 
@@ -151,7 +173,7 @@ export function getStoreBackendPolicy(
 
 export function isSupportedStoreBackend(
   backend: string | undefined | null,
-): backend is SupportedStoreBackend {
+): backend is SupportedDaemonStoreBackend {
   return isKnownStoreBackend(backend) && !STORE_BACKENDS[backend].retired;
 }
 
@@ -171,4 +193,34 @@ export function isManagedLocalBackend(
   backend: string | undefined | null,
 ): backend is ManagedLocalStoreBackend {
   return isKnownStoreBackend(backend) && STORE_BACKENDS[backend].kind === 'managed-local';
+}
+
+export function isStorageAdapterBackend(
+  backend: string | undefined | null,
+): backend is StorageAdapterBackend {
+  return isKnownStoreBackend(backend) && STORE_BACKENDS[backend].adapter;
+}
+
+export function customTripleStoreBackend(backend: string): CustomTripleStoreBackend {
+  if (!backend.trim()) throw new Error('Custom triple-store backend name cannot be empty');
+  if (isKnownStoreBackend(backend)) {
+    throw new Error(`Known triple-store backend "${backend}" does not need a custom-backend wrapper`);
+  }
+  return backend as CustomTripleStoreBackend;
+}
+
+export function classifyTripleStoreBackend(backend: string): ClassifiedTripleStoreBackend {
+  if (!isKnownStoreBackend(backend)) {
+    return { kind: 'custom', backend: backend as CustomTripleStoreBackend };
+  }
+  if (STORE_BACKENDS[backend].retired) {
+    return { kind: 'retired', backend: backend as RetiredStoreBackend };
+  }
+  if (STORE_BACKENDS[backend].adapter) {
+    return { kind: 'adapter', backend: backend as StorageAdapterBackend };
+  }
+  if (STORE_BACKENDS[backend].kind === 'managed-local') {
+    return { kind: 'managed-local', backend: backend as ManagedLocalStoreBackend };
+  }
+  throw new Error(`Known store backend "${backend}" has no factory-boundary classification`);
 }

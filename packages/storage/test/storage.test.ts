@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, expectTypeOf, beforeEach, beforeAll, afterAll } from 'vitest';
 import {
   OxigraphStore,
   BlazegraphStore,
@@ -6,6 +6,8 @@ import {
   GraphManager,
   PrivateContentStore,
   createTripleStore,
+  classifyTripleStoreBackend,
+  customTripleStoreBackend,
   loadSelectedSharedMemoryQuads,
   loadSelectedVerifiableMemoryQuads,
   registerTripleStoreAdapter,
@@ -13,6 +15,7 @@ import {
   resolveVerifiableMemoryReadGraphs,
   type Quad,
   type TripleStore,
+  type TripleStoreBackend,
 } from '../src/index.js';
 import {
   contextGraphDataGraphUri,
@@ -252,6 +255,12 @@ if (blazeUrl) {
 // ---------------------------------------------------------------------------
 
 describe('createTripleStore factory', () => {
+  it('keeps managed and retired daemon names out of the constructible backend type', () => {
+    expectTypeOf<'oxigraph'>().toMatchTypeOf<TripleStoreBackend>();
+    expectTypeOf<'oxigraph-server'>().not.toMatchTypeOf<TripleStoreBackend>();
+    expectTypeOf<'oxigraph-worker'>().not.toMatchTypeOf<TripleStoreBackend>();
+  });
+
   it('all built-in backends are registered (factory throws something other than "Unknown TripleStore backend")', async () => {
     // The *registry* contract being tested here is: every built-in
     // backend name is recognized. The construction itself may require
@@ -318,14 +327,32 @@ describe('createTripleStore factory', () => {
   });
 
   it('throws on unknown backend', async () => {
-    await expect(createTripleStore({ backend: 'unknown' })).rejects.toThrow(
+    await expect(createTripleStore({ backend: customTripleStoreBackend('unknown') })).rejects.toThrow(
       'Unknown TripleStore backend',
+    );
+  });
+
+  it('classifies factory adapters separately from managed and retired daemon names', async () => {
+    expect(classifyTripleStoreBackend('oxigraph')).toEqual({
+      kind: 'adapter',
+      backend: 'oxigraph',
+    });
+    expect(classifyTripleStoreBackend('oxigraph-server')).toEqual({
+      kind: 'managed-local',
+      backend: 'oxigraph-server',
+    });
+    expect(classifyTripleStoreBackend('oxigraph-worker')).toEqual({
+      kind: 'retired',
+      backend: 'oxigraph-worker',
+    });
+    await expect(createTripleStore({ backend: 'oxigraph-server' })).rejects.toThrow(
+      /daemon-managed config backend.*not a constructible storage adapter/,
     );
   });
 
   it('custom adapter can be registered and used', async () => {
     const calls: string[] = [];
-    registerTripleStoreAdapter('test-custom', async () => ({
+    const backend = registerTripleStoreAdapter('test-custom', async () => ({
       insert: async () => { calls.push('insert'); },
       delete: async () => {},
       deleteByPattern: async () => 0,
@@ -339,7 +366,7 @@ describe('createTripleStore factory', () => {
       close: async () => {},
     }));
 
-    const store = await createTripleStore({ backend: 'test-custom' });
+    const store = await createTripleStore({ backend });
     await store.insert([]);
     expect(calls).toEqual(['insert']);
     expect(await store.countQuads()).toBe(1);

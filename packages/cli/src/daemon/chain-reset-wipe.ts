@@ -64,8 +64,6 @@
  */
 import {
   existsSync,
-  readFileSync,
-  writeFileSync,
   readdirSync,
   rmSync,
   renameSync,
@@ -74,32 +72,14 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { isExternalBackend, getSparqlEndpoint, CHANGELOG_GRAPH } from '@origintrail-official/dkg-storage';
-
-const STATE_FILE = '.network-state.json';
-
-interface PersistedNetworkState {
-  /** Last chainResetMarker value the daemon booted on. */
-  chainResetMarker: string | null;
-  /**
-   * Last triple-store backend the daemon booted on. Used by
-   * `detectBackendSwitch` to warn loudly when an operator hand-edits
-   * `config.store.backend` between boots — the new backend is fresh
-   * and empty, so silently booting would mean stale SWM/VM data is
-   * inaccessible. `null` on legacy state files (pre-RFC 120) and on
-   * first boot. (RFC 120 review point #6.)
-   */
-  lastBackend?: string | null;
-  /**
-   * Last resolved network the daemon booted on (the `networkConfig` overlay
-   * name, e.g. `mainnet-gnosis`/`testnet`). Used by `detectNetworkSwitch` to
-   * abort boot when an operator repoints `config.networkConfig` at a different
-   * network on an existing data dir — the store holds the old network's
-   * chain-derived state (KC ids, merkle roots), which is meaningless on the
-   * new chain. `null`/absent on legacy state files and on first boot.
-   */
-  lastNetworkConfig?: string | null;
-  savedAt: number;
-}
+import {
+  readPersistedDaemonState,
+  readPersistedNetworkConfig,
+  readPersistedStoreBackend,
+  writePersistedChainResetMarker,
+  writePersistedNetworkConfig,
+  writePersistedStoreBackend,
+} from './daemon-state.js';
 
 /**
  * Subset of `DkgConfig['store']` used by the wipe step to talk to an
@@ -227,83 +207,6 @@ export interface ChainResetWipeOptions {
  */
 export function skipChainResetWipe(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.DKG_SKIP_CHAIN_RESET_WIPE === '1';
-}
-
-function loadState(dataDir: string): PersistedNetworkState | null {
-  try {
-    const raw = readFileSync(join(dataDir, STATE_FILE), 'utf8');
-    const obj = JSON.parse(raw) as PersistedNetworkState;
-    if (typeof obj?.chainResetMarker !== 'string' && obj?.chainResetMarker !== null) return null;
-    return obj;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Return the backend accepted by the daemon's boot-selection gate, or `null` for
- * first-boot / pre-backend-marker state. The legacy store migration gate uses
- * this to distinguish an unacknowledged worker-to-server cutover from a stale
- * `store.nq` file deliberately left behind after an earlier acknowledged
- * cutover.
- */
-export function readPersistedStoreBackend(dataDir: string): string | null {
-  const state = loadState(dataDir);
-  return typeof state?.lastBackend === 'string' && state.lastBackend.length > 0
-    ? state.lastBackend
-    : null;
-}
-
-function saveState(dataDir: string, marker: string | null): void {
-  // Preserve any sibling fields (lastBackend) that `detectBackendSwitch`
-  // may have written. Otherwise a chain-reset wipe would clobber a
-  // freshly-recorded backend tag and the next boot would re-warn.
-  const existing = loadState(dataDir) ?? { chainResetMarker: null, savedAt: 0 };
-  writeFileSync(
-    join(dataDir, STATE_FILE),
-    JSON.stringify(
-      {
-        ...existing,
-        chainResetMarker: marker,
-        savedAt: Date.now(),
-      } satisfies PersistedNetworkState,
-      null,
-      2,
-    ),
-  );
-}
-
-function saveBackendTag(dataDir: string, backend: string): void {
-  const existing = loadState(dataDir) ?? { chainResetMarker: null, savedAt: 0 };
-  writeFileSync(
-    join(dataDir, STATE_FILE),
-    JSON.stringify(
-      {
-        ...existing,
-        lastBackend: backend,
-        savedAt: Date.now(),
-      } satisfies PersistedNetworkState,
-      null,
-      2,
-    ),
-  );
-}
-
-function saveNetworkTag(dataDir: string, networkConfig: string): void {
-  // Preserve sibling fields (chainResetMarker, lastBackend) like saveBackendTag.
-  const existing = loadState(dataDir) ?? { chainResetMarker: null, savedAt: 0 };
-  writeFileSync(
-    join(dataDir, STATE_FILE),
-    JSON.stringify(
-      {
-        ...existing,
-        lastNetworkConfig: networkConfig,
-        savedAt: Date.now(),
-      } satisfies PersistedNetworkState,
-      null,
-      2,
-    ),
-  );
 }
 
 /**
@@ -596,7 +499,7 @@ export async function chainResetWipe(
     return { wiped: false, skipped: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
-  const prev = loadState(opts.dataDir);
+  const prev = readPersistedDaemonState(opts.dataDir);
   const prevMarker = prev?.chainResetMarker ?? null;
 
   if (prevMarker === opts.currentMarker) {
@@ -678,7 +581,7 @@ export async function chainResetWipe(
 
   if (failedFiles.length === 0) {
     try {
-      saveState(opts.dataDir, opts.currentMarker);
+      writePersistedChainResetMarker(opts.dataDir, opts.currentMarker);
       markerPersisted = true;
     } catch (err) {
       log(
@@ -774,7 +677,7 @@ export function detectBackendSwitch(
   // recorded backends count as a switch.
   if (previous === null) {
     try {
-      saveBackendTag(opts.dataDir, opts.currentBackend);
+      writePersistedStoreBackend(opts.dataDir, opts.currentBackend);
     } catch {
       // Non-fatal: if we can't write the tag now, we'll try again next
       // boot. The downside is one missed early-warning window.
@@ -811,7 +714,7 @@ export function detectBackendSwitch(
   log(``);
   log(`DKG_ACCEPT_STORE_RESET=1 set — proceeding with the new backend.`);
   try {
-    saveBackendTag(opts.dataDir, opts.currentBackend);
+    writePersistedStoreBackend(opts.dataDir, opts.currentBackend);
   } catch (err) {
     log(`WARN: failed to persist new backend tag: ${(err as Error).message}. Will re-warn on next boot.`);
   }
@@ -861,11 +764,7 @@ export function detectNetworkSwitch(
   opts: NetworkSwitchDetectOptions,
 ): NetworkSwitchDetectResult {
   const log = opts.log ?? (() => {});
-  const prev = loadState(opts.dataDir);
-  const previous =
-    typeof prev?.lastNetworkConfig === 'string' && prev.lastNetworkConfig.length > 0
-      ? prev.lastNetworkConfig
-      : null;
+  const previous = readPersistedNetworkConfig(opts.dataDir);
 
   // First boot or legacy state file: silently record and move on. We do NOT
   // treat null-previous as a switch — that would abort every operator who
@@ -876,7 +775,7 @@ export function detectNetworkSwitch(
   // are caught normally.
   if (previous === null) {
     try {
-      saveNetworkTag(opts.dataDir, opts.currentNetworkConfig);
+      writePersistedNetworkConfig(opts.dataDir, opts.currentNetworkConfig);
     } catch {
       // Non-fatal: retry the tag write next boot.
     }
@@ -916,7 +815,7 @@ export function detectNetworkSwitch(
   log(``);
   log(`DKG_ACCEPT_NETWORK_SWITCH=1 set — proceeding on the new network.`);
   try {
-    saveNetworkTag(opts.dataDir, opts.currentNetworkConfig);
+    writePersistedNetworkConfig(opts.dataDir, opts.currentNetworkConfig);
   } catch (err) {
     log(`WARN: failed to persist new network tag: ${(err as Error).message}. Will re-warn on next boot.`);
   }

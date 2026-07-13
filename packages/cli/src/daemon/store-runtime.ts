@@ -1,12 +1,12 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  DEFAULT_STORE_BACKEND,
+  DEFAULT_DAEMON_STORE_BACKEND,
   isManagedLocalBackend,
   isRetiredStoreBackend,
 } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
-import { readPersistedStoreBackend } from './chain-reset-wipe.js';
+import { readPersistedStoreBackend } from './daemon-state.js';
 import type { ManagedOxigraphResult } from './oxigraph-managed.js';
 
 type StoreConfig = NonNullable<DkgConfig['store']>;
@@ -50,7 +50,7 @@ export interface DaemonStoreRuntimePlan extends DaemonStoreBootPlan {
 }
 
 export function resolveEffectiveDaemonStore(config: Pick<DkgConfig, 'store'>): StoreConfig {
-  return config.store ?? { backend: DEFAULT_STORE_BACKEND, options: {} };
+  return config.store ?? { backend: DEFAULT_DAEMON_STORE_BACKEND, options: {} };
 }
 
 export function resolveDaemonStoreBootPlan(opts: {
