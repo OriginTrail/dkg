@@ -2,7 +2,7 @@ import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
+import { invokePhaseCallback, type PhaseCallback } from '@origintrail-official/dkg-publisher';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -151,14 +151,15 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   for (const [index, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
-    const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
+    const startPhase = async (phase: 'fetch' | 'verify' | 'store') => {
       activePhase = phase;
-      onPhase?.(phase, 'start');
+      await invokePhaseCallback(onPhase, phase, 'start');
     };
-    const endPhase = () => {
+    const endPhase = async () => {
       if (!activePhase) return;
-      onPhase?.(activePhase, 'end');
+      const phase = activePhase;
       activePhase = undefined;
+      await invokePhaseCallback(onPhase, phase, 'end');
     };
 
     try {
@@ -168,7 +169,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
-      startPhase('fetch');
+      await startPhase('fetch');
       const fetchStartedAt = Date.now();
       const skipAgentsMeta = pid === SYSTEM_CONTEXT_GRAPHS.AGENTS && syncAgentsMeta === false;
       if (skipAgentsMeta) {
@@ -188,19 +189,19 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         recordPhaseOutcome(metaResult, { updateCheckpoint: false });
-        endPhase();
+        await endPhase();
         break;
       }
       const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
       peerRespondedForContextGraph = true;
-      endPhase();
+      await endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
 
-      startPhase('verify');
+      await startPhase('verify');
       const verifyStartedAt = Date.now();
       const processed = await processDurableBatchInWorker(dataResult.quads, metaResult.quads, ctx, isSystemContextGraph);
-      endPhase();
+      await endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
 
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
@@ -231,7 +232,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         continue;
       }
 
-      startPhase('store');
+      await startPhase('store');
       const storeStartedAt = Date.now();
       if (processed.verifiedData.length > 0) {
         await storeInsert(processed.verifiedData);
@@ -245,7 +246,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
-      endPhase();
+      await endPhase();
       if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
@@ -263,7 +264,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.rejectedKcs += processed.rejectedKcs;
       }
     } catch (pidErr) {
-      endPhase();
+      await endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       if (isSyncPermanentRejection(pidErr)) {
         // Missed-seam alarm (OT-RFC-56): the oversize guard should have

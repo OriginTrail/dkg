@@ -117,6 +117,7 @@ import {
   resolveLiftWorkspaceSlice,
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
+  invokePhaseCallback,
   TripleStoreAsyncLiftPublisher,
   TripleStoreAsyncPromoteQueue,
   FileWorkspacePublicSnapshotStore,
@@ -1479,10 +1480,10 @@ export class PublishMethods extends DKGAgentBase {
       span.addEvent('publish_failed', { error: String(result.contextGraphError ?? '') });
     }
 
-    onPhase?.('broadcast', 'start');
+    await invokePhaseCallback(onPhase, 'broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
     await this.broadcastPublish(contextGraphId, result, ctx);
-    onPhase?.('broadcast', 'end');
+    await invokePhaseCallback(onPhase, 'broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kaId=${result.kaId}`);
 
     // refresh the private CG's public projection now the root
@@ -1725,7 +1726,7 @@ export class PublishMethods extends DKGAgentBase {
     });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
-    onPhase?.('broadcast', 'start');
+    await invokePhaseCallback(onPhase, 'broadcast', 'start');
     if (result.onChainResult && result.publicQuads) {
       try {
         const dataGraph = `did:dkg:context-graph:${contextGraphId}`;
@@ -1757,7 +1758,7 @@ export class PublishMethods extends DKGAgentBase {
         this.log.warn(ctx, `Failed to broadcast KA update: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    onPhase?.('broadcast', 'end');
+    await invokePhaseCallback(onPhase, 'broadcast', 'end');
 
     return result;
   }

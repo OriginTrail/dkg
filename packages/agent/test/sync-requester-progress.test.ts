@@ -79,6 +79,74 @@ function sharedMemoryProcessResult() {
 }
 
 describe('sync requester progress accounting', () => {
+  it('awaits async phase callbacks before advancing durable sync work', async () => {
+    let releaseFetchStart!: () => void;
+    const fetchStartGate = new Promise<void>((resolve) => {
+      releaseFetchStart = resolve;
+    });
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase));
+
+    const sync = runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['gated-cg'],
+      onPhase: async (phase, status) => {
+        if (phase === 'fetch' && status === 'start') await fetchStartGate;
+      },
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    await Promise.resolve();
+    expect(fetchSyncPages.calls).toHaveLength(0);
+
+    releaseFetchStart();
+    await sync;
+
+    expect(fetchSyncPages.calls).toHaveLength(2);
+  });
+
+  it('observes an async phase failure without emitting the same end twice', async () => {
+    let fetchEndCalls = 0;
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['phase-fails'],
+      onPhase: async (phase, status) => {
+        if (phase === 'fetch' && status === 'end') {
+          fetchEndCalls += 1;
+          throw new Error('phase journal unavailable');
+        }
+      },
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (_ctx, _peer, contextGraphId, _includeSharedMemory, phase) =>
+        pageResult(contextGraphId, phase),
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(fetchEndCalls).toBe(1);
+    expect(summary.failedPhases).toBe(1);
+  });
+
   it('continues durable sync after a denied context graph and records only that CG as denied', async () => {
     const deniedCgs: string[] = [];
     const fetchSyncPages = recorder(async (
