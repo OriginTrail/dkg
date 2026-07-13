@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as storageIndex from '../src/index.js';
 import {
   createTripleStore,
+  loadNamedKnowledgeAssetSharedMemoryQuads,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   resolveSharedMemoryReadGraphs,
@@ -234,6 +235,29 @@ describe('resolveSharedMemoryReadGraphs — bound only prunes real SWM children 
 });
 
 describe('the generic SWM loader cannot be pruned (bound is not an option)', () => {
+  it('exact named-KA reads preserve checksum graph casing and exclude the bucket', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('named-exact-casing');
+    const root = 'urn:test:named:root';
+    const exact = `${swm}/${AUTHOR_A_MIXED}/7`;
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"bucket"', graph: swm },
+        { subject: root, predicate: 'urn:p', object: '"exact"', graph: exact },
+      ]);
+
+      const quads = await loadNamedKnowledgeAssetSharedMemoryQuads(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { agentAddress: AUTHOR_A, kaNumber: 7n },
+      );
+      expect(quads.map((quad) => quad.object)).toEqual(['"exact"']);
+    } finally {
+      await store.close();
+    }
+  });
+
   // `kaGraphBound` was removed from `LoadSelectedSharedMemoryQuadsOptions`, so the
   // four production callers — two of them merkle-DEFINING, one the ACK decline lane
   // — get a compile error if they try to prune. This pins the runtime half: even if

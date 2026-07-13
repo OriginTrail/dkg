@@ -405,11 +405,21 @@ async function loadSharedMemoryQuadsInternal(
     if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
       throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
     }
-    const exactGraph = `${bucketGraph}/${agentAddress.toLowerCase()}/${kaNumber.toString()}`;
+    const exactGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
     assertSafeIri(exactGraph);
+    const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, queryOptions))
+      .filter((graph) => {
+        const child = parseBoundableSwmChildGraph(bucketGraph, graph);
+        return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
+          && child.kaNumber === kaNumber;
+      });
     // Exact named lifecycle reads deliberately exclude the legacy bucket and
-    // every sibling graph, even when they contain the same root subject.
-    swmGraphs = [exactGraph];
+    // every sibling graph, even when they contain the same root subject. Graph
+    // discovery preserves the writer's checksum casing while identity matching
+    // remains EVM-address case-insensitive.
+    swmGraphs = matchingGraphs.length > 0
+      ? matchingGraphs as NonEmptyGraphList
+      : [exactGraph];
   } else {
     swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
   }
