@@ -25,8 +25,8 @@ import type {
   OperationContext,
   AuthorAttestationTypedData,
   DkgNetworkIdentity,
+  CompatibleProtocolOutboxStore,
   MessageIdempotencyStore,
-  ProtocolOutboxStore,
   SwmSenderKeyPackageAckReasonCode,
 } from '@origintrail-official/dkg-core';
 import type {
@@ -1246,7 +1246,7 @@ export interface DKGAgentConfig {
   onReplicationEvent?: ReplicationEventSink;
   messengerStores?: {
     idempotencyStore: MessageIdempotencyStore;
-    outboxStore: ProtocolOutboxStore;
+    outboxStore: CompatibleProtocolOutboxStore;
   };
 }
 

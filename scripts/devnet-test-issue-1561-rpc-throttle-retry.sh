@@ -76,6 +76,9 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 [[ "$(code_of "$(api "$NODE" GET /api/status)")" == 200 ]] || fail "temporary node not ready"
+status_before="$(api "$NODE" GET /api/status)"
+exhaustions_before="$(field "$(body_of "$status_before")" chain.rpcExhaustions)"
+[[ -n "$exhaustions_before" ]] || exhaustions_before=0
 api "$NODE" POST /api/identity/ensure '{}' >/dev/null || true
 
 name="issue-1561-$(date +%s)-$$"; subject="urn:issue:1561:$name"
@@ -87,6 +90,12 @@ api "$NODE" POST "/api/knowledge-assets/$name/swm/share" "{\"contextGraphId\":\"
 result="$(api "$NODE" POST "/api/knowledge-assets/$name/vm/publish" "{\"contextGraphId\":\"$CG\"}")"
 [[ "$(code_of "$result")" == 200 ]] || fail "publish failed: $(body_of "$result")"
 [[ "$(field "$(body_of "$result")" status)" == confirmed ]] || fail "publish not confirmed"
+
+status_after="$(api "$NODE" GET /api/status)"
+exhaustions_after="$(field "$(body_of "$status_after")" chain.rpcExhaustions)"
+[[ -n "$exhaustions_after" ]] || exhaustions_after=0
+[[ "$exhaustions_after" == "$exhaustions_before" ]] \
+  || fail "recovered throttle pass was reported as terminal exhaustion ($exhaustions_before -> $exhaustions_after)"
 
 stats="$(curl -fsS "http://127.0.0.1:$PROXY_PORT/stats")"
 STATS="$stats" node -e 'const s=JSON.parse(process.env.STATS); for (const p of ["/a","/b"]) { const n=s[`${p}:eth_getBlockByNumber`]||0; if(n<2) throw new Error(`${p} getBlock calls=${n}, expected throttle plus recovery`); }' \

@@ -615,6 +615,7 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT });
     expect(res.graphs).toEqual([]);
     expect(res.graphPrefixes).toEqual([
+      `did:dkg:context-graph:${CG}/_working_memory/${AGENT.toLowerCase()}/`,
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
     ]);
   });
@@ -630,17 +631,19 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     });
     expect(res.graphs).toEqual([]);
     expect(res.graphPrefixes).toEqual([
+      `did:dkg:context-graph:${CG}/_working_memory/${AGENT.toLowerCase()}/`,
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
       `did:dkg:context-graph:${CG}/_working_memory/${PEER}/`,
     ]);
   });
 
-  it('resolveViewGraphs working-memory aliases dedupe case-insensitively against the primary', () => {
+  it('keeps one canonical prefix plus the primary legacy checksum-cased prefix', () => {
     const res = resolveViewGraphs('working-memory', CG, {
       agentAddress: AGENT,
       agentAddressAliases: [AGENT.toLowerCase(), '', AGENT],
     });
     expect(res.graphPrefixes).toEqual([
+      `did:dkg:context-graph:${CG}/_working_memory/${AGENT.toLowerCase()}/`,
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
     ]);
   });
@@ -778,6 +781,27 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     );
 
     expect(result.bindings.map((b) => b['name']).sort()).toEqual(['"DefaultDraft"', '"NamedDraft"']);
+  });
+
+  it('by-name WM read preserves a pre-canonicalization checksum-cased per-KA graph', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const name = 'legacy-checksum-draft';
+    const kaNumber = 13n;
+    const legacyGraph = `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/${kaNumber}`;
+    const urn = assertionLifecycleUri(CG, AGENT, name);
+    const metaGraph = contextGraphMetaUri(CG);
+
+    await store.insert([
+      quad('urn:legacy-checksum:1', 'http://schema.org/name', '"LegacyChecksum"', legacyGraph),
+      quad(urn, 'http://dkg.io/ontology/kaId', '"13"^^<http://www.w3.org/2001/XMLSchema#integer>', metaGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CG, view: 'working-memory', agentAddress: AGENT, assertionName: name },
+    );
+    expect(result.bindings.map((binding) => binding['name'])).toEqual(['"LegacyChecksum"']);
   });
 });
 

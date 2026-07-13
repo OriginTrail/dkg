@@ -1573,7 +1573,12 @@ export async function performNpmUpdateEdge(
     return "failed";
   }
   try {
-    return await _performNpmUpdateInnerEdge(targetVersion, currentVersion, log);
+    return await _performNpmUpdateInnerEdge(
+      targetVersion,
+      currentVersion,
+      log,
+      _autoUpdateIo.edgeRestartCommand(),
+    );
   } finally {
     await releaseUpdateLock();
     _updateInProgress = false;
@@ -1584,11 +1589,12 @@ async function _performNpmUpdateInnerEdge(
   targetVersion: string,
   currentVersion: string | null,
   log: (msg: string) => void,
+  restartCommand: EdgeRestartCommand,
 ): Promise<UpdateStatus> {
   // Destructure from `_autoUpdateIo` so unit tests can stub each
   // dependency — matches the existing `_performNpmUpdateInner`
   // (Core) pattern.
-  const { writeFile, exec: execAsyncIo, dkgDir } = _autoUpdateIo;
+  const { writeFile, exec: execAsyncIo, execFile: execFileAsyncIo, dkgDir } = _autoUpdateIo;
   const previousVersionPath = join(dkgDir(), "previous-version");
   if (currentVersion && currentVersion.length > 0) {
     try {
@@ -1611,7 +1617,7 @@ async function _performNpmUpdateInnerEdge(
 
   // 5-minute timeout covers slow network + npm registry round-trips on
   // CI / homegrown runners. Any longer is almost certainly a hung process.
-  const installCmd = `npm install -g ${CLI_NPM_PACKAGE}@${targetVersion}`;
+  const installCmd = globalCliInstallCommand(targetVersion);
   log(`Auto-update (npm-edge): running '${installCmd}'…`);
   try {
     const installStart = Date.now();
@@ -1631,24 +1637,15 @@ async function _performNpmUpdateInnerEdge(
     return "failed";
   }
 
-  try {
-    const reported = await verifyGlobalDkgVersion(execAsyncIo, targetVersion, 'self-check');
-    log(`Auto-update (npm-edge): self-check passed (${reported}).`);
-  } catch (verifyErr: any) {
-    log(`Auto-update (npm-edge): post-install self-check failed — ${verifyErr?.message ?? verifyErr}.`);
-    if (!currentVersion) {
-      log('Auto-update (npm-edge): previous version is unknown; automatic rollback is unavailable.');
-      return 'failed';
-    }
-    const rollbackCmd = `npm install -g ${CLI_NPM_PACKAGE}@${currentVersion}`;
-    log(`Auto-update (npm-edge): rolling back with '${rollbackCmd}'…`);
-    try {
-      await installGlobalCliVersion(execAsyncIo, currentVersion);
-      const reported = await verifyGlobalDkgVersion(execAsyncIo, currentVersion, 'rollback');
-      log(`Auto-update (npm-edge): rollback restored ${reported}.`);
-    } catch (rollbackErr: any) {
-      log(`Auto-update (npm-edge): CRITICAL rollback failed — ${rollbackErr?.message ?? rollbackErr}.`);
-    }
+  const verified = await verifyInstalledCliOrRollback({
+    execIo: execAsyncIo,
+    execFileIo: execFileAsyncIo,
+    targetVersion,
+    currentVersion,
+    restartCommand,
+    log,
+  });
+  if (!verified) {
     return 'failed';
   }
 
@@ -1660,9 +1657,15 @@ async function _performNpmUpdateInnerEdge(
 }
 
 type EdgeExec = typeof _autoUpdateIo.exec;
+type EdgeExecFile = typeof _autoUpdateIo.execFile;
+type EdgeRestartCommand = ReturnType<typeof _autoUpdateIo.edgeRestartCommand>;
+
+function globalCliInstallCommand(version: string): string {
+  return `npm install -g ${CLI_NPM_PACKAGE}@${version}`;
+}
 
 async function installGlobalCliVersion(execIo: EdgeExec, version: string): Promise<void> {
-  await execIo(`npm install -g ${CLI_NPM_PACKAGE}@${version}`, {
+  await execIo(globalCliInstallCommand(version), {
     encoding: 'utf-8',
     timeout: 300_000,
   });
@@ -1673,20 +1676,69 @@ function parseReportedDkgVersion(output: string): string | undefined {
 }
 
 async function verifyGlobalDkgVersion(
-  execIo: EdgeExec,
+  execFileIo: EdgeExecFile,
+  restartCommand: EdgeRestartCommand,
   expectedVersion: string,
   context: 'self-check' | 'rollback',
 ): Promise<string> {
-  const { stdout, stderr } = await execIo('dkg --version', {
-    encoding: 'utf-8',
-    timeout: 30_000,
-  });
+  const { stdout, stderr } = await execFileIo(
+    restartCommand.nodeExecutable,
+    [...restartCommand.nodeExecArgv, restartCommand.restartEntryPoint, '--version'],
+    {
+      encoding: 'utf-8',
+      timeout: 30_000,
+    },
+  );
   const reported = `${stdout ?? ''} ${stderr ?? ''}`.trim();
   const parsed = parseReportedDkgVersion(reported);
   if (parsed !== expectedVersion) {
     throw new Error(`${context} expected ${expectedVersion}, got ${parsed ?? (reported || 'empty version output')}`);
   }
   return reported;
+}
+
+async function verifyInstalledCliOrRollback(options: {
+  execIo: EdgeExec;
+  execFileIo: EdgeExecFile;
+  targetVersion: string;
+  currentVersion: string | null;
+  restartCommand: EdgeRestartCommand;
+  log: (msg: string) => void;
+}): Promise<boolean> {
+  const { execIo, execFileIo, targetVersion, currentVersion, restartCommand, log } = options;
+  try {
+    const reported = await verifyGlobalDkgVersion(
+      execFileIo,
+      restartCommand,
+      targetVersion,
+      'self-check',
+    );
+    log(`Auto-update (npm-edge): self-check passed (${reported}).`);
+    return true;
+  } catch (verifyErr: any) {
+    log(`Auto-update (npm-edge): post-install self-check failed — ${verifyErr?.message ?? verifyErr}.`);
+  }
+
+  if (!currentVersion) {
+    log('Auto-update (npm-edge): previous version is unknown; automatic rollback is unavailable.');
+    return false;
+  }
+
+  const rollbackCmd = globalCliInstallCommand(currentVersion);
+  log(`Auto-update (npm-edge): rolling back with '${rollbackCmd}'…`);
+  try {
+    await installGlobalCliVersion(execIo, currentVersion);
+    const reported = await verifyGlobalDkgVersion(
+      execFileIo,
+      restartCommand,
+      currentVersion,
+      'rollback',
+    );
+    log(`Auto-update (npm-edge): rollback restored ${reported}.`);
+  } catch (rollbackErr: any) {
+    log(`Auto-update (npm-edge): CRITICAL rollback failed — ${rollbackErr?.message ?? rollbackErr}.`);
+  }
+  return false;
 }
 
 export async function checkForUpdate(

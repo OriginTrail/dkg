@@ -11,6 +11,7 @@ import type {
   StorePressureSnapshot,
   TripleStore,
 } from './triple-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
 export const SHARED_MEMORY_GRAPH_SUFFIX = '/_shared_memory';
@@ -86,7 +87,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
-      throw new Error('SharedMemoryLiteralBlobStore: inner store does not support update()');
+      throw new UnsupportedTripleStoreCapabilityError('update', 'SharedMemoryLiteralBlobStore');
     }
     // Forward verbatim. A server-side INSERT…WHERE copies whatever terms are
     // already stored — including any externalized blob-ref placeholders — so

@@ -17,7 +17,7 @@
  * cache invalidation fires and the GraphSetIndex touched-graph maintenance keeps
  * the new scoped graph enumerable without a lazy full rebuild.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   GraphSetIndexStore,
   OxigraphStore,
@@ -132,6 +132,41 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
   it('exposes update() at the top of the decorator stack (capability propagation)', () => {
     expect(typeof store.update).toBe('function');
+  });
+
+  it('forwards pressure telemetry and hasGraph admission options through the agent decorator', async () => {
+    const pressure = {
+      ackInflight: 1,
+      normalInflight: 2,
+      backgroundInflight: 3,
+      ackQueued: 4,
+      normalQueued: 5,
+      backgroundQueued: 6,
+      maxConcurrent: 8,
+      ackReservedSlots: 2,
+    };
+    const hasGraph = vi.fn(async () => true);
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'getPressureSnapshot') return () => pressure;
+        if (prop === 'hasGraph') return hasGraph;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(adapter, () => undefined);
+    const controller = new AbortController();
+    const options: QueryOptions = {
+      source: 'test.ack-read',
+      priority: 'ack',
+      signal: controller.signal,
+    };
+
+    expect(wrapped.getPressureSnapshot?.()).toBe(pressure);
+    await expect(wrapped.hasGraph('urn:test:graph', options)).resolves.toBe(true);
+    expect(hasGraph).toHaveBeenCalledWith('urn:test:graph', options);
+
+    await wrapped.close();
   });
 
   it('invalidates caches for query updates with dotted PREFIX labels', async () => {

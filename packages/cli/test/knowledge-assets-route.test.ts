@@ -809,9 +809,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       // different on-chain identity — is devnet-tier: custodial agents on one
       // node all author under the node-owner address.)
       await createKa(LOCAL, 'scoped');
-      const mine = await getJson(daemon, `/api/knowledge-assets/scoped?contextGraphId=${LOCAL}&agentAddress=${ownerAddress}`);
-      expect(mine.status).toBe(200);
-      expect(String(mine.body.agentAddress).toLowerCase()).toBe(ownerAddress.toLowerCase());
+      // The canonical per-layer graph URI exposes a lowercase address while
+      // historical lifecycle URNs preserve the writer's EIP-55 casing. Drive
+      // the lowercase form explicitly so this remains a casing-compatibility
+      // regression even if the create response changes its presentation.
+      const canonicalOwnerAddress = ownerAddress.toLowerCase();
+      const mine = await getJson(daemon, `/api/knowledge-assets/scoped?contextGraphId=${LOCAL}&agentAddress=${canonicalOwnerAddress}`);
+      expect(mine.status, `owner-scoped descriptor: ${JSON.stringify(mine.body)}`).toBe(200);
+      expect(String(mine.body.agentAddress).toLowerCase()).toBe(canonicalOwnerAddress);
 
       const reg = await postJson(daemon, '/api/agent/register', { name: 'ka-agent-b', framework: 'test' });
       const other = await getJson(daemon, `/api/knowledge-assets/scoped?contextGraphId=${LOCAL}&agentAddress=${reg.body.agentAddress}`);

@@ -212,6 +212,78 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(2);
   });
 
+  it('serves a warm index and exponentially backs off failed periodic revalidations', async () => {
+    let now = 1_000;
+    const cached = 'did:dkg:context-graph:cached';
+    const external = 'did:dkg:context-graph:external-after-failure';
+    const inner = new OxigraphStore();
+    await inner.insert([q(cached)]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 100,
+      revalidateFailureBackoffMs: 10,
+      revalidateFailureMaxBackoffMs: 40,
+      now: () => now,
+    });
+
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    await inner.insert([q(external)]);
+    counting.failListGraphs = true;
+
+    // The first expired periodic refresh fails, but the warm write-through set
+    // remains serviceable. Repeated readers do not immediately re-run the scan.
+    now += 100;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(2);
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    now += 9;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(2);
+
+    // Failure delays grow 10 -> 20 -> 40 ms and are bounded at 40 ms.
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(3);
+    now += 19;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(3);
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(4);
+    now += 39;
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(4);
+
+    counting.failListGraphs = false;
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, external]));
+    expect(counting.listGraphsCalls).toBe(5);
+
+    // A successful refresh resets the exponential sequence to its initial delay.
+    counting.failListGraphs = true;
+    now += 100;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, external]));
+    expect(counting.listGraphsCalls).toBe(6);
+    now += 9;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, external]));
+    expect(counting.listGraphsCalls).toBe(6);
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, external]));
+    expect(counting.listGraphsCalls).toBe(7);
+  });
+
+  it('keeps a failed cold seed strict instead of serving an empty graph set', async () => {
+    const counting = new CountingStore(new OxigraphStore());
+    counting.failListGraphs = true;
+    const store = new GraphSetIndexStore(counting);
+
+    await expect(store.listGraphs()).rejects.toThrow('listGraphs failed');
+    expect(counting.listGraphsCalls).toBe(1);
+    counting.failListGraphs = false;
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(2);
+  });
+
   it('treats revalidateMs 0 as always expired', async () => {
     const inner = new OxigraphStore();
     const counting = new CountingStore(inner);
@@ -221,6 +293,34 @@ describe('GraphSetIndexStore', () => {
     await inner.insert([q('did:dkg:context-graph:zero-revalidate')]);
     await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:zero-revalidate']);
     expect(counting.listGraphsCalls).toBe(2);
+  });
+
+  it('retries every read after a warm revalidation failure when revalidateMs is 0', async () => {
+    const now = 1_000;
+    const cached = 'did:dkg:context-graph:cached-zero-revalidate';
+    const recovered = 'did:dkg:context-graph:recovered-zero-revalidate';
+    const inner = new OxigraphStore();
+    await inner.insert([q(cached)]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 0,
+      revalidateFailureBackoffMs: 10,
+      now: () => now,
+    });
+
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    await inner.insert([q(recovered)]);
+    counting.failListGraphs = true;
+
+    // A failed warm scan still serves the last known set for availability.
+    await expect(store.listGraphs()).resolves.toEqual([cached]);
+    expect(counting.listGraphsCalls).toBe(2);
+
+    // Recovery is visible on the very next read at the same timestamp. The
+    // configured failure delay must not override the always-revalidate contract.
+    counting.failListGraphs = false;
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([cached, recovered]));
+    expect(counting.listGraphsCalls).toBe(3);
   });
 
   it('coalesces concurrent refresh callers onto one listGraphs scan', async () => {

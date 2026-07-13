@@ -1452,7 +1452,13 @@ export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta, o
     ? contextGraphLayerUri(meta.contextGraphId, MemoryLayer.WorkingMemory, meta.agentAddress, meta.kaNumber, meta.subGraphName)
     : contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const swmGraphUri = meta.kaNumber !== undefined
-    ? contextGraphLayerUri(meta.contextGraphId, MemoryLayer.SharedWorkingMemory, meta.agentAddress, meta.kaNumber, meta.subGraphName)
+    ? contextGraphLayerUri(
+        meta.contextGraphId,
+        MemoryLayer.SharedWorkingMemory,
+        meta.agentAddress,
+        meta.kaNumber,
+        meta.subGraphName,
+      )
     : contextGraphSharedMemoryUri(meta.contextGraphId, meta.subGraphName);
 
   const del = [

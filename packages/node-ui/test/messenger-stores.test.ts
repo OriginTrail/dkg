@@ -217,6 +217,18 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(store.hasPendingFor('peer-c')).toBe(false);
   });
 
+  it('retains the legacy peer snapshot contract without changing retry eligibility', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 60_000 });
+    store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'e', 2_000);
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000);
+    store.enqueue(PEER_B, PROTO, MSG_1, PAYLOAD, 'e', 500);
+
+    expect(store.pendingFor(PEER_A).map((entry) => entry.messageId)).toEqual([MSG_1, MSG_2]);
+    expect(store.pendingFor(PEER_B)).toHaveLength(1);
+    expect(store.due(60_499)).toHaveLength(0);
+    expect(store.due(60_500).map((entry) => entry.peer)).toEqual([PEER_B]);
+  });
+
   it('due returns entries with nextAttemptAt <= now', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1_000_000);
