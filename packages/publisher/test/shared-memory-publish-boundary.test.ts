@@ -325,6 +325,38 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(pointer.type === 'bindings' ? pointer.bindings[0]?.['g'] : undefined).toBe(canonicalGraph);
   });
 
+  it('converges a checksum-cased alias without issuing a graphless delete', async () => {
+    const { publisher, store } = await makeRealPublisher();
+    const root = 'urn:test:root:checksum-alias';
+    const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const aliasGraph = `${SWM_GRAPH}/${checksummedAuthor}/9`;
+    const canonicalGraph = `${SWM_GRAPH}/${checksummedAuthor.toLowerCase()}/9`;
+    await store.insert([
+      q(root, 'http://schema.org/name', '"legacy alias"', aliasGraph),
+    ]);
+
+    const ensured = await publisher.ensureFinalizedLifecycleSwmRoots(
+      {
+        lifecycle: {
+          contextGraphId: CONTEXT_GRAPH,
+          assertionName: 'checksum-alias',
+          assertionLifecycleAgentAddress: checksummedAuthor,
+        },
+        sealAuthorScope: { agentAddress: checksummedAuthor, kaNumber: 9n },
+        rootEntities: [root],
+      },
+      createOperationContext('test'),
+    );
+
+    expect(ensured.migratedLegacyQuadCount).toBe(0);
+    expect(ensured.targetGraph).toBe(canonicalGraph);
+    expect(ensured.quads.map((quad) => quad.object)).toEqual(['"legacy alias"']);
+    const alias = await store.query(`ASK { GRAPH <${aliasGraph}> { <${root}> ?p ?o } }`);
+    const canonical = await store.query(`ASK { GRAPH <${canonicalGraph}> { <${root}> ?p ?o } }`);
+    expect(alias).toMatchObject({ type: 'boolean', value: false });
+    expect(canonical).toMatchObject({ type: 'boolean', value: true });
+  });
+
   it('confirmed exact cleanup removes stale ownership when the local KA was the last share', async () => {
     const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');
     const root = 'urn:test:root:one';

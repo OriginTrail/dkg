@@ -5516,6 +5516,12 @@ export class DKGPublisher implements Publisher {
       swmGraph,
       sealAuthorScope,
     );
+    const exactGraphs = await resolveSharedMemoryScopeGraphs(
+      this.store,
+      swmGraph,
+      scope,
+      { source: 'publisher.ensureFinalizedLifecycleSwmRoots.graphs' },
+    );
     const exactQuads = await loadSharedMemoryQuadsForScope(
       this.store,
       swmGraph,
@@ -5551,7 +5557,14 @@ export class DKGPublisher implements Publisher {
     await this.store.insert(
       [...exactQuads, ...legacyQuads].map((quad) => ({ ...quad, graph: targetGraph })),
     );
-    const legacyAliasQuads = exactQuads.filter((quad) => quad.graph !== targetGraph);
+    // A CONSTRUCT result is a default-graph dataset, so exactQuads cannot tell
+    // us which source graph supplied each triple. Reattach every resolved
+    // historical alias explicitly before deleting. Mapping the union to each
+    // alias is safe (absent triples are no-ops) and avoids a graphless DELETE
+    // DATA, which strict remote SPARQL endpoints reject.
+    const legacyAliasQuads = exactGraphs
+      .filter((graph) => graph !== targetGraph)
+      .flatMap((graph) => exactQuads.map((quad) => ({ ...quad, graph })));
     if (legacyAliasQuads.length > 0) {
       await this.store.delete(legacyAliasQuads);
     }
