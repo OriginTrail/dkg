@@ -297,29 +297,50 @@ export async function loadSharedMemoryQuadsForScope(
 
 interface NamedLifecycleGraphResolution {
   canonicalGraph: string;
-  matchingGraphs: string[];
+  legacyCompatibleReadGraphs: string[];
 }
 
-async function resolveNamedLifecycleGraphPolicy(
-  store: TripleStore,
+/**
+ * One stable identity-to-graph mapping for all new named-lifecycle writes.
+ *
+ * EVM addresses are case-insensitive identities, while RDF graph IRIs are
+ * case-sensitive strings. Lower-casing here makes write placement independent
+ * of historical store contents and enumeration order. Read resolution below
+ * separately discovers checksum-cased aliases written by older versions.
+ */
+function canonicalNamedLifecycleGraph(
   bucketGraph: string,
   identity: NamedKnowledgeAssetGraphIdentity,
-  options?: QueryOptions,
-): Promise<NamedLifecycleGraphResolution> {
+): string {
   assertSafeIri(bucketGraph);
   const { agentAddress, kaNumber } = identity;
   if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
     throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
   }
-  const canonicalGraph = `${bucketGraph}/${agentAddress}/${kaNumber.toString()}`;
-  assertSafeIri(canonicalGraph);
-  const matchingGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
+  const graph = `${bucketGraph}/${agentAddress.toLowerCase()}/${kaNumber.toString()}`;
+  assertSafeIri(graph);
+  return graph;
+}
+
+/**
+ * Legacy read compatibility only: find every historical checksum-casing alias
+ * for the same logical lifecycle. This scan must never influence where new
+ * data is written.
+ */
+async function resolveNamedLifecycleReadPolicy(
+  store: TripleStore,
+  bucketGraph: string,
+  identity: NamedKnowledgeAssetGraphIdentity,
+  options?: QueryOptions,
+): Promise<NamedLifecycleGraphResolution> {
+  const canonicalGraph = canonicalNamedLifecycleGraph(bucketGraph, identity);
+  const legacyCompatibleReadGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
     .filter((graph) => {
       const child = parseBoundableSwmChildGraph(bucketGraph, graph);
-      return child?.agentAddress.toLowerCase() === agentAddress.toLowerCase()
-        && child.kaNumber === kaNumber;
+      return child?.agentAddress.toLowerCase() === identity.agentAddress.toLowerCase()
+        && child.kaNumber === identity.kaNumber;
     });
-  return { canonicalGraph, matchingGraphs };
+  return { canonicalGraph, legacyCompatibleReadGraphs };
 }
 
 /** Resolve the concrete graph set for an explicit semantic SWM scope. */
@@ -332,38 +353,30 @@ export async function resolveSharedMemoryScopeGraphs(
   if (scope.kind === 'complete-family') {
     return resolveSharedMemoryReadGraphs(store, bucketGraph, options);
   }
-  const { canonicalGraph, matchingGraphs } = await resolveNamedLifecycleGraphPolicy(
+  const { canonicalGraph, legacyCompatibleReadGraphs } = await resolveNamedLifecycleReadPolicy(
     store,
     bucketGraph,
     scope.identity,
     options,
   );
-  // Preserve the writer's checksum casing while matching EVM identity
-  // case-insensitively. An absent lifecycle still resolves to its canonical
-  // candidate so the caller gets a safe empty result.
-  return matchingGraphs.length > 0
-    ? matchingGraphs as NonEmptyGraphList
+  // Read every historical checksum-casing alias for compatibility. An absent
+  // lifecycle still resolves to the canonical candidate so callers receive a
+  // safe empty result without widening to the bucket or sibling lifecycles.
+  return legacyCompatibleReadGraphs.length > 0
+    ? legacyCompatibleReadGraphs as NonEmptyGraphList
     : [canonicalGraph];
 }
 
 /** Resolve the single graph to WRITE for a semantic scope. */
 export async function resolveSharedMemoryScopeWriteGraph(
-  store: TripleStore,
+  _store: TripleStore,
   bucketGraph: string,
   scope: SharedMemoryGraphScope,
-  options?: QueryOptions,
+  _options?: QueryOptions,
 ): Promise<string> {
   assertSafeIri(bucketGraph);
   if (scope.kind === 'complete-family') return bucketGraph;
-  const { canonicalGraph, matchingGraphs } = await resolveNamedLifecycleGraphPolicy(
-    store,
-    bucketGraph,
-    scope.identity,
-    options,
-  );
-  return matchingGraphs.find((graph) => graph === canonicalGraph)
-    ?? matchingGraphs.slice().sort()[0]
-    ?? canonicalGraph;
+  return canonicalNamedLifecycleGraph(bucketGraph, scope.identity);
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */

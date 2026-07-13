@@ -275,4 +275,50 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       identity: { agentAddress: AGENT_B, kaNumber: 1n },
     });
   });
+
+  it('rejects a finalized seal whose packed KA id belongs to another author namespace', async () => {
+    const store = new OxigraphStore();
+    const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
+    const mismatchedReservedKaId = (BigInt(DEFAULT_AGENT) << 96n) | 1n;
+    await store.insert(buildAssertionSealQuads({
+      assertionUri,
+      metaGraph: contextGraphMetaUri(CG),
+      merkleRoot: MERKLE,
+      authorAddress: AGENT_B,
+      authorAttestationR: new Uint8Array(32).fill(1),
+      authorAttestationVS: new Uint8Array(32).fill(2),
+      authorSchemeVersion: 1,
+      chainId: 31337n,
+      kav10Address: AGENT_B,
+      reservedKaId: mismatchedReservedKaId,
+      finalizedAtIso: '2026-01-01T00:00:00.000Z',
+      rootEntities: [ROOT],
+    }) as Quad[]);
+
+    let swmLoads = 0;
+    let publishes = 0;
+    const agent = Object.create(DKGAgent.prototype) as any;
+    agent.store = store;
+    agent.chain = {};
+    agent.defaultAgentAddress = AGENT_B;
+    Object.defineProperty(agent, 'peerId', { value: 'peer-namespace', configurable: true });
+    agent.log = makeLog();
+    agent.publisher = {
+      hasSwmShareComplete: async () => true,
+    };
+    agent._loadSelectedSWMQuads = async () => {
+      swmLoads += 1;
+      return [];
+    };
+    agent.publishFromSharedMemory = async () => {
+      publishes += 1;
+      throw new Error('publish must not run');
+    };
+
+    await expect(
+      agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B }),
+    ).rejects.toThrow(/not in author/i);
+    expect(swmLoads).toBe(0);
+    expect(publishes).toBe(0);
+  });
 });
