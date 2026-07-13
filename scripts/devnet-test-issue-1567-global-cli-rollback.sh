@@ -33,10 +33,10 @@ result="$(
   node --input-type=module <<'NODE'
 import { performNpmUpdateEdge } from './packages/cli/dist/daemon/auto-update.js';
 import { _autoUpdateIo } from './packages/cli/dist/daemon/manifest.js';
-_autoUpdateIo.edgeRestartCommand = () => ({
-  nodeExecutable: process.execPath,
-  nodeExecArgv: [],
-  restartEntryPoint: process.env.FAKE_DKG_RESTART_ENTRY,
+_autoUpdateIo.resolveDaemonNodeCommand = (...args) => ({
+  executable: process.execPath,
+  args: [process.env.FAKE_DKG_RESTART_ENTRY, ...args],
+  entryPoint: process.env.FAKE_DKG_RESTART_ENTRY,
 });
 const logs = [];
 const result = await performNpmUpdateEdge(
