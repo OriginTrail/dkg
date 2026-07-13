@@ -160,45 +160,21 @@ export async function reconcileContextGraph(
 export class ReconcileCoalescer {
   private readonly inFlight = new Map<string, Promise<void>>();
   private readonly again = new Set<string>();
-  private readonly retryAfter = new Map<string, number>();
-  private readonly failureBackoffMs: number;
-  private readonly now: () => number;
 
-  constructor(
-    private readonly run: (key: string) => Promise<void>,
-    options: { failureBackoffMs?: number; now?: () => number } = {},
-  ) {
-    this.failureBackoffMs = Math.max(0, options.failureBackoffMs ?? 0);
-    this.now = options.now ?? Date.now;
-  }
+  constructor(private readonly run: (key: string) => Promise<void>) {}
 
   trigger(key: string): Promise<void> {
-    const retryAfter = this.retryAfter.get(key);
-    if (retryAfter !== undefined) {
-      if (this.now() < retryAfter) return Promise.resolve();
-      this.retryAfter.delete(key);
-    }
     const existing = this.inFlight.get(key);
     if (existing) {
       // A run is in flight — mark that one more pass is needed after it.
       this.again.add(key);
       return existing;
     }
-    let failed = false;
     const promise = this.run(key)
-      .catch(() => {
-        // The run is responsible for logging. A configured cooldown keeps live
-        // chain-event nudges from immediately re-running the same expensive
-        // failed sweep; the periodic sweep retries after the window expires.
-        failed = true;
-        if (this.failureBackoffMs > 0) {
-          this.retryAfter.set(key, this.now() + this.failureBackoffMs);
-        }
-      })
+      .catch(() => { /* run is responsible for its own logging */ })
       .finally(() => {
         this.inFlight.delete(key);
-        const runAgain = this.again.delete(key);
-        if (runAgain && (!failed || this.failureBackoffMs === 0)) void this.trigger(key);
+        if (this.again.delete(key)) void this.trigger(key);
       });
     this.inFlight.set(key, promise);
     return promise;
@@ -207,6 +183,56 @@ export class ReconcileCoalescer {
   /** True if a run for `key` is currently in flight. */
   isInFlight(key: string): boolean {
     return this.inFlight.has(key);
+  }
+}
+
+/**
+ * VM-specific scheduling policy around the generic single-flight coalescer.
+ *
+ * Live chain events are latency nudges, while the periodic sweep is the
+ * reliability path. After a failed VM pass, live nudges for that CG are held so
+ * they cannot hot-loop the same expensive store/RPC work. The next periodic
+ * sweep explicitly releases the hold and retries. Failure logging also lives at
+ * this scheduling boundary; the domain operation remains a normal rejecting
+ * async function and the generic coalescer remains policy-free.
+ */
+export class VmReconcileScheduler {
+  private readonly liveBlocked = new Set<string>();
+  private readonly coalescer: ReconcileCoalescer;
+
+  constructor(
+    run: (key: string) => Promise<void>,
+    onFailure: (key: string, error: unknown) => void,
+  ) {
+    this.coalescer = new ReconcileCoalescer(async (key) => {
+      // A failed in-flight pass may already have a trailing live nudge queued
+      // inside the coalescer. Consume that trailing pass without re-running the
+      // expensive domain operation.
+      if (this.liveBlocked.has(key)) return;
+      try {
+        await run(key);
+        this.liveBlocked.delete(key);
+      } catch (error) {
+        this.liveBlocked.add(key);
+        onFailure(key, error);
+      }
+    });
+  }
+
+  /** Low-latency chain-event nudge; suppressed after failure until a sweep. */
+  triggerLive(key: string): Promise<void> {
+    if (this.liveBlocked.has(key)) return Promise.resolve();
+    return this.coalescer.trigger(key);
+  }
+
+  /** Reliability path; every periodic sweep gets one retry after a failure. */
+  triggerPeriodic(key: string): Promise<void> {
+    this.liveBlocked.delete(key);
+    return this.coalescer.trigger(key);
+  }
+
+  isInFlight(key: string): boolean {
+    return this.coalescer.isInFlight(key);
   }
 }
 

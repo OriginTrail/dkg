@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   reconcileContextGraph,
   ReconcileCoalescer,
+  VmReconcileScheduler,
   RecentUalSet,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
@@ -188,33 +189,40 @@ describe('ReconcileCoalescer', () => {
     await Promise.all([coalescer.trigger('a'), coalescer.trigger('b')]);
     expect(ran.sort()).toEqual(['a', 'b']);
   });
+});
 
-  it('backs off a failed key and suppresses its queued trailing run', async () => {
-    let now = 1_000;
+describe('VmReconcileScheduler', () => {
+  it('suppresses queued/live retries after failure but retries on the periodic path', async () => {
     let runs = 0;
+    const failures: Array<{ key: string; error: unknown }> = [];
+    let resolveCurrent!: () => void;
     let rejectCurrent!: (error: Error) => void;
-    const coalescer = new ReconcileCoalescer(
+    const scheduler = new VmReconcileScheduler(
       async () => {
         runs += 1;
-        await new Promise<void>((_resolve, reject) => { rejectCurrent = reject; });
+        await new Promise<void>((resolve, reject) => {
+          resolveCurrent = resolve;
+          rejectCurrent = reject;
+        });
       },
-      { failureBackoffMs: 60_000, now: () => now },
+      (key, error) => failures.push({ key, error }),
     );
 
-    const first = coalescer.trigger('cg');
-    void coalescer.trigger('cg'); // asks for a trailing run while the first is active
-    rejectCurrent(new Error('store deadline exceeded'));
+    const failure = new Error('store deadline exceeded');
+    const first = scheduler.triggerLive('cg');
+    void scheduler.triggerLive('cg'); // queues one trailing pass while active
+    rejectCurrent(failure);
     await first;
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runs).toBe(1); // failed pass does not immediately run the queued pass
+    expect(failures).toEqual([{ key: 'cg', error: failure }]);
 
-    await coalescer.trigger('cg');
-    expect(runs).toBe(1); // live nudge inside the cooldown is ignored
+    await scheduler.triggerLive('cg');
+    expect(runs).toBe(1); // live nudge during the failure hold is ignored
 
-    now += 60_000;
-    const retry = coalescer.trigger('cg');
-    expect(runs).toBe(2); // periodic trigger at the boundary retries normally
-    rejectCurrent(new Error('still unavailable'));
+    const retry = scheduler.triggerPeriodic('cg');
+    expect(runs).toBe(2); // the periodic reliability path retries normally
+    resolveCurrent();
     await retry;
   });
 });
