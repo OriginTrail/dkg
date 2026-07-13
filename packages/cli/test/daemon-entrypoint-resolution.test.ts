@@ -1,7 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
 
-import { resolveDaemonEntryPoint } from '../src/cli-helpers.js';
+import {
+  daemonRestartCommandArgs,
+  resolveDaemonEntryPoint,
+  resolveDaemonRestartCommand,
+} from '../src/daemon-entrypoint.js';
 
 /**
  * Regression guard for #962 (cli.ts split review): `resolveDaemonEntryPoint`
@@ -34,5 +38,27 @@ describe('resolveDaemonEntryPoint (#962)', () => {
 
     expect(entry).toMatch(/cli\.(ts|js)$/);
     expect(existsSync(entry), `daemon entrypoint must exist: ${entry}`).toBe(true);
+  });
+
+  it('builds supervisor and verifier arguments from the same canonical command', () => {
+    process.env.DKG_NO_BLUE_GREEN = '1';
+
+    const command = resolveDaemonRestartCommand();
+
+    expect(command).toEqual({
+      nodeExecutable: process.execPath,
+      nodeExecArgv: process.execArgv,
+      restartEntryPoint: resolveDaemonEntryPoint(),
+    });
+    expect(daemonRestartCommandArgs(command, 'daemon-worker')).toEqual([
+      ...process.execArgv,
+      command.restartEntryPoint,
+      'daemon-worker',
+    ]);
+    expect(daemonRestartCommandArgs(command, '--version')).toEqual([
+      ...process.execArgv,
+      command.restartEntryPoint,
+      '--version',
+    ]);
   });
 });

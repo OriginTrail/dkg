@@ -12,10 +12,8 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { performNpmUpdateEdge } from "../src/daemon/auto-update.js";
-import { _autoUpdateIo } from "../src/daemon/manifest.js";
 
 describe("Edge auto-update restart-entry self-check (real child processes)", () => {
-  const originalEdgeRestartCommand = _autoUpdateIo.edgeRestartCommand;
   const originalEnv = {
     DKG_HOME: process.env.DKG_HOME,
     PATH: process.env.PATH,
@@ -24,7 +22,6 @@ describe("Edge auto-update restart-entry self-check (real child processes)", () 
   let root: string | undefined;
 
   afterEach(async () => {
-    _autoUpdateIo.edgeRestartCommand = originalEdgeRestartCommand;
     for (const [name, value] of Object.entries(originalEnv)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -74,17 +71,18 @@ describe("Edge auto-update restart-entry self-check (real child processes)", () 
     expect(
       execFileSync(pathDkg, ["--version"], { encoding: "utf8" }).trim(),
     ).toBe("dkg 10.0.0-rc.1");
-    _autoUpdateIo.edgeRestartCommand = () => ({
+    const restartCommand = {
       nodeExecutable: process.execPath,
       nodeExecArgv: [],
       restartEntryPoint: restartEntry,
-    });
+    };
 
     const logs: string[] = [];
     const result = await performNpmUpdateEdge(
       "10.0.0-rc.1",
       "10.0.0-rc.0",
       (message) => logs.push(message),
+      restartCommand,
     );
 
     expect(result).toBe("failed");
