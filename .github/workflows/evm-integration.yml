@@ -51,7 +51,6 @@ jobs:
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MERGE_SHA: ${{ github.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -62,14 +61,15 @@ jobs:
           : > "${CHANGES_FILE}"
 
           if [[ "${EVENT_NAME}" == "pull_request" ]]; then
-            if [[ -z "${BASE_SHA}" || -z "${MERGE_SHA}" ]]; then
-              echo "::error::Missing pull-request base/merge SHA"
+            if [[ -z "${MERGE_SHA}" ]]; then
+              echo "::error::Missing pull-request merge SHA"
               exit 1
             fi
-            if ! git -C candidate cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-              git -C candidate fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            fi
             git -C candidate cat-file -e "${MERGE_SHA}^{commit}"
+            # First parent of the synthetic merge = the CURRENT base tip; the
+            # event's pull_request.base.sha is a stale snapshot that misroutes
+            # PRs to full CI after unrelated merges to base (see ci.yml).
+            BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"
             git -C candidate diff --name-status -z \
               "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
           fi

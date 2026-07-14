@@ -439,6 +439,12 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('git -C candidate diff --name-status -z \\\n'));
   assert.ok(workflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.equal(workflow.includes('"${BASE_SHA}" "${HEAD_SHA}"'), false);
+  // The diff base must be the merge candidate's first parent (the CURRENT
+  // base tip). The event payload's pull_request.base.sha is a stale snapshot:
+  // it drags unrelated already-merged base changes into the diff and misroutes
+  // ordinary PRs to full CI (observed on PR #1690 after #1687 merged).
+  assert.ok(workflow.includes('BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"'));
+  assert.equal(workflow.includes('github.event.pull_request.base.sha'), false);
   assert.match(workflow, /^  evm-node-test-artifacts:/m);
   assert.match(workflow, /^  evm-devnet-test-artifacts:/m);
   assert.ok(workflow.includes('plan-vitest-shard.mjs chain "$SHARD_ID"'));
@@ -471,6 +477,8 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(evmWorkflow.includes("github.base_ref == 'main'"));
   assert.ok(evmWorkflow.includes('git -C candidate diff --name-status -z \\\n'));
   assert.ok(evmWorkflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
+  assert.ok(evmWorkflow.includes('BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"'));
+  assert.equal(evmWorkflow.includes('github.event.pull_request.base.sha'), false);
   assert.match(evmWorkflow, /^  evm-gate:/m);
 
   const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
