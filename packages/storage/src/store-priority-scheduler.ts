@@ -109,11 +109,11 @@ function metricOperation(operation: string): string {
   return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 80) || 'unknown';
 }
 
-function priorityRank(priority: StoreWorkPriority): number {
-  if (priority === 'ack') return 0;
-  if (priority === 'normal') return 1;
-  return 2;
-}
+const PRIORITY_ORDER = [
+  'ack',
+  'normal',
+  'background',
+] as const satisfies readonly StoreWorkPriority[];
 
 export class StorePriorityScheduler {
   private readonly queues: Record<StoreWorkPriority, Array<QueueEntry<unknown>>> = {
@@ -233,9 +233,15 @@ export class StorePriorityScheduler {
   }
 
   private nextRunnable(): QueueEntry<unknown> | undefined {
-    const priorities: StoreWorkPriority[] = ['ack', 'normal', 'background'];
-    priorities.sort((a, b) => priorityRank(a) - priorityRank(b));
-    for (const priority of priorities) {
+    const totalInflight = this.ackInflight + this.normalInflight + this.backgroundInflight;
+    if (totalInflight >= this.maxConcurrent) return undefined;
+
+    const owedFloor = this.owedFloorPriority();
+    if (owedFloor && this.canStart(owedFloor)) {
+      return this.queues[owedFloor].shift();
+    }
+
+    for (const priority of PRIORITY_ORDER) {
       const queue = this.queues[priority];
       if (queue.length === 0) continue;
       if (!this.canStart(priority)) continue;
@@ -247,33 +253,34 @@ export class StorePriorityScheduler {
   private canStart(priority: StoreWorkPriority): boolean {
     const totalInflight = this.ackInflight + this.normalInflight + this.backgroundInflight;
     if (totalInflight >= this.maxConcurrent) return false;
-    if (priority === 'ack') return !this.shouldHoldNonAckFloor();
+    if (priority === 'ack') return true;
 
     const nonAckLimit = this.nonAckLimit();
     const nonAckInflight = this.normalInflight + this.backgroundInflight;
-    if (nonAckInflight >= nonAckLimit) return false;
-    if (priority === 'normal' && this.shouldHoldBackgroundFloor()) return false;
-    return true;
+    return nonAckInflight < nonAckLimit;
   }
 
-  private shouldHoldNonAckFloor(): boolean {
-    const nonAckInflight = this.normalInflight + this.backgroundInflight;
-    if (nonAckInflight >= this.nonAckLimit()) return false;
-
-    if (this.queues.normal.length > 0 && this.normalInflight === 0) {
-      // A single-slot scheduler cannot preserve ACK capacity and a normal lane
-      // simultaneously. Alternate after an ACK so both lanes still progress.
-      return this.maxConcurrent > 1 || this.lastStartedPriority === 'ack';
-    }
-
-    return this.shouldHoldBackgroundFloor();
-  }
-
-  private shouldHoldBackgroundFloor(): boolean {
+  private owedFloorPriority(): Exclude<StoreWorkPriority, 'ack'> | undefined {
     const backgroundReserve = this.effectiveBackgroundReserve();
-    return backgroundReserve > 0 &&
+    const backgroundFloorOwed =
+      backgroundReserve > 0 &&
       this.queues.background.length > 0 &&
       this.backgroundInflight < backgroundReserve;
+    // Restore the background reserve before the normal floor when both are owed.
+    if (backgroundFloorOwed) return 'background';
+
+    const normalFloorOwed =
+      this.queues.normal.length > 0 &&
+      this.normalInflight === 0;
+    if (!normalFloorOwed) return undefined;
+
+    if (this.maxConcurrent > 1) return 'normal';
+
+    // A single-slot scheduler cannot preserve ACK capacity and a normal lane
+    // simultaneously. Alternate after an ACK so both lanes still progress.
+    if (this.lastStartedPriority === 'ack') return 'normal';
+
+    return undefined;
   }
 
   private effectiveAckReserve(): number {
