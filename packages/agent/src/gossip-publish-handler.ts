@@ -16,7 +16,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
-import type { ContextGraphSub } from './dkg-agent-types.js';
+import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from './dkg-agent-types.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
@@ -25,12 +25,11 @@ export interface GossipPublishHandlerCallbacks {
   getContextGraphOwner: (id: string) => Promise<string | null>;
   setContextGraphSubscription?: (id: string, next: ContextGraphSub, options?: { persist?: boolean }) => void;
   /**
-   * Catalogue a Context Graph learned from ontology gossip without activating
-   * member gossip handlers, sync scope, membership, or durable subscription
-   * state. Agent-backed callers provide the central DKGAgent implementation;
-   * standalone handlers fall back to an in-memory `subscribed: false` record.
+   * Record a Context Graph learned from ontology gossip. Agent-backed callers
+   * apply the node-role policy centrally (edge=catalogue-only, core=activate);
+   * standalone handlers fall back to an in-memory passive catalogue record.
    */
-  recordDiscoveredContextGraph?: (id: string, next: ContextGraphSub) => void;
+  recordDiscoveredContextGraph?: (id: string, metadata: ContextGraphDiscoveryMetadata) => void;
   /**
    * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
    * local store already has a trustworthy public announcement for this CG
@@ -96,14 +95,27 @@ export class GossipPublishHandler {
     this.subscribedContextGraphs.set(id, next);
   }
 
-  private recordDiscoveredContextGraph(id: string, next: ContextGraphSub): void {
-    const discoveryOnly = { ...next, subscribed: false };
+  private recordDiscoveredContextGraph(id: string, metadata: ContextGraphDiscoveryMetadata): void {
     const recorder = this.callbacks.recordDiscoveredContextGraph;
     if (recorder) {
-      recorder(id, discoveryOnly);
+      recorder(id, metadata);
       return;
     }
-    this.setContextGraphSubscription(id, discoveryOnly, { persist: false });
+    const existing = this.subscribedContextGraphs.get(id);
+    this.setContextGraphSubscription(id, {
+      ...existing,
+      // Construct allowed discovery metadata explicitly. Besides keeping the
+      // TypeScript contract narrow, this prevents an older/untyped callback
+      // from smuggling membership, host, or reconciliation fields at runtime.
+      name: metadata.name ?? existing?.name,
+      onChainId: metadata.onChainId ?? existing?.onChainId,
+      onChainHash: metadata.onChainHash ?? existing?.onChainHash,
+      participantAgents: metadata.participantAgents ?? existing?.participantAgents,
+      subscribed: existing?.subscribed === true,
+      synced: existing?.synced === true,
+      sharedMemorySynced: existing?.sharedMemorySynced === true,
+      metaSynced: existing?.metaSynced === true,
+    }, { persist: false });
   }
 
   async handlePublishMessage(data: Uint8Array, contextGraphId: string, onPhase?: GossipPhaseCallback, fromPeerId?: string): Promise<void> {
@@ -222,20 +234,12 @@ export class GossipPublishHandler {
               q.subject === `${contextGraphPrefix}${newId}` && q.predicate === DKG_ONTOLOGY.SCHEMA_NAME,
             );
             const name = nameQuad ? stripLiteral(nameQuad.object) : newId;
-            const next = {
+            const metadata = {
               name,
-              subscribed: false,
-              // `synced: false` — we just got the definition triple via
-              // gossip, no actual CG data has been pulled yet. The
-              // catchup runner flips this to true once data arrives.
-              // Setting it true here would lie about sync state and
-              // pollute the Oracle browse catalogue with stale entries.
-              synced: false,
-              metaSynced: false,
               onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
             };
-            this.recordDiscoveredContextGraph(newId, next);
-            this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via ontology gossip — catalogued (not subscribed)`);
+            this.recordDiscoveredContextGraph(newId, metadata);
+            this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via ontology gossip — recorded for role-aware activation`);
           }
         }
 

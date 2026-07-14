@@ -454,14 +454,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // access control stay consistent.
     //
     // The `subscribed === true` filter is what Codex review on PR #431
-    // (round 3) flagged. `discoverContextGraphsFromStore()` seeds entries
-    // for OPEN CGs we merely learned about with `subscribed: false` (we
-    // don't auto-subscribe discovered CGs — explicit local intent only). Without
-    // this filter, those discovery-only entries would be advertised in
-    // `contextGraphsServed`, so other peers would route join attempts to a
-    // node that doesn't actually host the CG. The curated/private discovery
-    // path is discovery-only too. Curated membership is activated by the
-    // authenticated join-approved flow, not by passively observing metadata.
+    // (round 3) flagged. Edge discovery seeds OPEN entries as catalogue-only,
+    // so advertising every known row would route peers to an edge that does
+    // not host the CG. Cores currently auto-subscribe newly discovered graphs
+    // as an ACK-custody compatibility bridge, so their public discoveries are
+    // intentionally advertised. Curated graphs remain excluded by the policy
+    // check below regardless of role.
     //
     // System CGs (`agents`, `ontology`) are excluded — they are universal
     // and don't need to be re-advertised in every profile.

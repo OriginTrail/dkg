@@ -108,15 +108,22 @@ Graphs: `agents` and `ontology`. Context Graphs selected in the node's
 `contextGraphs` configuration or a network overlay's `defaultContextGraphs` are
 also subscribed at startup because configuration is explicit operator intent.
 
-Other user Context Graphs learned from ontology gossip, the on-chain registry,
-or passive local-store discovery are catalogue entries only. They can appear in
-`dkg context-graph list`, but remain `subscribed: false` and do not enter member
-gossip or catch-up until an explicit subscription, local create/write, or
-approved join activates them:
+On edge nodes, other user Context Graphs learned from ontology gossip, the
+on-chain registry, or passive local-store discovery are catalogue entries only.
+They can appear in `dkg context-graph list`, but remain `subscribed: false` and
+do not enter member gossip or catch-up until an explicit subscription, local
+create/write, or approved join activates them:
 
 ```bash
 dkg subscribe <context-graph-id>
 ```
+
+Core nodes temporarily retain automatic subscription for newly discovered
+graphs because they are responsible for Storage ACK custody and the independent
+host-mode path does not yet replace every member-subscription handler. A
+successful public-graph ACK may additionally set the separate `coreHosted`
+flag; that durable hosting obligation is not the same as user membership.
+Remove this compatibility bridge only with host-mode separation in #1611.
 
 Nodes upgraded from an older release may already have durable user
 subscriptions that cannot be safely classified as manual or discovery-created.

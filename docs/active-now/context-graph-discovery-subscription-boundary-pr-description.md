@@ -1,465 +1,392 @@
-# Separate Context Graph Discovery from Edge-Node Membership
+# Stop Unsolicited Context Graph Subscriptions on Edge Nodes
 
 ## Summary
 
-This PR stops DKG edge nodes from becoming active members of user Context
-Graphs merely because those graphs were discovered through ontology gossip,
-the on-chain Context Graph registry, or passive local-store inspection.
+This PR separates Context Graph discovery from edge-node membership without
+removing the temporary core behavior required for Storage ACK custody.
 
-Discovery still retains useful catalogue metadata and exposes the graph through
-the existing list/browse surfaces, but a newly discovered user graph now stays:
+The role contract is now explicit:
+
+- an **edge** that learns about a user Context Graph through ontology gossip,
+  a chain scan, or store inspection records catalogue metadata only;
+- a **core** still auto-subscribes to newly discovered graphs because the ACK
+  path currently depends on member gossip/finalization handlers; remove that
+  compatibility bridge only with host-mode separation in #1611;
+- an existing explicitly unsubscribed row is never reactivated by rediscovery
+  on either role; and
+- `coreHosted` remains a separate, ACK-backed durable obligation. Discovery
+  does not manufacture it.
+
+`agents` and `ontology` remain universal startup subscriptions. Configured or
+network-default graphs, explicit subscribe, local create/write, approved join,
+and legitimate persisted rehydration also remain activation paths.
+
+## Motivation
+
+Every node subscribes to `ontology` so it can learn Context Graph definitions.
+Before this change, a valid definition could be treated as local membership
+intent. On edge nodes, passive network observation could therefore install
+user-graph GossipSub handlers, add catch-up scope, persist a membership row,
+and restore that accidental subscription after every restart.
+
+The architecture needs three distinct facts:
+
+1. **Catalogue:** this graph exists and these are its authoritative identifiers.
+2. **Membership:** this node intentionally joined and synchronizes the graph.
+3. **Core custody:** this core has an ACK-backed hosting/reconciliation duty.
+
+For edges, fact 1 must not imply fact 2. For cores, fact 1 still temporarily
+activates fact 2 because ACK handling is not yet independent (#1611). Fact 3
+is never inferred from discovery.
+
+## Architecture Before
+
+```mermaid
+flowchart TD
+  SYS["Startup"] --> A["Subscribe agents"]
+  SYS --> O["Subscribe ontology"]
+  SYS --> CFG["Subscribe configured/default graphs"]
+
+  O --> OG["Validated ontology definition gossip"]
+  CHAIN["Chain registry scan"] --> META["Persist on-chain metadata"]
+  STORE["Ontology or private _meta scan"] --> FOUND["Graph found"]
+
+  OG --> ACTIVE["subscribeToContextGraph"]
+  META --> ACTIVE
+  FOUND -->|"selected branches"| ACTIVE
+
+  ACTIVE --> HANDLERS["Install member handlers"]
+  ACTIVE --> SCOPE["Add catch-up scope"]
+  ACTIVE --> MEMBER["Write membership state"]
+  ACTIVE --> ROW["Persist active subscription"]
+  ROW --> RESTART["Restart rehydrates membership"]
+```
+
+Discovery call sites owned membership side effects directly. In particular:
+
+- ontology gossip called the subscription callback after inserting a valid
+  definition;
+- a revealed public chain entry persisted its binding and subscribed;
+- curated/private store discovery subscribed immediately; and
+- persisted accidental rows became indistinguishable from legitimate intent.
+
+This coupling was wrong for edge nodes. It could not simply be removed for all
+roles, however, because cores are responsible for ACK handling and still need
+the member handlers that subscription installs.
+
+## Architecture After
+
+### Central role-aware discovery boundary
+
+```mermaid
+flowchart TD
+  OG["Ontology gossip"] --> RECORD["recordDiscoveredContextGraph"]
+  CHAIN["Chain scan"] --> RDF["Durable authoritative RDF binding"]
+  RDF --> RECORD
+  STORE["Ontology / _meta / binding-only store scan"] --> RECORD
+
+  RECORD --> EXISTS{"Existing row?"}
+  EXISTS -->|"yes, active"| ENRICH["Enrich metadata; preserve membership"]
+  EXISTS -->|"yes, unsubscribed"| KEEP["Enrich metadata; remain unsubscribed"]
+  EXISTS -->|"no"| ROLE{"Node role"}
+  ROLE -->|"edge"| CATALOGUE["Catalogue only"]
+  ROLE -->|"core"| COREACTIVE["Auto-subscribe for ACK compatibility"]
+
+  CATALOGUE --> EDGE["No handler, sync scope, membership, or subscription row"]
+  COREACTIVE --> HANDLERS["Member handlers and durable subscription"]
+  COREACTIVE -->|"store/gossip"| SCOPE["Catch-up scope"]
+  COREACTIVE -->|"chain"| NOSCOPE["Preserve legacy trackSyncScope=false"]
+
+  ACK["Successful public Storage ACK"] --> HOST["coreHosted=true"]
+  RECORD -. "never sets" .-> HOST
+```
+
+`DKGAgent.recordDiscoveredContextGraph()` is the only agent-level transition
+used by passive discovery. It accepts a deliberately narrow metadata type:
+
+- `name`;
+- `onChainId`;
+- `onChainHash`; and
+- `participantAgents`.
+
+Callers cannot choose `subscribed`, `synced`, `metaSynced`, `coreHosted`,
+reconciliation watermarks, or pending-join state. The implementation also
+constructs the next record field-by-field, so an older or untyped runtime
+caller cannot inject those fields through object spreading.
+
+### Edge behavior
+
+A newly discovered edge record starts with:
 
 ```text
 subscribed: false
 synced: false
+sharedMemorySynced: false
+metaSynced: false
 ```
 
-until an explicit local-intent path activates membership.
+It stays in the local in-memory catalogue and list/browse surfaces, but
+discovery does not:
 
-The change preserves the two universal protocol Context Graphs, `agents` and
-`ontology`, as automatic subscriptions on every node role. It also preserves
-configured/network-default subscriptions, explicit API/CLI/SDK/UI/MCP
-subscriptions, local create/register/write flows, approved joins, legitimate
-persisted rehydration, unsubscribe/cleanup behavior, and core-only SWM hosting.
+- register publish/app/update/finalization handlers;
+- add the graph to `config.syncContextGraphs`;
+- write local graph membership;
+- persist an active subscription row; or
+- add the edge to `contextGraphsServed`.
 
-## Why This Is Needed
+### Core behavior and #1611
 
-Every node subscribes to the `ontology` system Context Graph so it can learn
-Context Graph definitions. Before this PR, receiving a valid definition could
-be interpreted as local membership intent. A clean edge node could therefore
-accumulate user-graph gossip handlers, sync scope, durable subscription rows,
-and membership records without an operator or agent asking it to join.
+A core still auto-subscribes when a graph is first discovered. This is a
+compatibility requirement, not an assertion that catalogue discovery and
+membership are conceptually the same: cores currently need subscription-owned
+handlers to receive, finalize, and ACK network data.
 
-Those accidental subscriptions were sticky. Once persisted, startup
-rehydration restored them and reinstalled their handlers after every restart.
-At scale, passive network discovery could therefore fan out into unnecessary
-gossip, catch-up, storage, and profile activity.
+Core discovery source behavior is preserved:
 
-The required invariant is:
+| Discovery source | Core activation | Ordinary catch-up scope |
+| --- | --- | --- |
+| Ontology gossip | auto-subscribe | enabled |
+| Public/curated store scan | auto-subscribe | enabled |
+| Revealed public chain scan | auto-subscribe | disabled (`trackSyncScope=false`) |
 
-- discovery answers **which Context Graphs exist**;
-- member subscription answers **which Context Graphs this node intentionally
-  joins and synchronizes**;
-- core hosting answers **which Context Graphs a core stores or reconciles in
-  host mode without becoming a member**.
+`coreHosted` remains independent. It is set by the ACK-backed host path, can be
+true while `subscribed=false`, and is preserved by unsubscribe/cleanup. It must
+not be set merely because a core discovered or subscribed to a graph.
 
-These are separate state transitions and must not imply one another.
+### Ontology gossip
 
-## Protocol and Operator Intent That Remain Automatic
+The gossip handler still validates and inserts Context Graph definitions. Its
+callback now accepts only discovery metadata and delegates role policy to the
+agent:
 
-### Protocol system Context Graphs
+- edge agent: records a passive catalogue entry;
+- core agent: records and auto-subscribes;
+- standalone handler without an agent callback: uses a safe passive in-memory
+  fallback.
 
-`SYSTEM_CONTEXT_GRAPHS` defines exactly two universal graphs:
+`metaSynced` is not declared by discovery. New records remain false until
+`refreshMetaSyncedFlags()` observes the required local metadata; that method
+remains the single authority for opening the metadata gate.
 
-| Context Graph | Purpose |
-| --- | --- |
-| `agents` | Agent registry and peer/agent discovery. |
-| `ontology` | Shared ontology and Context Graph definition catalogue. |
+### Chain discovery and durable restart reconstruction
 
-`AGENT_REGISTRY_CONTEXT_GRAPH` remains an alias of
-`SYSTEM_CONTEXT_GRAPHS.AGENTS`; it is not a third system graph.
+Chain scans continue to:
 
-Both system graphs remain explicitly subscribed during `DKGAgent.start()` and
-remain in the default sync-on-connect scope for edge and core roles. Existing
-unsubscribe and bulk-cleanup protections for these graphs are unchanged.
+- retain revealed names and authoritative on-chain IDs;
+- write the `ContextGraphOnChainId` RDF binding before acknowledging a page;
+- preserve full/incremental scan watermark and retry semantics;
+- skip unresolved hash-only entries whose topic name is unusable; and
+- apply the existing private-entry curator filter.
 
-### Configured/default Context Graphs
+The chain path cannot always write a complete `rdf:type`/name definition. Store
+discovery therefore also reads binding-only `ContextGraphOnChainId` rows and
+derives the local graph ID from their canonical subject URI. After a restart
+with chain RPC unavailable, an edge reconstructs the graph and its on-chain ID
+without subscribing. Active persisted core/member state still rehydrates with
+its original scope semantics.
 
-The daemon still subscribes graphs selected by local `config.contextGraphs` or
-a network overlay's `defaultContextGraphs`. Configuration represents explicit
-operator/network intent, so it is intentionally different from passive
-discovery.
+### On-chain rebinding safety
 
-The authoritative repo-root `network/*.json` overlays currently have empty
-`defaultContextGraphs` arrays. No user graph name is promoted to a protocol
-constant by this PR.
+When authoritative discovery changes an active graph's `onChainId`, the shared
+binding helper now applies the same invalidation rules as other binding paths:
 
-## Architecture Before This PR
+- reset and persist `lastReconciledOrdinal`;
+- discard the in-memory reconciliation cursor;
+- clear a stale `onChainHash` unless the new authoritative hash is supplied;
+  and
+- preserve watermark/cursor state when the ID is unchanged.
 
-### Discovery and membership were coupled
+This prevents VM reconciliation state for one on-chain graph from being reused
+against a different binding.
 
-```mermaid
-flowchart TD
-  SYS["DKGAgent.start()"] --> S1["Subscribe agents"]
-  SYS --> S2["Subscribe ontology"]
-  SYS --> CFG["Subscribe configured/default graphs"]
+### Store discovery
 
-  S2 --> OG["Ontology definition gossip"]
-  CHAIN["Background chain registry scan"] --> CAT["Write definition/on-chain metadata"]
-  STORE["Passive store discovery"] --> CAT2["Read ontology or private _meta definition"]
+Public ontology definitions, curated/private `_meta` definitions, and
+binding-only chain metadata all pass through the same role-aware recorder.
+Public and curated branches no longer duplicate subscription logic.
 
-  OG --> ACTIVE["Create subscribed=true record"]
-  CAT --> ACTIVE
-  CAT2 -->|"curated/private"| ACTIVE
+Rediscovery enriches an existing active row and re-tracks an active private
+member when required for SWM catch-up. It never re-tracks or reactivates an
+explicitly unsubscribed row.
 
-  ACTIVE --> TOPICS["Install member GossipSub handlers"]
-  ACTIVE --> SCOPE["Add to syncContextGraphs"]
-  ACTIVE --> MEMBER["Persist node membership"]
-  ACTIVE --> ROW["Persist subscription row"]
-  ROW --> REHYDRATE["Restart rehydrates active subscription"]
-  REHYDRATE --> TOPICS
+### Invited-agent join flow
+
+`add-agent` grants authorization on the curator; it is not edge-local join
+intent. The edge stays passive until its agent sends `request-join`.
+
+The pre-approved sequence is covered end-to-end over real libp2p:
+
+```text
+add-agent
+  -> edge remains unsubscribed
+request-join
+  -> curator returns already-member
+  -> join-approved delivered to requester node
+  -> requester subscribes
+  -> same-cycle curator catch-up completes
 ```
 
-### Ontology gossip path
-
-`GossipPublishHandler` receives validated graph-definition triples on the
-universal `ontology` topic. For a new user graph it previously:
-
-1. created a registry record with `subscribed: true`;
-2. called the agent's `subscribeToContextGraph()` callback;
-3. installed publish/app/update/finalization handlers;
-4. added the graph to sync scope; and
-5. allowed the subscription state to become durable.
-
-This path had no local-intent gate. Listening to the catalogue was enough to
-join every public graph announced through it.
-
-### Chain discovery path
-
-The daemon runs an initial registry scan and periodic recovery scans. A
-revealed public entry was written into the local ontology graph and then
-activated through `subscribeToContextGraph()`. The authoritative name and
-on-chain ID were useful catalogue data, but subscription was an unrelated side
-effect.
-
-### Store discovery path
-
-Public ontology definitions were already catalogue-only. The curated/private
-branch was different: finding a private `_meta` or allowlist definition seeded
-a record and immediately subscribed so the same connection cycle could attempt
-catch-up. That made passive metadata observation substitute for an approved
-local join. The authenticated `join-approved` path already owns that
-activation and immediate catch-up responsibility.
-
-### Persistence made accidental state sticky
-
-`subscribeToContextGraph()` writes active state through the configured
-`ContextGraphSubscriptionStore`. Startup rehydration restores those rows,
-member topics, and sync behavior. The persisted schema has no reliable
-historical origin that can distinguish manual intent from an older
-discovery-created row.
-
-### Core hosting was already a separate concept
-
-Core host mode uses `coreHosted`, `swmHostModeSubscribed`, chain-event
-reconciliation, discovery beacons, and sharding/storage gates. A core may host
-opaque or public graph data without being a member subscriber. This PR does not
-route core hosting through the new discovery catalogue transition.
-
-## Architecture After This PR
-
-### Three explicit transitions
-
-```mermaid
-flowchart TD
-  subgraph Discovery["1. Catalogue discovery"]
-    OG["Ontology gossip"] --> RECORD["recordDiscoveredContextGraph"]
-    CHAIN["Chain registry scan"] --> RDF["Persist authoritative RDF metadata"]
-    RDF --> RECORD
-    STORE["Ontology/private _meta scan"] --> RECORD
-    RECORD --> MAP["Known graph: subscribed=false"]
-    MAP --> LIST["List/browse surfaces"]
-  end
-
-  subgraph Membership["2. Member subscription"]
-    SYSTEM["agents / ontology"] --> ACTIVATE["subscribeToContextGraph"]
-    CONFIG["Configured/default graph"] --> ACTIVATE
-    MANUAL["Explicit API/CLI/SDK/UI/MCP"] --> ACTIVATE
-    CREATE["Local create/register/write"] --> ACTIVATE
-    JOIN["Authenticated join-approved"] --> ACTIVATE
-    RESTORE["Legitimate persisted row"] --> ACTIVATE
-    ACTIVATE --> TOPICS["Member GossipSub handlers"]
-    ACTIVATE --> SCOPE["Sync scope and catch-up"]
-    ACTIVATE --> MEMBER["Local membership state"]
-    ACTIVATE --> PERSIST["Durable subscription row"]
-  end
-
-  subgraph Hosting["3. Core host mode"]
-    EVENT["Chain event / discovery beacon"] --> HOST["Core host reconciliation"]
-    HOST --> HOSTSTATE["coreHosted / host-mode state"]
-  end
-
-  RECORD -. "cannot activate" .-> ACTIVATE
-  RECORD -. "cannot create" .-> HOSTSTATE
-```
-
-### Central catalogue boundary
-
-`DKGAgent.recordDiscoveredContextGraph()` is now the single agent-level
-transition for passive discovery metadata.
-
-For a new graph it:
-
-- records the graph in the in-memory catalogue with `subscribed: false`;
-- preserves the name, on-chain ID/hash, participant metadata, and confirmed
-  meta state supplied by the discovery source;
-- does not register member gossip handlers;
-- does not add the graph to `config.syncContextGraphs`;
-- does not persist node membership;
-- does not persist a subscription row; and
-- cannot manufacture `coreHosted`, reconciliation watermarks, or pending-join
-  state.
-
-For an already active legitimate subscription it may enrich authoritative
-catalogue metadata, but it preserves active membership and positive sync/host
-state. Passive rediscovery therefore cannot downgrade a manual subscription,
-and it also cannot upgrade a catalogue-only record into one.
-
-### Ontology gossip is catalogue-only
-
-The gossip handler callback contract no longer exposes
-`subscribeToContextGraph()`. Instead, agent-backed handlers receive
-`recordDiscoveredContextGraph()`. Standalone handlers fall back to an
-in-memory, non-persisted `subscribed: false` record.
-
-Validated definition triples are still inserted and policy validation is
-unchanged. The log now reports that the graph was catalogued rather than
-auto-subscribed.
-
-### Chain discovery retains authoritative metadata without joining
-
-Chain scans still:
-
-- retain the cleartext name when revealed;
-- persist the authoritative on-chain ID binding in the ontology graph;
-- mark projection metadata dirty;
-- preserve cursor page acknowledgement ordering; and
-- remain idempotent across repeated full/incremental scans.
-
-After the durable RDF binding succeeds, the in-memory catalogue transition
-records `subscribed: false`. No member activation follows.
-
-### Public and curated store discovery use the same rule
-
-Definitions found in the ontology graph and private `_meta` graphs now both use
-the catalogue transition. A curated `_meta` definition may report confirmed
-metadata locally, but membership still requires the authenticated
-`join-approved` or another explicit subscription path.
-
-### Profile advertising remains membership-filtered
-
-`publishProfile()` already filters `contextGraphsServed` to active public
-subscriptions and excludes `agents`/`ontology`. Its comments now describe both
-public and curated passive discovery correctly. Discovery-only rows therefore
-remain visible locally without advertising the edge as a graph-serving member.
+The already-member short-circuit has no pending request row to update; approval
+is proven by requester-side handler/scope/persistence activation and successful
+same-cycle data catch-up.
 
 ## Behavior Matrix
 
-| Trigger | Before | After |
+| Trigger | Edge after | Core after |
 | --- | --- | --- |
-| Startup: `agents` | Active system subscription | Unchanged |
-| Startup: `ontology` | Active system subscription | Unchanged |
-| Config/network default | Active configured subscription | Unchanged |
-| Ontology definition gossip | Activated user subscription | Catalogue only |
-| Revealed public chain entry | Activated user subscription | Catalogue only |
-| Public ontology store row | Catalogue only | Catalogue only |
-| Curated/private `_meta` row | Activated user subscription | Catalogue only |
-| Explicit subscribe API/CLI/SDK/UI/MCP | Active, persisted membership | Unchanged |
-| Local create/register/write | Active creator/local subscription | Unchanged |
-| Authenticated `join-approved` | Active membership and catch-up | Unchanged |
-| Legitimate persisted subscription | Rehydrated active subscription | Unchanged |
-| Explicit unsubscribe | Removes member topics/sync scope | Unchanged |
-| Admin bulk cleanup | Clears non-system, non-hosted user rows | Unchanged |
-| Core chain-event/beacon hosting | Host-mode state, separate from membership | Unchanged |
+| Startup `agents` | active | active |
+| Startup `ontology` | active | active |
+| Configured/network-default graph | active | active |
+| Ontology definition gossip | catalogue only | active for ACK compatibility |
+| Revealed public chain entry | catalogue only | active, legacy no ordinary scope |
+| Public ontology store row | catalogue only | active |
+| Curated/private `_meta` row | catalogue only | active |
+| Rediscovery after explicit unsubscribe | remains unsubscribed | remains unsubscribed |
+| Explicit subscribe | active and persisted | active and persisted |
+| Local create/write | active and persisted | active and persisted |
+| `join-approved` | active plus immediate catch-up | active plus immediate catch-up |
+| Legitimate persisted row | rehydrated | rehydrated |
+| Successful public ACK | no core host state | may set independent `coreHosted` |
 
 ## Modules Changed and Why
 
 ### Runtime
 
-| Module | Change | Reason |
+| Module | Change | Why |
 | --- | --- | --- |
-| `packages/agent/src/dkg-agent.ts` | Added `recordDiscoveredContextGraph()`; routed store and chain discovery through it; updated logs/comments. | Establish one enforceable catalogue boundary and remove passive activation. |
-| `packages/agent/src/gossip-publish-handler.ts` | Removed the subscription callback from the discovery contract; added catalogue recording; new definitions use `subscribed: false`. | Prevent universal ontology listeners from joining every announced user graph. |
-| `packages/agent/src/dkg-agent-swm-substrate.ts` | Wires the gossip handler to the catalogue callback instead of member activation. | Connect ontology discovery to the new boundary without changing explicit subscription behavior. |
-| `packages/agent/src/dkg-agent-registry.ts` | Updated `contextGraphsServed` architecture comments. | Document that public and curated passive discoveries are both excluded from profile advertising. |
+| `packages/agent/src/dkg-agent-types.ts` | Adds narrow discovery metadata/options types and documents forbidden state. | Make the discovery boundary explicit at compile time. |
+| `packages/agent/src/index.ts` | Exports the discovery contract. | Keep handler and external agent construction typed consistently. |
+| `packages/agent/src/dkg-agent.ts` | Implements role-aware recording; routes ontology/store/chain discovery; reads binding-only RDF rows; preserves unsubscribe; resets changed bindings. | Centralize policy and retain core ACK behavior plus restart durability. |
+| `packages/agent/src/gossip-publish-handler.ts` | Replaces subscription-shaped discovery input with metadata-only recording and a passive fallback. | Prevent ontology listeners from directly choosing membership. |
+| `packages/agent/src/dkg-agent-swm-substrate.ts` | Wires the gossip handler to the central recorder. | Ensure real agent-backed ontology gossip uses the role boundary. |
+| `packages/agent/src/dkg-agent-registry.ts` | Clarifies role-aware `contextGraphsServed` behavior. | Distinguish edge catalogue rows, core public membership, curated exclusion, and `coreHosted`. |
 
 ### Tests
 
-| Module | Change | Reason |
+| Module | Change | Why |
 | --- | --- | --- |
-| `packages/agent/test/discovery-subscription-boundary.test.ts` | New focused edge-node coverage for system graphs, gossip-registration state, sync scope, persistence, membership, restart, public/curated store discovery, chain discovery, idempotency, metadata enrichment, and core-host-state separation. | Prove side effects, not only `subscribed` map values. |
-| `packages/agent/test/gossip-publish-handler.test.ts` | Updated the callback contract and added ontology catalogue-only coverage. | Prevent reintroduction of the gossip activation path. |
-| `packages/agent/test/context-graph-discovery.test.ts` | Replaced chain auto-subscribe expectations; added persistence/sync assertions; strengthened curated store and cursor/idempotency expectations. | Align the existing integration-oriented discovery suite with the new invariant. |
-| `packages/agent/test/adversarial-determinism.test.ts` | Removed obsolete gossip subscription callback fixtures. | Keep adversarial handler construction aligned with the callback contract. |
-| `packages/agent/test/phase-sequences.test.ts` | Removed obsolete gossip subscription callback fixtures. | Keep phase-contract tests aligned with the callback contract. |
+| `packages/agent/test/discovery-subscription-boundary.test.ts` | Covers edge/core gossip, chain, public/curated store discovery, forbidden metadata injection, persistence, restart with RPC unavailable, rebinding, profile advertisement, explicit activation, cleanup, and host independence. | Assert all side effects, not just a map boolean. |
+| `packages/agent/test/e2e-join.test.ts` | Runs the pre-approved join sequence on an edge requester over real libp2p and checks same-cycle data catch-up. | Prove `add-agent` stays passive while `join-approved` remains an activation source. |
+| `packages/agent/test/gossip-publish-handler.test.ts` | Uses the narrowed callback and passive fallback. | Lock the handler contract. |
+| `packages/agent/test/context-graph-discovery.test.ts` | Aligns store `metaSynced` expectations with the refresh authority. | Prevent discovery from declaring metadata complete. |
+| `packages/agent/test/adversarial-determinism.test.ts`, `phase-sequences.test.ts` | Updates handler fixtures for the new callback. | Keep adversarial/phase coverage representative. |
+| `packages/agent/test/sync-on-connect-churn.test.ts` | Retains system/configured scope assertions. | Prove automatic intended subscriptions still sync on connect. |
+| Agent/CLI Vitest configs and daemon wiring tests | Include the focused boundary and configured/default coverage. | Ensure CI runs the new contract. |
 
-### Operator documentation
+### Documentation
 
-| Module | Change | Reason |
+| Module | Change | Why |
 | --- | --- | --- |
-| `docs/references/cli.md` | Documents discovery-only behavior, the two system graphs, explicit subscribe, and legacy cleanup scope. | Give operators a safe rollout and recovery procedure. |
+| `docs/references/cli.md` | Documents edge discovery, core ACK compatibility, #1611, system graphs, explicit subscribe, and cleanup. | Give operators the correct role and rollout model. |
+| This file | Records before/after architecture, module ownership, risk, and validation. | Serve as the standard PR description and durable handoff. |
 
-## Preserved Activation Sources
+## Preserved Explicit Activation Paths
 
-The PR deliberately does not add a blanket edge-role rejection inside
-`subscribeToContextGraph()`. Edge nodes must still be able to join when intent
-is explicit.
+This PR does not reject edge subscriptions inside `subscribeToContextGraph()`.
+The following paths still express intent and activate membership:
 
-The following activation call sites remain valid:
+- startup for `agents` and `ontology`;
+- configured/network-default graphs;
+- explicit API/CLI/SDK/UI/MCP subscribe;
+- local create/register/write;
+- authenticated `join-approved`;
+- legitimate persisted rehydration.
 
-- system graph startup in `dkg-agent-lifecycle.ts`;
-- configured/network-default startup in `packages/cli/src/daemon/lifecycle.ts`;
-- explicit subscribe routes in `packages/cli/src/daemon/routes/context-graph.ts`;
-- local graph create/register paths in `dkg-agent-cg-registry.ts` and
-  `dkg-agent-context-graph.ts`;
-- explicit local publish/write paths in `dkg-agent-publish.ts`;
-- authenticated join approval in `dkg-agent-lifecycle.ts`; and
-- persisted subscription rehydration in `dkg-agent-lifecycle.ts`.
+Explicit unsubscribe still removes member topics and sync scope. Local create,
+write, rehydration, and unsubscribe production modules are unchanged.
 
-Core host-mode activation remains in the existing lifecycle/SWM-host modules
-and is not implemented as member subscription.
-
-## Persisted-State and Rollout Behavior
+## Persistence, Cleanup, and Rollout
 
 No database schema or provenance migration is introduced.
 
-Discovery-only entries are not written to `context_graph_subscriptions`; their
-durable catalogue data already lives in ontology/on-chain RDF state. Fresh or
-explicitly cleaned edge nodes therefore do not recreate accidental rows after
-restart.
+Fresh edge discoveries do not create active subscription rows. Existing rows
+are preserved because historical state cannot safely distinguish manual intent
+from an old discovery side effect.
 
-Existing persisted rows are intentionally preserved because historical rows
-cannot be classified safely as manual or discovery-created. Silently deleting
-them could remove legitimate user intent.
-
-Operators can inspect active user subscriptions through:
+Operators can inspect and deliberately clear legacy user subscriptions through:
 
 ```text
 GET /api/context-graph/subscriptions
-```
-
-and deliberately clear the backlog through:
-
-```text
 DELETE /api/context-graph/subscriptions
 ```
 
-The DELETE operation clears every non-system, non-`coreHosted` user
-subscription, including legitimate subscriptions. It preserves `agents`,
-`ontology`, core-hosted rows, and VM/SWM graph data. Wanted user subscriptions
-must be re-added explicitly afterward.
+Bulk cleanup preserves `agents`, `ontology`, host-only `coreHosted` rows, and
+graph data. It removes all eligible non-system user subscriptions, including
+legitimate ones. Wanted graphs must be subscribed again explicitly. Later
+passive discovery may repopulate catalogue visibility but cannot reactivate an
+edge subscription; core rediscovery retains the temporary ACK behavior.
 
-## Verification
+## Validation
 
-### Passed
+### Automated results
 
-- `pnpm run build:runtime:packages`
-  - all runtime packages built successfully;
 - `pnpm --filter @origintrail-official/dkg-agent build`
-  - TypeScript build and agent type tests passed;
-- `pnpm --filter @origintrail-official/dkg build`
-  - CLI TypeScript build and runtime asset copy passed;
-- focused agent regressions: 93 passed across 5 files:
-  - ontology gossip handler: 15 passed;
-  - discovery/subscription boundary: 7 passed;
-  - system/configured sync-on-connect behavior: 16 passed;
-  - join-approved deferred gossip behavior: 3 passed;
-  - core-host/member-subscription independence: 52 passed;
-- focused CLI regressions: 17 passed across 3 files:
-  - chain scan scheduling/idempotency: 8 passed;
-  - subscription diagnostics/cleanup route: 3 passed;
-  - daemon wiring, including configured/default graph scope: 6 passed;
-- focused two-node devnet discovery/subscription boundary: passed;
-- `git diff --check` passed.
+  - TypeScript build and type tests passed.
+- focused role boundary and ontology handler suite
+  - 2 files, 27 tests passed.
+- chain/store Context Graph discovery suite
+  - 1 file, 79 tests passed.
+- real-libp2p invited join suite
+  - 1 file, 6 tests passed.
+- reconciler/backpressure/late-joiner/rehydration shard
+  - 4 files, 115 tests passed.
+  - includes `defers wrapped private shared-memory admission pressure without peer backoff`; the expected result remains `deferred-backpressure`.
+- focused CLI scan/cleanup/configuration suite
+  - 3 files, 17 tests passed.
+- `git diff --check`
+  - passed.
 
-The focused boundary suite exercises actual `DKGAgent` startup with a
-`MockChainAdapter` and verifies:
+### Focused live devnet proof
 
-- only `agents` and `ontology` are universal system graphs;
-- `AGENT_REGISTRY_CONTEXT_GRAPH` is the `agents` alias;
-- passive discovery creates no member handler, sync-scope entry, membership
-  record, subscription row, pending join, or core-host state;
-- public and curated store definitions remain catalogue-only;
-- a revealed chain entry retains its on-chain ID and remains catalogue-only;
-- repeated chain discovery is idempotent;
-- explicit subscription installs member handlers, sync scope, membership, and
-  persistence;
-- rediscovery cannot downgrade that explicit subscription; and
-- restart rehydrates only the explicitly activated graph.
+The branch was also exercised on an isolated core/edge devnet with a freshly
+generated public graph. The core registered the graph and wrote a unique marker
+triple to SWM. The edge learned the graph through discovery with
+`subscribed=false`, returned zero marker rows before subscription, and remained
+passive through a restart plus a 30-second observation window. After an
+explicit subscribe request with shared-memory catch-up, the edge returned the
+same marker triple. The graph was therefore available and sync-capable, while
+passive edge discovery alone did not synchronize it.
 
-### Validation matrix
+The devnet proof also confirmed the discovered on-chain ID survived edge
+restart, the passive graph was absent from the active-subscriptions endpoint,
+and explicit activation persisted `subscribed=true, coreHosted=false`.
 
-| Invariant | Status | Evidence |
-| --- | --- | --- |
-| Ontology gossip inserts validated definitions without activating a user subscription. | Validated | `gossip-publish-handler.test.ts` asserts that a valid `ContextGraph` definition is inserted and catalogued with `subscribed=false`; a non-definition ontology row is not catalogued. |
-| Chain scans retain authoritative metadata and cursor semantics without joining the graph. | Validated | `discovery-subscription-boundary.test.ts` asserts that the on-chain ID and RDF binding are durable before the page callback acknowledges the cursor, while handler, sync scope, membership, and persisted subscription remain absent. `chain-discovery-scan-mode.test.ts` covers bounded seeding, startup recovery, incremental scans, periodic full recovery, custom budgets, and serialization. |
-| Public and curated store discoveries both stay catalogue-only. | Validated | The boundary suite discovers both access policies from the store and asserts `subscribed=false` with no handler, sync scope, membership, or persisted subscription for either graph. |
-| Explicit edge subscription still installs handlers, sync scope, membership, and persistence. | Validated | The boundary suite explicitly subscribes after passive discovery and asserts all four member side effects. The live devnet then proves the edge catches up the marker only after the explicit subscribe request. |
-| `agents` and `ontology` remain active on startup and sync-on-connect. | Validated | Startup assertions verify both system subscriptions and gossip handlers. `sync-on-connect-churn.test.ts` asserts both system graphs remain in the metadata refresh scope. |
-| Configured/default graphs remain automatic subscriptions. | Validated | `daemon-storage-ack-timing-wiring.test.ts` asserts configured and network-default graph IDs are merged and deduplicated into `DKGAgent.create({ syncContextGraphs })`. Daemon startup iterates that same merged list through `ensureContextGraphLocal` with `subscribeToContextGraph` fallback; the boundary lifecycle test asserts the ensure path activates the subscription and handler, while sync-on-connect coverage asserts the configured graph remains in scope. |
-| Join-approved, local create/write, rehydration, and unsubscribe paths are unchanged. | Validated | The late-joiner suite covers deferred join-approved SWM gossip and its activation after metadata arrives. The boundary lifecycle test covers local create, implicit local write activation, restart rehydration, and unsubscribe teardown. No production join/create/write/unsubscribe module was changed. |
-| `contextGraphsServed` excludes discovery-only graphs. | Validated | The boundary suite captures the published profile and asserts that only the active public member graph is advertised; discovery-only public and curated graphs are excluded. |
-| Core host mode remains independent from member subscription. | Validated | `core-fills-gap.test.ts` covers host-only `coreHosted=true, subscribed=false`, preserves an existing member subscription when host mode is added, and reconciles host-only graphs. Cleanup coverage also preserves host-only rows. |
-| Legacy cleanup scope is clear and operator-controlled. | Validated | The admin-only GET/DELETE route suite covers authorization and returned diagnostics. The boundary cleanup test asserts that cleanup clears only eligible user subscriptions while preserving system subscriptions, host-only state, and graph data. |
+### Acceptance matrix
 
-### Focused devnet boundary
-
-An isolated two-node devnet was run with one core and one edge node. The test
-cleared the edge node's preconfigured user subscriptions, created and
-registered a fresh public graph on the core (`onChainId=3`), and observed the
-graph on the live edge through ontology gossip with `subscribed=false`.
-
-The edge was then restarted to exercise persisted discovery state and the
-startup chain scan scheduled after 15 seconds. After that scan, the graph still
-had `subscribed=false`, retained `onChainId=3`, and was absent from
-`GET /api/context-graph/subscriptions`. A final explicit
-`POST /api/context-graph/subscribe` activated the graph with
-`subscribed=true` and `coreHosted=false`.
-
-A follow-up data-bearing check created another randomly named public graph,
-wrote a unique marker triple into the core node's shared working memory, and
-verified that the core could query the marker. The edge discovered the graph
-with `subscribed=false` but returned zero marker rows before subscription and
-through a 30-second passive window after an edge restart. After an explicit
-subscription with shared-memory catch-up, the same edge query returned the
-marker. This proves the graph data is available and sync-capable, while passive
-discovery alone does not initiate synchronization.
-
-The isolated devnet and its generated deployment metadata were cleaned after
-the run.
-
-### Local fixture limitation
-
-The repository's default chain-backed agent test command was attempted under
-both the shell's Node 25 and the repository's supported Node 24 runtime. In
-this local environment, the spawned Hardhat process became unreachable after
-deployment (`ECONNREFUSED 127.0.0.1:9547`, and once an empty contract result),
-so `context-graph-discovery.test.ts` and the large agent-part suites aborted
-before their assertions ran.
-
-This was a fixture/runtime failure, not a failing product assertion. The
-chain/store behavior changed by this PR is covered by the passing MockChain
-boundary tests, while the existing chain-backed expectations were also updated
-for CI or an environment with a stable Hardhat fixture.
+| Invariant | Evidence |
+| --- | --- |
+| Ontology gossip inserts validated definitions without unsolicited edge membership. | Real agent-backed edge/core role matrix plus handler fallback tests. |
+| Chain scans retain authoritative metadata and cursor semantics. | Durable RDF-before-ack assertion, edge passive assertion, and core legacy-scope assertion. |
+| Public and curated store discovery obey role policy. | Edge remains catalogue-only; core auto-subscribes both; explicit unsubscribe survives rediscovery. |
+| Explicit edge subscription installs handlers, scope, membership, and persistence. | Boundary lifecycle assertions and same-cycle join catch-up. |
+| `agents` and `ontology` remain startup and sync-on-connect subscriptions. | Startup and churn/reconciler tests. |
+| Configured/default graphs remain automatic. | Existing daemon wiring and boundary lifecycle coverage. |
+| Join-approved, local create/write, rehydration, and unsubscribe remain valid. | Real join test plus boundary lifecycle/regression shards. |
+| `contextGraphsServed` excludes discovery-only edge graphs. | Profile capture excludes edge catalogue rows; active public membership remains advertised; curated graphs remain excluded. |
+| Core host mode remains independent from member subscription. | Host-only and ACK/reconciliation coverage; discovery cannot inject `coreHosted`. |
+| Binding changes invalidate stale reconciliation state. | Changed-ID and same-ID persistence/cursor tests. |
+| Chain catalogue survives restart without RPC. | Disk-backed restart reconstructs an OnChainId-only row without edge activation. |
+| Legacy cleanup is explicit and operator-controlled. | GET/DELETE route and boundary cleanup coverage. |
 
 ## Compatibility and Risk
 
-- No public API endpoint is removed or renamed.
-- No persisted schema changes.
-- No user graph is hard-coded as a new system graph.
-- Existing legitimate persisted subscriptions continue to rehydrate.
-- Configured/default graph subscriptions remain automatic.
-- Core hosting and ciphertext custody paths are unchanged.
-- The behavior change is intentionally limited to passive discovery call
-  sites.
-
-The primary rollout consideration is existing accidental persisted rows. They
-remain active until an operator deliberately invokes the documented cleanup
-endpoint.
+- No public endpoint or persisted schema changes.
+- No new system graph is introduced.
+- Existing legitimate subscriptions continue to rehydrate.
+- Core discovery remains active until #1611, avoiding an ACK regression.
+- `coreHosted` and ciphertext/VM reconciliation remain independent.
+- The main rollout risk is pre-existing accidental subscription rows; cleanup
+  is intentionally opt-in because provenance is unavailable.
 
 ## Reviewer Checklist
 
-- [x] Ontology gossip inserts validated definitions but does not activate a
-      user subscription.
-- [x] Chain scans retain authoritative metadata and cursor semantics without
-      joining the graph.
-- [x] Public and curated store discoveries both stay catalogue-only.
-- [x] Explicit edge subscription still installs handlers, sync scope,
-      membership, and persistence.
-- [x] `agents` and `ontology` remain active on startup and sync-on-connect.
-- [x] Configured/default graphs remain automatic subscriptions.
-- [x] Join-approved, local create/write, rehydration, and unsubscribe paths are
-      unchanged.
-- [x] `contextGraphsServed` excludes discovery-only graphs.
-- [x] Core host mode remains independent from member subscription.
-- [x] Legacy cleanup scope is clear and operator-controlled.
+- [x] Edge ontology gossip is catalogue-only; core ontology gossip remains active.
+- [x] Edge chain/store discovery is passive; core ACK compatibility is retained.
+- [x] Existing explicit unsubscribe is not undone by rediscovery.
+- [x] Discovery cannot inject membership, sync, host, watermark, or pending state.
+- [x] Binding-only chain metadata survives restart without RPC.
+- [x] Changed bindings clear stale hash, watermark, and live cursor state.
+- [x] `add-agent -> request-join -> already-member -> join-approved -> catch-up` is covered over real libp2p.
+- [x] `metaSynced` has one refresh authority.
+- [x] `contextGraphsServed` reflects role and access policy correctly.
+- [x] Cleanup scope is documented and operator-controlled.

@@ -2798,11 +2798,11 @@ describe('discoverContextGraphsFromStore', () => {
     expect(entry!.name).toBe('Curated Meta Only');
     expect(entry!.subscribed).toBe(false);
     expect((agent as any).config.syncContextGraphs ?? []).not.toContain(curatedId);
-    // `synced=false` — discovery from the _meta store gives us the
-    // definition triple but not actual CG data. `metaSynced=true` is
-    // the right flag for "we have the curated _meta allowlist."
+    // Discovery itself does not certify authenticated metadata. The existing
+    // refreshMetaSyncedFlags path is the single authority that promotes this
+    // after confirming the local _meta state.
     expect(entry!.synced).toBe(false);
-    expect(entry!.metaSynced).toBe(true);
+    expect(entry!.metaSynced).toBe(false);
   }, 15000);
 });
 

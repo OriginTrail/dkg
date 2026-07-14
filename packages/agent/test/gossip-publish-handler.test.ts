@@ -6,7 +6,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
-import type { ContextGraphSub } from '../src/index.js';
+import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'test-gossip-handler';
 
@@ -35,7 +35,7 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   setContextGraphSubscription: (id: string, next: ContextGraphSub) => void;
-  recordDiscoveredContextGraph: (id: string, next: ContextGraphSub) => void;
+  recordDiscoveredContextGraph: (id: string, metadata: ContextGraphDiscoveryMetadata) => void;
 }>) {
   const s = store ?? new OxigraphStore();
   const subscriptions = new Map<string, ContextGraphSub>();
@@ -50,8 +50,13 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
         contextGraphExists: callbacks?.contextGraphExists ?? (async () => false),
         getContextGraphOwner: callbacks?.getContextGraphOwner ?? (async () => null),
         setContextGraphSubscription: callbacks?.setContextGraphSubscription ?? ((id, next) => { subscriptions.set(id, next); }),
-        recordDiscoveredContextGraph: callbacks?.recordDiscoveredContextGraph ?? ((id, next) => {
-          subscriptions.set(id, { ...next, subscribed: false });
+        recordDiscoveredContextGraph: callbacks?.recordDiscoveredContextGraph ?? ((id, metadata) => {
+          subscriptions.set(id, {
+            ...metadata,
+            subscribed: false,
+            synced: false,
+            metaSynced: false,
+          });
         }),
       },
     ),

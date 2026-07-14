@@ -17,6 +17,8 @@
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { DKGAgent } from '../src/index.js';
+import type { ContextGraphSubscriptionRecord } from '../src/index.js';
+import { contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
 import {
   createEVMAdapter,
   getSharedContext,
@@ -65,6 +67,8 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
   let joiner: DKGAgent; // hosts the requesting agents
   let approvedAddr: string;
   let rejectedAddr: string;
+  let preapprovedAddr: string;
+  const joinerPersistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
 
   afterAll(async () => {
     try { await curator?.stop(); } catch { /* ignore */ }
@@ -86,7 +90,12 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
-      nodeRole: 'core',
+      nodeRole: 'edge',
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...joinerPersistedSubscriptions.values()],
+        save: async (record) => { joinerPersistedSubscriptions.set(record.id, { ...record }); },
+        delete: async (id) => { joinerPersistedSubscriptions.delete(id); },
+      },
     });
 
     await curator.start();
@@ -104,10 +113,13 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     // signing key so signJoinRequest can produce a real SignedAgentDelegation).
     const recApprove = await joiner.registerAgent('joiner-approve', { framework: 'test' });
     const recReject = await joiner.registerAgent('joiner-reject', { framework: 'test' });
+    const recPreapproved = await joiner.registerAgent('joiner-preapproved', { framework: 'test' });
     approvedAddr = recApprove.agentAddress;
     rejectedAddr = recReject.agentAddress;
+    preapprovedAddr = recPreapproved.agentAddress;
     expect(approvedAddr).toMatch(/^0x[0-9a-fA-F]{40}$/);
     expect(rejectedAddr).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(preapprovedAddr).toMatch(/^0x[0-9a-fA-F]{40}$/);
   }, 25_000);
 
   it('the curator owns a CURATED context graph (join-gated)', async () => {
@@ -116,6 +128,59 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     // The joiner is NOT the curator → its join requests must go over the wire.
     expect(await joiner.isCuratorOf(CG)).toBe(false);
   }, 15_000);
+
+  it('add-agent stays passive until request-join, then already-member approval catches up in the same cycle', async () => {
+    const subject = 'urn:dkg:e2e-join:preapproved-catchup';
+    await curator.inviteAgentToContextGraph(CG, preapprovedAddr);
+    await curator.store.insert([{
+      subject,
+      predicate: 'http://schema.org/name',
+      object: '"Preapproved Catchup"',
+      graph: contextGraphDataGraphUri(CG),
+    }]);
+
+    // add-agent grants authorization on the curator. It is not local join
+    // intent on the edge and must not install any subscription machinery.
+    expect(joiner.getSubscribedContextGraphs().get(CG)?.subscribed ?? false).toBe(false);
+    expect((joiner as any).gossipRegistered.has(CG)).toBe(false);
+    expect((joiner as any).config.syncContextGraphs ?? []).not.toContain(CG);
+    expect(joinerPersistedSubscriptions.has(CG)).toBe(false);
+
+    const delegation = await joiner.signJoinRequest(CG, preapprovedAddr);
+    const forwarded = await joiner.forwardJoinRequest(
+      CG,
+      delegation,
+      'joiner-preapproved',
+      curator.peerId,
+    );
+    expect(forwarded).toMatchObject({ delivered: 1, alreadyMember: true });
+
+    const caughtUp = await pollUntil(
+      async () => {
+        const data = await joiner.store.query(`
+          ASK WHERE {
+            GRAPH <${contextGraphDataGraphUri(CG)}> {
+              <${subject}> <http://schema.org/name> "Preapproved Catchup" .
+            }
+          }
+        `);
+        return {
+          subscribed: joiner.getSubscribedContextGraphs().get(CG)?.subscribed === true,
+          hasData: data.type === 'boolean' && data.value,
+        };
+      },
+      (state) => state.subscribed && state.hasData,
+      30_000,
+    );
+
+    expect(caughtUp).toEqual({ subscribed: true, hasData: true });
+    expect((joiner as any).gossipRegistered.has(CG)).toBe(true);
+    expect((joiner as any).config.syncContextGraphs ?? []).toContain(CG);
+    expect(joinerPersistedSubscriptions.get(CG)).toMatchObject({
+      subscribed: true,
+      syncScoped: true,
+    });
+  }, 45_000);
 
   it('a join request forwarded over real libp2p lands as PENDING on the curator', async () => {
     const delegation = await joiner.signJoinRequest(CG, approvedAddr);
