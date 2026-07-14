@@ -33,6 +33,7 @@ export type {
   QueryHistoryRow,
   SavedQueryRow,
   ContextGraphSubscriptionRow,
+  ContextGraphReadinessProvenance,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
   ContextGraphMemberRow,

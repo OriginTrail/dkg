@@ -126,12 +126,27 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     deferredBackpressure: 0,
   };
 
-  const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean; countProgress?: boolean }) => {
+  const recordPhaseOutcome = (
+    result: SyncPageResult,
+    options: {
+      updateCheckpoint: boolean;
+      countProgress?: boolean;
+      emptyPhase?: boolean;
+    },
+  ) => {
     const countProgress = options.countProgress ?? true;
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
     if (options.updateCheckpoint && countProgress) {
-      if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+      if (
+        result.completed &&
+        !result.timedOut &&
+        (
+          options.emptyPhase === true ||
+          result.resumedFromOffset > 0 ||
+          result.nextOffset > result.resumedFromOffset
+        )
+      ) {
         summary.completedPhases += 1;
       }
       if (result.nextOffset > result.resumedFromOffset) {
@@ -226,8 +241,20 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         processed.dataRejectedMissingMeta > 0 ||
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
-        recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-        recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
+        // The verifier reports an empty batch only when both fetched phase
+        // payloads are empty. Record each phase independently: a completed
+        // zero-offset phase is a real clean-empty response, while a sibling
+        // timeout remains incomplete.
+        const emptyPhase = processed.emptyResponses > 0;
+        recordPhaseOutcome(metaResult, {
+          updateCheckpoint: updateMetaCheckpoint,
+          countProgress: !metadataOnlyResponse,
+          emptyPhase,
+        });
+        recordPhaseOutcome(dataResult, {
+          updateCheckpoint: updateDataCheckpoint,
+          emptyPhase,
+        });
         if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
         }

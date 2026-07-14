@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { DKGEvent, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -23,7 +23,7 @@ export interface CatchupJobResult {
   peersResponded: number;
   /**
    * Subset of `peersTried` whose per-peer sync round finished without a
-   * transport failure, without an explicit ACL denial, and with either real
+   * transport failure, timeout, or explicit ACL denial, and with either real
    * progress or a clean non-metadata-only empty completion.
    */
   peersSucceeded: number;
@@ -33,6 +33,22 @@ export interface CatchupJobResult {
   sharedMemorySynced: number;
   denied: boolean;
   deniedPeers: number;
+  /**
+   * Per-plane evidence produced before peer results are aggregated. Aggregate
+   * diagnostics intentionally retain every timeout/denial for observability,
+   * but readiness must not let one bad peer mask another peer that completed
+   * the same plane cleanly and stored verified data.
+   */
+  cleanPlaneCompletions?: {
+    durable: {
+      verifiedDataPeers: number;
+      emptyPeers: number;
+    };
+    sharedMemory: {
+      verifiedDataPeers: number;
+      emptyPeers: number;
+    };
+  };
   diagnostics?: {
     noProtocolPeers: number;
     durable: {
@@ -52,6 +68,7 @@ export interface CatchupJobResult {
       failedPeers: number;
       failedPhases: number;
       deferredBackpressure: number;
+      deniedPhases?: number;
     };
     sharedMemory: {
       fetchedMetaTriples: number;
@@ -68,6 +85,7 @@ export interface CatchupJobResult {
       failedPeers: number;
       failedPhases: number;
       deferredBackpressure: number;
+      deniedPhases?: number;
     };
   };
 }
@@ -91,6 +109,19 @@ export interface CatchupPhaseProgress {
   bytesReceived?: number;
   emptyResponses?: number;
   deferredBackpressure?: number;
+  deniedPhases?: number;
+}
+
+export function catchupPlaneCompletedWithoutFailure(
+  progress: CatchupPhaseProgress | null | undefined,
+): boolean {
+  return progress != null
+    && (progress.completedPhases ?? 0) > 0
+    && (progress.timedOutPhases ?? 0) === 0
+    && (progress.failedPeers ?? 0) === 0
+    && (progress.failedPhases ?? 0) === 0
+    && (progress.deferredBackpressure ?? 0) === 0
+    && (progress.deniedPhases ?? 0) === 0;
 }
 
 export function catchupPeerSucceeded(
@@ -119,7 +150,7 @@ export function catchupPeerSucceeded(
     || (shared ? (shared.insertedMetaTriples ?? 0) > 0 : false)
   );
   const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);
-  return peerMadeProgress || (!peerTimedOut && !peerMetadataOnly);
+  return !peerTimedOut && (peerMadeProgress || !peerMetadataOnly);
 }
 
 export function catchupPeerResponded(
@@ -278,19 +309,12 @@ class WorkerCatchupRunner implements CatchupRunner {
         return agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId]);
       }
       case 'finalizeCatchup': {
-        const [contextGraphId, dataSynced, sharedMemorySynced] = args as [string, number, number];
+        const [contextGraphId] = args as [string, number, number];
         await agent.refreshMetaSyncedFlags([contextGraphId]);
-        if (dataSynced > 0 || sharedMemorySynced > 0) {
-          agent.markContextGraphSubscriptionState?.(contextGraphId, {
-            synced: true,
-            ...(sharedMemorySynced > 0 ? { sharedMemorySynced: true } : {}),
-          });
-          agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
-            contextGraphId,
-            dataSynced,
-            sharedMemorySynced,
-          });
-        }
+        // Readiness is classified by the daemon route after the worker returns
+        // its complete per-plane diagnostics. Insert counts alone can describe
+        // an early page followed by a timeout; marking here would persist a
+        // false-ready window before the route can reject that partial result.
         return null;
       }
       default:

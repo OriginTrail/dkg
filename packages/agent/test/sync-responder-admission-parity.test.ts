@@ -255,7 +255,7 @@ describe('sync responder graph admission planner', () => {
     expect(out).toContain(`${DKG_NS}SubGraph`);
     expect(out).toContain(SCHEMA_NAME);
     expect(out).toContain('did:dkg:activity:1');
-    expect(out).toContain('did:dkg:join-request:1');
+    expect(out).not.toContain('did:dkg:join-request:1');
     expect(out).toContain('urn:lifecycle:vm');
     expect(out).toContain(vmAssertion);
     expect(out).toContain('urn:event:vm');

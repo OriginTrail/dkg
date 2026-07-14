@@ -54,6 +54,7 @@ type SyncSessionTokenEntry = {
 type PreparedResponderSession = {
   rowListCacheKey: string;
   refreshRowList: boolean;
+  refreshGeneration: string;
 };
 
 type PreparedResponderStage =
@@ -484,6 +485,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     return {
       rowListCacheKey: key,
       refreshRowList,
+      // Include the server-derived row-list scope so two remote peers choosing
+      // the same opaque token cannot make global prerequisite memos treat their
+      // otherwise-independent sessions as one generation.
+      refreshGeneration: `${key}\u0000${token}`,
     };
   };
 
@@ -598,10 +603,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmMetaPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+            graphList: await graphListMemo.get({
+              refresh: session?.refreshRowList ?? offset === 0,
+              refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+              signal,
+            }),
             registeredSubGraphNames: await swmAdmissionMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             contextGraphId,
             cutoffIso: cutoff,
@@ -611,6 +624,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -628,10 +642,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmDataPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+            graphList: await graphListMemo.get({
+              refresh: session?.refreshRowList ?? offset === 0,
+              refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+              signal,
+            }),
             registeredSubGraphNames: await swmAdmissionMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             contextGraphId,
             cutoffIso: cutoff,
@@ -641,6 +663,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -682,7 +705,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             registeredSubGraphNames: await subGraphRegistrationMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             offset,
             limit,
@@ -690,6 +717,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListMemo: session ? durableMetaRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -708,7 +736,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
         const rows = await readDurableDataPage({
           store,
-          graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+          graphList: await graphListMemo.get({
+            refresh: session?.refreshRowList ?? offset === 0,
+            refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+            signal,
+          }),
           contextGraphId,
           sinceBatchId,
           offset,
@@ -717,6 +749,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           rowListMemo: session ? durableDataRowsMemo : undefined,
           rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
+          refreshGeneration: session?.refreshGeneration,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();

@@ -1,6 +1,12 @@
 import { parentPort } from 'node:worker_threads';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS, mapWithConcurrency } from '@origintrail-official/dkg-agent';
-import { catchupPeerResponded, catchupPeerSucceeded, type CatchupJobResult, type CatchupRunRequest } from './catchup-runner.js';
+import {
+  catchupPeerResponded,
+  catchupPeerSucceeded,
+  catchupPlaneCompletedWithoutFailure,
+  type CatchupJobResult,
+  type CatchupRunRequest,
+} from './catchup-runner.js';
 
 type InvokeResultMessage = {
   type: 'invoke-result';
@@ -57,6 +63,11 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   let deniedPeers = 0;
   let noProtocolPeers = 0;
 
+  const cleanPlaneCompletions: NonNullable<CatchupJobResult['cleanPlaneCompletions']> = {
+    durable: { verifiedDataPeers: 0, emptyPeers: 0 },
+    sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+  };
+
   const diagnostics: NonNullable<CatchupJobResult['diagnostics']> = {
     noProtocolPeers: 0,
     durable: {
@@ -76,6 +87,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       failedPeers: 0,
       failedPhases: 0,
       deferredBackpressure: 0,
+      deniedPhases: 0,
     },
     sharedMemory: {
       fetchedMetaTriples: 0,
@@ -92,6 +104,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       failedPeers: 0,
       failedPhases: 0,
       deferredBackpressure: 0,
+      deniedPhases: 0,
     },
   };
 
@@ -204,7 +217,18 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.failedPhases += durable.failedPhases ?? 0;
     diagnostics.durable.deferredBackpressure += durable.deferredBackpressure ?? 0;
     deferredBackpressure += durable.deferredBackpressure ?? 0;
+    diagnostics.durable.deniedPhases =
+      (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
     peerDenied = peerDenied || durable.deniedPhases > 0;
+
+    if (catchupPlaneCompletedWithoutFailure(durable)) {
+      if ((durable.insertedDataTriples ?? 0) > 0) {
+        cleanPlaneCompletions.durable.verifiedDataPeers += 1;
+      }
+      if ((durable.emptyResponses ?? 0) > 0) {
+        cleanPlaneCompletions.durable.emptyPeers += 1;
+      }
+    }
 
     if (shared) {
       sharedMemorySynced += shared.insertedDataTriples ?? 0;
@@ -223,7 +247,18 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
       diagnostics.sharedMemory.deferredBackpressure += shared.deferredBackpressure ?? 0;
       deferredBackpressure += shared.deferredBackpressure ?? 0;
+      diagnostics.sharedMemory.deniedPhases =
+        (diagnostics.sharedMemory.deniedPhases ?? 0) + (shared.deniedPhases ?? 0);
       peerDenied = peerDenied || shared.deniedPhases > 0;
+
+      if (catchupPlaneCompletedWithoutFailure(shared)) {
+        if ((shared.insertedDataTriples ?? 0) > 0) {
+          cleanPlaneCompletions.sharedMemory.verifiedDataPeers += 1;
+        }
+        if ((shared.emptyResponses ?? 0) > 0) {
+          cleanPlaneCompletions.sharedMemory.emptyPeers += 1;
+        }
+      }
     }
 
     if (peerDenied) {
@@ -262,6 +297,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     sharedMemorySynced,
     denied: deniedPeers > 0,
     deniedPeers,
+    cleanPlaneCompletions,
     diagnostics,
   };
 }

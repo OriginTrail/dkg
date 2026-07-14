@@ -1220,9 +1220,18 @@ export class DKGAgentBase {
   protected readonly seenPrivateSyncRequestIds = new Map<string, number>();
   protected readonly metaRefreshTimestamps = new Map<string, number>();
   protected readonly preferredSyncPeers = new Map<string, string>();
+  /** Stable key for state that must be scoped to one signed join generation. */
+  protected joinRequestTrackingKey(
+    contextGraphId: string,
+    agentAddress: string,
+    requestGeneration: string,
+  ): string {
+    return `${contextGraphId}::${agentAddress.toLowerCase()}::${requestGeneration.toLowerCase()}`;
+  }
   /**
    * Remembers the libp2p peer ID that delivered each pending join request
-   * to this curator. Keyed by `${contextGraphId}::${agentAddress_lower}`.
+   * to this curator. Keyed by context graph, agent, and signed request
+   * generation so a delayed request cannot redirect a newer decision.
    *
    * This is the authoritative source when we later need to notify that
    * requester about approval/rejection — the agent registry can be stale
@@ -1266,17 +1275,17 @@ export class DKGAgentBase {
   protected readonly localApprovedAgentByCG = new Map<string, string>();
   /**
    * Symmetric companion to `joinRequestOriginPeers`, populated on the
-   * REQUESTER side. When `forwardJoinRequest` broadcasts to all peers,
-   * any peer that responds `{ok: true}` is self-claiming curator status
-   * for this `(contextGraphId, agentAddress)` pair. We remember those
-   * peers so a subsequent `join-approved` / `join-rejected` notification
-   * can be authenticated against them — without requiring the requester
+   * REQUESTER side. Only the explicit invite-supplied curator is remembered
+   * when it accepts (or durably queues) a request. We remember that peer so a
+   * subsequent `join-approved` / `join-rejected` notification can be
+   * authenticated against the exact signed request generation — without
+   * requiring the requester
    * to have synced the CG's `_meta` graph (which is impossible by
    * definition: a curated CG denies meta sync until approval, and the
    * rejection notification is the one case where the request will
    * never be approved).
    *
-   * Keyed identically (`${contextGraphId}::${agentAddress_lower}`).
+   * Keyed identically (context graph, lower-cased agent, request generation).
    * Stored as a Set because the broadcast may legitimately reach
    * multiple curator nodes for the same CG (multi-curator deployments
    * are not yet a feature, but the data shape doesn't preclude them).
@@ -1290,11 +1299,9 @@ export class DKGAgentBase {
    * notification just collapses the same denial-of-service window
    * faster, never widens it.
    *
-   * In-memory only, like `joinRequestOriginPeers`. On requester
-   * restart between submit and decision, we fall back to the
-   * `_meta`-based curator check (which works for already-approved
-   * agents who later get re-rejected, the only scenario where the
-   * requester has meta access).
+   * This remains a compatibility/diagnostic cache. The durable requester
+   * join-state row is the primary authority and survives restarts; `_meta`
+   * curator resolution is the final fallback for older rows.
    */
   protected readonly joinRequestAcceptedBy = new Map<string, Set<string>>();
   /**

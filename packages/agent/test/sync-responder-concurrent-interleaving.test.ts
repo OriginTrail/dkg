@@ -1,6 +1,9 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { createResponderGraphListMemo } from '../src/sync/responder/graph-plan.js';
+import {
+  createResponderGraphListMemo,
+  createResponderSubGraphRegistrationMemo,
+} from '../src/sync/responder/graph-plan.js';
 import {
   DKG_NS,
   lineGraphsFromNquads,
@@ -718,6 +721,118 @@ describe('sync responder pagination interleaving', () => {
     expect(retryAttempt).not.toContain('"meta-000"');
   });
 
+  it('serves the signed agent delegation needed for private-CG sync authorization', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'private-delegation-durable-meta';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const metaGraph = `${cgPrefix}/_meta`;
+    const delegation = `did:dkg:agent-delegation:${cgId}:0x1234`;
+    const orphanDelegation = `did:dkg:agent-delegation:${cgId}:0xorphan`;
+    const revokedDelegation = `did:dkg:agent-delegation:${cgId}:0xrevoked`;
+    await store.insert([
+      {
+        graph: metaGraph,
+        subject: cgPrefix,
+        predicate: 'https://dkg.network/ontology#allowedAgent',
+        object: '"0x1234"',
+      },
+      {
+        graph: metaGraph,
+        subject: delegation,
+        predicate: 'https://dkg.network/ontology#delegationAgent',
+        object: '"0x1234"',
+      },
+      {
+        graph: metaGraph,
+        subject: delegation,
+        predicate: 'https://dkg.network/ontology#allowedDelegateePeer',
+        object: '"12D3KooWAuthorizedJoiner"',
+      },
+      {
+        graph: metaGraph,
+        subject: orphanDelegation,
+        predicate: 'https://dkg.network/ontology#delegationAgent',
+        object: '"0xorphan"',
+      },
+      {
+        graph: metaGraph,
+        subject: orphanDelegation,
+        predicate: 'https://dkg.network/ontology#allowedDelegateePeer',
+        object: '"12D3KooWOrphaned"',
+      },
+      {
+        graph: metaGraph,
+        subject: cgPrefix,
+        predicate: 'https://dkg.network/ontology#allowedAgent',
+        object: '"0xrevoked"',
+      },
+      {
+        graph: metaGraph,
+        subject: cgPrefix,
+        predicate: 'https://dkg.network/ontology#revokedAgent',
+        object: '"0xrevoked"',
+      },
+      {
+        graph: metaGraph,
+        subject: revokedDelegation,
+        predicate: 'https://dkg.network/ontology#delegationAgent',
+        object: '"0xrevoked"',
+      },
+      {
+        graph: metaGraph,
+        subject: revokedDelegation,
+        predicate: 'https://dkg.network/ontology#allowedDelegateePeer',
+        object: '"12D3KooWRevoked"',
+      },
+      {
+        graph: metaGraph,
+        subject: 'did:dkg:agent-delegation:another-cg:0x1234',
+        predicate: 'https://dkg.network/ontology#allowedDelegateePeer',
+        object: '"12D3KooWUnrelated"',
+      },
+    ]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 10 });
+    const response = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta',
+      offset: 0,
+      limit: 10,
+      syncSessionId: 'private-delegation-session',
+    }, 'peer-a');
+
+    expect(response).toContain(delegation);
+    expect(response).toContain('12D3KooWAuthorizedJoiner');
+    expect(response).not.toContain('12D3KooWOrphaned');
+    expect(response).not.toContain('12D3KooWRevoked');
+    expect(response).not.toContain('12D3KooWUnrelated');
+
+    // Force the intrinsically-oversized snapshot path so the store-bounded
+    // SPARQL predicate is held to the same active-delegation contract.
+    const fallbackCap = registerTestSyncHandler(store, {
+      syncPageSize: 10,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const fallbackResponse = await fallbackCap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta',
+      offset: 0,
+      limit: 10,
+      syncSessionId: 'private-delegation-fallback-session',
+    }, 'peer-a');
+    expect(fallbackResponse).toContain('12D3KooWAuthorizedJoiner');
+    expect(fallbackResponse).not.toContain('12D3KooWOrphaned');
+    expect(fallbackResponse).not.toContain('12D3KooWRevoked');
+    expect(fallbackResponse).not.toContain('12D3KooWUnrelated');
+  });
+
   it('reuses a SWM data session snapshot on page-zero retry', async () => {
     const store = new OxigraphStore();
     const cgId = 'retry-session-swm-data';
@@ -885,5 +1000,69 @@ describe('sync responder pagination interleaving', () => {
     await expect(overlappingRefresh).resolves.toEqual(['new']);
     await expect(deepPage).resolves.toEqual(['new']);
     expect(calls).toBe(2);
+  });
+
+  it('reloads graph-list and subgraph prerequisites for a newer session generation', async () => {
+    const oldGraphs = deferred<string[]>();
+    const newGraphs = deferred<string[]>();
+    let graphCalls = 0;
+    const graphStore = {
+      listGraphs: async () => {
+        graphCalls++;
+        return graphCalls === 1 ? oldGraphs.promise : newGraphs.promise;
+      },
+    } as unknown as OxigraphStore;
+    const graphMemo = createResponderGraphListMemo(graphStore);
+
+    const oldGraphSession = graphMemo.get({
+      refresh: true,
+      refreshGeneration: 'old-session',
+    });
+    const newGraphSession = graphMemo.get({
+      refresh: true,
+      refreshGeneration: 'new-session',
+    });
+    await Promise.resolve();
+    expect(graphCalls).toBe(1);
+    oldGraphs.resolve(['urn:graph:old']);
+    await expect(oldGraphSession).resolves.toEqual(['urn:graph:old']);
+    await vi.waitFor(() => expect(graphCalls).toBe(2));
+    newGraphs.resolve(['urn:graph:new']);
+    await expect(newGraphSession).resolves.toEqual(['urn:graph:new']);
+
+    const cgId = 'generation-aware-subgraphs';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const oldSubgraphs = deferred<any>();
+    const newSubgraphs = deferred<any>();
+    let subgraphCalls = 0;
+    const subgraphStore = {
+      query: async () => {
+        subgraphCalls++;
+        return subgraphCalls === 1 ? oldSubgraphs.promise : newSubgraphs.promise;
+      },
+    } as unknown as OxigraphStore;
+    const subgraphMemo = createResponderSubGraphRegistrationMemo(subgraphStore);
+
+    const oldSubgraphSession = subgraphMemo.get(cgId, {
+      refresh: true,
+      refreshGeneration: 'old-session',
+    });
+    const newSubgraphSession = subgraphMemo.get(cgId, {
+      refresh: true,
+      refreshGeneration: 'new-session',
+    });
+    await Promise.resolve();
+    expect(subgraphCalls).toBe(1);
+    oldSubgraphs.resolve({
+      type: 'bindings',
+      bindings: [{ sg: `${cgPrefix}/old`, name: '"old"' }],
+    });
+    await expect(oldSubgraphSession).resolves.toEqual(['old']);
+    await vi.waitFor(() => expect(subgraphCalls).toBe(2));
+    newSubgraphs.resolve({
+      type: 'bindings',
+      bindings: [{ sg: `${cgPrefix}/new`, name: '"new"' }],
+    });
+    await expect(newSubgraphSession).resolves.toEqual(['new']);
   });
 });

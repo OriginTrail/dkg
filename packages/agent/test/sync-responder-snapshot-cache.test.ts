@@ -114,6 +114,143 @@ describe('sync responder snapshot budget defaults', () => {
 });
 
 describe('sync responder snapshot cache and budget', () => {
+  it('reloads a new session after an older snapshot load is already in flight', async () => {
+    const memo = createResponderSyncRowListMemo(10_000);
+    const oldLoad = deferred<readonly {
+      s: string;
+      p: string;
+      o: string;
+      g: string;
+    }[]>();
+    let freshLoads = 0;
+
+    const oldSession = memo.get('durable-meta:peer:cg', () => oldLoad.promise, {
+      refresh: true,
+      refreshGeneration: 'session-before-approval',
+    });
+    const freshSession = memo.get('durable-meta:peer:cg', async () => {
+      freshLoads++;
+      return [{
+        s: 'urn:memo:fresh',
+        p: `${DKG_NS}label`,
+        o: '"fresh-after-approval"',
+        g: 'urn:memo:graph',
+      }];
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-after-approval',
+    });
+
+    // The new session must wait for the old store read rather than coalescing
+    // onto it, and must perform its own read afterwards.
+    await Promise.resolve();
+    expect(freshLoads).toBe(0);
+    oldLoad.resolve([{
+      s: 'urn:memo:stale',
+      p: `${DKG_NS}label`,
+      o: '"stale-before-approval"',
+      g: 'urn:memo:graph',
+    }]);
+
+    await expect(oldSession).resolves.toMatchObject([
+      { o: '"stale-before-approval"' },
+    ]);
+    await expect(freshSession).resolves.toMatchObject([
+      { o: '"fresh-after-approval"' },
+    ]);
+    expect(freshLoads).toBe(1);
+
+    await expect(memo.get(
+      'durable-meta:peer:cg',
+      async () => { throw new Error('cached snapshot should be reused'); },
+    )).resolves.toMatchObject([{ o: '"fresh-after-approval"' }]);
+  });
+
+  it('does not reuse an older generation when a refresh load fails', async () => {
+    const memo = createResponderSyncRowListMemo(10_000);
+    const stale = [{
+      s: 'urn:memo:stale',
+      p: `${DKG_NS}label`,
+      o: '"stale-before-approval"',
+      g: 'urn:memo:graph',
+    }];
+    const fresh = [{
+      s: 'urn:memo:fresh',
+      p: `${DKG_NS}label`,
+      o: '"fresh-after-retry"',
+      g: 'urn:memo:graph',
+    }];
+
+    await expect(memo.get('durable-meta:peer:cg', async () => stale, {
+      refresh: true,
+      refreshGeneration: 'session-before-approval',
+    })).resolves.toBe(stale);
+    await expect(memo.get('durable-meta:peer:cg', async () => {
+      throw new Error('transient store failure');
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-after-approval',
+    })).rejects.toThrow('transient store failure');
+
+    // prepareResponderSession already installed this token, so the transport
+    // retry arrives with refresh=false. It must miss the stale generation.
+    await expect(memo.get('durable-meta:peer:cg', async () => fresh, {
+      refreshGeneration: 'session-after-approval',
+    })).resolves.toBe(fresh);
+  });
+
+  it('does not reuse an older generation when the refresh waiter aborts', async () => {
+    const memo = createResponderSyncRowListMemo(10_000);
+    const oldLoad = deferred<readonly {
+      s: string;
+      p: string;
+      o: string;
+      g: string;
+    }[]>();
+    const controller = new AbortController();
+    let retryLoads = 0;
+
+    const oldSession = memo.get('durable-meta:peer:cg', () => oldLoad.promise, {
+      refresh: true,
+      refreshGeneration: 'session-before-approval',
+    });
+    const abortedRefresh = memo.get('durable-meta:peer:cg', async () => {
+      throw new Error('aborted refresh must not start its store load');
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-after-approval',
+      signal: controller.signal,
+    });
+    controller.abort(new Error('request timed out'));
+    await expect(abortedRefresh).rejects.toThrow('request timed out');
+    // Retry while the old generation is STILL loading. Because the token was
+    // already installed, this arrives with refresh=false; generation mismatch
+    // must nevertheless wait for and supersede the old in-flight snapshot.
+    const retry = memo.get('durable-meta:peer:cg', async () => {
+      retryLoads += 1;
+      return [{
+      s: 'urn:memo:fresh',
+      p: `${DKG_NS}label`,
+      o: '"fresh-after-retry"',
+      g: 'urn:memo:graph',
+      }];
+    }, {
+      refreshGeneration: 'session-after-approval',
+    });
+    await Promise.resolve();
+    expect(retryLoads).toBe(0);
+
+    oldLoad.resolve([{
+      s: 'urn:memo:stale',
+      p: `${DKG_NS}label`,
+      o: '"stale-before-approval"',
+      g: 'urn:memo:graph',
+    }]);
+    await expect(oldSession).resolves.toHaveLength(1);
+    await expect(retry).resolves.toMatchObject([{ o: '"fresh-after-retry"' }]);
+    expect(retryLoads).toBe(1);
+  });
+
   it('keeps active durable row snapshots alive while pages are still being read', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

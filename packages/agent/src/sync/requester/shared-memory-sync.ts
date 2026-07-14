@@ -116,12 +116,23 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     deferredBackpressure: 0,
   };
 
-  const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint?: boolean } = {}) => {
+  const recordPhaseOutcome = (
+    result: SyncPageResult,
+    options: { updateCheckpoint?: boolean; emptyPhase?: boolean } = {},
+  ) => {
     const updateCheckpoint = options.updateCheckpoint ?? true;
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
     if (!updateCheckpoint) return;
-    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+    if (
+      result.completed &&
+      !result.timedOut &&
+      (
+        options.emptyPhase === true ||
+        result.resumedFromOffset > 0 ||
+        result.nextOffset > result.resumedFromOffset
+      )
+    ) {
       summary.completedPhases += 1;
     }
     if (result.nextOffset > result.resumedFromOffset) {
@@ -181,8 +192,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.emptyResponses += processed.emptyResponses;
 
       if (processed.emptyResponses > 0) {
-        recordPhaseOutcome(wsMetaResult);
-        recordPhaseOutcome(wsDataResult);
+        // Count a genuinely empty public graph as complete without requiring
+        // cursor movement. Each phase still owns its outcome, so a timeout in
+        // one phase cannot be hidden by the sibling's clean empty response.
+        recordPhaseOutcome(wsMetaResult, { emptyPhase: true });
+        recordPhaseOutcome(wsDataResult, { emptyPhase: true });
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
         }
