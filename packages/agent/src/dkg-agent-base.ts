@@ -865,6 +865,16 @@ export class DKGAgentBase {
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS']) || 5_000);
   static readonly LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS =
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS']) || 5_000);
+  /**
+   * Per-row list enrichment can issue several store queries. Keep the aggregate
+   * fan-out comfortably below the store scheduler's normal-queue limit even on
+   * nodes that have discovered hundreds of context graphs.
+   */
+  static readonly LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY =
+    Math.min(8, Math.max(
+      1,
+      Math.floor(Number(process.env['DKG_LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY']) || 4),
+    ));
 
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
