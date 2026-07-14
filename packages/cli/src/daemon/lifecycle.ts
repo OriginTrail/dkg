@@ -1055,34 +1055,54 @@ export async function bootstrapConfiguredContextGraphs(input: {
     }
 
     const existing = input.agent.getSubscribedContextGraphs().get(contextGraphId);
+    input.agent.subscribeToContextGraph(contextGraphId);
+
     let hasAuthoritativeMetadata = false;
-    if (existing) {
+    let locallyCurated = false;
+    if (existing?.metaSynced === true) {
       try {
-        // Use the agent's live authoritative-meta predicate instead of the
-        // presence of a creator triple. Legitimate public configured graphs
-        // created by ensureContextGraphLocal intentionally have no creator and
-        // must survive upgrades without deletion or a permanent pending reset.
-        hasAuthoritativeMetadata = existing.metaSynced === true &&
-          await input.agent.hasConfirmedMetaState(contextGraphId);
+        locallyCurated = await input.agent.isCuratorOf(contextGraphId);
+      } catch (err) {
+        input.log(
+          `Context graph "${contextGraphId}" ownership check failed: ${err instanceof Error ? err.message : String(err)} — treating it as remote`,
+        );
+      }
+    }
+
+    if (existing?.metaSynced === true) {
+      try {
+        // Explicit local ownership is the only safe exception to rejecting an
+        // unregistered placeholder. createContextGraph() stamps ownership;
+        // the legacy configured-graph shadow created by
+        // ensureContextGraphLocal() deliberately has no creator/curator.
+        hasAuthoritativeMetadata = await input.agent.hasConfirmedMetaState(
+          contextGraphId,
+          { rejectUnregisteredPlaceholder: !locallyCurated },
+        );
       } catch (err) {
         input.log(
           `Context graph "${contextGraphId}" metadata check failed: ${err instanceof Error ? err.message : String(err)} — treating metadata as pending`,
         );
       }
     }
-    input.agent.subscribeToContextGraph(contextGraphId);
+
+    if (!hasAuthoritativeMetadata) {
+      // Legacy ensureContextGraphLocal() shadows contain an `unregistered`
+      // marker and stale metaSynced=true. The explicit remote proof above
+      // rejects that marker without depending on mutable subscription state;
+      // only now do we persist the fail-closed bootstrap classification.
+      input.agent.markContextGraphSubscriptionState(contextGraphId, {
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        pendingMeta: true,
+      });
+    }
 
     if (hasAuthoritativeMetadata) {
       input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata already confirmed)`);
       continue;
     }
-
-    input.agent.markContextGraphSubscriptionState(contextGraphId, {
-      synced: false,
-      sharedMemorySynced: false,
-      metaSynced: false,
-      pendingMeta: true,
-    });
     input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata pending)`);
   }
 }

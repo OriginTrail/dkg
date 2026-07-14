@@ -5561,8 +5561,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       firstSeenAt?: number;
       updatedAt: number;
     }) | null = null;
+    let previousMembershipKnown = membershipStore === undefined;
     if (membershipStore?.loadAll) {
       const rows = await membershipStore.loadAll();
+      previousMembershipKnown = true;
       previousMembership = rows.find((row) =>
         row.contextGraphId === contextGraphId &&
         row.principalType === membership.principalType &&
@@ -5580,6 +5582,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let membershipAttempted = false;
     let subscriptionAttempted = false;
     try {
+      // Membership is the prepare record; the subscription row is the durable
+      // activation/rehydration commit marker and must remain last. A legacy
+      // membership store without a read API may retain an idempotent prepared
+      // row after failure, but it can never leave a restart-visible active
+      // subscription without the membership fact it depends on.
       if (membershipStore) membershipAttempted = true;
       await this.upsertContextGraphMember(membership, { strict: true });
       if (subscriptionStore) subscriptionAttempted = true;
@@ -5591,7 +5598,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch (error) {
       const rollbackFailures: unknown[] = [];
       // A store may reject after applying a write, so compensate every
-      // attempted operation, including the one that surfaced the failure.
+      // attempted operation whose prior value was observable, including the
+      // one that surfaced the failure. Never guess absence for a legacy
+      // membership store without loadAll(): deleting there could erase a
+      // valid pre-existing row after an upsert that rejected before mutation.
       if (subscriptionAttempted && subscriptionStore) {
         try {
           await this.enqueueContextGraphSubscriptionPersistWrite(
@@ -5604,7 +5614,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           rollbackFailures.push(rollbackError);
         }
       }
-      if (membershipAttempted && membershipStore) {
+      if (membershipAttempted && membershipStore && previousMembershipKnown) {
         try {
           if (previousMembership) {
             await membershipStore.upsert(previousMembership);
@@ -6125,7 +6135,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return cleared;
   }
 
-  async hasConfirmedMetaState(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+  async hasConfirmedMetaState(this: DKGAgent,
+    contextGraphId: string,
+    options?: { rejectUnregisteredPlaceholder?: boolean },
+  ): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return true;
     }
@@ -6146,6 +6159,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean' &&
       unregisteredPlaceholderResult.value === true;
+    let hasActivePublicOnChainProof = false;
+    if (hasUnregisteredPlaceholder && options?.rejectUnregisteredPlaceholder === true) {
+      // Replicas do not rewrite the creator's local registrationStatus marker,
+      // so a legitimately registered public CG can still say "unregistered".
+      // Preserve that shape only on fresh positive chain proof (tracked
+      // non-zero id, active slot, accessPolicy=public); a legacy local shadow
+      // has no such proof, and a private slot cannot borrow its public ontology
+      // fallback.
+      hasActivePublicOnChainProof = await this.contextGraphActivePublicOnChainFromRegistry(
+        contextGraphId,
+      ).catch(() => false);
+    }
     // Curated/private CG creation in 10.0.6 emits this complete definition in
     // `_meta`: type + private policy + creator peer DID + curator wallet DID.
     // Requiring both identities prevents an incidental/provenance type triple
@@ -6178,16 +6203,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return true;
     }
 
-    // `ensureContextGraphLocal` remains authoritative for public network
-    // defaults, including namespaced defaults. Reject that otherwise-valid
-    // shape only when runtime state proves this is a remote membership
-    // bootstrap: a trusted join approval or explicit pending-meta state. A
-    // slash heuristic would incorrectly break legitimate public defaults.
+    // `ensureContextGraphLocal` remains authoritative for explicit public
+    // network defaults, including namespaced defaults. Reject that otherwise-
+    // valid shape for trusted join/pending bootstrap state or when a caller
+    // explicitly classifies it as remote. The one remote exception requires
+    // fresh active-public chain proof; a slash heuristic or onChainId alone
+    // would break defaults or let a private slot borrow the public fallback.
     if (
       hasUnregisteredPlaceholder &&
       (
         this.localApprovedAgentByCG.has(contextGraphId) ||
-        this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true
+        (
+          !hasActivePublicOnChainProof &&
+          (
+            options?.rejectUnregisteredPlaceholder === true ||
+            this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true
+          )
+        )
       )
     ) {
       return false;

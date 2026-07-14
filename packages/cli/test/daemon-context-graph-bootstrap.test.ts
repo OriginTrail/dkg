@@ -24,6 +24,7 @@ function createAgent(
   creators: Record<string, string | null> = {},
   store = createStore(),
   confirmedMeta: Record<string, boolean> = {},
+  locallyCurated: Record<string, boolean> = {},
 ) {
   const subscriptions = new Map<string, Subscription>(Object.entries(initial));
   const ensureContextGraphLocal = vi.fn();
@@ -47,6 +48,7 @@ function createAgent(
     agent: {
       ensureContextGraphLocal,
       getContextGraphCreator: vi.fn(async (contextGraphId: string) => creators[contextGraphId] ?? null),
+      isCuratorOf: vi.fn(async (contextGraphId: string) => locallyCurated[contextGraphId] ?? false),
       hasConfirmedMetaState: vi.fn(async (contextGraphId: string) =>
         confirmedMeta[contextGraphId] ?? Boolean(creators[contextGraphId])),
       getSubscribedContextGraphs: () => subscriptions,
@@ -127,6 +129,9 @@ describe('configured context graph daemon bootstrap', () => {
         '0x1234567890123456789012345678901234567890/local-cg':
           'did:dkg:agent:12D3KooWCreator',
       },
+      createStore(),
+      {},
+      { '0x1234567890123456789012345678901234567890/local-cg': true },
     );
 
     await bootstrapConfiguredContextGraphs({
@@ -151,7 +156,7 @@ describe('configured context graph daemon bootstrap', () => {
     });
   });
 
-  it('preserves a confirmed legitimate public configured graph even when it has no creator', async () => {
+  it('preserves a confirmed remote public configured graph even when it has no creator', async () => {
     const contextGraphId = '0x1234567890123456789012345678901234567890/creatorless-public';
     const store = createStore();
     const fixture = createAgent(
@@ -215,6 +220,45 @@ describe('configured context graph daemon bootstrap', () => {
 
     expect(fixture.store.delete).not.toHaveBeenCalled();
     expect(fixture.store.flush).not.toHaveBeenCalled();
+    expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    });
+  });
+
+  it('fails closed before checking a legacy unregistered configured shadow', async () => {
+    const contextGraphId = '0x1234567890123456789012345678901234567890/legacy-shadow';
+    const fixture = createAgent({
+      [contextGraphId]: {
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+      },
+    });
+    // Mirrors hasConfirmedMetaState's legacy-placeholder guard: the normal
+    // public ontology fallback says true, but the explicit remote proof must
+    // reject the same unregistered placeholder before migration reads it.
+    vi.mocked(fixture.agent.hasConfirmedMetaState).mockImplementation(async (
+      _id,
+      options?: { rejectUnregisteredPlaceholder?: boolean },
+    ) => options?.rejectUnregisteredPlaceholder !== true);
+
+    await bootstrapConfiguredContextGraphs({
+      agent: fixture.agent,
+      configuredContextGraphIds: [contextGraphId],
+      networkDefaultContextGraphIds: [],
+      log: vi.fn(),
+    });
+
+    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledTimes(1);
+    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledWith(
+      contextGraphId,
+      { rejectUnregisteredPlaceholder: true },
+    );
     expect(fixture.subscriptions.get(contextGraphId)).toMatchObject({
       subscribed: true,
       synced: false,

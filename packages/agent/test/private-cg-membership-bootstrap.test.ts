@@ -276,6 +276,10 @@ describe('private CG membership bootstrap recovery', () => {
       });
 
       expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
+      expect(await (agent as any).hasConfirmedMetaState(
+        contextGraphId,
+        { rejectUnregisteredPlaceholder: true },
+      )).toBe(false);
       const bytes = await (agent as any).buildSyncRequest(
         contextGraphId,
         0,
@@ -286,6 +290,27 @@ describe('private CG membership bootstrap recovery', () => {
       );
       expect(decoder.decode(bytes)).toBe(`${contextGraphId}|0|100`);
     }
+  });
+
+  it('accepts an unregistered public replica only with active public on-chain proof', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapPublicReplica'));
+    const contextGraphId = 'public/bootstrap/on-chain-replica';
+    await agent.ensureContextGraphLocal({
+      id: contextGraphId,
+      name: 'Public on-chain replica',
+    });
+    agent.markContextGraphSubscriptionState(contextGraphId, {
+      onChainId: '7',
+      pendingMeta: true,
+    });
+    const publicOnChainProof = vi.fn(async () => true);
+    (agent as any).contextGraphActivePublicOnChainFromRegistry = publicOnChainProof;
+
+    expect(await (agent as any).hasConfirmedMetaState(
+      contextGraphId,
+      { rejectUnregisteredPlaceholder: true },
+    )).toBe(true);
+    expect(publicOnChainProof).toHaveBeenCalledWith(contextGraphId);
   });
 
   it('keeps requester decisions local, preserves queued generations, and drops stale decisions', async () => {
@@ -966,13 +991,25 @@ describe('private CG membership bootstrap recovery', () => {
       const contextGraphId = `private-bootstrap-${failingStore}-failure`;
       const approvedAddress = agent.getDefaultAgentAddress();
       (agent as any).isTrustedJoinDecisionSender = async () => true;
+      let membershipRow: any = {
+        contextGraphId,
+        principalType: 'agent',
+        principalId: approvedAddress,
+        status: 'pending',
+        source: 'pre-existing',
+        updatedAt: 1,
+      };
       (agent as any).config.contextGraphMembershipStore = {
+        ...(failingStore === 'subscription'
+          ? { loadAll: async () => [{ ...membershipRow }] }
+          : {}),
         upsert: async (record: any) => {
           if (failingStore === 'membership' && record.source === 'join-approved') {
             throw new Error('membership persistence failed');
           }
+          membershipRow = { ...record };
         },
-        delete: async () => {},
+        delete: async () => { membershipRow = undefined; },
       };
       (agent as any).config.contextGraphSubscriptionStore = {
         loadAll: async () => [],
@@ -1002,9 +1039,83 @@ describe('private CG membership bootstrap recovery', () => {
         })),
         '12D3KooWPrivateBootstrapFailingCurator',
       )).rejects.toThrow(`${failingStore} persistence failed`);
+      expect(membershipRow).toMatchObject({
+        status: 'pending',
+        source: 'pre-existing',
+      });
+      expect(await agent.getJoinRequestStatus(contextGraphId, approvedAddress!)).toBe('pending');
       expect(immediateSync).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps a legacy membership prepare inert until reliable approval replay commits subscription', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapLegacyMembershipReplay'));
+    const contextGraphId = 'private-bootstrap-legacy-membership-replay';
+    const approvedAddress = agent.getDefaultAgentAddress()!;
+    const curatorPeerId = '12D3KooWPrivateBootstrapLegacyReplayCurator';
+    const requestGeneration = `0x${'8'.repeat(64)}`;
+    let membershipRow: any;
+    let subscriptionRow: any;
+    let failSubscriptionWrite = true;
+    const membershipUpsert = vi.fn(async (record: any) => {
+      membershipRow = { ...record };
+    });
+    const membershipDelete = vi.fn(async () => {
+      membershipRow = undefined;
+    });
+    (agent as any).config.contextGraphMembershipStore = {
+      // Deliberately no loadAll(): this models a pre-rehydration custom store.
+      upsert: membershipUpsert,
+      delete: membershipDelete,
+    };
+    (agent as any).config.contextGraphSubscriptionStore = {
+      loadAll: async () => subscriptionRow ? [{ ...subscriptionRow }] : [],
+      save: async (record: any) => {
+        if (failSubscriptionWrite) {
+          failSubscriptionWrite = false;
+          throw new Error('subscription persistence failed');
+        }
+        subscriptionRow = { ...record };
+      },
+      delete: async () => { subscriptionRow = undefined; },
+    };
+    (agent as any).isTrustedJoinDecisionSender = async () => true;
+    const immediateSync = vi.fn(async () => {});
+    const onApproved = vi.fn();
+    (agent as any).runImmediatePostApprovalSync = immediateSync;
+    (agent as any).eventBus.on(DKGEvent.JOIN_APPROVED, onApproved);
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      approvedAddress,
+      requestGeneration,
+      curatorPeerId,
+    );
+    const notification = encoder.encode(JSON.stringify({
+      type: 'join-approved',
+      contextGraphId,
+      agentAddress: approvedAddress,
+      requestGeneration,
+    }));
+
+    await expect(joinRequestHandler(agent)(notification, curatorPeerId))
+      .rejects.toThrow('subscription persistence failed');
+    expect(membershipRow).toMatchObject({ status: 'active', source: 'join-approved' });
+    expect(membershipDelete).not.toHaveBeenCalled();
+    expect(subscriptionRow).toBeUndefined();
+    expect(await agent.getJoinRequestStatus(contextGraphId, approvedAddress)).toBe('pending');
+    expect((agent as any).subscribedContextGraphs.has(contextGraphId)).toBe(false);
+    expect(immediateSync).not.toHaveBeenCalled();
+    expect(onApproved).not.toHaveBeenCalled();
+
+    const response = JSON.parse(decoder.decode(
+      await joinRequestHandler(agent)(notification, curatorPeerId),
+    ));
+    expect(response).toEqual({ ok: true });
+    expect(membershipUpsert).toHaveBeenCalledTimes(2);
+    expect(subscriptionRow).toMatchObject({ id: contextGraphId, subscribed: true });
+    expect(immediateSync).toHaveBeenCalledTimes(1);
+    expect(onApproved).toHaveBeenCalledTimes(1);
+  });
 
   it('refreshes an already-member delegation before sending join-approved', async () => {
     const created = await createAgent('PrivateBootstrapAlreadyMember');
