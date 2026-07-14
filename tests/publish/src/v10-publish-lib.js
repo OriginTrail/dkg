@@ -85,6 +85,13 @@ const EXPECTED_NODE_COMMIT = String(process.env.EXPECTED_NODE_COMMIT || '').trim
 const REMOTE_QUERY_ENABLED = String(process.env.V10_ENABLE_REMOTE_QUERY || 'false').toLowerCase() === 'true';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function runDeadlineError(label, nodeName) {
+  const error = new Error(`Jenkins run deadline reached before "${label}" on ${nodeName}`);
+  error.code = 'RUN_DEADLINE';
+  error.runDeadline = true;
+  return error;
+}
+
 // Publish timeouts must cancel the HTTP request itself. A Promise.race-only
 // timeout leaves the server request and socket alive, so the harness can start
 // KA N+1 while KA N is still mutating the same node. This helper waits for
@@ -122,10 +129,7 @@ export async function withRunDeadline(
 ) {
   const remainingMs = runDeadline - Date.now();
   if (remainingMs <= 0) {
-    const error = new Error(`Jenkins run deadline reached before "${label}" on ${nodeName}`);
-    error.code = 'RUN_DEADLINE';
-    error.runDeadline = true;
-    throw error;
+    throw runDeadlineError(label, nodeName);
   }
   const runDeadlineIsLimit = remainingMs <= operationTimeoutMs;
   try {
@@ -145,6 +149,17 @@ export async function withRunDeadline(
     }
     throw error;
   }
+}
+
+export async function waitForBatchDelay(delayMs, runDeadline, nodeName, sleeper = sleep) {
+  if (delayMs <= 0) return;
+  const remainingMs = runDeadline - Date.now();
+  // Reject an impossible delay immediately so the runner's finally block can
+  // checkpoint telemetry before Jenkins reaches its outer job timeout.
+  if (remainingMs <= 0 || delayMs >= remainingMs) {
+    throw runDeadlineError('inter-KA batch delay', nodeName);
+  }
+  await sleeper(delayMs);
 }
 
 export function requireJenkinsBuildExpectation(
@@ -265,6 +280,23 @@ export function assertCompleteNodeRun(nodeName, stats, expectedKas, expectsRemot
 export function completionRate(success, expected) {
   if (!Number.isFinite(expected) || expected <= 0) return '0.00';
   return ((success / expected) * 100).toFixed(2);
+}
+
+export function validateHarnessConfig() {
+  assert.ok(Number.isInteger(KA_COUNT) && KA_COUNT > 0, `TEST_KA_BATCHES must be a positive integer, got ${KA_COUNT}`);
+  assert.ok(Number.isInteger(TEST_ENTITY_COUNT) && TEST_ENTITY_COUNT >= 0, `TEST_ENTITY_COUNT must be a non-negative integer, got ${TEST_ENTITY_COUNT}`);
+  assert.ok(Number.isFinite(TEST_CONTENT_SIZE_KB) && TEST_CONTENT_SIZE_KB >= 0, `TEST_CONTENT_SIZE_KB must be non-negative, got ${TEST_CONTENT_SIZE_KB}`);
+  assert.ok(Number.isFinite(TEST_BATCH_DELAY_MS) && TEST_BATCH_DELAY_MS >= 0, `TEST_BATCH_DELAY_MS must be non-negative, got ${TEST_BATCH_DELAY_MS}`);
+  assert.ok(Number.isFinite(OP_TIMEOUT_MS) && OP_TIMEOUT_MS > 0, `V10_OP_TIMEOUT_MS must be positive, got ${OP_TIMEOUT_MS}`);
+  assert.ok(Number.isFinite(READ_TOTAL_TIMEOUT_MS) && READ_TOTAL_TIMEOUT_MS > 0, `V10_READ_TOTAL_TIMEOUT_MS must be positive, got ${READ_TOTAL_TIMEOUT_MS}`);
+  assert.ok(Number.isFinite(PREFLIGHT_TIMEOUT_MS) && PREFLIGHT_TIMEOUT_MS > 0, `V10_PREFLIGHT_TIMEOUT_MS must be positive, got ${PREFLIGHT_TIMEOUT_MS}`);
+  assert.ok(Number.isFinite(RUN_TIMEOUT_MS) && RUN_TIMEOUT_MS > 0, `V10_RUN_TIMEOUT_MS must be positive, got ${RUN_TIMEOUT_MS}`);
+  assert.ok(Number.isFinite(HTTP_TIMEOUT_MS) && HTTP_TIMEOUT_MS > 0, `V10_HTTP_TIMEOUT_MS must be positive, got ${HTTP_TIMEOUT_MS}`);
+  assert.ok(Number.isFinite(PUBLISH_TIMEOUT_MS) && PUBLISH_TIMEOUT_MS > 0, `V10_PUBLISH_TIMEOUT_MS must be positive, got ${PUBLISH_TIMEOUT_MS}`);
+  assert.ok(
+    PUBLISH_TIMEOUT_MS <= HTTP_TIMEOUT_MS,
+    `Effective publish timeout (${PUBLISH_TIMEOUT_MS}ms) exceeds undici HTTP timeout (${HTTP_TIMEOUT_MS}ms); increase V10_HTTP_TIMEOUT_MS so the harness owns cancellation`,
+  );
 }
 
 // Run a read until it returns data (publish→VM indexing lags a few seconds) or
@@ -466,6 +498,99 @@ async function getPeerId(node, signal) {
 
 const mean = (arr) => (arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
 
+export function checkpointRunArtifacts({
+  name,
+  blockchainName,
+  expectedKaCount,
+  remoteQueryEnabled,
+  nodeBuild,
+  nodeWalletAddrs,
+  publisherAddresses,
+  failedAssets,
+  harnessError,
+  counters,
+  durations,
+  globalStats,
+  errorStats,
+}) {
+  // null (not 0) when nothing succeeded: Grafana must show "No data", not
+  // fabricate an instant operation from a failed workload.
+  const averages = {
+    avgPublishMs: durations.publish.length ? mean(durations.publish) : null,
+    avgQueryMs: durations.query.length ? mean(durations.query) : null,
+    avgVmGetMs: durations.vmGet.length ? mean(durations.vmGet) : null,
+    avgQueryRemoteMs: durations.queryRemote.length ? mean(durations.queryRemote) : null,
+  };
+
+  console.log(`\n──────────── Summary for ${name} ────────────`);
+  if (failedAssets.length > 0) {
+    console.log('🔍 Failed Assets:');
+    failedAssets.forEach((entry) => console.log(`  - ${entry}`));
+  } else if (harnessError) {
+    console.log(`❌ Harness stopped before completing the workload: ${harnessError.message}`);
+  } else if (counters.publishSuccess === expectedKaCount && counters.publishFail === 0) {
+    console.log('✅ All assets processed successfully');
+  } else {
+    console.log(`❌ Harness stopped after ${counters.publishSuccess + counters.publishFail}/${expectedKaCount} publish attempts`);
+  }
+  if (publisherAddresses.size > 0) {
+    console.log(`💳 Node published with wallet(s): ${[...publisherAddresses].join(', ')}`);
+  }
+
+  const stats = { ...counters, ...averages };
+  globalStats[blockchainName][name] = stats;
+  const summary = {
+    blockchain_name: blockchainName,
+    node_name: name,
+    node_version: nodeBuild.version,
+    node_commit: nodeBuild.commit,
+    store_backend: nodeBuild.storeBackend,
+    node_wallet: nodeWalletAddrs.join(', '),
+    node_publisher_wallets: [...publisherAddresses].join(', '),
+    expected_ka_count: expectedKaCount,
+    attempted_publish_count: counters.publishSuccess + counters.publishFail,
+    remote_query_enabled: remoteQueryEnabled,
+    harness_error: harnessError?.message || null,
+    publish_success_rate: completionRate(counters.publishSuccess, expectedKaCount),
+    query_success_rate: completionRate(counters.querySuccess, expectedKaCount),
+    publisher_get_success_rate: completionRate(counters.vmGetSuccess, expectedKaCount),
+    non_publisher_get_success_rate: remoteQueryEnabled
+      ? completionRate(counters.queryRemoteSuccess, expectedKaCount)
+      : null,
+    average_publish_time: averages.avgPublishMs === null ? null : (averages.avgPublishMs / 1000).toFixed(2),
+    average_query_time: averages.avgQueryMs === null ? null : (averages.avgQueryMs / 1000).toFixed(2),
+    average_publisher_get_time: averages.avgVmGetMs === null ? null : (averages.avgVmGetMs / 1000).toFixed(2),
+    average_non_publisher_get_time: averages.avgQueryRemoteMs === null ? null : (averages.avgQueryRemoteMs / 1000).toFixed(2),
+    time_stamp: new Date().toISOString(),
+  };
+  const summaryFileName = `summary_${name.replace(/\s+/g, '_')}.json`;
+  fs.writeFileSync(summaryFileName, JSON.stringify(summary, null, 2));
+  console.log(`✅ Checkpointed summary in finally to ${summaryFileName}`);
+
+  const nodeErrors = errorStats[name] || { aggregated: {}, detailed: {}, services: {} };
+  const aggregatedErrors = { ...(nodeErrors.aggregated || {}) };
+  const detailedErrors = { ...(nodeErrors.detailed || {}) };
+  const errorServices = { ...(nodeErrors.services || {}) };
+  if (harnessError && Object.keys(detailedErrors).length === 0) {
+    const detailKey = `publish — Harness stopped before workload: ${harnessError.message} for KA #1`;
+    const aggregateKey = `Harness stopped before workload: ${harnessError.message}`;
+    detailedErrors[detailKey] = 1;
+    aggregatedErrors[aggregateKey] = 1;
+    errorServices[aggregateKey] = 'jenkins-harness';
+  }
+  const errorData = {
+    blockchain_id: blockchainName,
+    aggregated: aggregatedErrors,
+    detailed: detailedErrors,
+    services: errorServices,
+    harness_error: harnessError?.message || null,
+  };
+  const errorsFileName = `errors_${name.replace(/\s+/g, '_')}.json`;
+  fs.writeFileSync(errorsFileName, JSON.stringify(errorData, null, 2));
+  console.log(`✅ Checkpointed errors in finally to ${errorsFileName}`);
+  return { stats, summary, errorData };
+}
+
 // ---------------------------------------------------------------------------
 // Register the per-chain describe/it suite.
 //   config = { title, blockchainName, contextGraphId, nodes:[{name,hostname,token}] }
@@ -517,20 +642,7 @@ export function defineChainPublishSuite(config) {
         try {
           const trimmedToken = validateBearerToken(name, token);
           client = makeNodeClient(hostname, trimmedToken);
-          assert.ok(Number.isInteger(KA_COUNT) && KA_COUNT > 0, `TEST_KA_BATCHES must be a positive integer, got ${KA_COUNT}`);
-          assert.ok(Number.isInteger(TEST_ENTITY_COUNT) && TEST_ENTITY_COUNT >= 0, `TEST_ENTITY_COUNT must be a non-negative integer, got ${TEST_ENTITY_COUNT}`);
-          assert.ok(Number.isFinite(TEST_CONTENT_SIZE_KB) && TEST_CONTENT_SIZE_KB >= 0, `TEST_CONTENT_SIZE_KB must be non-negative, got ${TEST_CONTENT_SIZE_KB}`);
-          assert.ok(Number.isFinite(TEST_BATCH_DELAY_MS) && TEST_BATCH_DELAY_MS >= 0, `TEST_BATCH_DELAY_MS must be non-negative, got ${TEST_BATCH_DELAY_MS}`);
-          assert.ok(Number.isFinite(OP_TIMEOUT_MS) && OP_TIMEOUT_MS > 0, `V10_OP_TIMEOUT_MS must be positive, got ${OP_TIMEOUT_MS}`);
-          assert.ok(Number.isFinite(READ_TOTAL_TIMEOUT_MS) && READ_TOTAL_TIMEOUT_MS > 0, `V10_READ_TOTAL_TIMEOUT_MS must be positive, got ${READ_TOTAL_TIMEOUT_MS}`);
-          assert.ok(Number.isFinite(PREFLIGHT_TIMEOUT_MS) && PREFLIGHT_TIMEOUT_MS > 0, `V10_PREFLIGHT_TIMEOUT_MS must be positive, got ${PREFLIGHT_TIMEOUT_MS}`);
-          assert.ok(Number.isFinite(RUN_TIMEOUT_MS) && RUN_TIMEOUT_MS > 0, `V10_RUN_TIMEOUT_MS must be positive, got ${RUN_TIMEOUT_MS}`);
-          assert.ok(Number.isFinite(HTTP_TIMEOUT_MS) && HTTP_TIMEOUT_MS > 0, `V10_HTTP_TIMEOUT_MS must be positive, got ${HTTP_TIMEOUT_MS}`);
-          assert.ok(Number.isFinite(PUBLISH_TIMEOUT_MS) && PUBLISH_TIMEOUT_MS > 0, `V10_PUBLISH_TIMEOUT_MS must be positive, got ${PUBLISH_TIMEOUT_MS}`);
-          assert.ok(
-            PUBLISH_TIMEOUT_MS <= HTTP_TIMEOUT_MS,
-            `Effective publish timeout (${PUBLISH_TIMEOUT_MS}ms) exceeds undici HTTP timeout (${HTTP_TIMEOUT_MS}ms); increase V10_HTTP_TIMEOUT_MS so the harness owns cancellation`,
-          );
+          validateHarnessConfig();
 
           requireJenkinsBuildExpectation(EXPECTED_NODE_COMMIT);
           console.log(`🔑 ${name} bearer token: ✅ present (length ${trimmedToken.length})`);
@@ -642,7 +754,7 @@ export function defineChainPublishSuite(config) {
         for (let i = 0; i < KA_COUNT; i++) {
           if (i > 0 && TEST_BATCH_DELAY_MS > 0) {
             console.log(`Waiting ${TEST_BATCH_DELAY_MS}ms before KA #${i + 1}`);
-            await sleep(TEST_BATCH_DELAY_MS);
+            await waitForBatchDelay(TEST_BATCH_DELAY_MS, runDeadline, name);
           }
           console.log(`\nPublishing KA #${i + 1} on ${name}`);
           const { quads, rootEntity } = i === 0 ? firstPayload : buildQuads(name, i + 1);
@@ -816,91 +928,31 @@ export function defineChainPublishSuite(config) {
           harnessError = error;
           throw error;
         } finally {
-
-        // null (not 0) when nothing succeeded — "0s avg" would read as instant
-        // success and the DB/Grafana layer needs NULL to show "No data".
-        const avgPublishMs = publishDurations.length ? mean(publishDurations) : null;
-        const avgQueryMs = queryDurations.length ? mean(queryDurations) : null;
-        const avgVmGetMs = vmGetDurations.length ? mean(vmGetDurations) : null;
-        const avgQueryRemoteMs = queryRemoteDurations.length ? mean(queryRemoteDurations) : null;
-
-        console.log(`\n──────────── Summary for ${name} ────────────`);
-        if (failedAssets.length > 0) {
-          console.log(`🔍 Failed Assets:`);
-          failedAssets.forEach((entry) => console.log(`  - ${entry}`));
-        } else if (harnessError) {
-          console.log(`❌ Harness stopped before completing the workload: ${harnessError.message}`);
-        } else if (publishSuccess === KA_COUNT && publishFail === 0) {
-          console.log(`✅ All assets processed successfully`);
-        } else {
-          console.log(`❌ Harness stopped after ${publishSuccess + publishFail}/${KA_COUNT} publish attempts`);
-        }
-        if (publisherAddresses.size > 0) {
-          console.log(`💳 Node published with wallet(s): ${[...publisherAddresses].join(', ')}`);
-        }
-
-        globalStats[blockchainName][name] = {
-          publishSuccess, publishFail,
-          querySuccess, queryFail,
-          vmGetSuccess, vmGetFail,
-          queryRemoteSuccess, queryRemoteFail,
-          avgPublishMs, avgQueryMs, avgVmGetMs, avgQueryRemoteMs,
-        };
-
-        const summary = {
-          blockchain_name: blockchainName,
-          node_name: name,
-          node_version: nodeBuild.version,
-          node_commit: nodeBuild.commit,
-          store_backend: nodeBuild.storeBackend,
-          node_wallet: nodeWalletAddrs.join(', '),
-          node_publisher_wallets: [...publisherAddresses].join(', '),
-          expected_ka_count: KA_COUNT,
-          attempted_publish_count: publishSuccess + publishFail,
-          remote_query_enabled: REMOTE_QUERY_ENABLED && nodes.length > 1,
-          harness_error: harnessError?.message || null,
-          // Denominator is the configured workload, not merely attempted ops:
-          // skipped reads after a failed publish must lower Grafana's rate.
-          publish_success_rate: completionRate(publishSuccess, KA_COUNT),
-          query_success_rate: completionRate(querySuccess, KA_COUNT),
-          publisher_get_success_rate: completionRate(vmGetSuccess, KA_COUNT),                 // VM GET
-          non_publisher_get_success_rate: REMOTE_QUERY_ENABLED && nodes.length > 1
-            ? completionRate(queryRemoteSuccess, KA_COUNT)
-            : null, // Query Remote (sync) is a separate opt-in gate.
-          average_publish_time: avgPublishMs === null ? null : (avgPublishMs / 1000).toFixed(2),
-          average_query_time: avgQueryMs === null ? null : (avgQueryMs / 1000).toFixed(2),
-          average_publisher_get_time: avgVmGetMs === null ? null : (avgVmGetMs / 1000).toFixed(2),
-          average_non_publisher_get_time: avgQueryRemoteMs === null ? null : (avgQueryRemoteMs / 1000).toFixed(2),
-          time_stamp: new Date().toISOString(),
-        };
-        const summaryFileName = `summary_${name.replace(/\s+/g, '_')}.json`;
-        fs.writeFileSync(summaryFileName, JSON.stringify(summary, null, 2));
-        console.log(`✅ Checkpointed summary in finally to ${summaryFileName}`);
-
-        const nodeErrors = errorStats[name] || { aggregated: {}, detailed: {}, services: {} };
-        const aggregatedErrors = { ...(nodeErrors.aggregated || {}) };
-        const detailedErrors = { ...(nodeErrors.detailed || {}) };
-        const errorServices = { ...(nodeErrors.services || {}) };
-        if (harnessError && Object.keys(detailedErrors).length === 0) {
-          // The telemetry schema has operation-specific columns but no generic
-          // harness column. Preserve preflight/config failures in the existing
-          // publish-error stream instead of silently dropping their cause.
-          const detailKey = `publish — Harness stopped before workload: ${harnessError.message} for KA #1`;
-          const aggregateKey = `Harness stopped before workload: ${harnessError.message}`;
-          detailedErrors[detailKey] = 1;
-          aggregatedErrors[aggregateKey] = 1;
-          errorServices[aggregateKey] = 'jenkins-harness';
-        }
-        const errorData = {
-          blockchain_id: blockchainName,
-          aggregated: aggregatedErrors,
-          detailed: detailedErrors,
-          services: errorServices,
-          harness_error: harnessError?.message || null,
-        };
-        const errorsFileName = `errors_${name.replace(/\s+/g, '_')}.json`;
-        fs.writeFileSync(errorsFileName, JSON.stringify(errorData, null, 2));
-        console.log(`✅ Checkpointed errors in finally to ${errorsFileName}`);
+          checkpointRunArtifacts({
+            name,
+            blockchainName,
+            expectedKaCount: KA_COUNT,
+            remoteQueryEnabled: REMOTE_QUERY_ENABLED && nodes.length > 1,
+            nodeBuild,
+            nodeWalletAddrs,
+            publisherAddresses,
+            failedAssets,
+            harnessError,
+            counters: {
+              publishSuccess, publishFail,
+              querySuccess, queryFail,
+              vmGetSuccess, vmGetFail,
+              queryRemoteSuccess, queryRemoteFail,
+            },
+            durations: {
+              publish: publishDurations,
+              query: queryDurations,
+              vmGet: vmGetDurations,
+              queryRemote: queryRemoteDurations,
+            },
+            globalStats,
+            errorStats,
+          });
         }
       }
     });

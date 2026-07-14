@@ -1,0 +1,40 @@
+name: Publish Harness CI
+
+on:
+  pull_request:
+    branches: [test/publish]
+    paths:
+      - 'tests/publish/**'
+      - '.github/workflows/publish-harness-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-harness-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  harness-test:
+    name: Harness Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    defaults:
+      run:
+        working-directory: tests/publish
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: tests/publish/package-lock.json
+
+      - name: Install locked harness dependencies
+        run: npm ci
+
+      - name: Run harness regression tests
+        run: npm run test:harness
