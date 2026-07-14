@@ -236,4 +236,238 @@ describe('Context Graph discovery/subscription boundary', () => {
       await agent.stop().catch(() => {});
     }
   }, 30_000);
+
+  it('acknowledges cursor pages only after authoritative metadata is durably catalogued', async () => {
+    const onChainId = `0x${'c'.repeat(64)}`;
+    const localId = 'cursor-chain-discovery';
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+    const chain = new MockChainAdapter();
+    let agent: DKGAgent | undefined;
+    const acknowledgements: string[] = [];
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [{
+          contextGraphId: onChainId,
+          name: localId,
+          creator: '0x1111111111111111111111111111111111111111',
+          accessPolicy: 0,
+          blockNumber: 101,
+          metadataRevealed: true,
+        } satisfies ContextGraphOnChain],
+        ack: async () => {
+          const entry = agent!.getSubscribedContextGraphs().get(localId);
+          expect(entry).toMatchObject({
+            subscribed: false,
+            synced: false,
+            onChainId,
+          });
+          const durable = await agent!.store.query(`
+            ASK WHERE {
+              GRAPH <${contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)}> {
+                <${contextGraphDataGraphUri(localId)}>
+                  <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId>
+                  "${onChainId}" .
+              }
+            }
+          `);
+          expect(durable).toEqual({ type: 'boolean', value: true });
+          acknowledgements.push('applied-then-acked');
+        },
+      };
+    };
+
+    agent = await DKGAgent.create({
+      name: 'PassiveCursorDiscovery',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (record) => { persisted.set(record.id, { ...record }); },
+        delete: async (id) => { persisted.delete(id); },
+      },
+    });
+
+    try {
+      await agent.start();
+      expect(await agent.discoverContextGraphsFromChain({
+        mode: 'seedFromCursor',
+        pageBudget: 1,
+      })).toBe(1);
+      expect(acknowledgements).toEqual(['applied-then-acked']);
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain(localId);
+      expect((agent as any).gossipRegistered.has(localId)).toBe(false);
+      expect(persisted.has(localId)).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('preserves system subscriptions and explicit local create/write/unsubscribe side effects', async () => {
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+    const members = new Map<string, ContextGraphMembershipRecord>();
+    const agent = await DKGAgent.create({
+      name: 'ExplicitLifecycleBoundary',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      syncContextGraphs: ['configured-default-cg'],
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (record) => { persisted.set(record.id, { ...record }); },
+        delete: async (id) => { persisted.delete(id); },
+      },
+      contextGraphMembershipStore: {
+        upsert: async (record) => {
+          members.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
+        },
+        delete: async (contextGraphId, principalType, principalId) => {
+          members.delete(`${contextGraphId}|${principalType}|${principalId}`);
+        },
+      },
+    });
+
+    try {
+      await agent.start();
+      for (const systemId of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
+        expect(agent.getSubscribedContextGraphs().get(systemId)?.subscribed).toBe(true);
+        expect((agent as any).gossipRegistered.has(systemId)).toBe(true);
+      }
+      await agent.ensureContextGraphLocal({
+        id: 'configured-default-cg',
+        name: 'Configured Default CG',
+      });
+      expect(agent.getSubscribedContextGraphs().get('configured-default-cg')?.subscribed).toBe(true);
+      expect((agent as any).gossipRegistered.has('configured-default-cg')).toBe(true);
+
+      await agent.createContextGraph({
+        id: 'explicit-local-create',
+        name: 'Explicit Local Create',
+      });
+      await agent.ensureImplicitSharedMemoryContextGraph('implicit-local-write');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      for (const id of ['explicit-local-create', 'implicit-local-write']) {
+        expect(agent.getSubscribedContextGraphs().get(id)?.subscribed).toBe(true);
+        expect((agent as any).config.syncContextGraphs ?? []).toContain(id);
+        expect((agent as any).gossipRegistered.has(id)).toBe(true);
+        expect(persisted.get(id)).toMatchObject({ subscribed: true, syncScoped: true });
+        expect([...members.values()].some((record) =>
+          record.contextGraphId === id && record.status === 'active',
+        )).toBe(true);
+      }
+
+      agent.unsubscribeFromContextGraph('explicit-local-create');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(agent.getSubscribedContextGraphs().get('explicit-local-create')?.subscribed).toBe(false);
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain('explicit-local-create');
+      expect((agent as any).gossipRegistered.has('explicit-local-create')).toBe(false);
+      expect(persisted.has('explicit-local-create')).toBe(false);
+      expect([...members.values()].some((record) =>
+        record.contextGraphId === 'explicit-local-create',
+      )).toBe(false);
+      expect(agent.getSubscribedContextGraphs().get('implicit-local-write')?.subscribed).toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('excludes discovery-only and curated graphs from contextGraphsServed', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ServedGraphBoundary',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    let capturedProfile: Record<string, unknown> | undefined;
+
+    try {
+      await agent.start();
+      await agent.createContextGraph({
+        id: 'served-public',
+        name: 'Served Public',
+      });
+      await agent.createContextGraph({
+        id: 'served-curated',
+        name: 'Served Curated',
+        accessPolicy: 1,
+      });
+      agent.recordDiscoveredContextGraph('catalogue-only-public', {
+        name: 'Catalogue Only Public',
+        subscribed: false,
+        synced: false,
+      });
+
+      (agent as any).profileManager.publishProfile = async (profile: Record<string, unknown>) => {
+        capturedProfile = profile;
+        return { status: 'confirmed', kaId: 1, kaManifest: [] };
+      };
+      (agent as any).broadcastPublish = async () => undefined;
+
+      await agent.publishProfile();
+
+      expect(capturedProfile?.contextGraphsServed).toEqual(['served-public']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('keeps legacy cleanup operator-scoped and preserves systems, host mode, and graph data', async () => {
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+    const agent = await DKGAgent.create({
+      name: 'CleanupBoundary',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (record) => { persisted.set(record.id, { ...record }); },
+        delete: async (id) => { persisted.delete(id); },
+      },
+    });
+    const clearableId = 'cleanup-clearable';
+    const hostedId = 'cleanup-hosted';
+    const dataGraph = contextGraphDataGraphUri(clearableId);
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph(clearableId);
+      (agent as any).setContextGraphSubscription(hostedId, {
+        name: hostedId,
+        subscribed: false,
+        synced: false,
+        coreHosted: true,
+      });
+      agent.persistContextGraphSubscriptionState(hostedId);
+      await agent.store.insert([{
+        subject: 'urn:dkg:cleanup:preserved',
+        predicate: 'http://schema.org/name',
+        object: '"Preserved"',
+        graph: dataGraph,
+      }]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(persisted.has(clearableId)).toBe(true);
+      expect(persisted.get(hostedId)?.coreHosted).toBe(true);
+      expect(await agent.clearContextGraphSubscriptions()).toBe(1);
+
+      expect(agent.getSubscribedContextGraphs().has(clearableId)).toBe(false);
+      expect(persisted.has(clearableId)).toBe(false);
+      expect(agent.getSubscribedContextGraphs().get(hostedId)).toMatchObject({
+        subscribed: false,
+        coreHosted: true,
+      });
+      expect(persisted.get(hostedId)?.coreHosted).toBe(true);
+      for (const systemId of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
+        expect(agent.getSubscribedContextGraphs().get(systemId)?.subscribed).toBe(true);
+        expect(persisted.has(systemId)).toBe(true);
+      }
+      const dataPreserved = await agent.store.query(`
+        ASK WHERE {
+          GRAPH <${dataGraph}> {
+            <urn:dkg:cleanup:preserved> <http://schema.org/name> "Preserved" .
+          }
+        }
+      `);
+      expect(dataPreserved).toEqual({ type: 'boolean', value: true });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
 });

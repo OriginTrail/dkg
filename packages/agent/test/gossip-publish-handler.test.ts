@@ -221,8 +221,8 @@ describe('GossipPublishHandler', () => {
     expect(bindings.length).toBeGreaterThan(0);
   });
 
-  it('catalogues ontology definitions without activating a member subscription', async () => {
-    const { handler, subscriptions } = createHandler();
+  it('inserts validated ontology definitions without activating a member subscription', async () => {
+    const { store, handler, subscriptions } = createHandler();
     const id = 'ontology-discovery-only';
     const data = makePublishMessage({
       contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
@@ -240,6 +240,33 @@ describe('GossipPublishHandler', () => {
       synced: false,
       metaSynced: false,
     });
+
+    const inserted = await store.query(`
+      ASK WHERE {
+        GRAPH <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> {
+          <did:dkg:context-graph:${id}>
+            <${DKG_ONTOLOGY.RDF_TYPE}>
+            <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+        }
+      }
+    `);
+    expect(inserted).toEqual({ type: 'boolean', value: true });
+  });
+
+  it('does not catalogue ontology rows that lack a ContextGraph definition', async () => {
+    const { handler, subscriptions } = createHandler();
+    const id = 'ontology-name-only';
+    const data = makePublishMessage({
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      nquads: [
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.SCHEMA_NAME}> "Not A Definition" <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.RDF_TYPE}> <http://schema.org/Thing> <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+      ].join('\n'),
+    });
+
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+
+    expect(subscriptions.has(id)).toBe(false);
   });
 
   it('keeps legacy subscription-map fallback when setContextGraphSubscription is omitted', async () => {

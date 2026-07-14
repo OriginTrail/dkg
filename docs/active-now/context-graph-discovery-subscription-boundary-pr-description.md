@@ -346,14 +346,19 @@ must be re-added explicitly afterward.
 - `pnpm run build:runtime:packages`
   - all runtime packages built successfully;
 - `pnpm --filter @origintrail-official/dkg-agent build`
-  - TypeScript build and agent type tests passed after the final runtime edit;
-- focused agent regressions:
-  - ontology gossip handler: 14 passed;
-  - discovery/subscription boundary: 3 passed;
-  - core discovery-beacon host mode: 4 passed;
-- focused CLI regressions:
+  - TypeScript build and agent type tests passed;
+- `pnpm --filter @origintrail-official/dkg build`
+  - CLI TypeScript build and runtime asset copy passed;
+- focused agent regressions: 93 passed across 5 files:
+  - ontology gossip handler: 15 passed;
+  - discovery/subscription boundary: 7 passed;
+  - system/configured sync-on-connect behavior: 16 passed;
+  - join-approved deferred gossip behavior: 3 passed;
+  - core-host/member-subscription independence: 52 passed;
+- focused CLI regressions: 17 passed across 3 files:
   - chain scan scheduling/idempotency: 8 passed;
   - subscription diagnostics/cleanup route: 3 passed;
+  - daemon wiring, including configured/default graph scope: 6 passed;
 - focused two-node devnet discovery/subscription boundary: passed;
 - `git diff --check` passed.
 
@@ -371,6 +376,21 @@ The focused boundary suite exercises actual `DKGAgent` startup with a
   persistence;
 - rediscovery cannot downgrade that explicit subscription; and
 - restart rehydrates only the explicitly activated graph.
+
+### Validation matrix
+
+| Invariant | Status | Evidence |
+| --- | --- | --- |
+| Ontology gossip inserts validated definitions without activating a user subscription. | Validated | `gossip-publish-handler.test.ts` asserts that a valid `ContextGraph` definition is inserted and catalogued with `subscribed=false`; a non-definition ontology row is not catalogued. |
+| Chain scans retain authoritative metadata and cursor semantics without joining the graph. | Validated | `discovery-subscription-boundary.test.ts` asserts that the on-chain ID and RDF binding are durable before the page callback acknowledges the cursor, while handler, sync scope, membership, and persisted subscription remain absent. `chain-discovery-scan-mode.test.ts` covers bounded seeding, startup recovery, incremental scans, periodic full recovery, custom budgets, and serialization. |
+| Public and curated store discoveries both stay catalogue-only. | Validated | The boundary suite discovers both access policies from the store and asserts `subscribed=false` with no handler, sync scope, membership, or persisted subscription for either graph. |
+| Explicit edge subscription still installs handlers, sync scope, membership, and persistence. | Validated | The boundary suite explicitly subscribes after passive discovery and asserts all four member side effects. The live devnet then proves the edge catches up the marker only after the explicit subscribe request. |
+| `agents` and `ontology` remain active on startup and sync-on-connect. | Validated | Startup assertions verify both system subscriptions and gossip handlers. `sync-on-connect-churn.test.ts` asserts both system graphs remain in the metadata refresh scope. |
+| Configured/default graphs remain automatic subscriptions. | Validated | `daemon-storage-ack-timing-wiring.test.ts` asserts configured and network-default graph IDs are merged and deduplicated into `DKGAgent.create({ syncContextGraphs })`. Daemon startup iterates that same merged list through `ensureContextGraphLocal` with `subscribeToContextGraph` fallback; the boundary lifecycle test asserts the ensure path activates the subscription and handler, while sync-on-connect coverage asserts the configured graph remains in scope. |
+| Join-approved, local create/write, rehydration, and unsubscribe paths are unchanged. | Validated | The late-joiner suite covers deferred join-approved SWM gossip and its activation after metadata arrives. The boundary lifecycle test covers local create, implicit local write activation, restart rehydration, and unsubscribe teardown. No production join/create/write/unsubscribe module was changed. |
+| `contextGraphsServed` excludes discovery-only graphs. | Validated | The boundary suite captures the published profile and asserts that only the active public member graph is advertised; discovery-only public and curated graphs are excluded. |
+| Core host mode remains independent from member subscription. | Validated | `core-fills-gap.test.ts` covers host-only `coreHosted=true, subscribed=false`, preserves an existing member subscription when host mode is added, and reconciles host-only graphs. Cleanup coverage also preserves host-only rows. |
+| Legacy cleanup scope is clear and operator-controlled. | Validated | The admin-only GET/DELETE route suite covers authorization and returned diagnostics. The boundary cleanup test asserts that cleanup clears only eligible user subscriptions while preserving system subscriptions, host-only state, and graph data. |
 
 ### Focused devnet boundary
 
@@ -429,17 +449,17 @@ endpoint.
 
 ## Reviewer Checklist
 
-- [ ] Ontology gossip inserts validated definitions but does not activate a
+- [x] Ontology gossip inserts validated definitions but does not activate a
       user subscription.
-- [ ] Chain scans retain authoritative metadata and cursor semantics without
+- [x] Chain scans retain authoritative metadata and cursor semantics without
       joining the graph.
-- [ ] Public and curated store discoveries both stay catalogue-only.
-- [ ] Explicit edge subscription still installs handlers, sync scope,
+- [x] Public and curated store discoveries both stay catalogue-only.
+- [x] Explicit edge subscription still installs handlers, sync scope,
       membership, and persistence.
-- [ ] `agents` and `ontology` remain active on startup and sync-on-connect.
-- [ ] Configured/default graphs remain automatic subscriptions.
-- [ ] Join-approved, local create/write, rehydration, and unsubscribe paths are
+- [x] `agents` and `ontology` remain active on startup and sync-on-connect.
+- [x] Configured/default graphs remain automatic subscriptions.
+- [x] Join-approved, local create/write, rehydration, and unsubscribe paths are
       unchanged.
-- [ ] `contextGraphsServed` excludes discovery-only graphs.
-- [ ] Core host mode remains independent from member subscription.
-- [ ] Legacy cleanup scope is clear and operator-controlled.
+- [x] `contextGraphsServed` excludes discovery-only graphs.
+- [x] Core host mode remains independent from member subscription.
+- [x] Legacy cleanup scope is clear and operator-controlled.
