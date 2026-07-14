@@ -22,6 +22,8 @@ import {
   type RawLiftRequest,
 } from './lift-job.js';
 import type {
+  AsyncKnowledgeAssetVmPublishJobHandler,
+  AsyncKnowledgeAssetVmPublishRecoveryResolver,
   AsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
@@ -78,6 +80,22 @@ type AsyncLiftJobHandler = {
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
 };
 
+function resolveKnowledgeAssetVmPublishHandler(
+  config: AsyncLiftPublisherConfig,
+): AsyncKnowledgeAssetVmPublishJobHandler | undefined {
+  if (config.knowledgeAssetVmPublishHandler) {
+    return config.knowledgeAssetVmPublishHandler;
+  }
+  if (!config.knowledgeAssetVmPublishExecutor) {
+    return undefined;
+  }
+  return {
+    execute: config.knowledgeAssetVmPublishExecutor,
+    preflight: config.knowledgeAssetVmPublishPreflight,
+    finalizeRecovered: config.knowledgeAssetVmPublishRecoveryFinalizer,
+  };
+}
+
 export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
@@ -95,6 +113,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly now: () => number;
   private readonly idGenerator: () => string;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
+  private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
@@ -143,8 +162,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
+    this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
-    this.knowledgeAssetVmPublishHandler = config.knowledgeAssetVmPublishHandler;
+    this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
     this.graphManager = new GraphManager(store);
@@ -558,8 +578,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (job.status !== 'broadcast' && job.status !== 'included') return false;
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
-    if (this.chainRecoveryResolver) {
-      const resolved = await this.chainRecoveryResolver(recoverable);
+    if (this.knowledgeAssetVmPublishRecoveryResolver) {
+      const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(recoverable);
       if (resolved) {
         if (
           this.knowledgeAssetVmPublishHandler?.finalizeRecovered &&

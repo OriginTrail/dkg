@@ -4,7 +4,12 @@ import {
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
-import { DEFAULT_WALLET_LOCK_GRAPH_URI, walletLockSubject } from '../src/async-lift-control-plane.js';
+import {
+  CONTROL_LOCKED_JOB,
+  DEFAULT_WALLET_LOCK_GRAPH_URI,
+  jobSubject,
+  walletLockSubject,
+} from '../src/async-lift-control-plane.js';
 import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
 
 describe('KA async VM publish broadcast progress', () => {
@@ -152,7 +157,7 @@ describe('KA async VM publish broadcast progress', () => {
     const ual = `did:dkg:evm:31337/0x3333333333333333333333333333333333333333/${kaId}`;
     const finalized: Array<{ jobId: string; status: string }> = [];
     const publisher = createPublisher({
-      chainRecoveryResolver: async () => ({
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
         inclusion: { txHash, blockNumber: 42, blockTimestamp: 2_000 },
         finalization: {
           mode: 'published',
@@ -162,6 +167,10 @@ describe('KA async VM publish broadcast progress', () => {
           startKAId: kaId,
           endKAId: kaId,
           publisherAddress: '0x4444444444444444444444444444444444444444',
+        },
+        publishProof: {
+          merkleRoot: request.sealMerkleRoot,
+          authorAddress: request.seal.authorAddress,
         },
       }),
       knowledgeAssetVmPublishHandler: {
@@ -236,7 +245,7 @@ describe('KA async VM publish broadcast progress', () => {
     let attempts = 0;
     const publisher = createPublisher({
       recoveryLookupTimeoutMs: 1,
-      chainRecoveryResolver: async () => ({
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
         inclusion: { txHash, blockNumber: 43 },
         finalization: {
           mode: 'published',
@@ -246,6 +255,10 @@ describe('KA async VM publish broadcast progress', () => {
           startKAId: kaId,
           endKAId: kaId,
           publisherAddress: '0x4444444444444444444444444444444444444444',
+        },
+        publishProof: {
+          merkleRoot: request.sealMerkleRoot,
+          authorAddress: request.seal.authorAddress,
         },
       }),
       knowledgeAssetVmPublishHandler: {
@@ -280,5 +293,53 @@ describe('KA async VM publish broadcast progress', () => {
     expect(job?.status).toBe('broadcast');
     expect(job?.broadcast?.txHash).toBe(txHash);
     expect(job?.failure).toBeUndefined();
+
+    const lock = await store.query(`SELECT ?job WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> <${CONTROL_LOCKED_JOB}> ?job .
+      }
+    }`);
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings).toEqual([{ job: jobSubject(jobId) }]);
+  });
+
+  it('keeps the legacy named-KA executor and preflight config API working', async () => {
+    await stageShareSnapshot();
+    const preflightCalls: unknown[] = [];
+    const executorCalls: unknown[] = [];
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishPreflight: async (input) => {
+        preflightCalls.push(input);
+        return { action: 'execute' };
+      },
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        executorCalls.push(input);
+        return {
+          kaId: 11n,
+          ual: 'did:dkg:mock:31337/0xdef/11',
+          merkleRoot: new Uint8Array([0xde, 0xf0]),
+          kaManifest: [],
+          status: 'confirmed',
+          onChainResult: {
+            batchId: 11n,
+            startKAId: 11n,
+            endKAId: 11n,
+            txHash: '0xdef',
+            blockNumber: 77,
+            blockTimestamp: 1_700_000_077,
+            publisherAddress: '0x2222222222222222222222222222222222222222',
+          },
+        };
+      },
+    });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('finalized');
+    expect(preflightCalls).toHaveLength(2);
+    expect(executorCalls).toHaveLength(1);
   });
 });

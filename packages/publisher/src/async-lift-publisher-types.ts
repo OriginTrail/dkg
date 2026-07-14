@@ -53,10 +53,14 @@ export interface AsyncLiftPublisher {
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationMetadata;
-  /** Immutable evidence emitted by the exact transaction being recovered. */
-  publishProof?: {
+}
+
+/** Required immutable transaction evidence for named-KA lifecycle recovery. */
+export interface AsyncKnowledgeAssetVmPublishRecoveryEvidence
+  extends AsyncLiftPublisherRecoveryResult {
+  readonly publishProof: {
     readonly merkleRoot: LiftJobHex;
-    readonly authorAddress?: LiftJobHex;
+    readonly authorAddress: LiftJobHex;
   };
 }
 
@@ -96,7 +100,7 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
   readonly walletId: string;
   readonly request: KnowledgeAssetVmPublishRequest;
   readonly job: LiftJobBroadcast | LiftJobIncluded;
-  readonly recovery: AsyncLiftPublisherRecoveryResult;
+  readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
   readonly publisher?: DKGPublisher;
 }
 
@@ -117,6 +121,10 @@ export type AsyncLiftPublisherRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
 ) => Promise<AsyncLiftPublisherRecoveryResult | null>;
 
+export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
+  job: LiftJobBroadcast | LiftJobIncluded,
+) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
+
 export interface AsyncLiftPublisherConfig {
   graphUri?: string;
   maxRetries?: number;
@@ -126,8 +134,21 @@ export interface AsyncLiftPublisherConfig {
   now?: () => number;
   idGenerator?: () => string;
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
+  knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   knowledgeAssetVmPublishHandler?: AsyncKnowledgeAssetVmPublishJobHandler;
+  /** @deprecated Use knowledgeAssetVmPublishHandler.execute. */
+  knowledgeAssetVmPublishExecutor?: (
+    input: AsyncKnowledgeAssetVmPublishExecutionInput,
+  ) => Promise<PublishResult>;
+  /** @deprecated Use knowledgeAssetVmPublishHandler.preflight. */
+  knowledgeAssetVmPublishPreflight?: (
+    input: AsyncKnowledgeAssetVmPublishPreflightInput,
+  ) => Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
+  /** @deprecated Use knowledgeAssetVmPublishHandler.finalizeRecovered. */
+  knowledgeAssetVmPublishRecoveryFinalizer?: (
+    input: AsyncKnowledgeAssetVmPublishRecoveryInput,
+  ) => Promise<void>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }

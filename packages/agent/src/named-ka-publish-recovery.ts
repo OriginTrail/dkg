@@ -3,7 +3,7 @@
 import { ethers } from 'ethers';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type {
-  AsyncLiftPublisherRecoveryResult,
+  AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   KnowledgeAssetVmPublishRequest,
   LiftJobBroadcast,
   LiftJobIncluded,
@@ -42,7 +42,7 @@ function recoveryInconsistent(name: string, message: string): Error {
 export async function normalizeRecoveredNamedKaPublish(input: {
   readonly request: KnowledgeAssetVmPublishRequest;
   readonly job: LiftJobBroadcast | LiftJobIncluded;
-  readonly recovery: AsyncLiftPublisherRecoveryResult;
+  readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
   readonly chain: ChainAdapter;
 }): Promise<RecoveredNamedKaPublish> {
   const { request, job, recovery, chain } = input;
@@ -109,12 +109,12 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   const transactionPublisher = ethers.getAddress(publisherAddress);
 
   const proof = recovery.publishProof;
-  if (!proof?.merkleRoot || !sameHex(proof.merkleRoot, request.sealMerkleRoot)) {
+  if (!sameHex(proof.merkleRoot, request.sealMerkleRoot)) {
     throw inconsistent(
-      `transaction merkle root ${proof?.merkleRoot ?? 'missing'} does not match queued seal ${request.sealMerkleRoot}`,
+      `transaction merkle root ${proof.merkleRoot} does not match queued seal ${request.sealMerkleRoot}`,
     );
   }
-  if (!proof.authorAddress || !ethers.isAddress(proof.authorAddress)) {
+  if (!ethers.isAddress(proof.authorAddress)) {
     throw inconsistent('chain recovery did not return the transaction author');
   }
   const transactionAuthor = ethers.getAddress(proof.authorAddress);

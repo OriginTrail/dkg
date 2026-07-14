@@ -7,7 +7,11 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
-import { createChainRecoveryResolver, scopeKnowledgeAssetVmPublishHandler } from '../src/publisher-runner.js';
+import {
+  createChainRecoveryResolver,
+  createKnowledgeAssetVmPublishRecoveryResolver,
+  scopeKnowledgeAssetVmPublishHandler,
+} from '../src/publisher-runner.js';
 
 describe('named KA publisher recovery wiring', () => {
   it('reconstructs the canonical V10 UAL from a confirmed transaction receipt', async () => {
@@ -34,7 +38,7 @@ describe('named KA publisher recovery wiring', () => {
         resolvePublishByTxHash,
       },
     } as unknown as DKGPublisher;
-    const resolver = createChainRecoveryResolver(new Map([[walletId, publisher]]));
+    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(new Map([[walletId, publisher]]));
 
     const resolved = await resolver({
       status: 'broadcast',
@@ -65,6 +69,7 @@ describe('named KA publisher recovery wiring', () => {
     const txHash = `0x${'cd'.repeat(32)}` as `0x${string}`;
     const walletId = '0x1111111111111111111111111111111111111111';
     const kaId = 42n;
+    const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
     const chain = {
       chainId: 'evm:31337',
       resolvePublishByTxHash: vi.fn(async () => ({
@@ -72,15 +77,18 @@ describe('named KA publisher recovery wiring', () => {
         kaId,
         startKAId: kaId,
         endKAId: kaId,
+        merkleRoot: Buffer.from(merkleRoot.slice(2), 'hex'),
+        authorAddress: walletId,
         txHash,
         blockNumber: 9,
+        blockTimestamp: 1_700_000_009,
         publisherAddress: walletId,
       })),
       getDKGKnowledgeAssetsAddress: vi.fn(async () => '0x2222222222222222222222222222222222222222'),
     };
     const publisher = { chain } as unknown as DKGPublisher;
 
-    const resolved = await createChainRecoveryResolver(new Map([[walletId, publisher]]))({
+    const resolved = await createKnowledgeAssetVmPublishRecoveryResolver(new Map([[walletId, publisher]]))({
       status: 'broadcast',
       broadcast: { txHash, walletId },
     } as LiftJobBroadcast);
@@ -89,6 +97,36 @@ describe('named KA publisher recovery wiring', () => {
     expect(resolved?.finalization.ual).toBe(
       `did:dkg:evm:31337/0x2222222222222222222222222222222222222222/${kaId}`,
     );
+  });
+
+  it('fails closed for named-KA recovery when the receipt lacks immutable proof', async () => {
+    const txHash = `0x${'de'.repeat(32)}` as `0x${string}`;
+    const walletId = '0x1111111111111111111111111111111111111111';
+    const kaId = 42n;
+    const publisher = {
+      chain: {
+        chainId: 'evm:31337',
+        resolvePublishByTxHash: vi.fn(async () => ({
+          batchId: kaId,
+          kaId,
+          knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
+          startKAId: kaId,
+          endKAId: kaId,
+          txHash,
+          blockNumber: 9,
+          blockTimestamp: 1_700_000_009,
+          publisherAddress: walletId,
+        })),
+      },
+    } as unknown as DKGPublisher;
+    const publishers = new Map([[walletId, publisher]]);
+    const job = {
+      status: 'broadcast',
+      broadcast: { txHash, walletId },
+    } as LiftJobBroadcast;
+
+    await expect(createChainRecoveryResolver(publishers)(job)).resolves.not.toBeNull();
+    await expect(createKnowledgeAssetVmPublishRecoveryResolver(publishers)(job)).resolves.toBeNull();
   });
 
   it('forwards the immutable job and wallet-scoped publisher to the agent repair method', async () => {
@@ -146,7 +184,7 @@ describe('named KA publisher recovery wiring', () => {
     } as const;
     const runtimePublisher = new TripleStoreAsyncLiftPublisher(new OxigraphStore(), {
       knowledgeAssetVmPublishHandler: scoped,
-      chainRecoveryResolver: async () => ({
+      knowledgeAssetVmPublishRecoveryResolver: async () => ({
         inclusion: { txHash, blockNumber: 9 },
         finalization: {
           mode: 'published',
@@ -156,6 +194,10 @@ describe('named KA publisher recovery wiring', () => {
           startKAId: kaId.toString(),
           endKAId: kaId.toString(),
           publisherAddress: walletB,
+        },
+        publishProof: {
+          merkleRoot: request.sealMerkleRoot,
+          authorAddress: request.seal.authorAddress,
         },
       }),
     });
