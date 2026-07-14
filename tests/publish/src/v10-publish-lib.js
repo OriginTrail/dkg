@@ -41,6 +41,7 @@ import {
   TEST_CONTENT_SIZE_KB,
   TEST_KA_BATCHES,
   TEST_BATCH_DELAY_MS,
+  requireCompleteLifecyclePublishResponse,
 } from './v10-helpers.js';
 
 const PUBLISH_EPOCHS = Number(process.env.PUBLISH_EPOCHS || 2);
@@ -260,6 +261,7 @@ export function validateConfirmedPublishIdentity(result) {
 export function assertCompleteNodeRun(nodeName, stats, expectedKas, expectsRemote = true) {
   const expected = [
     ['publish', stats.publishSuccess, stats.publishFail, expectedKas],
+    ['SWM cleanup', stats.swmCleanupSuccess, stats.swmCleanupFail, expectedKas],
     ['query', stats.querySuccess, stats.queryFail, expectedKas],
     ['VM GET', stats.vmGetSuccess, stats.vmGetFail, expectedKas],
   ];
@@ -386,12 +388,15 @@ export function makeNodeClient(baseUrl, token) {
           alsoPublishVm: { publishEpochs: PUBLISH_EPOCHS },
         },
         { acceptStatuses: [200, 201, 207], signal },
-      ).then((r) => ({
-        ...r.data,
-        status: r.data.status === 'vm-confirmed' ? 'confirmed' : r.data.status,
-        publisherAddress: r.data.publisherAddress || r.data.authorAddress,
-        httpStatus: r.status,
-      })),
+      ).then((r) => {
+        requireCompleteLifecyclePublishResponse(r.status, r.data);
+        return {
+          ...r.data,
+          status: r.data.status === 'vm-confirmed' ? 'confirmed' : r.data.status,
+          publisherAddress: r.data.publisherAddress || r.data.authorAddress,
+          httpStatus: r.status,
+        };
+      }),
     query: (sparql, contextGraphId, view = 'verifiable-memory', signal) =>
       req('POST', '/api/query', { sparql, contextGraphId, view }, { signal }).then((r) => r.data),
     // cross-node read: ask a PEER (by peerId) for a KA's triples. lookup is
@@ -552,6 +557,10 @@ export function checkpointRunArtifacts({
     remote_query_enabled: remoteQueryEnabled,
     harness_error: harnessError?.message || null,
     publish_success_rate: completionRate(counters.publishSuccess, expectedKaCount),
+    shared_working_memory_cleanup_success_rate: completionRate(
+      counters.swmCleanupSuccess,
+      expectedKaCount,
+    ),
     query_success_rate: completionRate(counters.querySuccess, expectedKaCount),
     publisher_get_success_rate: completionRate(counters.vmGetSuccess, expectedKaCount),
     non_publisher_get_success_rate: remoteQueryEnabled
@@ -616,6 +625,7 @@ export function defineChainPublishSuite(config) {
         const { name, hostname, token } = nodesToRun[currentIndex];
 
         let publishSuccess = 0, publishFail = 0;
+        let swmCleanupSuccess = 0, swmCleanupFail = 0;
         let querySuccess = 0, queryFail = 0;
         let vmGetSuccess = 0, vmGetFail = 0;
         let queryRemoteSuccess = 0, queryRemoteFail = 0;
@@ -828,6 +838,43 @@ export function defineChainPublishSuite(config) {
             continue;
           }
 
+          // A clean lifecycle response must mean the publisher awaited its
+          // shared-working-memory cleanup. Check the exact root once, without
+          // retrying: a retry would hide the race this release gate protects.
+          step = 'SWM cleanup';
+          try {
+            const swmSparql = `SELECT ?p ?o WHERE { <${rootEntity}> ?p ?o } LIMIT 1`;
+            const result = await withRunDeadline(
+              (signal) => client.query(
+                swmSparql,
+                contextGraphId,
+                'shared-working-memory',
+                signal,
+              ),
+              'SWM cleanup',
+              name,
+              OP_TIMEOUT_MS,
+              runDeadline,
+            );
+            const bindings = result?.result?.bindings;
+            assert.ok(
+              Array.isArray(bindings),
+              'SWM cleanup query did not return a SPARQL bindings array',
+            );
+            assert.equal(
+              bindings.length,
+              0,
+              `Shared Working Memory still contains ${bindings.length} binding(s) for fresh root ${rootEntity}`,
+            );
+            console.log('✅ SWM cleanup verified — fresh root is absent');
+            swmCleanupSuccess++;
+          } catch (error) {
+            await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
+            failedAssets.push(`KA #${i + 1} (SWM cleanup failed)`);
+            swmCleanupFail++;
+            if (error?.runDeadline) throw error;
+          }
+
           // ── 2. query — SELECT this KA's child entities (via isPartOf) from VM ─
           step = 'query';
           const queryStart = Date.now();
@@ -917,6 +964,7 @@ export function defineChainPublishSuite(config) {
           name,
           {
             publishSuccess, publishFail,
+            swmCleanupSuccess, swmCleanupFail,
             querySuccess, queryFail,
             vmGetSuccess, vmGetFail,
             queryRemoteSuccess, queryRemoteFail,
@@ -940,6 +988,7 @@ export function defineChainPublishSuite(config) {
             harnessError,
             counters: {
               publishSuccess, publishFail,
+              swmCleanupSuccess, swmCleanupFail,
               querySuccess, queryFail,
               vmGetSuccess, vmGetFail,
               queryRemoteSuccess, queryRemoteFail,
@@ -964,6 +1013,7 @@ export function defineChainPublishSuite(config) {
         Object.entries(nodeStats).forEach(([nodeName, stats]) => {
           console.log(`  • ${nodeName}:`);
           console.log(`    Publish:             ✅ ${stats.publishSuccess} / ❌ ${stats.publishFail} -> ${completionRate(stats.publishSuccess, KA_COUNT)}% of workload`);
+          console.log(`    SWM cleanup:         ✅ ${stats.swmCleanupSuccess} / ❌ ${stats.swmCleanupFail} -> ${completionRate(stats.swmCleanupSuccess, KA_COUNT)}% of workload`);
           console.log(`    Query:               ✅ ${stats.querySuccess} / ❌ ${stats.queryFail} -> ${completionRate(stats.querySuccess, KA_COUNT)}% of workload`);
           console.log(`    VM GET:             ✅ ${stats.vmGetSuccess} / ❌ ${stats.vmGetFail} -> ${completionRate(stats.vmGetSuccess, KA_COUNT)}% of workload`);
           console.log(REMOTE_QUERY_ENABLED && nodes.length > 1

@@ -17,6 +17,7 @@ import {
   withAbortTimeout,
   withRunDeadline,
 } from '../src/v10-publish-lib.js';
+import { requireCompleteLifecyclePublishResponse } from '../src/v10-helpers.js';
 import { importSummaries } from '../scripts/insert_summary_to_db.js';
 import { importErrors } from '../scripts/insert_errors_to_db.js';
 import { CHAIN_SUITE_MANIFEST, runNodeSuites } from '../scripts/run_node_suites.js';
@@ -55,10 +56,17 @@ function rootFromPublish(body) {
   return body.quads?.find((quad) => quad.object === 'http://schema.org/Dataset')?.subject;
 }
 
-function createStrictLifecycleRouter({ publishUal = FRESH_UAL, requiredRemoteUal = publishUal } = {}) {
+function createStrictLifecycleRouter({
+  publishUal = FRESH_UAL,
+  requiredRemoteUal = publishUal,
+  publishHttpStatus = 201,
+  publishResponse = {},
+  retainPublishedRootInSwm = false,
+} = {}) {
   const state = {
     publishBodies: [],
     localQueryBodies: [],
+    swmQueryBodies: [],
     remoteQueryBodies: [],
     publishedRoot: null,
   };
@@ -80,16 +88,32 @@ function createStrictLifecycleRouter({ publishUal = FRESH_UAL, requiredRemoteUal
         json(res, 400, { error: 'publish did not contain the expected fresh root/context graph' });
         return;
       }
-      json(res, 201, {
+      json(res, publishHttpStatus, {
         status: 'vm-confirmed',
         kaId: 17,
         ual: publishUal,
         authorAddress: '0xpublisher',
+        ...publishResponse,
       });
       return;
     }
     if (req.method === 'POST' && req.url === '/api/query') {
       const body = await readJsonBody(req);
+      if (body.view === 'shared-working-memory') {
+        state.swmQueryBodies.push(body);
+        const targetsFreshRoot = Boolean(state.publishedRoot)
+          && body.contextGraphId === EXPECTED_CONTEXT_GRAPH
+          && typeof body.sparql === 'string'
+          && body.sparql.includes(`<${state.publishedRoot}>`);
+        json(res, 200, {
+          result: {
+            bindings: retainPublishedRootInSwm && targetsFreshRoot
+              ? [{ predicate: 'urn:residue', object: 'still-present' }]
+              : [],
+          },
+        });
+        return;
+      }
       state.localQueryBodies.push(body);
       const targetsFreshPublish = Boolean(state.publishedRoot)
         && body.contextGraphId === EXPECTED_CONTEXT_GRAPH
@@ -409,6 +433,20 @@ describe('V10 Jenkins publish harness guards', () => {
     );
   });
 
+  it('accepts only clean HTTP 200/201 lifecycle responses', () => {
+    for (const httpStatus of [200, 201]) {
+      const response = { status: 'vm-confirmed', errors: [] };
+      assert.equal(requireCompleteLifecyclePublishResponse(httpStatus, response), response);
+    }
+    assert.throws(
+      () => requireCompleteLifecyclePublishResponse(201, {
+        status: 'vm-confirmed',
+        errors: [{ message: 'storage acknowledgement failed' }],
+      }),
+      /response reported 1 error\(s\)/,
+    );
+  });
+
   it('computes telemetry rates against the configured workload', () => {
     assert.equal(completionRate(9, 10), '90.00');
     assert.equal(completionRate(0, 10), '0.00');
@@ -418,6 +456,7 @@ describe('V10 Jenkins publish harness guards', () => {
   it('can exclude remote query from the authoritative lifecycle gate', () => {
     const stats = {
       publishSuccess: 2, publishFail: 0,
+      swmCleanupSuccess: 2, swmCleanupFail: 0,
       querySuccess: 2, queryFail: 0,
       vmGetSuccess: 2, vmGetFail: 0,
       queryRemoteSuccess: 0, queryRemoteFail: 2,
@@ -485,6 +524,7 @@ describe('V10 Jenkins publish harness guards', () => {
     assert.equal(result.exitCode, 0, result.output);
     assert.equal(state.publishBodies.length, 1);
     assert.equal(state.localQueryBodies.length, 2);
+    assert.equal(state.swmQueryBodies.length, 1);
     assert.equal(state.remoteQueryBodies.length, 0);
     assert.ok(state.publishedRoot?.startsWith('urn:ka:sbb-'));
     for (const body of state.localQueryBodies) {
@@ -492,14 +532,86 @@ describe('V10 Jenkins publish harness guards', () => {
       assert.equal(body.view, 'verifiable-memory');
       assert.match(body.sparql, new RegExp(state.publishedRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     }
+    assert.equal(state.swmQueryBodies[0].contextGraphId, EXPECTED_CONTEXT_GRAPH);
+    assert.equal(state.swmQueryBodies[0].view, 'shared-working-memory');
+    assert.match(
+      state.swmQueryBodies[0].sparql,
+      new RegExp(state.publishedRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    );
     assert.equal(result.summary.harness_error, null);
     assert.equal(result.summary.remote_query_enabled, false);
     assert.equal(result.summary.publish_success_rate, '100.00');
+    assert.equal(result.summary.shared_working_memory_cleanup_success_rate, '100.00');
     assert.equal(result.summary.query_success_rate, '100.00');
     assert.equal(result.summary.publisher_get_success_rate, '100.00');
     assert.equal(result.summary.non_publisher_get_success_rate, null);
     assert.equal(result.summary.average_non_publisher_get_time, null);
     assert.match(result.output, /Query Remote \(sync\) skipped — not part of this release gate/);
+  });
+
+  it('counts a clean HTTP 200 vm-confirmed lifecycle as a successful publish', async () => {
+    const { handler, state } = createStrictLifecycleRouter({ publishHttpStatus: 200 });
+    const result = await withMockNodeServer(handler, (baseUrl) => runPublishSpec({
+      baseUrl,
+      prefix: 'dkg-publish-clean-200-',
+    }));
+
+    assert.equal(result.exitCode, 0, result.output);
+    assert.equal(state.publishBodies.length, 1);
+    assert.equal(state.localQueryBodies.length, 2);
+    assert.equal(state.swmQueryBodies.length, 1);
+    assert.equal(result.summary.publish_success_rate, '100.00');
+    assert.equal(result.summary.shared_working_memory_cleanup_success_rate, '100.00');
+    assert.equal(result.summary.query_success_rate, '100.00');
+    assert.equal(result.summary.publisher_get_success_rate, '100.00');
+  });
+
+  it('does not count HTTP 207 vm-confirmed responses with errors as successful publishes', async () => {
+    const { handler, state } = createStrictLifecycleRouter({
+      publishHttpStatus: 207,
+      publishResponse: {
+        errors: [{ message: 'context graph binding failed after mint' }],
+        contextGraphError: 'context graph binding failed after mint',
+      },
+    });
+    const result = await withMockNodeServer(handler, (baseUrl) => runPublishSpec({
+      baseUrl,
+      prefix: 'dkg-publish-partial-207-',
+    }));
+
+    assert.equal(result.exitCode, 1, result.output);
+    assert.equal(state.publishBodies.length, 1);
+    assert.equal(state.localQueryBodies.length, 0);
+    assert.equal(state.swmQueryBodies.length, 0);
+    assert.equal(result.summary.publish_success_rate, '0.00');
+    assert.equal(result.summary.shared_working_memory_cleanup_success_rate, '0.00');
+    assert.equal(result.summary.query_success_rate, '0.00');
+    assert.equal(result.summary.publisher_get_success_rate, '0.00');
+    assert.match(result.output, /HTTP 207 indicates partial lifecycle completion/);
+    assert.match(result.output, /SERVER ERROR LOG - context graph binding failed after mint/);
+    assert.doesNotMatch(result.output, /All assets processed successfully/);
+  });
+
+  it('fails when VM reads pass but the exact fresh root remains in shared working memory', async () => {
+    const { handler, state } = createStrictLifecycleRouter({
+      retainPublishedRootInSwm: true,
+    });
+    const result = await withMockNodeServer(handler, (baseUrl) => runPublishSpec({
+      baseUrl,
+      prefix: 'dkg-publish-swm-residue-',
+    }));
+
+    assert.equal(result.exitCode, 1, result.output);
+    assert.equal(state.publishBodies.length, 1);
+    assert.equal(state.swmQueryBodies.length, 1);
+    assert.equal(state.localQueryBodies.length, 2);
+    assert.equal(result.summary.publish_success_rate, '100.00');
+    assert.equal(result.summary.query_success_rate, '100.00');
+    assert.equal(result.summary.publisher_get_success_rate, '100.00');
+    assert.equal(result.summary.shared_working_memory_cleanup_success_rate, '0.00');
+    assert.match(result.output, /Shared Working Memory still contains 1 binding\(s\) for fresh root/);
+    assert.match(result.summary.harness_error, /SWM cleanup: expected 1 success \/ 0 fail/);
+    assert.doesNotMatch(result.output, /All assets processed successfully/);
   });
 
   it('requires exact fresh UAL, context graph, peer and lookup type for remote verification', async () => {
@@ -652,6 +764,7 @@ describe('V10 Jenkins publish harness guards', () => {
   it('fails an incomplete or partially failed lifecycle run', () => {
     const complete = {
       publishSuccess: 2, publishFail: 0,
+      swmCleanupSuccess: 2, swmCleanupFail: 0,
       querySuccess: 2, queryFail: 0,
       vmGetSuccess: 2, vmGetFail: 0,
       queryRemoteSuccess: 2, queryRemoteFail: 0,

@@ -202,10 +202,52 @@ export async function httpCreateContextGraph(id, name, description) {
   return data;
 }
 
+function lifecycleErrorMessages(value) {
+  if (value === undefined || value === null || value === '') return [];
+  if (Array.isArray(value)) return value.flatMap(lifecycleErrorMessages);
+  if (typeof value === 'object') {
+    if (Object.keys(value).length === 0) return [];
+    if (value.message !== undefined) return lifecycleErrorMessages(value.message);
+    if (value.error !== undefined) return lifecycleErrorMessages(value.error);
+    try {
+      return [JSON.stringify(value)];
+    } catch {
+      return [String(value)];
+    }
+  }
+  return [String(value)];
+}
+
 /**
- * Publish quads to verifiable memory. Accepts HTTP 200 (fully bound) and 207
- * (minted on-chain but context-graph binding failed) as success; retries the
- * transient LU-5 "access-policy is unknown" read-lag.
+ * Reject a lifecycle response that only partially completed. The API can
+ * return `vm-confirmed` after minting while a later lifecycle stage failed;
+ * HTTP 207 and any response error field must therefore never count as a clean
+ * publish in Jenkins telemetry.
+ */
+export function requireCompleteLifecyclePublishResponse(httpStatus, data = {}) {
+  const responseErrors = [...new Set([
+    ...lifecycleErrorMessages(data.errors),
+    ...lifecycleErrorMessages(data.error),
+    ...lifecycleErrorMessages(data.contextGraphError),
+  ])];
+  if (httpStatus !== 207 && responseErrors.length === 0) return data;
+
+  const reasons = [];
+  if (httpStatus === 207) reasons.push('HTTP 207 indicates partial lifecycle completion');
+  if (responseErrors.length) reasons.push(`response reported ${responseErrors.length} error(s)`);
+  const error = new Error(`Publish lifecycle was not fully successful: ${reasons.join('; ')}`);
+  error.statusCode = httpStatus;
+  error.body = data;
+  error.partialPublish = httpStatus === 207;
+  error.serverError = responseErrors.join(' | ') || `HTTP ${httpStatus} partial lifecycle response`;
+  throw error;
+}
+
+/**
+ * Publish quads to verifiable memory. HTTP 207 is parsed so its server-side
+ * lifecycle error can be reported, but is rejected rather than counted as a
+ * successful publish. Retries the transient LU-5 "access-policy is unknown"
+ * read-lag.
  */
 export async function httpPublish(contextGraphId, quads) {
   let lastErr;
@@ -226,6 +268,7 @@ export async function httpPublish(contextGraphId, quads) {
         },
         { acceptStatuses: [200, 201, 207] },
       );
+      requireCompleteLifecyclePublishResponse(status, data);
       return {
         ...data,
         status: data.status === 'vm-confirmed' ? 'confirmed' : data.status,
@@ -234,6 +277,9 @@ export async function httpPublish(contextGraphId, quads) {
       };
     } catch (err) {
       lastErr = err;
+      // A parsed 207/error-bearing response may already have minted a KA, so
+      // never retry it and risk creating a duplicate. This retry remains only
+      // for a request-level rejection whose own message reports LU-5.
       if (String(err.message || '').includes('access-policy is unknown') && attempt < LU5_RETRIES) {
         await sleep(LU5_DELAY_MS);
         continue;
