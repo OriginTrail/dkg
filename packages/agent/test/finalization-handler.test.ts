@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  GraphManager,
+  type Quad,
+  type QueryOptions,
+} from '@origintrail-official/dkg-storage';
 import {
   encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest, createOperationContext,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -422,10 +427,31 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
   it('promotes a chain-registered KC when the CG binding + recomputed merkle match', async () => {
     const store = new OxigraphStore();
     const merkleRoot = await seedSwmSnapshot(store);
+    const queryOptions: QueryOptions[] = [];
+    const graphDiscoveryOptions: QueryOptions[] = [];
+    const origQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: QueryOptions) => {
+      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+        queryOptions.push(options);
+      }
+      return origQuery(sparql, options);
+    }) as typeof store.query;
+    const origListGraphs = store.listGraphs.bind(store);
+    store.listGraphs = async (options?: QueryOptions) => {
+      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+        graphDiscoveryOptions.push(options);
+      }
+      return origListGraphs(options);
+    };
     const handler = new FinalizationHandler(store, makeBindingChain(42n));
 
     const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
     expect(outcome).toBe('promoted');
+    expect(queryOptions.length).toBeGreaterThan(0);
+    expect(graphDiscoveryOptions.length).toBeGreaterThan(0);
+    expect([...queryOptions, ...graphDiscoveryOptions].every(
+      (options) => options.priority === 'background',
+    )).toBe(true);
 
     const perCgGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}`;
     const promoted = await store.query(
