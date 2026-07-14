@@ -37,8 +37,13 @@
 // Other datatypes (hexBinary, base64Binary, anyURI, token, custom IRIs, …) are
 // returned with normalized escaping but otherwise verbatim — matching oxigraph.
 
+import {
+  decodeRdfLiteralBody,
+  parseRdfLiteralLexicalTerm,
+  XSD_STRING_DATATYPE,
+} from '@origintrail-official/dkg-rdf-utils';
+
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
-const XSD_STRING = XSD + 'string';
 const XSD_INTEGER = XSD + 'integer';
 
 const INTEGER_TYPES = new Set(
@@ -66,31 +71,22 @@ const I128_MIN = -(1n << 127n);
 const I128_MAX = (1n << 127n) - 1n;
 const DEC_SCALE = 10n ** 18n;
 
-// A literal is "<lex>"(@tag | ^^<IRI> | ^^IRI). N-Triples mandates the bracketed
-// datatype, but oxigraph's storage adapter also accepts the BARE "v"^^IRI form on
-// input and canonicalizes it to "v"^^<IRI>, so we accept (m[3] bracketed, m[4]
-// bare) and always re-emit bracketed. The bare alternative is `[^<]…` so a
-// MALFORMED bracketed datatype (e.g. "a"^^<b>extra, "x"^^<>) does NOT get
-// mis-captured as a bare IRI — it fails the match and is returned verbatim, as
-// oxigraph does.
-const RE_LITERAL = /^"((?:[^"\\]|\\.)*)"(?:@([A-Za-z0-9-]+)|\^\^(?:<([^>]+)>|([^<].*)))?$/;
-
 export function canonicalizeObjectTermForHash(object: string): string {
   if (object.length === 0 || object.charCodeAt(0) !== 34 /* " */) return object; // IRI / blank / genid
-  const m = RE_LITERAL.exec(object);
-  if (!m) return object;
-  const lang = m[2];
+  const literal = parseRdfLiteralLexicalTerm(object);
+  if (!literal) return object;
+  const lang = literal.suffix.kind === 'language' ? literal.suffix.language : undefined;
   // oxigraph decodes N-Triples UCHAR (\uXXXX / \UXXXXXXXX) escapes inside the
   // datatype IRI on parse, so the canonical form (and any datatype matching below)
   // must run on the decoded IRI — e.g. <…XMLSchema#integer> ≡ xsd:integer.
-  const dtRaw = m[3] ?? m[4];
+  const dtRaw = literal.suffix.kind === 'datatype' ? literal.suffix.datatype : undefined;
   const dt = dtRaw === undefined ? undefined : decodeIriEscapes(dtRaw);
   // Literal CONTENT escaping is normalized for every literal (a store decodes
   // \uXXXX / \t / \U… to raw UTF-8 and re-emits only \ " \n \r escaped).
-  const lex = normalizeEscaping(m[1]);
+  const lex = normalizeEscaping(literal.body);
 
   if (lang !== undefined) return `"${lex}"@${lang.toLowerCase()}`;
-  if (dt === undefined || dt === XSD_STRING) return `"${lex}"`; // plain / xsd:string
+  if (dt === undefined || dt === XSD_STRING_DATATYPE) return `"${lex}"`; // plain / xsd:string
 
   try {
     if (INTEGER_TYPES.has(dt)) return canonIntegerTerm(lex) ?? verbatim(lex, dt);
@@ -119,31 +115,11 @@ const wrap = (canonLex: string, dt: string) => `"${canonLex}"^^<${dt}>`;
 const verbatim = (lex: string, dt: string) => `"${lex}"^^<${dt}>`;
 
 // ── literal content escaping ───────────────────────────────────────────────────
-const ESCAPE_DECODE = /\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[tbnrf"'\\])/g;
 function normalizeEscaping(lex: string): string {
-  const decoded = lex.replace(ESCAPE_DECODE, (whole, e: string) => {
-    const c = e[0];
-    if (c === 'u' || c === 'U') {
-      const cp = parseInt(e.slice(1), 16);
-      // A \U escape can encode up to 0xFFFFFFFF, but only ≤0x10FFFF is a valid
-      // Unicode scalar. String.fromCodePoint THROWS above that; oxigraph rejects
-      // the literal. Guard so canon never throws (it runs before the per-type
-      // try/catch and on EVERY literal) — leave the out-of-range escape undecoded.
-      if (cp > 0x10ffff) return whole;
-      return String.fromCodePoint(cp);
-    }
-    switch (e) {
-      case 't': return '\t';
-      case 'b': return '\b';
-      case 'n': return '\n';
-      case 'r': return '\r';
-      case 'f': return '\f';
-      case '"': return '"';
-      case "'": return "'";
-      case '\\': return '\\';
-      default: return whole;
-    }
-  });
+  const decoded = decodeRdfLiteralBody(lex, {
+    invalidEscape: 'preserve',
+    allowSurrogateCodePoints: true,
+  })!;
   // re-emit oxigraph's minimal escaping (escapeNQuadsLiteral): \ " \n \r only.
   return decoded.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 }

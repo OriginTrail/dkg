@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { join, dirname, basename } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
@@ -23,6 +23,7 @@ import {
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
+import { runtimeAssetRoots } from './runtime-assets.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -481,7 +482,9 @@ export interface DkgConfig {
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
-   * When omitted, runtime falls back to project.json#defaultNetwork.
+   * When omitted, legacy configs infer the overlay from chain.chainId when it
+   * matches a bundled network; otherwise runtime falls back to
+   * project.json#defaultNetwork.
    */
   networkConfig?: string;
   relay?: string;
@@ -1102,10 +1105,12 @@ export function parseWeiFloor(
 
 let _networkConfig: NetworkConfig | null = null;
 let _networkConfigName: string | null = null;
+let _bundledNetworkRegistry: Readonly<Record<string, NetworkConfig>> | null = null;
 
 export function _resetNetworkConfigCache(): void {
   _networkConfig = null;
   _networkConfigName = null;
+  _bundledNetworkRegistry = null;
 }
 
 export interface ProjectConfig {
@@ -1120,60 +1125,6 @@ export interface ProjectConfig {
 let _projectConfig: ProjectConfig | null = null;
 
 /**
- * Return true when `dir` is the published DKG CLI package root, as
- * determined by an adjacent `package.json` whose `name` is
- * `@origintrail-official/dkg`. This is resilient to `projectName`
- * renames in `project.json` and cannot be spoofed by an unrelated app.
- */
-function isDkgPackageRoot(dir: string): boolean {
-  try {
-    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8'));
-    return pkg?.name === '@origintrail-official/dkg'
-      && existsSync(join(dir, 'project.json'));
-  } catch { return false; }
-}
-
-/**
- * Resolve candidate directories where repo-root files (project.json,
- * network/*.json) may live, in priority order.
- *
- * Ordering rationale:
- *   - In a monorepo checkout the DKG root is the single source of
- *     truth, so any detected monorepo ancestor MUST win. Otherwise,
- *     once `packages/cli/build` has copied `project.json` and
- *     `network/*.json` into `packages/cli/`, those stale artifacts
- *     would shadow edits made to the root files until the next
- *     rebuild — breaking the intended "edit root config, rerun" dev
- *     flow.
- *   - In a published npm install there is no monorepo ancestor, so
- *     we fall back to the package-local root (identified unambiguously
- *     by its `package.json.name`). This also guarantees we never
- *     accidentally read a consumer's own `project.json` from
- *     `node_modules/..`.
- */
-function candidateRoots(): string[] {
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-  const out: string[] = [];
-
-  // Monorepo ancestors first (dev / source checkout). `dist/` and
-  // `src/` live at different depths, so both paths are tried.
-  const monorepoCandidates = [
-    join(thisDir, '..', '..', '..'),        // from dist/
-    join(thisDir, '..', '..', '..', '..'),  // from src/ during dev
-  ];
-  for (const dir of monorepoCandidates) {
-    if (isDkgMonorepoRoot(dir)) out.push(dir);
-  }
-
-  // Package-local root as the fallback — the only location that ever
-  // wins in a published install, and unambiguous via its package.json.
-  const pkgRoot = join(thisDir, '..');
-  if (isDkgPackageRoot(pkgRoot)) out.push(pkgRoot);
-
-  return out;
-}
-
-/**
  * Load project.json — the single source of truth for repo name,
  * branch, GitHub URL, and default network. Values here drive the
  * startup banner, auto-update fallbacks, and network selection.
@@ -1183,7 +1134,7 @@ function candidateRoots(): string[] {
  */
 export function loadProjectConfig(): ProjectConfig {
   if (_projectConfig) return _projectConfig;
-  for (const root of candidateRoots()) {
+  for (const root of runtimeAssetRoots()) {
     try {
       const raw = readFileSync(join(root, 'project.json'), 'utf-8');
       _projectConfig = JSON.parse(raw) as ProjectConfig;
@@ -1521,7 +1472,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   if (_networkConfig && _networkConfigName === name) return _networkConfig;
   try {
     const file = `${name}.json`;
-    const candidates = candidateRoots().map(root => join(root, 'network', file));
+    const candidates = runtimeAssetRoots().map(root => join(root, 'network', file));
     for (const path of candidates) {
       try {
         const raw = await readFile(path, 'utf-8');
@@ -1536,8 +1487,127 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-export function resolveNetworkConfigName(config?: Pick<DkgConfig, 'networkConfig'> | null): string {
-  return config?.networkConfig?.trim() || loadProjectConfig().defaultNetwork;
+function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+  if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
+
+  _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());
+  return _bundledNetworkRegistry;
+}
+
+/** Every valid network overlay bundled with this CLI, including entries that
+ * are intentionally omitted from the interactive setup menu. Persisted-config
+ * inference must use this registry rather than UI curation. */
+export function listBundledNetworkConfigNames(): readonly string[] {
+  return Object.keys(loadBundledNetworkRegistry()).sort();
+}
+
+/**
+ * Build the bundled registry entry-by-entry in root priority order.
+ *
+ * A malformed optional/experimental overlay must not make every known network
+ * unavailable. If a higher-priority root contains a bad copy of one entry, a
+ * valid package-local fallback for that same entry can still supply it.
+ */
+export function loadNetworkRegistryFromRoots(
+  roots: readonly string[],
+): Readonly<Record<string, NetworkConfig>> {
+  const registry: Record<string, NetworkConfig> = {};
+
+  for (const root of roots) {
+    const networkDir = join(root, 'network');
+    let entries;
+    try {
+      entries = readdirSync(networkDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const name = entry.name.slice(0, -'.json'.length);
+      if (registry[name] !== undefined) continue;
+      try {
+        registry[name] = JSON.parse(
+          readFileSync(join(networkDir, entry.name), 'utf-8'),
+        ) as NetworkConfig;
+      } catch { /* isolate a malformed entry and continue */ }
+    }
+  }
+
+  return registry;
+}
+
+/**
+ * Infer an overlay from its canonical bundled network config's chain ID.
+ * Production reads network/*.json, so adding a network needs no second table.
+ * Tests and embedders may supply a registry explicitly.
+ */
+export interface NetworkChainIdentity {
+  chain?: { chainId?: string | null };
+}
+
+export function inferNetworkConfigNameFromChainId(
+  chainId: string | null | undefined,
+  registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
+): string | undefined {
+  const normalized = chainId?.trim().toLowerCase();
+  if (!normalized) return undefined;
+
+  let matchedName: string | undefined;
+  for (const [name, network] of Object.entries(registry)) {
+    if (network.chain?.chainId?.trim().toLowerCase() !== normalized) continue;
+    // Ambiguous chain ownership is not safe to infer. Require an explicit
+    // networkConfig until the bundled registry is unique again.
+    if (matchedName && matchedName !== name) return undefined;
+    matchedName = name;
+  }
+  return matchedName;
+}
+
+/**
+ * Resolve only network identities that are actually known from persisted
+ * state. Unlike {@link resolveNetworkConfigName}, this does not collapse an
+ * unknown legacy chain into the project default. Setup uses the distinction
+ * when deciding whether it is safe to discard operator chain overrides.
+ */
+export function resolveKnownNetworkConfigName(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
+): string | undefined {
+  const explicitNetwork = config?.networkConfig?.trim();
+  if (explicitNetwork) return explicitNetwork;
+  return inferNetworkConfigNameFromChainId(config?.chain?.chainId, registry);
+}
+
+/**
+ * Resolve the bundled network overlay for both current and legacy configs.
+ *
+ * Older homes predate `networkConfig` and only persisted the selected chain.
+ * Falling straight through to project.json#defaultNetwork can silently place
+ * one of those homes on the wrong p2p overlay. Infer known bundled networks
+ * from chainId; explicit operator selection always takes precedence.
+ */
+export function resolveNetworkConfigName(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+): string {
+  return resolveKnownNetworkConfigName(config) ?? loadProjectConfig().defaultNetwork;
+}
+
+export interface LoadedResolvedNetworkConfig {
+  name: string;
+  network: NetworkConfig | null;
+}
+
+/**
+ * Resolve legacy chain-only homes and load their effective overlay at one
+ * boundary. Callers that need network metadata should use this instead of
+ * manually composing resolveNetworkConfigName() and loadNetworkConfig().
+ */
+export async function loadResolvedNetworkConfig(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  loader: (name: string) => Promise<NetworkConfig | null> = loadNetworkConfig,
+): Promise<LoadedResolvedNetworkConfig> {
+  const name = resolveNetworkConfigName(config);
+  return { name, network: await loader(name) };
 }
 
 /**

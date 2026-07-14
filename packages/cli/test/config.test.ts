@@ -24,6 +24,11 @@ import {
   classifyMonorepoInit,
   sharedHomeInitGate,
   repoDir,
+  inferNetworkConfigNameFromChainId,
+  listBundledNetworkConfigNames,
+  loadResolvedNetworkConfig,
+  loadNetworkRegistryFromRoots,
+  resolveKnownNetworkConfigName,
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
@@ -147,6 +152,25 @@ describe('removePid / removeApiPort (catch path)', () => {
 });
 
 describe('loadNetworkConfig', () => {
+  it('keeps a valid requested network available when an unrelated overlay is malformed', async () => {
+    const root = join(tmpdir(), `dkg-network-registry-${randomBytes(8).toString('hex')}`);
+    await mkdir(join(root, 'network'), { recursive: true });
+    try {
+      await writeFile(join(root, 'network', 'testnet.json'), JSON.stringify({
+        networkName: 'Fixture Testnet',
+        relays: [],
+        defaultNodeRole: 'edge',
+      }));
+      await writeFile(join(root, 'network', 'experimental.json'), '{not-json');
+
+      const registry = loadNetworkRegistryFromRoots([root]);
+      expect(registry.testnet?.networkName).toBe('Fixture Testnet');
+      expect(registry.experimental).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('loads network/testnet.json with correct shape when run from repo', async () => {
     const config = await loadNetworkConfig();
     if (!config) {
@@ -192,6 +216,7 @@ describe('loadNetworkConfig', () => {
     expect(config.networkName).toBe('DKG V10 Base Testnet');
     expect((config as any).genesisId).toBe('base-testnet');
     expect(config.networkId).toBe('7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b');
+    expect(config.defaultContextGraphs).toEqual([]);
   });
 
   it('loads mainnet prep configs without activating testnet genesis or relays', async () => {
@@ -512,9 +537,87 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveNetworkConfigName(loaded)).toBe('mainnet-base');
   });
 
-  it('falls back to project default network when networkConfig is unset or blank', () => {
+  it('infers legacy network selection from a known chainId', () => {
+    expect(resolveNetworkConfigName({ chain: { chainId: 'base:84532' } })).toBe('testnet');
+    expect(resolveNetworkConfigName({ chain: { chainId: ' BASE:8453 ' } })).toBe('mainnet-base');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'gnosis:100' } })).toBe('mainnet-gnosis');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'neuroweb:2043' } })).toBe('mainnet-neuroweb');
+  });
+
+  it('derives legacy inference from the supplied bundled-network registry', () => {
+    expect(inferNetworkConfigNameFromChainId('fixture:42', {
+      'fixture-network': {
+        chain: {
+          type: 'evm',
+          chainId: 'fixture:42',
+          rpcUrl: 'https://fixture.invalid',
+          hubAddress: '0x0000000000000000000000000000000000000042',
+        },
+      },
+    })).toBe('fixture-network');
+  });
+
+  it('uses the same bundled registry for load-by-name and chain inference', async () => {
+    for (const name of ['testnet', 'mainnet-base', 'mainnet-gnosis'] as const) {
+      const network = await loadNetworkConfig(name);
+      expect(network).not.toBeNull();
+      expect(inferNetworkConfigNameFromChainId(network?.chain?.chainId)).toBe(name);
+    }
+  });
+
+  it('lists every bundled overlay, including networks omitted from setup menus', () => {
+    expect(listBundledNetworkConfigNames()).toEqual([
+      'mainnet-base',
+      'mainnet-gnosis',
+      'mainnet-neuroweb',
+      'testnet',
+    ]);
+  });
+
+  it('loads a legacy chain-only config through one resolved-network boundary', async () => {
+    const resolved = await loadResolvedNetworkConfig({ chain: { chainId: 'neuroweb:2043' } });
+
+    expect(resolved.name).toBe('mainnet-neuroweb');
+    expect(resolved.network?.chain?.chainId).toBe('neuroweb:2043');
+  });
+
+  it('refuses to infer an ambiguous chain shared by two overlays', () => {
+    const chain = {
+      type: 'evm' as const,
+      chainId: 'fixture:42',
+      rpcUrl: 'https://fixture.invalid',
+      hubAddress: '0x0000000000000000000000000000000000000042',
+    };
+    expect(inferNetworkConfigNameFromChainId('fixture:42', {
+      first: { chain },
+      second: { chain },
+    })).toBeUndefined();
+  });
+
+  it('keeps explicit networkConfig authoritative over chain inference', () => {
+    expect(resolveNetworkConfigName({
+      networkConfig: 'mainnet-base',
+      chain: { chainId: 'gnosis:100' },
+    })).toBe('mainnet-base');
+  });
+
+  it('infers from chain when networkConfig is blank', () => {
+    expect(resolveNetworkConfigName({
+      networkConfig: '   ',
+      chain: { chainId: 'gnosis:100' },
+    })).toBe('mainnet-gnosis');
+  });
+
+  it('falls back to project default network without a known legacy chain', () => {
     expect(resolveNetworkConfigName({})).toBe('testnet');
     expect(resolveNetworkConfigName({ networkConfig: '   ' })).toBe('testnet');
+    expect(resolveNetworkConfigName({ chain: { chainId: 'evm:31337' } })).toBe('testnet');
+  });
+
+  it('keeps unknown legacy chains distinguishable from the project fallback', () => {
+    expect(resolveKnownNetworkConfigName({})).toBeUndefined();
+    expect(resolveKnownNetworkConfigName({ chain: { chainId: 'evm:31337' } })).toBeUndefined();
+    expect(resolveKnownNetworkConfigName({ chain: { chainId: 'gnosis:100' } })).toBe('mainnet-gnosis');
   });
 
   it('round-trips relayServerCapacity through saveConfig/loadConfig (operator override)', async () => {

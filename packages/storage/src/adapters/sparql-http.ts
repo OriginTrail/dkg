@@ -34,6 +34,10 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
+import {
+  formatSparqlJsonBindings,
+  type AdapterSparqlJsonSelectResponse,
+} from './sparql-json-results.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
@@ -426,22 +430,13 @@ export class SparqlHttpStore implements TripleStore {
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = (await res.json()) as W3CSelectResponse | W3CAskResponse;
+        const json = (await res.json()) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
         if (isAsk || 'boolean' in json) {
           return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
         }
 
-        const sr = json as W3CSelectResponse;
-        const vars = sr.head?.vars ?? [];
-        const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
-          const obj: Record<string, string> = {};
-          for (const v of vars) {
-            const cell = row[v];
-            if (cell) obj[v] = w3cTermToString(cell);
-          }
-          return obj;
-        });
+        const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
         return { type: 'bindings', bindings } satisfies SelectResult;
       } finally {
         this.maybeEmitSlowQuery({
@@ -652,37 +647,8 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
 // W3C SPARQL 1.1 JSON result types
 // ---------------------------------------------------------------------------
 
-interface W3CTerm {
-  type: 'uri' | 'literal' | 'bnode' | 'typed-literal';
-  value: string;
-  datatype?: string;
-  'xml:lang'?: string;
-}
-
-interface W3CSelectResponse {
-  head: { vars: string[] };
-  results: { bindings: Array<Record<string, W3CTerm>> };
-}
-
 interface W3CAskResponse {
   boolean: boolean;
-}
-
-function escapeNQuadsLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
-}
-
-function w3cTermToString(t: W3CTerm): string {
-  if (t.type === 'bnode') return `_:${t.value}`;
-  if (t.type === 'literal' || t.type === 'typed-literal') {
-    const escaped = escapeNQuadsLiteral(t.value);
-    if (t['xml:lang']) return `"${escaped}"@${t['xml:lang']}`;
-    if (t.datatype && t.datatype !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${escaped}"^^<${t.datatype}>`;
-    }
-    return `"${escaped}"`;
-  }
-  return t.value;
 }
 
 // ---------------------------------------------------------------------------

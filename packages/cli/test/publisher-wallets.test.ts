@@ -177,6 +177,27 @@ describe('publisher wallets', () => {
     ).rejects.toThrow(/DKG V10 NeuroWeb Mainnet is marked pre-deployment/);
   });
 
+  it('resolves publisher network readiness from a legacy chain-only config', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    await expect(
+      createPublisherRuntime({
+        dataDir,
+        config: {
+          name: 'legacy-neuroweb-publisher',
+          apiPort: 9200,
+          listenPort: 0,
+          nodeRole: 'edge',
+          contextGraphs: [],
+          store: { backend: 'oxigraph' },
+          chain: { chainId: 'neuroweb:2043' },
+        },
+      }),
+    ).rejects.toThrow(/DKG V10 NeuroWeb Mainnet is marked pre-deployment/);
+  });
+
   it('bootstraps publisher runtime from an existing agent store', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
     const wallet = ethers.Wallet.createRandom();

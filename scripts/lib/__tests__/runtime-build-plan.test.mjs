@@ -4,9 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runRuntimePackageBuild } from '../../build-runtime-packages.mjs';
+import {
+  RUNTIME_BUILD_EXCLUSIONS,
+  runtimeBuildPnpmArgs,
+} from '../runtime-build-plan.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const ROOT_PACKAGE_JSON = path.join(REPO_ROOT, 'package.json');
 const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 
 const REQUIRED_RUNTIME_PACKAGES = [
@@ -29,33 +33,67 @@ const REQUIRED_RUNTIME_PACKAGES = [
   '@origintrail-official/kafka-plugin',
 ];
 
-function shellTokens(command) {
-  return [...command.matchAll(/'([^']*)'|"([^"]*)"|(\S+)/g)]
-    .map((match) => match[1] ?? match[2] ?? match[3]);
-}
+test('public runtime build script delegates to the checked build plan', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+
+  assert.equal(
+    packageJson.scripts?.['build:runtime:packages'],
+    'node scripts/build-runtime-packages.mjs',
+    'pnpm run build:runtime:packages must use the entrypoint backed by runtimeBuildPnpmArgs',
+  );
+});
+
+test('runtime build entrypoint invokes pnpm with the checked plan and forwards extra arguments', () => {
+  let invocation;
+  const status = runRuntimePackageBuild({
+    extraArgs: ['--force', '--log-order=stream'],
+    platform: 'linux',
+    spawn(command, args, options) {
+      invocation = { command, args, options };
+      return { status: 0, signal: null };
+    },
+    reportError(message) {
+      assert.fail(`successful runtime build must not report an error: ${message}`);
+    },
+  });
+
+  assert.equal(status, 0);
+  assert.deepEqual(invocation, {
+    command: 'pnpm',
+    args: runtimeBuildPnpmArgs(['run', 'build', '--force', '--log-order=stream']),
+    options: { stdio: 'inherit', shell: false },
+  });
+});
+
+test('runtime build entrypoint propagates process failures', () => {
+  const messages = [];
+  const reportError = (message) => messages.push(message);
+
+  assert.equal(runRuntimePackageBuild({
+    spawn: () => ({ status: 23, signal: null }),
+    reportError,
+  }), 23);
+  assert.equal(runRuntimePackageBuild({
+    spawn: () => ({ status: null, signal: null, error: new Error('spawn failed') }),
+    reportError,
+  }), 1);
+  assert.equal(runRuntimePackageBuild({
+    spawn: () => ({ status: null, signal: 'SIGTERM' }),
+    reportError,
+  }), 1);
+
+  assert.equal(messages[0], 'spawn failed');
+  assert.match(messages[1], /exited via SIGTERM$/);
+});
 
 test('release runtime build plan includes workspace dependencies but excludes Hardhat', () => {
-  const rootPackage = JSON.parse(fs.readFileSync(ROOT_PACKAGE_JSON, 'utf8'));
-  const buildCommand = rootPackage.scripts?.['build:runtime:packages'];
-
-  assert.equal(typeof buildCommand, 'string');
-  const tokens = shellTokens(buildCommand);
-  assert.deepEqual(tokens.slice(0, 2), ['pnpm', '-r']);
-  assert.deepEqual(tokens.slice(-2), ['run', 'build']);
   assert.ok(
-    tokens.includes('!@origintrail-official/dkg-evm-module'),
+    RUNTIME_BUILD_EXCLUSIONS.includes('@origintrail-official/dkg-evm-module'),
     'runtime dependency closure must explicitly subtract evm-module',
   );
 
-  // Resolve the exact filters used by the release build, replacing only the
-  // mutating `run build` operation with pnpm's read-only workspace listing.
-  const planArgs = [
-    ...tokens.slice(1, -2),
-    'list',
-    '--depth',
-    '-1',
-    '--json',
-  ];
+  // Resolve the canonical filters with pnpm's read-only workspace listing.
+  const planArgs = runtimeBuildPnpmArgs(['list', '--depth', '-1', '--json']);
   const selected = JSON.parse(execFileSync(PNPM, planArgs, {
     cwd: REPO_ROOT,
     encoding: 'utf8',
