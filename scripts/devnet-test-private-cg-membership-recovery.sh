@@ -289,9 +289,16 @@ done
 restart_allowed=false
 sudo -n -l /usr/bin/systemctl restart "$service" >/dev/null 2>&1 \
   && restart_allowed=true
+# The disruptive phase runs `systemctl stop`, not `restart`. An argument-scoped
+# sudoers rule can permit one and deny the other, so probe the verb we actually
+# execute -- otherwise preflight passes and the run dies mid-scenario, after it
+# has already created a context graph and published fixtures on a live testnet.
+stop_allowed=false
+sudo -n -l /usr/bin/systemctl stop "$service" >/dev/null 2>&1 \
+  && stop_allowed=true
 SERVICE_ACTIVE="$service_active" CURRENT_COMMIT="$current_commit" ACTIVE_GIT="$active_git" \
 ACTIVE_SLOT="$active_slot" ACCEPT_QUEUE="$accept_queue" BUILD_RUNNING="$build_running" \
-RESTART_ALLOWED="$restart_allowed" node -e '
+RESTART_ALLOWED="$restart_allowed" STOP_ALLOWED="$stop_allowed" node -e '
   process.stdout.write(JSON.stringify({
     serviceActive: process.env.SERVICE_ACTIVE,
     currentCommit: process.env.CURRENT_COMMIT || null,
@@ -300,6 +307,7 @@ RESTART_ALLOWED="$restart_allowed" node -e '
     acceptQueue: process.env.ACCEPT_QUEUE === "" ? null : Number(process.env.ACCEPT_QUEUE),
     buildRunning: process.env.BUILD_RUNNING === "true",
     restartAllowed: process.env.RESTART_ALLOWED === "true",
+    stopAllowed: process.env.STOP_ALLOWED === "true",
   }));
 '
 REMOTE
@@ -1024,6 +1032,8 @@ for node in $(seq 1 "$NUM_NODES"); do
       || fail "node $node is still building an auto-update: $probe"
     [ "$(json_get "$probe" restartAllowed)" = "true" ] \
       || fail "node $node SSH user lacks passwordless restart permission for $TESTNET_SERVICE"
+    [ "$(json_get "$probe" stopAllowed)" = "true" ] \
+      || fail "node $node SSH user lacks passwordless stop permission for $TESTNET_SERVICE"
     current_commit="$(json_get "$probe" currentCommit)"
     active_git="$(json_get "$probe" activeGit)"
     commit_matches "$current_commit" "$TESTNET_EXPECT_COMMIT" \
