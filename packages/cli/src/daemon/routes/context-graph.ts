@@ -105,6 +105,13 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import {
+  catchupResultHasCleanResponse,
+  classifyContextGraphCatchupReadiness,
+  classifyExistingContextGraphReadiness,
+  readContextGraphReadiness,
+  writeContextGraphReadiness,
+} from '../../context-graph-readiness.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -566,6 +573,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         callerAgentAddress: requestAgentAddress,
         ...(parsed.private === true ? { private: true } : {}),
       });
+      const createdSubscription = agent.getSubscribedContextGraphs().get(id);
+      try {
+        writeContextGraphReadiness(dashDb, id, {
+          durableVerified: createdSubscription?.synced === true,
+          sharedMemoryVerified: createdSubscription?.sharedMemorySynced === true,
+        });
+      } catch (readinessErr) {
+        process.stderr.write(
+          `[DKG-Daemon] WARN: Context graph "${id}" was created, but readiness provenance could not be persisted: ` +
+          `${readinessErr instanceof Error ? readinessErr.message : String(readinessErr)}\n`,
+        );
+      }
     } catch (err: any) {
       const msg = err?.message ?? "";
       if (
@@ -1534,6 +1553,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const existingSub = subMap?.get(contextGraphId);
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
+    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
@@ -1547,9 +1567,22 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         });
       }
 
-      if (existingSub.synced && (!shouldSyncSharedMemory || existingSub.sharedMemorySynced)) {
-        const jobId = existingJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-        if (!existingJob) {
+      // The persisted bit alone is not proof on upgraded v10.0.6 nodes:
+      // startup could create a namespaced public shadow containing only an
+      // `unregistered` marker and still store metaSynced=true. Validate the
+      // live graph before taking the already-ready shortcut.
+      const hasConfirmedExistingMeta = existingSub.metaSynced === true &&
+        await agent.hasConfirmedMetaState(contextGraphId).catch(() => false);
+      const existingReadiness = classifyExistingContextGraphReadiness({
+        subscription: existingSub,
+        readiness: readinessBeforeCatchup,
+        includeSharedMemory: shouldSyncSharedMemory,
+        hasConfirmedMeta: hasConfirmedExistingMeta,
+      });
+      if (existingReadiness.alreadyReady) {
+        const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
+        const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        if (!reusableDoneJob) {
           const syntheticJob: CatchupJob = {
             jobId,
             contextGraphId,
@@ -1571,6 +1604,25 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           },
         });
       }
+
+      if (existingReadiness.statePatch) {
+        agent.markContextGraphSubscriptionState(
+          contextGraphId,
+          existingReadiness.statePatch,
+        );
+      }
+      if (existingReadiness.readinessPatch) {
+        writeContextGraphReadiness(
+          dashDb,
+          contextGraphId,
+          existingReadiness.readinessPatch,
+        );
+      }
+      // The existing-state classifier may have just invalidated stale v1
+      // provenance because authoritative metadata was missing. Carry the
+      // corrected value into the queued catch-up so a later metadata-only or
+      // incomplete response cannot resurrect the pre-reset true bits.
+      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
     }
 
     console.log(`[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory}`);
@@ -1617,69 +1669,53 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           includeSharedMemory: shouldSyncSharedMemory,
         });
         job.result = result;
-        job.status = "done";
+        const inspectReadiness = catchupResultHasCleanResponse(result);
+        const hasConfirmedMeta = inspectReadiness
+          ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
+          : false;
+        const isPrivate = hasConfirmedMeta
+          ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
+          : false;
+        const classification = classifyContextGraphCatchupReadiness({
+          result,
+          includeSharedMemory: shouldSyncSharedMemory,
+          hasConfirmedMeta,
+          isPrivate,
+          readinessBeforeCatchup,
+        });
 
-        const d = result.diagnostics?.durable;
-        const s = result.diagnostics?.sharedMemory;
-        const servedUsableData =
-          result.dataSynced > 0 ||
-          result.sharedMemorySynced > 0;
-        const totalConnectedPeers = result.totalPeers ?? result.connectedPeers;
-        const selectedConnectedPeers = result.selectedPeers ?? result.connectedPeers;
-        const cleanResponse =
-          servedUsableData ||
-          (d?.emptyResponses ?? 0) > 0 ||
-          (s?.emptyResponses ?? 0) > 0 ||
-          (!result.denied && (d?.metaOnlyResponses ?? 0) > 0);
-        if (result.denied && !servedUsableData) {
-          job.status = "denied";
-          job.error = result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : "Sync denied by remote peer";
-          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
+        job.status = classification.jobStatus;
+        job.error = classification.error;
+        if (classification.readinessPatch) {
+          writeContextGraphReadiness(
+            dashDb,
+            contextGraphId,
+            classification.readinessPatch,
+          );
+        }
+        if (classification.statePatch) {
+          agent.markContextGraphSubscriptionState(
+            contextGraphId,
+            classification.statePatch,
+          );
+        }
+        if (classification.eventPayload) {
+          agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
+            contextGraphId,
+            ...classification.eventPayload,
+          });
         }
 
-        if (job.status === "done") {
-          if (cleanResponse) {
-            const hasContent = await agent.contextGraphHasLocalContent(contextGraphId).catch(() => false);
-            agent.markContextGraphSubscriptionState(contextGraphId, {
-              synced: true,
-              ...(shouldSyncSharedMemory ? { sharedMemorySynced: true } : {}),
-              ...(hasContent ? { metaSynced: true } : {}),
-            });
-          } else if (result.peersTried > 0 && (result.peersResponded ?? result.peersSucceeded) === 0) {
-            // No peer answered within the run — curator likely offline
-            // or no node currently holds this CG. Distinct from `denied`
-            // so the UI can render "couldn't reach the curator" copy +
-            // the signed-join-request CTA. The previous behaviour
-            // collapsed this case into a generic `failed` whose message
-            // ("all reachable peers failed") was easy to misread as a
-            // local error. See `JoinProjectModal.tsx` `unreachable`
-            // branch and `CatchupJobState`.
-            job.status = "unreachable";
-            job.error = "No peer could deliver this project's data — the curator may be offline, or no node currently holds the data. You can still send a signed join request; they will receive it next time they come online.";
-          } else if (result.peersTried > 0) {
-            job.status = "failed";
-            job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
-          } else if (totalConnectedPeers > 0 && selectedConnectedPeers >= totalConnectedPeers && result.syncCapablePeers === 0) {
-            // Connected to peers, but none speak the sync protocol —
-            // i.e. all our connections are non-DKG / mismatched
-            // versions. From the joiner's perspective this is the same
-            // unreachable outcome ("nobody can answer my sync"), so
-            // reuse the dedicated terminal status.
-            job.status = "unreachable";
-            job.error = "No sync-capable peers found for catch-up — the curator may be offline.";
-          } else if (totalConnectedPeers === 0) {
-            // No peers connected at all → definitionally unreachable.
-            job.status = "unreachable";
-            job.error = "No peers connected — couldn't reach the curator. They may be offline, or your node hasn't bootstrapped to the network yet.";
+        if (DEBUG_SYNC_TRACE) {
+          if (job.status === 'denied') {
+            console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
           }
-
-          if (DEBUG_SYNC_TRACE) {
-            console.log(
-              `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
-                `peers=${result.peersTried}/${result.syncCapablePeers} connected=${totalConnectedPeers} ` +
-                `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
-            );
-          }
+          console.log(
+            `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
+              `peers=${result.peersTried}/${result.syncCapablePeers} ` +
+              `connected=${result.totalPeers ?? result.connectedPeers} ` +
+              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+          );
         }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);

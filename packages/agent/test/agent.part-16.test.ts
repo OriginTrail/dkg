@@ -174,13 +174,17 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')).toMatchObject({
+          synced: true,
+          sharedMemorySynced: true,
+        });
       } finally {
         await agent.stop().catch(() => {});
       }
     });
 
 
-    it('does not count no-progress catchup timeouts as peer success', async () => {
+    it('does not count timed-out catchup rounds as peer success', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupTimeoutProgressAccounting',
         listenHost: '127.0.0.1',
@@ -201,6 +205,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         } as any));
 
         const durableResult = (overrides: Partial<{
+          insertedTriples: number;
+          insertedDataTriples: number;
           timedOutPhases: number;
           completedPhases: number;
           checkpointAdvances: number;
@@ -263,10 +269,31 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         expect(progressWithTimeout.peersTried).toBe(1);
         expect(progressWithTimeout.peersResponded).toBe(1);
-        expect(progressWithTimeout.peersSucceeded).toBe(1);
+        expect(progressWithTimeout.peersSucceeded).toBe(0);
         expect(progressWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.completedPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.checkpointAdvances).toBe(1);
+
+        syncFromPeerDetailedQueue.push(durableResult({
+          insertedTriples: 1,
+          insertedDataTriples: 1,
+          timedOutPhases: 1,
+          completedPhases: 1,
+        }));
+
+        const partialInsertWithTimeout = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(partialInsertWithTimeout.dataSynced).toBe(1);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.synced).not.toBe(true);
+
+        syncFromPeerDetailedQueue.push(durableResult({
+          insertedTriples: 1,
+          insertedDataTriples: 1,
+          completedPhases: 1,
+        }));
+
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.synced).toBe(true);
 
         syncFromPeerDetailedQueue.push(durableResult({
           failedPhases: 1,
@@ -281,15 +308,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(phaseFailure.diagnostics.durable.failedPhases).toBe(1);
 
         const syncSharedMemoryFromPeerDetailed = recorder(async () => ({
-          insertedTriples: 0,
+          insertedTriples: 1,
           fetchedMetaTriples: 0,
-          fetchedDataTriples: 0,
+          fetchedDataTriples: 1,
           insertedMetaTriples: 0,
-          insertedDataTriples: 0,
+          insertedDataTriples: 1,
           bytesReceived: 0,
           resumedPhases: 0,
           timedOutPhases: 0,
-          completedPhases: 0,
+          completedPhases: 1,
           checkpointAdvances: 0,
           emptyResponses: 0,
           droppedDataTriples: 0,
@@ -311,6 +338,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(durableOnlyResponse.peersSucceeded).toBe(0);
         expect(durableOnlyResponse.diagnostics.durable.failedPeers).toBe(0);
         expect(durableOnlyResponse.diagnostics.sharedMemory.failedPeers).toBe(1);
+        expect(durableOnlyResponse.sharedMemorySynced).toBe(1);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.sharedMemorySynced)
+          .not.toBe(true);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -368,7 +398,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             bytesReceived: 0,
             resumedPhases: 0,
             timedOutPhases: 0,
-            completedPhases: 0,
+            completedPhases: 1,
             checkpointAdvances: 0,
             emptyResponses: 0,
             metaOnlyResponses: 0,
@@ -386,6 +416,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.peersResponded).toBe(2);
         expect(result.peersSucceeded).toBe(1);
         expect(result.dataSynced).toBe(1);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.synced).toBe(true);
       } finally {
         await agent.stop().catch(() => {});
       }

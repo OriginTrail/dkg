@@ -108,8 +108,17 @@ function shouldTriggerDhtWalk(errMsg: string): boolean {
   return DHT_WALK_TRIGGER_ERRORS.some((needle) => lower.includes(needle));
 }
 
+class MessengerResponseRejectedError extends Error {
+  constructor(protocolId: string, reason: string) {
+    super(`[Messenger] invalid response on ${protocolId}: ${reason}`);
+    this.name = 'MessengerResponseRejectedError';
+  }
+}
+
 function isRecoverableMessengerSendError(err: unknown, errMsg: string): boolean {
-  return isRecoverableSendError(err) || shouldTriggerDhtWalk(errMsg);
+  return err instanceof MessengerResponseRejectedError ||
+    isRecoverableSendError(err) ||
+    shouldTriggerDhtWalk(errMsg);
 }
 
 export interface MessengerDeps {
@@ -430,6 +439,16 @@ export class Messenger {
    * be pure (no side effects) and cheap (microseconds).
    */
   private readonly deliveredResponseClassifiers = new Map<string, (response: Uint8Array) => boolean>();
+  /**
+   * Per-protocol wire-response validators. Unlike delivered-response
+   * classifiers (metrics only), rejection here keeps the exact envelope in
+   * the durable outbox. This is needed for protocols where a remote handler
+   * abort can surface as clean EOF rather than a stream-reset error.
+   */
+  private readonly responseAcceptanceValidators = new Map<
+    string,
+    (response: Uint8Array) => boolean
+  >();
 
   constructor(deps: MessengerDeps & { sloWindowSamples?: number }) {
     this.router = deps.router;
@@ -469,6 +488,32 @@ export class Messenger {
     classifier: (response: Uint8Array) => boolean,
   ): void {
     this.deliveredResponseClassifiers.set(protocolId, classifier);
+  }
+
+  /**
+   * Require an application-valid response before sender idempotency is
+   * recorded or an outbox row is removed. A rejected response is treated as
+   * recoverable so the identical ReliableEnvelope is retried after backoff.
+   */
+  setResponseAcceptanceValidator(
+    protocolId: string,
+    validator: (response: Uint8Array) => boolean,
+  ): void {
+    this.responseAcceptanceValidators.set(protocolId, validator);
+  }
+
+  private assertResponseAccepted(protocolId: string, response: Uint8Array): void {
+    const validator = this.responseAcceptanceValidators.get(protocolId);
+    if (!validator) return;
+    try {
+      if (validator(response)) return;
+    } catch (error) {
+      throw new MessengerResponseRejectedError(
+        protocolId,
+        `validator threw: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    throw new MessengerResponseRejectedError(protocolId, 'validator returned false');
   }
 
   private shouldCountResponseAsDelivered(protocolId: string, response: Uint8Array): boolean {
@@ -728,6 +773,7 @@ export class Messenger {
         envelope,
         opts.timeoutMs,
       );
+      this.assertResponseAccepted(protocolId, response);
       idem.record(peerId, protocolId, messageId, 'out', response);
       outbox.markDelivered(peerId, protocolId, messageId);
       this.noteDeliveredForSlo(protocolId, peerId, messageId, response);
@@ -894,6 +940,7 @@ export class Messenger {
         entry.protocol,
         entry.payload,
       );
+      this.assertResponseAccepted(entry.protocol, response);
       this.idempotencyStore!.record(
         entry.peer,
         entry.protocol,

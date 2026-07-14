@@ -2926,10 +2926,18 @@ describe('runImmediatePostApprovalSync', () => {
     };
     runCatchupThrows?: Error;
     broadcastThrows?: Error;
+    refreshMetaResults?: Array<boolean | Error>;
   }) {
     const calls = {
       ensureAdmittedCalls: [] as string[],
       ensurePeerConnectedCalls: [] as string[],
+      refreshMetaCalls: [] as Array<{
+        cg: string;
+        peer?: string;
+        force?: boolean;
+        approvedAgentAddress?: string;
+        expectedDelegateePeerId?: string;
+      }>,
       runCatchupCalls: [] as Array<{ cg: string; includeSwm: boolean; peers: string[] }>,
       broadcastCalls: [] as Array<{ cg: string; includeSwm: boolean }>,
     };
@@ -2945,6 +2953,32 @@ describe('runImmediatePostApprovalSync', () => {
       (opts.connectedPeers ?? []).map((pid) => ({
         remotePeer: { toString: () => pid },
       }));
+    let metaConfirmed = false;
+    (a as any).refreshMetaFromCurator = async (
+      cg: string,
+      refreshOpts?: {
+        trustedCuratorPeerId?: string;
+        force?: boolean;
+        memberProof?: {
+          approvedAgentAddress: string;
+          expectedDelegateePeerId?: string;
+        };
+      },
+    ) => {
+      calls.refreshMetaCalls.push({
+        cg,
+        peer: refreshOpts?.trustedCuratorPeerId,
+        force: refreshOpts?.force,
+        approvedAgentAddress: refreshOpts?.memberProof?.approvedAgentAddress,
+        expectedDelegateePeerId: refreshOpts?.memberProof?.expectedDelegateePeerId,
+      });
+      const outcome = opts.refreshMetaResults?.[calls.refreshMetaCalls.length - 1] ?? true;
+      if (outcome instanceof Error) throw outcome;
+      if (outcome) metaConfirmed = true;
+      return outcome;
+    };
+    (a as any).hasConfirmedMetaState = async () => metaConfirmed;
+    (a as any).refreshMetaSyncedFlags = async () => undefined;
     (a as any).runCatchupOverPeers = async (
       cg: string,
       includeSwm: boolean,
@@ -2987,10 +3021,22 @@ describe('runImmediatePostApprovalSync', () => {
       runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
     });
 
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-success',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
     await (agent as any).runImmediatePostApprovalSync('test-cg-success', CURATOR_PEER);
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
     expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
+    expect(calls.refreshMetaCalls).toEqual([{
+      cg: 'test-cg-success',
+      peer: CURATOR_PEER,
+      force: true,
+      approvedAgentAddress: agent.getDefaultAgentAddress()?.toLowerCase(),
+      expectedDelegateePeerId: agent.peerId,
+    }]);
     expect(calls.runCatchupCalls).toHaveLength(1);
     expect(calls.runCatchupCalls[0]).toMatchObject({
       cg: 'test-cg-success',
@@ -3009,6 +3055,11 @@ describe('runImmediatePostApprovalSync', () => {
       connectedPeers: [],
     });
 
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-missing-peer',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
     await (agent as any).runImmediatePostApprovalSync('test-cg-missing-peer', CURATOR_PEER);
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
@@ -3019,6 +3070,59 @@ describe('runImmediatePostApprovalSync', () => {
       cg: 'test-cg-missing-peer',
       includeSwm: true,
     });
+  }, 15000);
+
+  it('retries metadata and falls back after curator data succeeds without authoritative metadata', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      refreshMetaResults: [false, false],
+      runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-missing-authoritative-meta',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync(
+      'test-cg-missing-authoritative-meta',
+      CURATOR_PEER,
+    );
+
+    expect(calls.refreshMetaCalls).toHaveLength(2);
+    expect(calls.runCatchupCalls).toHaveLength(1);
+    expect(calls.broadcastCalls).toEqual([{
+      cg: 'test-cg-missing-authoritative-meta',
+      includeSwm: true,
+    }]);
+  }, 15000);
+
+  it('falls back to broadcast when the curator metadata refresh throws', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      refreshMetaResults: [new Error('curator metadata unavailable')],
+      runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-refresh-throws',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-refresh-throws', CURATOR_PEER);
+
+    expect(calls.refreshMetaCalls).toHaveLength(1);
+    expect(calls.runCatchupCalls).toHaveLength(0);
+    expect(calls.broadcastCalls).toEqual([{
+      cg: 'test-cg-refresh-throws',
+      includeSwm: true,
+    }]);
   }, 15000);
 
   // 🔴 Regression for the Lex-on-PR-#517 round-2 / Codex finding: the
@@ -3066,6 +3170,11 @@ describe('runImmediatePostApprovalSync', () => {
       runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
     });
 
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-admission-denied',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
     await (agent as any).runImmediatePostApprovalSync('test-cg-admission-denied', CURATOR_PEER);
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
@@ -3089,6 +3198,11 @@ describe('runImmediatePostApprovalSync', () => {
       },
       connectedPeers: [CURATOR_PEER],
     });
+
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-throw',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
 
     await (agent as any).runImmediatePostApprovalSync('test-cg-throw', CURATOR_PEER);
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { catchupPeerResponded, catchupPeerSucceeded } from '../src/catchup-runner.js';
 
 describe('catchup runner progress accounting', () => {
-  it('does not count no-progress timeouts as peer success', () => {
+  it('does not count timed-out peers as success, including after partial progress', () => {
     expect(catchupPeerSucceeded({
       failedPeers: 0,
       timedOutPhases: 1,
@@ -25,14 +25,14 @@ describe('catchup runner progress accounting', () => {
       resumedPhases: 1,
       checkpointAdvances: 0,
       insertedTriples: 0,
-    }, null, false)).toBe(true);
+    }, null, false)).toBe(false);
 
     expect(catchupPeerSucceeded({
       failedPeers: 0,
       timedOutPhases: 1,
       completedPhases: 0,
       checkpointAdvances: 1,
-    }, null, false)).toBe(true);
+    }, null, false)).toBe(false);
 
     expect(catchupPeerSucceeded({
       failedPeers: 0,
@@ -41,7 +41,7 @@ describe('catchup runner progress accounting', () => {
       checkpointAdvances: 0,
       insertedTriples: 1,
       insertedDataTriples: 1,
-    }, null, false)).toBe(true);
+    }, null, false)).toBe(false);
   });
 
   it('does not count metadata-only delivery as peer success', () => {

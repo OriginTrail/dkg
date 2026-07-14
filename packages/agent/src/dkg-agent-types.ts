@@ -786,6 +786,14 @@ export interface ContextGraphMembershipRecord {
 }
 
 export interface ContextGraphMembershipStore {
+  /**
+   * Load persisted membership facts for restart recovery. Optional so custom
+   * stores written before membership rehydration remain source-compatible.
+   */
+  loadAll?(): Promise<Array<ContextGraphMembershipRecord & {
+    firstSeenAt?: number;
+    updatedAt: number;
+  }>>;
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }
