@@ -2,11 +2,13 @@
 /**
  * dRAG REASONING demo — retrieve → verify → REASON → prove (OT-RFC-55 + EYE).
  *
- * A multi-agent CODE context graph: coding agents publish per-agent, on-chain
- * decision / code / review traces. The EYE reasoner then DERIVES a governance
- * conclusion nobody published — "which in-progress change violates the team's
- * review policy" — using NEGATION and TRANSITIVITY (things vectors/SPARQL can't),
- * and every leaf of the proof is a chain-verified, per-agent-authored citation.
+ * A multi-agent CODE context graph: agents publish on-chain decision/code/review
+ * traces (in the graph root), and the team's POLICY lives as managed, verifiable
+ * rules in a dedicated `rules` sub-graph. EYE reasons over the COMPLETE graph
+ * (root + sub-graphs) and DERIVES a governance conclusion nobody published —
+ * "which change violates the review policy" — using NEGATION + TRANSITIVITY, with
+ * every proof leaf a chain-verified citation. A second, DISABLED rule shows that
+ * rules are managed (a disabled rule never fires).
  *
  * Prereq:  ./scripts/devnet.sh start 4   AND   (cd packages/cli && pnpm i eyereasoner)
  * Run:     node scripts/drag-reason-demo.mjs
@@ -20,20 +22,24 @@ const TOKEN = readFileSync(join(REPO, '.devnet/node1/auth.token'), 'utf8').split
 const N1 = 'http://127.0.0.1:9201';
 const CG = 'code-graph-demo';
 const NS = 'http://ex/code#';
-const RULE_PRED = 'https://ontology.origintrail.io/drag/reasoning#ruleN3';
+const R = 'https://ontology.origintrail.io/drag/reasoning#'; // drag reasoning vocab
+const A = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const c = { b: (s) => `\x1b[1m${s}\x1b[0m`, d: (s) => `\x1b[2m${s}\x1b[0m`, g: (s) => `\x1b[32m${s}\x1b[0m`, r: (s) => `\x1b[31m${s}\x1b[0m`, y: (s) => `\x1b[33m${s}\x1b[0m`, c: (s) => `\x1b[36m${s}\x1b[0m` };
 const hr = (t) => console.log(c.b(`\n${c.c('━'.repeat(76))}\n${t}`));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const local = (u) => String(u).split(/[/#]/).pop();
 const lit = (o) => (typeof o === 'string' && o.startsWith('"') ? o.slice(1).replace(/"$/, '') : local(o));
+const esc = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 
-async function post(p, body, headers = {}) {
-  const r = await fetch(N1 + p, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}`, ...headers }, body: JSON.stringify(body) });
+async function post(p, body) {
+  const r = await fetch(N1 + p, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) });
   let b; try { b = await r.json(); } catch { b = await r.text(); }
   return { status: r.status, b };
 }
-async function publish(name, triples) {
-  const quads = triples.map(([s, p, o]) => ({ subject: s, predicate: p, object: o, graph: '' }));
+// Named-KA lifecycle publish (the canonical authoring path): create → WM write
+// → WM finalize → SWM share → VM publish. IRI objects are BARE.
+async function pub(name, quads, subGraphName) {
+  const sub = subGraphName ? { subGraphName } : {};
   for (let attempt = 0; attempt < 6; attempt++) {
     let ok = true;
     const steps = [
@@ -44,7 +50,7 @@ async function publish(name, triples) {
       [`/api/knowledge-assets/${name}/vm/publish`, {}],
     ];
     for (const [path, extra] of steps) {
-      const { status } = await post(path, { contextGraphId: CG, name, ...extra });
+      const { status } = await post(path, { contextGraphId: CG, name, ...sub, ...extra });
       if (![200, 201].includes(status)) { ok = false; break; }
     }
     if (ok) return true;
@@ -52,99 +58,94 @@ async function publish(name, triples) {
   }
   return false;
 }
+const T = (s, p, o) => ({ subject: NS + s, predicate: p.startsWith('http') ? p : NS + p, object: o, graph: '' });
+const ref = (x) => NS + x; // bare IRI object
 
-// One-line N3 so the rule body is a single literal (only inner quotes escaped).
-const RULES_N3 =
+// The review policy (single-line N3 so the body is one literal).
+const POLICY_N3 =
   `@prefix code: <${NS}>. @prefix log: <http://www.w3.org/2000/10/swap/log#>. @prefix list: <http://www.w3.org/2000/10/swap/list#>. ` +
   `{ ?c code:changes ?f } => { ?f code:affectedBy ?c } . ` +
   `{ ?caller code:calls ?f . ?f code:affectedBy ?c } => { ?caller code:affectedBy ?c } . ` +
   `{ ?c a code:Change . ?c code:changes ?f . ?f code:inModule ?m . ?m code:securityCritical "true" . ` +
   `( ?a { ?c code:reviewedBy ?r . ?r code:reviewer ?a . ?a code:clearance "senior" } ?L ) log:collectAllIn _:s . ?L list:length 0 . } ` +
   `=> { ?c code:violatesReviewPolicy "true" } .`;
-const escLit = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+// A second rule that WOULD flag every change — but it is published DISABLED.
+const FLAG_ALL_N3 = `@prefix code: <${NS}>. { ?c a code:Change } => { ?c code:flagged "true" } .`;
+
+// A managed rule = a typed, status-bearing KA: a drag:ReasoningRule.
+const rule = (id, n3, status) => [
+  { subject: 'urn:rule:' + id, predicate: A, object: R + 'ReasoningRule', graph: '' },
+  { subject: 'urn:rule:' + id, predicate: R + 'ruleStatus', object: esc(status), graph: '' },
+  { subject: 'urn:rule:' + id, predicate: R + 'ruleN3', object: esc(n3), graph: '' },
+];
 
 (async () => {
-  console.log(c.b('\n  dRAG reasoning — derive a verifiable governance conclusion from a multi-agent code graph\n'));
-  // wait for node identity
+  console.log(c.b('\n  dRAG reasoning — rules live in a managed `rules` sub-graph; EYE reasons over the whole context graph\n'));
   for (let i = 0; i < 30; i++) { try { if ((await (await fetch(N1 + '/api/identity', { headers: { Authorization: `Bearer ${TOKEN}` } })).json()).hasIdentity) break; } catch {} await sleep(2000); }
 
-  hr('SETUP — agents publish on-chain code/decision/review traces (+ a rule KA)');
+  hr('SETUP — code/decision/review facts (graph root) + POLICY rules (a `rules` sub-graph)');
   await post('/api/context-graph/create', { id: CG, name: 'multi-agent code graph', accessPolicy: 0, publishPolicy: 0, register: true });
   await sleep(2000);
-  // subjects/predicates are bare IRIs; IRI OBJECTS are wrapped in <> (KA write
-  // convention — they round-trip to bare in the stored triples); literals quoted.
-  // The authoring agent is recorded as a queryable FACT (code:author), as in the
-  // article's "/decisions graph with the author's identity".
-  const ref = (x) => `${NS}${x}`;
-  const T = (s, p, o) => [NS + s, p.startsWith('http') ? p : NS + p, o];
-  const A = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-  // One KA per concern, with DISTINCT rootEntities (a KA's subjects are its root
-  // entities, and a CG rejects a re-used rootEntity). Each decision carries its
-  // own review so D1/D2 are each a rootEntity exactly once.
+  await post('/api/sub-graph/create', { contextGraphId: CG, subGraphName: 'rules' });
+
   const ok = {};
-  // code structure (call graph + criticality) — agentA
-  ok.code = await publish('code-structure', [
+  ok.code = await pub('code-map', [
     T('apiGateway', 'calls', ref('handleAuth')), T('handleAuth', 'calls', ref('validateToken')),
     T('validateToken', 'inModule', ref('authModule')), T('sessionStore', 'inModule', ref('authModule')),
     T('authModule', 'securityCritical', '"true"'),
   ]);
-  // decision D1 (agentA) + its STANDARD-clearance review (agentC)
-  ok.d1 = await publish('decision-d1', [
-    T('D1', A, ref('Change')), T('D1', 'author', ref('agentA')), T('D1', 'changes', ref('validateToken')), T('D1', 'status', '"active"'), T('D1', 'rationale', '"session tokens to JWT"'),
+  ok.d1 = await pub('D1-decision', [
+    T('D1', A, ref('Change')), T('D1', 'author', ref('agentA')), T('D1', 'changes', ref('validateToken')), T('D1', 'status', '"active"'),
     T('D1', 'reviewedBy', ref('R1')), T('R1', 'reviewer', ref('agentC')), T('agentC', 'clearance', '"standard"'),
   ]);
-  // decision D2 (agentB, same critical module) + its SENIOR-clearance review (agentV)
-  ok.d2 = await publish('decision-d2', [
+  ok.d2 = await pub('D2-decision', [
     T('D2', A, ref('Change')), T('D2', 'author', ref('agentB')), T('D2', 'changes', ref('sessionStore')), T('D2', 'status', '"active"'),
     T('D2', 'reviewedBy', ref('R2')), T('R2', 'reviewer', ref('agentV')), T('agentV', 'clearance', '"senior"'),
   ]);
-  // the review policy, as a VERIFIABLE rule KA
-  const ruleOk = await publish('policy-rules', [[NS + 'policyRules', RULE_PRED, escLit(RULES_N3)]]);
-  const factsOk = [ok.code, ok.d1, ok.d2].filter(Boolean).length;
-  console.log(`  ${factsOk === 3 ? c.g('✓') : c.r('✗')} published ${factsOk}/3 fact KAs + rule-KA ${ruleOk ? c.g('ok') : c.r('FAILED')} to ${c.c(CG)}`);
-  console.log(c.d('  D1 (agentA) changes validateToken — security-critical, reviewed only at STANDARD clearance (agentC)'));
-  console.log(c.d('  D2 (agentB) changes sessionStore — same critical module, reviewed at SENIOR clearance (agentV)'));
+  // rules → the `rules` sub-graph: one active policy, one DISABLED rule.
+  ok.policy = await pub('rule-senior-review', rule('senior-review', POLICY_N3, 'active'), 'rules');
+  ok.flag = await pub('rule-flag-all', rule('flag-all', FLAG_ALL_N3, 'disabled'), 'rules');
 
-  hr('REASON — POST /api/answer { reason: true } → EYE derives, over VERIFIED facts only');
-  // The rule-KA (when published) drives reasoning as a VERIFIABLE rule; if it
-  // blipped, fall back to request-supplied rules so the demo always reasons.
-  const reqRules = ruleOk ? undefined : RULES_N3;
-  let R;
+  const allOk = Object.values(ok).every(Boolean);
+  console.log(`  ${allOk ? c.g('✓') : c.r('✗')} facts → ${c.c(CG)} (root) · rules → ${c.c(CG + '/rules')} sub-graph`);
+  console.log(c.d('  rules: ') + c.g('senior-review [active]') + c.d(' — critical change needs a senior review · ') + c.r('flag-all [disabled]') + c.d(' — would flag every change'));
+  console.log(c.d('  D1 (agentA) changes validateToken (critical), reviewed at STANDARD · D2 (agentB) changes sessionStore (critical), reviewed at SENIOR'));
+
+  hr('REASON — POST /api/answer { reason: true } → EYE over the COMPLETE graph (root + rules sub-graph)');
+  let res;
   for (let i = 0; i < 15; i++) {
-    R = (await post('/api/answer', { contextGraphId: CG, question: 'which changes violate the review policy?', reason: true, ...(reqRules ? { rules: reqRules } : {}) })).b;
-    if (R?.reasoning?.derived?.length) break;
+    res = (await post('/api/answer', { contextGraphId: CG, question: 'which changes violate the review policy?', reason: true })).b;
+    if (res?.reasoning?.derived?.length) break;
     process.stdout.write(c.d('.'));
     await sleep(4000);
   }
   console.log();
-  const der = R?.reasoning?.derived ?? [];
-  if (!der.length) { console.log(c.r('  no derivations — ' + (R?.reasoning?.note ?? 'reasoning did not run')), JSON.stringify(R?.reasoning ?? R).slice(0, 300)); return; }
+  const der = res?.reasoning?.derived ?? [];
+  if (!der.length) { console.log(c.r('  no derivations — ' + (res?.reasoning?.note ?? 'reasoning did not run'))); return; }
 
   const violations = der.filter((d) => d.conclusion.predicate.endsWith('violatesReviewPolicy'));
   const impact = der.filter((d) => d.conclusion.predicate.endsWith('affectedBy'));
+  const flagged = der.filter((d) => d.conclusion.predicate.endsWith('flagged'));
 
   hr('⚖  DERIVED — review-policy violations (nobody published these; EYE inferred them)');
   for (const v of violations) {
-    console.log(`  ${c.r('✗ ' + local(v.conclusion.subject))} ${c.b('violatesReviewPolicy')}   ${c.d('(security-critical change with no senior review)')}`);
-    console.log(c.d('     proof — each leaf is a chain-verified citation:'));
-    for (const cit of v.support) {
-      const t = cit.triple, ok = cit.checks?.verified;
-      console.log(`       ${ok ? c.g('✓') : c.r('✗')} ${local(t.subject)} ${c.c(local(t.predicate))} ${lit(t.object)}   ${c.d('[KA ' + String(cit.kaId).slice(0, 8) + '… auth ' + String(cit.onChain?.author ?? '?').slice(0, 8) + '…]')}`);
-    }
+    console.log(`  ${c.r('✗ ' + local(v.conclusion.subject))} ${c.b('violatesReviewPolicy')}   ${c.d('(security-critical change, no senior review)')}`);
+    for (const cit of v.support) console.log(`       ${cit.checks?.verified ? c.g('✓') : c.r('✗')} ${local(cit.triple.subject)} ${c.c(local(cit.triple.predicate))} ${lit(cit.triple.object)}`);
   }
   const compliant = ['D1', 'D2'].map((x) => NS + x).filter((s) => !violations.some((v) => v.conclusion.subject === s));
-  console.log(`  ${c.g('✓ ' + compliant.map(local).join(', '))} ${c.d('— compliant (senior review satisfies the policy; same critical module, different outcome)')}`);
+  console.log(`  ${c.g('✓ ' + compliant.map(local).join(', '))} ${c.d('— compliant (senior review satisfies the policy)')}`);
 
   hr('🔗 DERIVED — transitive impact (a change ripples up the call graph)');
-  const byChange = {};
-  for (const d of impact) (byChange[local(d.conclusion.object)] ??= []).push(local(d.conclusion.subject));
-  for (const [chg, fns] of Object.entries(byChange)) console.log(`  ${c.b(chg)} affects → ${c.y(fns.join(', '))}`);
+  const by = {};
+  for (const d of impact) (by[local(d.conclusion.object)] ??= []).push(local(d.conclusion.subject));
+  for (const [chg, fns] of Object.entries(by)) console.log(`  ${c.b(chg)} affects → ${c.y(fns.join(', '))}`);
 
-  hr('RULES applied (themselves verifiable KAs)');
-  for (const rc of R.reasoning.rules ?? []) console.log(`  ${c.g('✓')} rule KA ${c.d(String(rc.kaId).slice(0, 10) + '…')} ${c.d('author ' + String(rc.onChain?.author ?? '?').slice(0, 8) + '…')}`);
+  hr('🛠  RULE MANAGEMENT — rules are first-class, verifiable, status-gated KAs');
+  for (const rc of res.reasoning.rules ?? []) console.log(`  ${c.g('✓ applied')} ${c.d('rule KA ' + String(rc.kaId).slice(0, 10) + '… (from the rules sub-graph, verifiable)')}`);
+  console.log(`  ${c.r('∅ skipped')} ${c.d('flag-all — drag:ruleStatus "disabled" → never fires (' + (flagged.length ? c.r('LEAKED ' + flagged.length) : 'no `flagged` derived ✓') + ')')}`);
 
   console.log(c.b(`\n${c.c('━'.repeat(76))}`));
-  console.log(`  retrieve → verify → ${c.b('reason')} → ${c.b('prove')}: a governance conclusion DERIVED with negation +`);
-  console.log(`  transitivity, every input fact + the rule cryptographically auditable. An LLM can't show its work; EYE can.`);
+  console.log(`  retrieve → verify → ${c.b('reason')} → ${c.b('prove')}: rules managed in the graph, a governance conclusion`);
+  console.log(`  DERIVED with negation + transitivity — every fact AND rule cryptographically auditable.`);
   console.log(c.b(`${c.c('━'.repeat(76))}\n`));
 })();

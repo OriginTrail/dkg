@@ -383,6 +383,10 @@ export class DragMethods extends DKGAgentBase {
     const onChainIdStr = await this.getContextGraphOnChainId(contextGraphId).catch(() => null);
     if (!onChainIdStr || !/^\d+$/.test(onChainIdStr) || BigInt(onChainIdStr) === 0n) return empty();
     const cgOnChainId = BigInt(onChainIdStr);
+    // Root verifiable memory only. NOTE: sub-graph VM (e.g. `…/{cg}/rules/_verifiable_memory/…`)
+    // is intentionally NOT scanned — the proof-extraction core (extractV10KCFromStore →
+    // contextGraphDataUri) resolves a KA's graph as CG-root, so a sub-graph KA cannot yet
+    // be cited. Reasoning over sub-graphs is a follow-up gated on sub-graph-aware extraction.
     const vmPrefix = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/`;
     const cap = Math.max(1, Math.min(opts?.cap ?? 200, 1000));
     // Bound the TOTAL fact set (not just KA count) — the reasoner's runtime grows

@@ -404,6 +404,13 @@ export interface DragConfig {
   /** Cap on KAs gathered for reasoning (default 200). */
   reasoningMaxKas?: number;
   /**
+   * Governance allowlist for auto-discovered rule-KAs: if set, only rules whose
+   * on-chain author is in this list are trusted (0x addresses, case-insensitive).
+   * Use on PUBLIC CGs where any publisher could plant a rule. Unset = trust every
+   * verified rule-KA in the CG (fine for curated CGs the operator controls).
+   */
+  reasoningRuleAuthors?: string[];
+  /**
    * Allow per-request retrieval/embedder/price overrides (`embedder`,
    * `simulatePrice`) on POST /api/answer. For development + testing only;
    * default false (keeps the public answer contract clean).

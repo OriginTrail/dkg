@@ -21,12 +21,19 @@
 import { tripleContentV10, type CitationTriple, type VerifiableCitation } from '@origintrail-official/dkg-core';
 
 /**
- * Predicate that carries an N3 rule body as a verified literal — so RULES are
- * themselves chain-published, verifiable KAs ("verified facts + verified rules
- * → conclusions with verified evidence"). A CG's rules are auto-discovered from facts
- * with this predicate.
+ * Reasoning-rule vocabulary. A RULE is a verifiable KA (typically published into
+ * a CG's `rules` sub-graph) that carries its N3 body as a literal — so rules are
+ * themselves chain-published ("verifiable facts + verifiable rules → verifiable
+ * derivations"). They are managed objects: typed, status-gated, governable.
+ *
+ *   <rule>  a            drag:ReasoningRule ;
+ *           drag:ruleN3  "{ … } => { … } ." ;   # the body (DRAG_RULE_PREDICATE)
+ *           drag:ruleStatus "active" .          # active (default) | disabled
  */
-export const DRAG_RULE_PREDICATE = 'https://ontology.origintrail.io/drag/reasoning#ruleN3';
+export const DRAG_RULE_NS = 'https://ontology.origintrail.io/drag/reasoning#';
+export const DRAG_RULE_PREDICATE = DRAG_RULE_NS + 'ruleN3';
+export const DRAG_RULE_TYPE = DRAG_RULE_NS + 'ReasoningRule';
+export const DRAG_RULE_STATUS = DRAG_RULE_NS + 'ruleStatus';
 
 export interface VerifiedFact {
   triple: CitationTriple;

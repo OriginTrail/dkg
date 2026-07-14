@@ -41,7 +41,7 @@ import type { EmbeddingProvider } from '../../vector-store.js';
 import { VectorEntityRetriever } from '../drag-retriever.js';
 import { buildEmbedder, resolveSemanticEmbedder, type EmbedderKind } from '../drag-embedder.js';
 import { synthesizeAnswer } from '../drag-synthesize.js';
-import { DragReasoner, DRAG_RULE_PREDICATE, type ReasoningResult } from '../drag-reasoner.js';
+import { DragReasoner, DRAG_RULE_PREDICATE, DRAG_RULE_STATUS, type ReasoningResult } from '../drag-reasoner.js';
 import { validateContextGraphId, type VerifiableCitation, type CitationTriple } from '@origintrail-official/dkg-core';
 
 // Development verifier only: exercises the request-bound x402 challenge flow
@@ -73,39 +73,49 @@ function unquoteLiteral(o: string): string | null {
 }
 
 /**
- * Resolve the N3 rules to apply: auto-discover VERIFIABLE rule-KAs (verified
- * facts whose predicate is DRAG_RULE_PREDICATE — so the rules are themselves
- * chain-proven), then append any request-supplied `rules` N3.
+ * Resolve the N3 rules to apply, from VERIFIABLE rule-KAs in the CG (a rule is a
+ * verified fact `<rule> drag:ruleN3 "<n3>"`, typically published into a `rules`
+ * sub-graph) — so the rules are themselves chain-proven — then append any
+ * request-supplied `rules`. Rules are MANAGED: a rule whose `drag:ruleStatus` is
+ * `"disabled"` is skipped, and (governance) when `ruleAuthors` is set, only rules
+ * whose on-chain author is allow-listed are trusted.
  */
 const MAX_RULES = 50;
 const MAX_RULES_BYTES = 64 * 1024;
 function resolveRules(
   facts: Array<{ triple: CitationTriple; citation: VerifiableCitation }>,
   requestRules?: string,
+  ruleAuthors?: string[],
 ): { rulesN3: string; ruleCitations: VerifiableCitation[] } {
-  // Bound rule count + total size. Auto-discovered rule-KAs are AUTHOR-untrusted
-  // (any publisher to a public CG can plant one) — these caps blunt a planted
-  // many-rule / huge-rule blowup. NOTE: they do NOT bound an adversarial rule's
-  // RUNTIME; EYE runs in-process and an in-process timeout cannot interrupt the
-  // blocking WASM (worker-thread isolation is the planned hardening — see the
-  // dRAG guide). Operators exposing the API beyond loopback, or reasoning over
-  // untrusted public CGs, should leave the default `config.drag.reasoning: false`.
+  // Index by rule subject so a rule's body, status and author travel together.
+  const bodies = new Map<string, { n3: string; citation: VerifiableCitation }>();
+  const disabled = new Set<string>();
+  for (const f of facts) {
+    if (f.triple.predicate === DRAG_RULE_PREDICATE) {
+      const n3 = unquoteLiteral(f.triple.object);
+      if (n3) bodies.set(f.triple.subject, { n3, citation: f.citation });
+    } else if (f.triple.predicate === DRAG_RULE_STATUS && unquoteLiteral(f.triple.object) === 'disabled') {
+      disabled.add(f.triple.subject);
+    }
+  }
+  const allow = ruleAuthors && ruleAuthors.length ? new Set(ruleAuthors.map((a) => a.toLowerCase())) : null;
+  // Bound rule count + total size. NOTE: caps do NOT bound an adversarial rule's
+  // RUNTIME — EYE runs in-process and an in-process timeout can't interrupt the
+  // blocking WASM (worker-thread isolation is the planned hardening). On public
+  // CGs, set `reasoningRuleAuthors` (governance) and/or `reasoning:false`.
   const parts: string[] = [];
   const ruleCitations: VerifiableCitation[] = [];
   let bytes = 0;
-  for (const f of facts) {
+  for (const [subject, { n3, citation }] of bodies) {
     if (parts.length >= MAX_RULES || bytes >= MAX_RULES_BYTES) break;
-    if (f.triple.predicate === DRAG_RULE_PREDICATE) {
-      const n3 = unquoteLiteral(f.triple.object);
-      if (n3) {
-        const room = MAX_RULES_BYTES - bytes;
-        if (room <= 0) break;
-        const bounded = n3.slice(0, room);
-        parts.push(bounded);
-        bytes += bounded.length;
-        ruleCitations.push(f.citation);
-      }
-    }
+    if (disabled.has(subject)) continue; // managed: a disabled rule never fires
+    if (allow && !allow.has(String(citation.onChain?.author ?? '').toLowerCase())) continue; // governance
+    const room = MAX_RULES_BYTES - bytes;
+    if (room <= 0) break;
+    const bounded = n3.slice(0, room);
+    parts.push(bounded);
+    bytes += bounded.length;
+    ruleCitations.push(citation);
   }
   if (requestRules && requestRules.trim() && bytes < MAX_RULES_BYTES) parts.push(requestRules.slice(0, MAX_RULES_BYTES - bytes));
   return { rulesN3: parts.join('\n'), ruleCitations };
@@ -382,7 +392,11 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
               note: `reasoning refused: verified fact set is incomplete (${gathered.graphsSkipped} skipped, truncated=${gathered.truncated})`,
             };
           } else {
-            const { rulesN3, ruleCitations } = resolveRules(gathered.facts, typeof parsed.rules === 'string' ? parsed.rules : undefined);
+            const { rulesN3, ruleCitations } = resolveRules(
+              gathered.facts,
+              typeof parsed.rules === 'string' ? parsed.rules : undefined,
+              config.drag?.reasoningRuleAuthors,
+            );
             if (rulesN3) {
               reasoning = await dragReasoner.reason(gathered.facts, rulesN3);
               if (ruleCitations.length) reasoning.rules = ruleCitations;
