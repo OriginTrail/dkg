@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { PROTOCOL_JOIN_REQUEST } from '@origintrail-official/dkg-core';
+import { DKGEvent, PROTOCOL_JOIN_REQUEST } from '@origintrail-official/dkg-core';
 import {
   DKGAgent,
   signAgentDelegation,
@@ -1137,6 +1137,51 @@ describe('context graph open enrollment policy', () => {
       agent.peerId,
     )).rejects.toThrow(/queue.*full/i);
     expect(storePending).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('does not auto-evaluate or notify an exact replay of a rejected request', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-rejected-replay';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const joiner = await agent.registerAgent('rejected-replay', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const emit = vi.spyOn((agent as any).eventBus, 'emit');
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending', reason: 'manual-policy' });
+    (agent as any).notifyJoinRejection = vi.fn(async () => {});
+    await agent.rejectJoinRequest(contextGraphId, joiner.agentAddress, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+
+    const reservationsBefore = policyStore.audit.filter(
+      (event) => event.eventType === 'join_auto_reservation',
+    ).length;
+    const notificationsBefore = emit.mock.calls.filter(
+      ([event]) => event === DKGEvent.JOIN_REQUEST_RECEIVED,
+    ).length;
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).rejects.toThrow(/already rejected.*newly signed request/i);
+
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('rejected');
+    expect(policyStore.audit.filter(
+      (event) => event.eventType === 'join_auto_reservation',
+    )).toHaveLength(reservationsBefore);
+    expect(emit.mock.calls.filter(
+      ([event]) => event === DKGEvent.JOIN_REQUEST_RECEIVED,
+    )).toHaveLength(notificationsBefore);
   }, 30_000);
 
   it('gives a manual-policy request priority over queued automatic admissions', async () => {

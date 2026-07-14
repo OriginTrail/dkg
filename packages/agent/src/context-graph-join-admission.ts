@@ -118,7 +118,7 @@ export interface ContextGraphJoinAdmissionHost {
     contextGraphId: string,
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
-  ): Promise<void>;
+  ): Promise<boolean>;
   emitPendingJoinRequest(input: {
     contextGraphId: string;
     agentAddress: string;
@@ -468,7 +468,17 @@ export class ContextGraphJoinAdmission {
         `Join-request queue for "${contextGraphId}" is full (${MAX_PENDING_JOIN_REQUESTS_PER_CONTEXT_GRAPH}); try again after curator review.`,
       );
     }
-    await this.host.storePendingJoinRequest(contextGraphId, delegation, agentName);
+    const persisted = await this.host.storePendingJoinRequest(
+      contextGraphId,
+      delegation,
+      agentName,
+    );
+    if (!persisted && existingRequestStatus && existingRequestStatus !== 'pending') {
+      throw new Error(
+        `Join request generation is already ${existingRequestStatus}; `
+        + 'submit a newly signed request to retry.',
+      );
+    }
   }
 
   private async leavePending(

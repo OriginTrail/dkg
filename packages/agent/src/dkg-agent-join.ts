@@ -1068,7 +1068,7 @@ export class JoinRequestMethods extends DKGAgentBase {
           delegation,
           agentName,
           { emitNotification: false },
-        ).then(() => undefined),
+        ),
       emitPendingJoinRequest: ({ contextGraphId, agentAddress, agentName }) => {
         this.eventBus.emit(DKGEvent.JOIN_REQUEST_RECEIVED, {
           contextGraphId,
