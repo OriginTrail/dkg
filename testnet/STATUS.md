@@ -116,3 +116,41 @@ the operator deletes the file.
 4. `scenario.mjs` ledger-unavailable signature deltas now emit `gatedTotal`/
    `recordedTotal` `null` (was `0`) + `ledgerVersion: null`, matching
    `fleet.journalSignatureDeltas`' never-silent-zeroes discipline.
+
+## Live shakedown — first scored certify (2026-07-14, certify-94f3c78c-r1)
+
+**Verdict: `SAFETY_ABORT` (exit 3), by design.** ~15 min into the workload,
+core-2's cgroup `memory.current` reached **98.4% of `memory.high`** (threshold
+0.95) — the S3 early-warning trip fired, in-flight ops were quiesced (scored
+`aborted`, excluded from denominators), and the run ended terminal with a
+60-min cooldown (`runs/safety-abort.json`; operator clearance = delete it).
+Core-2 receded to 79% after quiesce. 174 fleet snapshots + 173 host-telemetry
+records + full signature deltas captured.
+
+Everything the review rounds hardened fired for real on the first run:
+- **Mid-run artifact change**: the canary auto-update recycled all 4 core
+  workers during the run → every network-dependent gate scored
+  `INCONCLUSIVE (fleet-artifact-changed)`; only fleet gates scored.
+- **Coverage/partial semantics**: public lane 23/23 success (1.0) before
+  quiesce; per-KA publish p95 reported but not gated (inconclusive).
+- **Terminal SAFETY_ABORT precedence** over gate outcomes, cooldown persisted.
+
+Network findings (for operators, not harness bugs):
+1. **`rfc59-private` CG is publish-dead**: every private-lane publish stalls in
+   ACK collection — cores decline `NO_DATA_IN_SWM` (private ciphertext staging
+   never reaches them; the CG predates the 2026-07-10 core wipes, and today's
+   passing rfc59 smoke used *freshly created* smoke CGs instead). Private-lane
+   certify needs a freshly registered private CG (or the custody fix).
+2. **Core-2's 1.5 GiB `memory.high` is too tight for publish load** (idles at
+   ~80%); any sustained battery will re-trip S3 until the ceiling or the RSS
+   is addressed.
+3. `sync_timeout` signature storms on two cores during the auto-update window;
+   `oom_sigkill` ledger class matched exactly 2 lines/core at restart time —
+   likely the updater's worker SIGKILL, not kernel OOM → ledger v2 TODO:
+   split/disposition that class.
+
+Harness fixes from the shakedown (in this branch): job-poll deadline messages
+now classify as `timeout` (were `error:unclassified`); the inconclusive reason
+is `fleet-artifact-changed` (a same-commit worker recycle also invalidates);
+`ps` KiB→bytes RSS conversion; `reuse:<name>` CG resolution via gitignored
+`fleet.json` `cgs` map (actual ids to the API, logical names in evidence).

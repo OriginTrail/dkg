@@ -63,7 +63,11 @@ export function classifyFailure(e) {
   }
   if (/readback[^a-z]{0,10}mismatch/.test(t)) return 'readback_mismatch';
   if (t.includes('timed out') || t.includes('timeout') || t.includes('etimedout')
-    || t.includes('deadline exceeded')) return 'timeout';
+    || t.includes('deadline exceeded')
+    // edge.mjs job-poll deadline message: "... did not reach finalized|failed
+    // within 180000ms (last state: validated)" — first live certify run
+    // (certify-94f3c78c-r1) surfaced this as error:unclassified.
+    || /did not reach .{0,40} within \d+ms/.test(t)) return 'timeout';
   if (t.includes('operation was aborted') || t.includes('aborterror')) return 'aborted';
 
   const excerpt = raw.trim().slice(0, 200) || '<empty>';

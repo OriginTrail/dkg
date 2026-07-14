@@ -29,7 +29,7 @@ import * as config from '../lib/config.mjs';
 import { EdgeClient } from '../lib/edge.mjs';
 import * as evidenceMod from '../lib/evidence.mjs';
 import * as fleetMod from '../lib/fleet.mjs';
-import { buildGates, runPublishScenario } from '../lib/scenario.mjs';
+import { buildGates, resolveCgMap, runPublishScenario } from '../lib/scenario.mjs';
 import * as scoringMod from '../lib/scoring.mjs';
 import { sleep } from '../lib/util.mjs';
 import * as watchMod from '../lib/watch.mjs';
@@ -249,6 +249,7 @@ export async function cmdCertify(args, deps = {}) {
     EdgeClient,
     runScenario: runPublishScenario,
     buildGates,
+    resolveCgMap,
     writeFile: writeFileSync,
     log: console.log,
     error: console.error,
@@ -375,6 +376,19 @@ export async function cmdCertify(args, deps = {}) {
     pass: 'skipped',
     evidence: { todo: 'CG registration/visibility preflight not implemented in Phase 0' },
   });
+  // reuse:<name> CG mappings must resolve via local fleet.json cgs (S6: actual
+  // ids stay out of committed files and out of evidence — logical names only).
+  let cgMap = null;
+  try {
+    cgMap = d.resolveCgMap(scenario, fleet);
+    checks.push({
+      id: 'cg_mapping_resolved',
+      pass: true,
+      evidence: { lanes: Object.fromEntries(Object.entries(cgMap).map(([l, s]) => [l, s.logical])) },
+    });
+  } catch (err) {
+    checks.push({ id: 'cg_mapping_resolved', pass: false, evidence: { problem: String(err?.message ?? err) } });
+  }
 
   const preflightOk = checks.every((c) => c.pass === true || c.pass === 'skipped');
   evidence.write('preflight', {
@@ -423,7 +437,7 @@ export async function cmdCertify(args, deps = {}) {
   const ledger = existsSync(ledgerPath) ? d.loadLedger(ledgerPath) : null;
 
   const run = await d.runScenario({
-    scenario, fleet, policy, edge, evidence, runId, baseline, ledger,
+    scenario, fleet, policy, edge, evidence, runId, baseline, ledger, cgMap,
   });
 
   if (run.safetyAborted) {

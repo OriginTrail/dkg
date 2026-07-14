@@ -166,11 +166,24 @@ export function loadFleet(path) {
     problems.push('fleet: sshConnectTimeoutSec must be a number > 0');
   }
 
+  if (json.cgs !== undefined) {
+    if (!isObj(json.cgs)) {
+      problems.push('fleet: cgs must be an object mapping logical CG names to actual CG ids');
+    } else {
+      for (const [logical, actual] of Object.entries(json.cgs)) {
+        if (!ALIAS_RE_GENERIC.test(logical)) problems.push(`fleet: cgs key '${logical}' must be a logical kebab name`);
+        // S6: never echo the actual id (may embed a wallet address) into errors.
+        if (!isNonEmptyStr(actual)) problems.push(`fleet: cgs['${logical}'] must be a non-empty CG id string`);
+      }
+    }
+  }
+
   throwIfProblems(problems);
   return {
     cores: json.cores,
     edges: json.edges,
     seeds: json.seeds,
+    cgs: json.cgs ?? {},
     sshConcurrency: json.sshConcurrency,
     sshConnectTimeoutSec: json.sshConnectTimeoutSec,
     network: json.network,

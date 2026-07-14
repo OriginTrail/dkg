@@ -80,11 +80,43 @@ export function attestationFromSnapshotCore(core) {
   };
 }
 
+/**
+ * Resolve the scenario's per-lane CG spec to {logical, actual} pairs.
+ * `reuse:<name>` looks <name> up in fleet.cgs (local, gitignored — actual ids
+ * may embed wallet addresses, which never enter committed files or evidence);
+ * a bare value is used as-is for both. Missing reuse mapping → throw (the
+ * caller turns this into a failing preflight check, not a crash mid-workload).
+ * @param {object} scenario @param {object} fleet
+ * @returns {Record<string, {logical: string, actual: string}>}
+ */
+export function resolveCgMap(scenario, fleet) {
+  const out = {};
+  for (const lane of scenario.lanes || Object.keys(scenario.cg || {})) {
+    const raw = (scenario.cg || {})[lane];
+    if (typeof raw !== 'string' || raw.length === 0) {
+      throw new Error(`resolveCgMap: scenario.cg.${lane} missing`);
+    }
+    if (raw.startsWith('reuse:')) {
+      const logical = raw.slice('reuse:'.length);
+      const actual = (fleet?.cgs || {})[logical];
+      if (typeof actual !== 'string' || actual.length === 0) {
+        throw new Error(`resolveCgMap: fleet.json cgs['${logical}'] mapping missing for lane '${lane}'`);
+      }
+      out[lane] = { logical, actual };
+    } else {
+      out[lane] = { logical: raw, actual: raw };
+    }
+  }
+  return out;
+}
+
 /** One full KA lifecycle op: create → share → publish → VM finalization. */
 async function runOneOp(ctx, lane, index, wave) {
   const { scenario, edge, evidence, runId, ctl, now, pollIntervalMs, opTimeoutMs } = ctx;
   const workload = scenario.workload || {};
-  const cg = (scenario.cg || {})[lane];
+  // API calls speak the ACTUAL CG id; evidence records carry the LOGICAL name (S6).
+  const cgSpec = ctx.cgMap?.[lane] ?? { logical: (scenario.cg || {})[lane], actual: (scenario.cg || {})[lane] };
+  const cg = cgSpec.actual;
   const payload = ctx.makePayload({
     runId,
     lane,
@@ -105,7 +137,7 @@ async function runOneOp(ctx, lane, index, wave) {
     const record = {
       op: workload.op || 'publish',
       lane,
-      cg,
+      cg: cgSpec.logical,
       index,
       wave,
       name,
@@ -259,6 +291,7 @@ async function runLaneBurst(ctx, { lane, wave, count, indexOffset, concurrency }
  */
 export async function runPublishScenario(p) {
   const { scenario, fleet, policy, edge, evidence, runId, baseline, snapshotIntervalMs = 5000 } = p;
+  const cgMap = p.cgMap ?? resolveCgMap(scenario, fleet);
   const now = p._now || Date.now;
   const snapshotFleetFn = p._snapshotFleet || fleetMod.snapshotFleet;
   const evaluateTripsFn = p._evaluateTrips || watchMod.evaluateTrips;
@@ -282,7 +315,7 @@ export async function runPublishScenario(p) {
 
   const ctx = {
     scenario, edge, evidence, runId, ctl, now, pollIntervalMs, opTimeoutMs,
-    inflight, attemptsLog, opResults, makePayload,
+    inflight, attemptsLog, opResults, makePayload, cgMap,
     // classifyFailure throws on unknown modes (never fold silently); the
     // composed `error:<class>` form is the sanctioned catch-side fallback.
     classify: (e) => {
@@ -388,7 +421,7 @@ export async function runPublishScenario(p) {
             ? { matched: 0, mismatches: [] }
             : await verifyReadbackFn(edge, {
               items,
-              cg: scenario.cg?.[lane],
+              cg: cgMap?.[lane]?.actual ?? scenario.cg?.[lane],
               view: 'verifiable-memory',
               chunkSize: scenario.readback?.chunkSize,
             });
@@ -592,15 +625,19 @@ export function buildGates(p) {
   const successes = scored.filter((o) => o.outcome === 'success');
   const gates = [];
 
-  // §3.1 mid-run SHA change: final snapshot attestation vs baseline attestation.
-  let shaChanged = false;
+  // §3.1 mid-run running-artifact change: final snapshot attestation vs
+  // baseline. sameArtifact compares commit AND pid AND start-ts, so an
+  // auto-update recycle onto the SAME commit still (correctly) invalidates —
+  // the label says "artifact", not "sha", for exactly that case (seen live:
+  // certify-94f3c78c-r1 caught a fleet-wide worker recycle mid-run).
+  let artifactChanged = false;
   for (const core of run.finalSnapshot?.cores || []) {
     if (core.reachable === false) continue;
     const base = (baseline?.attested || []).find((a) => a.alias === core.alias);
     if (!base || base.attested === false) continue;
-    if (!sameArtifact(base, attestationFromSnapshotCore(core))) { shaChanged = true; break; }
+    if (!sameArtifact(base, attestationFromSnapshotCore(core))) { artifactChanged = true; break; }
   }
-  const inc = shaChanged ? { inconclusiveReason: 'fleet-sha-changed' } : {};
+  const inc = artifactChanged ? { inconclusiveReason: 'fleet-artifact-changed' } : {};
 
   const sr = g.successRate || {};
   gates.push({

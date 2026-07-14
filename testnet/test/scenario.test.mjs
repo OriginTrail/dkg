@@ -88,9 +88,12 @@ function makeFakeEdge({ recover = new Set(), hardFail = new Set(), phaseDelayMs 
   let jobSeq = 0;
   const jobs = new Map();
   const opKey = (name) => name.slice(name.indexOf(RUN_ID) + RUN_ID.length + 1); // "<lane>-<index>"
+  const cgSeen = new Set();
   return {
+    cgSeen, // ACTUAL cg ids the API layer received (reuse:-resolution teeth)
     async status() { return { commit: 'deadbeefcafe0123', name: 'driver-fake' }; },
     async createKnowledgeAsset(p) {
+      cgSeen.add(p.cg);
       if (phaseDelayMs) await sleep(phaseDelayMs);
       return { ok: true, name: p.name };
     },
@@ -213,7 +216,9 @@ const policyFixture = () => ({
 function baseRunParams(overrides = {}) {
   return {
     scenario: scenarioFixture(),
-    fleet: { cores: [{ alias: 'core-1' }] },
+    // reuse: specs resolve through fleet.cgs — evidence must carry the LOGICAL
+    // names (pub/priv); API calls must receive the ACTUAL ids (cg-*-actual).
+    fleet: { cores: [{ alias: 'core-1' }], cgs: { pub: 'cg-pub-actual', priv: 'cg-priv-actual' } },
     policy: policyFixture(),
     evidence: new FakeEvidence(),
     runId: RUN_ID,
@@ -273,6 +278,11 @@ test('healthy run: op_results, recovery re-scoring, readbacks, PASS verdict', as
   // Unique UALs across the run.
   assert.equal(new Set(run.opResults.map((o) => o.ual)).size, 12);
 
+  // reuse: CG resolution split (S6): the API layer received the ACTUAL ids from
+  // fleet.cgs, while every evidence record carries only the LOGICAL names.
+  assert.deepEqual([...edge.cgSeen].sort(), ['cg-priv-actual', 'cg-pub-actual']);
+  assert.ok(run.opResults.every((o) => o.cg === 'pub' || o.cg === 'priv'));
+
   // Per-wave, per-lane byte-exact readback.
   assert.equal(run.readbacks.length, 4);
   assert.ok(run.readbacks.every((rb) => rb.expected === 3 && rb.matched === 3
@@ -326,7 +336,7 @@ test('healthy run: op_results, recovery re-scoring, readbacks, PASS verdict', as
   });
   for (const id of ['success_rate_overall', 'success_rate_public', 'success_rate_private',
     'publish_p95_ms', 'control_fixtures', 'unique_uals', 'readback_mismatches']) {
-    assert.equal(changed.find((g) => g.id === id).inconclusiveReason, 'fleet-sha-changed', id);
+    assert.equal(changed.find((g) => g.id === id).inconclusiveReason, 'fleet-artifact-changed', id);
   }
   assert.equal(changed.find((g) => g.id === 'fleet_core_restarts').inconclusiveReason, undefined);
   const changedVerdict = localComputeVerdict({ gates: changed.map(localEvaluateGate), safetyAbort: false });
