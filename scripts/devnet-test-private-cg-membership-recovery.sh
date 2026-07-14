@@ -5,11 +5,14 @@
 # Reproduces the v10.0.6 bootstrap inconsistency without mocks:
 #
 #   * node 5 creates a curated CG and is its only member;
+#   * in auto mode, node 5 enables bounded open enrollment before going offline;
 #   * node 5 writes root + sub-graph shared-memory fixtures;
 #   * node 5 goes offline;
 #   * fresh node 6 subscribes while only unrelated cores can answer;
 #   * the subscription state is inspected through both HTTP and node-ui.db;
-#   * node 5 returns, node 6 requests admission, and node 5 approves it;
+#   * node 5 returns and node 6 requests admission; node 5 either exposes the
+#     request for manual approval or automatically approves it through the
+#     persisted open-enrollment policy;
 #   * recovery (or the persistent v10.0.6 wedge) is measured across a node-6
 #     restart.
 #
@@ -17,7 +20,11 @@
 #
 #   ./scripts/devnet.sh start 6
 #   HARNESS_EXPECT=broken ./scripts/devnet-test-private-cg-membership-recovery.sh
-#   HARNESS_EXPECT=fixed  ./scripts/devnet-test-private-cg-membership-recovery.sh
+#   HARNESS_EXPECT=fixed ADMISSION_MODE=manual ./scripts/devnet-test-private-cg-membership-recovery.sh
+#   HARNESS_EXPECT=fixed ADMISSION_MODE=auto   ./scripts/devnet-test-private-cg-membership-recovery.sh
+#
+# ADMISSION_MODE defaults to manual. Auto mode requires the open-enrollment
+# implementation and is intended for current/fixed builds.
 #
 # `broken` passes only after observing the exact false-ready state:
 # synced=1, shared_memory_synced=1, meta_synced!=1, no local CG data, and at
@@ -47,6 +54,9 @@ SUB_GRAPH_NAME="${SUB_GRAPH_NAME:-ai-tools}"
 ROOT_TRIPLES="${ROOT_TRIPLES:-3}"
 SUB_GRAPH_TRIPLES="${SUB_GRAPH_TRIPLES:-5}"
 HARNESS_EXPECT="${HARNESS_EXPECT:-}"
+ADMISSION_MODE="${ADMISSION_MODE:-manual}"
+AUTO_MAX_MEMBERS="${AUTO_MAX_MEMBERS:-10}"
+AUTO_MAX_APPROVALS_PER_HOUR="${AUTO_MAX_APPROVALS_PER_HOUR:-5}"
 HARNESS_ARTIFACT_DIR="${HARNESS_ARTIFACT_DIR:-$REPO_ROOT/.harness-artifacts}"
 CATCHUP_TIMEOUT_S="${CATCHUP_TIMEOUT_S:-120}"
 JOIN_DELIVERY_TIMEOUT_S="${JOIN_DELIVERY_TIMEOUT_S:-90}"
@@ -66,6 +76,21 @@ case "$HARNESS_EXPECT" in
     ;;
 esac
 
+case "$ADMISSION_MODE" in
+  manual|auto) ;;
+  *)
+    echo "Usage: HARNESS_EXPECT=broken|fixed ADMISSION_MODE=manual|auto $0" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$ADMISSION_MODE" = "auto" ]; then
+  [[ "$AUTO_MAX_MEMBERS" =~ ^[0-9]+$ ]] && [ "$AUTO_MAX_MEMBERS" -ge 2 ] \
+    || { echo "AUTO_MAX_MEMBERS must be an integer >= 2 (curator + joiner)." >&2; exit 2; }
+  [[ "$AUTO_MAX_APPROVALS_PER_HOUR" =~ ^[0-9]+$ ]] && [ "$AUTO_MAX_APPROVALS_PER_HOUR" -ge 1 ] \
+    || { echo "AUTO_MAX_APPROVALS_PER_HOUR must be a positive integer." >&2; exit 2; }
+fi
+
 for numeric in \
   "$CURATOR_NODE" "$JOINER_NODE" "$NUM_NODES" "$ROOT_TRIPLES" \
   "$SUB_GRAPH_TRIPLES" "$CATCHUP_TIMEOUT_S" "$JOIN_DELIVERY_TIMEOUT_S" \
@@ -82,7 +107,7 @@ if [ "$NUM_NODES" -ne 6 ] || [ "$CURATOR_NODE" -ne 5 ] || [ "$JOINER_NODE" -ne 6
 fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-RUN_DIR="$HARNESS_ARTIFACT_DIR/private-cg-membership-recovery-$RUN_ID-$HARNESS_EXPECT"
+RUN_DIR="$HARNESS_ARTIFACT_DIR/private-cg-membership-recovery-$RUN_ID-$HARNESS_EXPECT-$ADMISSION_MODE"
 mkdir -p "$RUN_DIR"
 exec > >(tee -a "$RUN_DIR/harness.log") 2>&1
 
@@ -106,6 +131,7 @@ JOINER_STOPPED=0
 FAIL_REASON=""
 BROKEN_RECOVERED_BEFORE_RESTART=0
 BROKEN_RECOVERED_AFTER_RESTART=0
+AUTO_APPROVAL_OBSERVED=0
 
 log()  { echo "[private-cg-recovery] $*"; }
 warn() { echo "[private-cg-recovery] WARN: $*" >&2; }
@@ -147,6 +173,39 @@ json_get() {
       } catch {}
     });
   ' "$path"
+}
+
+join_request_present() {
+  local json="$1" agent="$2"
+  printf '%s' "$json" | AGENT="$agent" node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d);
+        if (!Array.isArray(j.requests)) {
+          process.stdout.write("invalid");
+          return;
+        }
+        const target = process.env.AGENT.toLowerCase();
+        process.stdout.write(j.requests.some(
+          r => String(r.agentAddress || "").toLowerCase() === target,
+        ) ? "1" : "0");
+      } catch { process.stdout.write("invalid"); }
+    });
+  '
+}
+
+assert_open_join_policy() {
+  local response="$1" label="$2"
+  [ "$(json_get "$response" mode)" = "open" ] \
+    || fail "$label did not report mode=open: $response"
+  [ "$(json_get "$response" source)" = "persisted" ] \
+    || fail "$label did not report a persisted policy: $response"
+  [ "$(json_get "$response" maxMembers)" = "$AUTO_MAX_MEMBERS" ] \
+    || fail "$label reported the wrong member cap: $response"
+  [ "$(json_get "$response" maxApprovalsPerHour)" = "$AUTO_MAX_APPROVALS_PER_HOUR" ] \
+    || fail "$label reported the wrong hourly approval cap: $response"
 }
 
 json_empty_response_count() {
@@ -566,18 +625,27 @@ collect_filtered_logs() {
 
 write_summary() {
   local exit_code="$1"
-  EXPECT="$HARNESS_EXPECT" EXIT_CODE="$exit_code" RUN_ID_ENV="$RUN_ID" \
+  EXPECT="$HARNESS_EXPECT" ADMISSION="$ADMISSION_MODE" EXIT_CODE="$exit_code" RUN_ID_ENV="$RUN_ID" \
     CG="$CG_ID" CURATOR="$CURATOR_NODE" JOINER="$JOINER_NODE" \
+    AUTO_OBSERVED="$AUTO_APPROVAL_OBSERVED" AUTO_MEMBERS="$AUTO_MAX_MEMBERS" \
+    AUTO_HOURLY="$AUTO_MAX_APPROVALS_PER_HOUR" \
     FAILURE="$FAIL_REASON" RECOVERED_BEFORE="$BROKEN_RECOVERED_BEFORE_RESTART" \
     RECOVERED_AFTER="$BROKEN_RECOVERED_AFTER_RESTART" node -e '
       process.stdout.write(JSON.stringify({
         runId: process.env.RUN_ID_ENV,
         expectation: process.env.EXPECT,
+        admissionMode: process.env.ADMISSION,
         exitCode: Number(process.env.EXIT_CODE),
         contextGraphId: process.env.CG || null,
         curatorNode: Number(process.env.CURATOR),
         joinerNode: Number(process.env.JOINER),
         failure: process.env.FAILURE || null,
+        autoApproval: {
+          enabled: process.env.ADMISSION === "auto",
+          observed: process.env.AUTO_OBSERVED === "1",
+          maxMembers: process.env.ADMISSION === "auto" ? Number(process.env.AUTO_MEMBERS) : null,
+          maxApprovalsPerHour: process.env.ADMISSION === "auto" ? Number(process.env.AUTO_HOURLY) : null,
+        },
         brokenModeRecovery: {
           beforeJoinerRestart: process.env.RECOVERED_BEFORE === "1",
           afterJoinerRestart: process.env.RECOVERED_AFTER === "1",
@@ -638,6 +706,9 @@ PACKAGE_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || tr
   echo "packageVersion=$PACKAGE_VERSION"
   echo "devnetDir=$DEVNET_DIR"
   echo "apiPortBase=$API_PORT_BASE"
+  echo "admissionMode=$ADMISSION_MODE"
+  echo "autoMaxMembers=$AUTO_MAX_MEMBERS"
+  echo "autoMaxApprovalsPerHour=$AUTO_MAX_APPROVALS_PER_HOUR"
 } > "$RUN_DIR/runtime.txt"
 
 CURATOR_IDENTITY="$(api_call "$CURATOR_NODE" GET /api/agent/identity)"
@@ -677,6 +748,26 @@ ON_CHAIN_ID="$(json_get "$CREATE_RESPONSE" onChainId)"
   || fail "curated CG create/register failed: $CREATE_RESPONSE"
 save_artifact "create-response.json" "$CREATE_RESPONSE"
 log "created $CG_ID (onChainId=$ON_CHAIN_ID)"
+
+if [ "$ADMISSION_MODE" = "auto" ]; then
+  act "Enable bounded open enrollment before the curator restart"
+  OPEN_POLICY_BODY="$(MODE=open MAX_MEMBERS="$AUTO_MAX_MEMBERS" MAX_HOURLY="$AUTO_MAX_APPROVALS_PER_HOUR" node -e '
+    process.stdout.write(JSON.stringify({
+      mode: process.env.MODE,
+      maxMembers: Number(process.env.MAX_MEMBERS),
+      maxApprovalsPerHour: Number(process.env.MAX_HOURLY),
+      acknowledgeOpenEnrollment: true,
+    }));
+  ')"
+  OPEN_POLICY_RESPONSE="$(api_call "$CURATOR_NODE" PUT "/api/context-graph/$CG_ENCODED/join-policy" "$OPEN_POLICY_BODY" 2>/dev/null || true)"
+  save_artifact "join-policy-enable-response.json" "$OPEN_POLICY_RESPONSE"
+  assert_open_join_policy "$OPEN_POLICY_RESPONSE" "open-enrollment enable response"
+
+  OPEN_POLICY_STATUS="$(api_call "$CURATOR_NODE" GET "/api/context-graph/$CG_ENCODED/join-policy" 2>/dev/null || true)"
+  save_artifact "join-policy-before-curator-restart.json" "$OPEN_POLICY_STATUS"
+  assert_open_join_policy "$OPEN_POLICY_STATUS" "open-enrollment status before curator restart"
+  log "open enrollment enabled: maxMembers=$AUTO_MAX_MEMBERS maxApprovalsPerHour=$AUTO_MAX_APPROVALS_PER_HOUR"
+fi
 
 SUBGRAPH_RESPONSE="$(api_call "$CURATOR_NODE" POST /api/sub-graph/create \
   "$(CG="$CG_ID" SUB="$SUB_GRAPH_NAME" node -e 'process.stdout.write(JSON.stringify({contextGraphId:process.env.CG,subGraphName:process.env.SUB}))')")"
@@ -791,6 +882,13 @@ wait_node_ready "$CURATOR_NODE" 90 \
   || fail "curator node $CURATOR_NODE did not become ready after restart"
 CURATOR_STOPPED=0
 
+if [ "$ADMISSION_MODE" = "auto" ]; then
+  OPEN_POLICY_AFTER_RESTART="$(api_call "$CURATOR_NODE" GET "/api/context-graph/$CG_ENCODED/join-policy" 2>/dev/null || true)"
+  save_artifact "join-policy-after-curator-restart.json" "$OPEN_POLICY_AFTER_RESTART"
+  assert_open_join_policy "$OPEN_POLICY_AFTER_RESTART" "open-enrollment status after curator restart"
+  log "persisted open-enrollment policy survived the curator restart"
+fi
+
 SIGN_RESPONSE="$(api_call "$JOINER_NODE" POST "/api/context-graph/$CG_ENCODED/sign-join" '{}')"
 [ "$(json_get "$SIGN_RESPONSE" ok)" = "true" ] \
   || fail "sign-join failed: $(json_get "$SIGN_RESPONSE" error)"
@@ -838,43 +936,63 @@ while [ $(( $(date +%s) - REQUEST_START )) -lt "$JOIN_DELIVERY_TIMEOUT_S" ]; do
   REQUEST_RESPONSE="$(api_call "$JOINER_NODE" POST "/api/context-graph/$CG_ENCODED/request-join" "$REQUEST_BODY" 2>/dev/null || true)"
   REQUEST_STATUS="$(json_get "$REQUEST_RESPONSE" status)"
   case "$REQUEST_STATUS" in
-    pending|already-member) break ;;
+    pending|approved|already-member) break ;;
   esac
   sleep 3
 done
 save_artifact "join-request-response.json" "$REQUEST_RESPONSE"
-[ "$REQUEST_STATUS" = "pending" ] \
-  || fail "join request was not delivered as pending within ${JOIN_DELIVERY_TIMEOUT_S}s: $REQUEST_RESPONSE"
 
-PENDING_FOUND=0
-PENDING_RESPONSE=""
-PENDING_START="$(date +%s)"
-while [ $(( $(date +%s) - PENDING_START )) -lt "$JOIN_DELIVERY_TIMEOUT_S" ]; do
+if [ "$ADMISSION_MODE" = "manual" ]; then
+  [ "$REQUEST_STATUS" = "pending" ] \
+    || fail "join request was not delivered as pending within ${JOIN_DELIVERY_TIMEOUT_S}s: $REQUEST_RESPONSE"
+
+  PENDING_FOUND=0
+  PENDING_RESPONSE=""
+  PENDING_START="$(date +%s)"
+  while [ $(( $(date +%s) - PENDING_START )) -lt "$JOIN_DELIVERY_TIMEOUT_S" ]; do
+    PENDING_RESPONSE="$(api_call "$CURATOR_NODE" GET "/api/context-graph/$CG_ENCODED/join-requests" 2>/dev/null || true)"
+    PENDING_FOUND="$(join_request_present "$PENDING_RESPONSE" "$JOINER_AGENT")"
+    [ "$PENDING_FOUND" = "1" ] && break
+    sleep 2
+  done
+  save_artifact "curator-pending-join-requests.json" "$PENDING_RESPONSE"
+  [ "$PENDING_FOUND" = "1" ] \
+    || fail "curator never exposed the joiner's pending request"
+
+  APPROVE_RESPONSE="$(api_call "$CURATOR_NODE" POST "/api/context-graph/$CG_ENCODED/approve-join" \
+    "$(AGENT="$JOINER_AGENT" node -e 'process.stdout.write(JSON.stringify({agentAddress:process.env.AGENT}))')")"
+  save_artifact "approve-response.json" "$APPROVE_RESPONSE"
+  [ "$(json_get "$APPROVE_RESPONSE" status)" = "approved" ] \
+    || fail "approve-join failed: $APPROVE_RESPONSE"
+  log "curator manually approved $JOINER_AGENT"
+else
+  [ "$REQUEST_STATUS" = "approved" ] \
+    || fail "open enrollment did not automatically approve the join request: $REQUEST_RESPONSE"
+  [ "$(json_get "$REQUEST_RESPONSE" autoApproved)" = "true" ] \
+    || fail "approved join response did not identify automatic approval: $REQUEST_RESPONSE"
+  [ "$(json_get "$REQUEST_RESPONSE" alreadyMember)" = "true" ] \
+    || fail "automatic approval response omitted the rolling-upgrade alreadyMember alias: $REQUEST_RESPONSE"
+  AUTO_APPROVAL_OBSERVED=1
+
   PENDING_RESPONSE="$(api_call "$CURATOR_NODE" GET "/api/context-graph/$CG_ENCODED/join-requests" 2>/dev/null || true)"
-  PENDING_FOUND="$(printf '%s' "$PENDING_RESPONSE" | AGENT="$JOINER_AGENT" node -e '
-    let d = "";
-    process.stdin.on("data", c => d += c);
-    process.stdin.on("end", () => {
-      try {
-        const j = JSON.parse(d);
-        const target = process.env.AGENT.toLowerCase();
-        process.stdout.write((j.requests || []).some(r => String(r.agentAddress || "").toLowerCase() === target) ? "1" : "0");
-      } catch { process.stdout.write("0"); }
-    });
-  ')"
-  [ "$PENDING_FOUND" = "1" ] && break
-  sleep 2
-done
-save_artifact "curator-pending-join-requests.json" "$PENDING_RESPONSE"
-[ "$PENDING_FOUND" = "1" ] \
-  || fail "curator never exposed the joiner's pending request"
+  save_artifact "curator-join-requests-after-auto-approval.json" "$PENDING_RESPONSE"
+  PENDING_FOUND="$(join_request_present "$PENDING_RESPONSE" "$JOINER_AGENT")"
+  [ "$PENDING_FOUND" != "invalid" ] \
+    || fail "curator join-request list was unreadable after automatic approval: $PENDING_RESPONSE"
+  [ "$PENDING_FOUND" = "0" ] \
+    || fail "automatically approved joiner remained in the pending-request list: $PENDING_RESPONSE"
 
-APPROVE_RESPONSE="$(api_call "$CURATOR_NODE" POST "/api/context-graph/$CG_ENCODED/approve-join" \
-  "$(AGENT="$JOINER_AGENT" node -e 'process.stdout.write(JSON.stringify({agentAddress:process.env.AGENT}))')")"
-save_artifact "approve-response.json" "$APPROVE_RESPONSE"
-[ "$(json_get "$APPROVE_RESPONSE" status)" = "approved" ] \
-  || fail "approve-join failed: $APPROVE_RESPONSE"
-log "curator approved $JOINER_AGENT"
+  OPEN_POLICY_AFTER_APPROVAL="$(api_call "$CURATOR_NODE" GET "/api/context-graph/$CG_ENCODED/join-policy" 2>/dev/null || true)"
+  save_artifact "join-policy-after-auto-approval.json" "$OPEN_POLICY_AFTER_APPROVAL"
+  assert_open_join_policy "$OPEN_POLICY_AFTER_APPROVAL" "open-enrollment status after automatic approval"
+  AUTO_APPROVALS_LAST_HOUR="$(json_get "$OPEN_POLICY_AFTER_APPROVAL" approvalsLastHour)"
+  AUTO_MEMBER_COUNT="$(json_get "$OPEN_POLICY_AFTER_APPROVAL" memberCount)"
+  [ -n "$AUTO_APPROVALS_LAST_HOUR" ] && [ "$AUTO_APPROVALS_LAST_HOUR" -ge 1 ] 2>/dev/null \
+    || fail "automatic approval was not reflected in policy usage: $OPEN_POLICY_AFTER_APPROVAL"
+  [ "$AUTO_MEMBER_COUNT" = "2" ] \
+    || fail "automatic approval did not produce the expected curator + joiner membership: $OPEN_POLICY_AFTER_APPROVAL"
+  log "curator automatically approved $JOINER_AGENT; no manual approve-join call was made"
+fi
 
 act "Measure post-approval metadata/data recovery"
 if [ "$HARNESS_EXPECT" = "fixed" ]; then
@@ -920,9 +1038,9 @@ snapshot_phase post-restart
 
 echo
 if [ "$HARNESS_EXPECT" = "broken" ]; then
-  log "PASS (broken oracle): v10.0.6 claimed a private CG was synced without authoritative metadata or data."
+  log "PASS (broken oracle, $ADMISSION_MODE approval): the build claimed a private CG was synced without authoritative metadata or data."
 else
-  log "PASS (fixed oracle): empty unrelated responses never claimed readiness; admission recovery survived restart."
+  log "PASS (fixed oracle, $ADMISSION_MODE approval): empty unrelated responses never claimed readiness; admission recovery survived restart."
 fi
 log "CG: $CG_ID"
 log "artifacts: $RUN_DIR"
