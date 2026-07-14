@@ -135,7 +135,38 @@ describe('planManagedOxigraph', () => {
     );
     expect(plan!.readyTimeoutMs).toBe(180_000);
     expect(plan!.queryTimeoutS).toBe(35);
+    expect(plan!.clientTimeoutMs).toBe(40_000);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
+  });
+
+  it('honours an independent HTTP client timeout without enabling the native Oxigraph timeout', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { clientTimeoutMs: 180_000 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.queryTimeoutS).toBeUndefined();
+    expect(plan!.clientTimeoutMs).toBe(180_000);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(180_000);
+  });
+
+  it('lets an explicit HTTP client timeout override the native-timeout-derived deadline', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { queryTimeoutS: 35, clientTimeoutMs: 120_000 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.queryTimeoutS).toBe(35);
+    expect(plan!.clientTimeoutMs).toBe(120_000);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(120_000);
   });
 
   it('plans finite managed Oxigraph memory limits independently of the daemon service', () => {
@@ -186,6 +217,21 @@ describe('planManagedOxigraph', () => {
       '/data',
     );
     expect(plan!.queryTimeoutS).toBe(4_294_967);
+    expect(plan!.clientTimeoutMs).toBe(2_147_483_647);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(2_147_483_647);
+  });
+
+  it('clamps an absurd clientTimeoutMs to Node’s max timer', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { clientTimeoutMs: 4_294_967_000 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.clientTimeoutMs).toBe(2_147_483_647);
     expect(plan!.storeConfigTemplate.options.timeout).toBe(2_147_483_647);
   });
 
@@ -194,13 +240,14 @@ describe('planManagedOxigraph', () => {
       {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { readyTimeoutMs: 0, queryTimeoutS: 1.5 },
+          options: { readyTimeoutMs: 0, queryTimeoutS: 1.5, clientTimeoutMs: -1 },
         },
       },
       '/data',
     );
     expect(plan!.readyTimeoutMs).toBeUndefined();
     expect(plan!.queryTimeoutS).toBeUndefined();
+    expect(plan!.clientTimeoutMs).toBeUndefined();
     expect(plan!.storeConfigTemplate.options).toEqual({ managedByDkg: true });
   });
 
@@ -355,6 +402,32 @@ describe('startManagedOxigraph (real download + real server)', () => {
       const timeoutIndex = args.indexOf('--timeout-s');
       expect(timeoutIndex).toBeGreaterThanOrEqual(0);
       expect(args[timeoutIndex + 1]).toBe('35');
+    } finally {
+      await result?.handle.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('forwards an independent client timeout without passing --timeout-s to Oxigraph', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const port = await freePort();
+
+    const result = await startManagedOxigraph({
+      config: {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { port, readyTimeoutMs: 5_000, clientTimeoutMs: 180_000 },
+        },
+      },
+      dataDir,
+      platform: 'freebsd',
+      log: () => {},
+    });
+    try {
+      expect(result).not.toBeNull();
+      expect(result!.storeConfig.options.timeout).toBe(180_000);
+      const args = await fetchManagedArgs(port);
+      expect(args).not.toContain('--timeout-s');
     } finally {
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });
