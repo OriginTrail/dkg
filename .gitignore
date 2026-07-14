@@ -12,6 +12,7 @@ coverage/
 # Test output files
 tests/publish/summary_*.json
 tests/publish/errors_*.json
+tests/publish/mochawesome-report/
 .dkg/
 data/
 

@@ -12,23 +12,6 @@
 //   TestNode3 = dkg-v10-beacon-03 (100.120.12.74)
 //   TestNode4 = dkg-v10-beacon-04 (100.65.228.120)
 import { defineChainPublishSuite } from './v10-publish-lib.js';
+import { getChainPublishConfig } from './suite-manifest.js';
 
-const nodes = [
-  { name: 'TestNode1', hostname: process.env.TESTNET1_API_URL || 'http://100.99.142.87:9200',  token: process.env.V10_TOKEN_TESTNET1 },
-  { name: 'TestNode2', hostname: process.env.TESTNET2_API_URL || 'http://100.70.65.41:9200',   token: process.env.V10_TOKEN_TESTNET2 },
-  { name: 'TestNode3', hostname: process.env.TESTNET3_API_URL || 'http://100.120.12.74:9200',  token: process.env.V10_TOKEN_TESTNET3 },
-  { name: 'TestNode4', hostname: process.env.TESTNET4_API_URL || 'http://100.65.228.120:9200', token: process.env.V10_TOKEN_TESTNET4 },
-];
-
-defineChainPublishSuite({
-  title: 'DKG Asset Lifecycle on Base Testnet',
-  blockchainName: 'v10:base:84532',
-  // 'jenkins-publish-tests' is our public open-publish CG on Base Sepolia (the old
-  // 'megagiga' no longer exists on the beacons after their stores were rebuilt).
-  // The suite's ensure-CG step creates+registers it if missing.
-  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'jenkins-publish-tests',
-  // Fallback UAL for read ops when a publish fails. Set via DKG_FALLBACK_UAL once
-  // real Base Sepolia testnet nodes exist (publish one KA, use its UAL here).
-  fallbackUal: process.env.DKG_FALLBACK_UAL || '',
-  nodes,
-});
+defineChainPublishSuite(getChainPublishConfig('base-testnet'));
