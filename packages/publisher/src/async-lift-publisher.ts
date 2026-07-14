@@ -1,7 +1,11 @@
 export type {
   AsyncKnowledgeAssetVmPublishExecutionInput,
+  AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishPreflightInput,
   AsyncKnowledgeAssetVmPublishPreflightResult,
+  AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  AsyncKnowledgeAssetVmPublishRecoveryInput,
+  AsyncKnowledgeAssetVmPublishRecoveryResolver,
   AsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublishExecutionInput,

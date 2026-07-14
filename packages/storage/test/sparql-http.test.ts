@@ -193,7 +193,9 @@ describe('SparqlHttpStore (test server)', () => {
     const before = getExternalStorePrioritySchedulerSnapshot();
     expect(before.maxConcurrent).toBeGreaterThan(1);
     expect(before.ackReservedSlots).toBeGreaterThan(0);
-    const backgroundSlots = before.maxConcurrent - before.ackReservedSlots;
+    const backgroundSlots = before.maxConcurrent
+      - before.ackReservedSlots
+      - before.normalReservedSlots;
     const arrivals: Array<'listGraphs' | 'ack' | 'other'> = [];
     const heldListGraphResponses: ServerResponse[] = [];
     let listGraphRequests = 0;

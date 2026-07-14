@@ -429,6 +429,7 @@ describe('ContextGraphMetaProjection', () => {
     ]);
 
     const agentLike = {
+      preferredSyncPeers: new Map<string, string>(),
       getCgMeta: (contextGraphId: string) => projection.get(contextGraphId),
       discovery: {
         findAgents: async () => {

@@ -32,6 +32,7 @@ export {
   DEFAULT_STORE_QUEUE_LIMIT,
   DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
   type StorePrioritySchedulerSnapshot,
+  type StorePrioritySchedulerOptions,
   type StorePriorityQueueLimits,
   type StoreSchedulerBusyReason,
 } from './store-priority-scheduler.js';
@@ -105,6 +106,7 @@ export {
   type SharedMemoryGraphScope,
   type SwmKaGraphBound,
   type SwmSliceSourceTags,
+  type LoadSharedMemorySliceWithKaBoundFallbackOptions,
 } from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 

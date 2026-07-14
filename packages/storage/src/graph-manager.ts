@@ -421,6 +421,12 @@ export interface SwmSliceSourceTags {
   unbounded: QueryOptions['source'];
 }
 
+export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
+  sources: SwmSliceSourceTags;
+  createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>;
+  queryOptions?: Omit<QueryOptions, 'source'>;
+}
+
 /**
  * The ONLY safe way to read a KA-bounded SWM slice: read bounded first, then WIDEN
  * to the complete read on an empty-or-mismatched result before returning (#1549).
@@ -437,20 +443,40 @@ export interface SwmSliceSourceTags {
  * With no bound this is a single complete read (safe by construction). With a
  * bound the result is exactly what the unbounded read would have produced on any
  * input — never accept→defer, sometimes defer→accept under recurrence.
+ * `queryOptions` is applied to graph discovery and every bounded or widened read.
  */
-export async function loadSharedMemorySliceWithKaBoundFallback(
+export function loadSharedMemorySliceWithKaBoundFallback(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound | undefined,
+  options: LoadSharedMemorySliceWithKaBoundFallbackOptions,
+): Promise<{ quads: Quad[]; accepted: Quad[] | null }>;
+/** @deprecated Use the named options object. Retained for package compatibility. */
+export function loadSharedMemorySliceWithKaBoundFallback(
   store: TripleStore,
   bucketGraph: string,
   selection: SharedMemoryReadSelection,
   kaGraphBound: SwmKaGraphBound | undefined,
   sources: SwmSliceSourceTags,
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+): Promise<{ quads: Quad[]; accepted: Quad[] | null }>;
+export async function loadSharedMemorySliceWithKaBoundFallback(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound | undefined,
+  optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
+  legacyCreateAccept?: () => Promise<(quads: Quad[]) => Quad[] | null>,
 ): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
+  const options = normalizeLoadSharedMemorySliceOptions(optionsOrSources, legacyCreateAccept);
+  const { sources, createAccept, queryOptions = {} } = options;
   const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
-    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { querySource: source });
+    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { queryOptions, querySource: source });
 
   let quads = kaGraphBound
     ? await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+        queryOptions,
         querySource: sources.bounded,
       })
     : await readComplete(sources.unbounded);
@@ -469,6 +495,17 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
     accepted = accept(quads);
   }
   return { quads, accepted };
+}
+
+function normalizeLoadSharedMemorySliceOptions(
+  optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
+  legacyCreateAccept: (() => Promise<(quads: Quad[]) => Quad[] | null>) | undefined,
+): LoadSharedMemorySliceWithKaBoundFallbackOptions {
+  if ('sources' in optionsOrSources) return optionsOrSources;
+  if (!legacyCreateAccept) {
+    throw new TypeError('loadSharedMemorySliceWithKaBoundFallback requires createAccept');
+  }
+  return { sources: optionsOrSources, createAccept: legacyCreateAccept };
 }
 
 function sharedMemorySelectionGraphPattern(

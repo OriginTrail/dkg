@@ -69,6 +69,7 @@ export {
 } from './dkg-publisher.js';
 export {
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolver,
@@ -225,8 +226,12 @@ export {
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishJobHandler,
   type AsyncKnowledgeAssetVmPublishPreflightInput,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
+  type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
+  type AsyncKnowledgeAssetVmPublishRecoveryResolver,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,

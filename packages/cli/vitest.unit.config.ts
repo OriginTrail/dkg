@@ -31,6 +31,10 @@ export default defineConfig({
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
           'test/daemon-context-graph-register.test.ts',
+          // Private-CG bootstrap readiness: clean-empty responses are only
+          // terminal when authoritative metadata has been confirmed.
+          'test/context-graph-subscribe-readiness.test.ts',
+          'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.
           'test/pca-confirmation-wire.test.ts',
@@ -76,6 +80,7 @@ export default defineConfig({
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
+          'test/publisher-ka-recovery.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
@@ -100,6 +105,9 @@ export default defineConfig({
           'test/write-preflight-resilience.test.ts',
           'test/http-literal-size-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
+          'test/context-graph-join-policy-cli.test.ts',
+          'test/context-graph-join-policy-route.test.ts',
+          'test/context-graph-join-request-route.test.ts',
           'test/assertion-cli-smoke.test.ts',
           'test/knowledge-asset-cli-smoke.test.ts',
           'test/okf-subcommands.test.ts',
@@ -117,9 +125,11 @@ export default defineConfig({
           'test/daemon-openclaw.part-*.test.ts',
           'test/daemon-hermes.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
+          'test/context-graph-subscriptions-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
           // wallets) — no hardhat.
+          'test/daemon-context-graph-bootstrap.test.ts',
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
           // Supervisor control-plane regression; uses a fake worker and temp

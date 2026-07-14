@@ -29,7 +29,7 @@ dkg chat <name>                          # interactive chat with a peer
 dkg context-graph create <id>            # create a local context graph
 dkg context-graph register <id>          # register an existing CG on-chain (unlocks VM)
 dkg context-graph add-agent <id> --agent <addr>   # add an agent to a curated CG allowlist (replaces deprecated 'invite')
-dkg context-graph list                   # list subscribed context graphs
+dkg context-graph list                   # list known context graphs and subscription state
 dkg context-graph info <id>              # show context-graph details
 dkg context-graph agents <id>            # list agents in the CG allowlist
 dkg context-graph request-join <id> <curatorPeerId>   # request to join a curated CG (peer id from V10 invite)
@@ -101,3 +101,42 @@ dkg update [--check] [--allow-prerelease]  # update node software
 dkg rollback                               # roll back to previous version
 ```
 
+## Context Graph discovery and subscriptions
+
+Every node automatically subscribes to the two protocol control-plane Context
+Graphs: `agents` and `ontology`. Context Graphs selected in the node's
+`contextGraphs` configuration or a network overlay's `defaultContextGraphs` are
+also subscribed at startup because configuration is explicit operator intent.
+
+On edge nodes, other user Context Graphs learned from ontology gossip, the
+on-chain registry, or passive local-store discovery are catalogue entries only.
+They can appear in `dkg context-graph list`, but remain `subscribed: false` and
+do not enter member gossip or catch-up until an explicit subscription, local
+create/write, or approved join activates them:
+
+```bash
+dkg subscribe <context-graph-id>
+```
+
+Core nodes temporarily retain automatic subscription for newly discovered
+graphs because they are responsible for Storage ACK custody and the independent
+host-mode path does not yet replace every member-subscription handler. A
+successful public-graph ACK may additionally set the separate `coreHosted`
+flag; that durable hosting obligation is not the same as user membership.
+Remove this compatibility bridge only with host-mode separation in #1611.
+
+Nodes upgraded from an older release may already have durable user
+subscriptions that cannot be safely classified as manual or discovery-created.
+The upgrade deliberately preserves those rows. An operator can inspect active
+user subscriptions with `GET /api/context-graph/subscriptions` and deliberately
+clear the backlog with the node-admin API:
+
+```bash
+curl -X DELETE http://127.0.0.1:9200/api/context-graph/subscriptions \
+  -H 'Authorization: Bearer <node-admin-token>'
+```
+
+This cleanup clears every non-system, non-`coreHosted` user subscription,
+including legitimate subscriptions. It preserves `agents`, `ontology`, hosted
+core state, and the graph's VM/SWM data. Re-add wanted user subscriptions
+explicitly after cleanup.

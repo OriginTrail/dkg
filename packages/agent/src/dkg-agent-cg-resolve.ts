@@ -9,7 +9,7 @@
  * cross-calls resolve against the composed class.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -34,7 +34,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -207,7 +207,6 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
-import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -299,7 +298,6 @@ import {
   EVM_PUBLISH_CURATED,
   EVM_PUBLISH_OPEN,
   MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
-  META_REFRESH_COOLDOWN_MS,
   SYNC_MIN_GRAPH_BUDGET_MS,
   DEBUG_SYNC_PROGRESS,
   DEFAULT_SWM_TTL_MS,
@@ -407,6 +405,11 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
+import {
+  runCuratorMetaRefresh,
+  type CuratorMetaRefreshOptions,
+} from './curator-meta-refresh.js';
 
 function syncAuthAbortError(reason: unknown): Error {
   if (reason instanceof Error) {
@@ -428,6 +431,30 @@ function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
 type InternalContextGraphListRow = ListContextGraphsRow & {
   policyKnown?: boolean;
 };
+
+function mapContextGraphListRows<T, R>(
+  items: readonly T[],
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  return mapWithConcurrency(
+    items,
+    DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY,
+    fn,
+  );
+}
+
+async function mapContextGraphListRowsSettled<T, R>(
+  items: readonly T[],
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  return mapContextGraphListRows(items, async (item, index) => {
+    try {
+      return { status: 'fulfilled', value: await fn(item, index) } as const;
+    } catch (reason) {
+      return { status: 'rejected', reason } as const;
+    }
+  });
+}
 
 function listContextGraphsProjectionEnabled(): boolean {
   // Before enabling this default-on: thread the caller signal into getCgMeta
@@ -477,11 +504,11 @@ async function applyContextGraphListPrivacy(
       .map(({ policyKnown: _policyKnown, ...row }) => row);
   }
 
-  const annotated = await Promise.all(visibleRows.map(async (r) => {
+  const annotated = await mapContextGraphListRows(visibleRows, async (r) => {
     const curatorMatch = agent.curatorDidMatchesChecksumAgent(r.curator, checksum);
     const allowlisted = await agent.callerIsAllowlistedAgentParticipant(r.id, checksum);
     return { ...r, callerInvolved: curatorMatch || allowlisted };
-  }));
+  });
 
   return annotated
     .filter((r) => {
@@ -515,7 +542,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       candidateIds.add(id);
     }
 
-    const rows = await Promise.all([...candidateIds].sort().map(async (id): Promise<InternalContextGraphListRow | null> => {
+    const rows = await mapContextGraphListRows([...candidateIds].sort(), async (id): Promise<InternalContextGraphListRow | null> => {
       if (!id) return null;
       const sub = this.subscribedContextGraphs.get(id);
       const meta = await this.getCgMeta(id);
@@ -544,7 +571,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         onChainId: sub?.onChainId ?? meta.onChainId,
         policyKnown,
       };
-    }));
+    });
 
     return applyContextGraphListPrivacy(
       this,
@@ -1057,18 +1084,38 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     syncSessionId?: string,
     recovery?: boolean,
   ): Promise<Uint8Array> {
-    const isPrivate = await this.isPrivateContextGraph(contextGraphId);
+    // Policy-read uncertainty must not abort bootstrap or downgrade it to the
+    // public pipe encoding. Treat an unreadable policy as private; catalog is
+    // explicitly exempt below and stays public.
+    const isPrivate = await this.isPrivateContextGraph(contextGraphId).catch(() => true);
 
-    // If we don't have any local data for this CG yet (e.g. just subscribed
-    // via invite), we can't determine the access policy. Send an
-    // authenticated request so the remote peer can verify our identity
-    // against its allowlist.
-    const hasLocalData = this.subscribedContextGraphs.get(contextGraphId)?.synced === true;
+    // Until `_meta` is authoritative locally, the access policy is UNKNOWN.
+    // A stale/incorrect `synced=true` must not downgrade the request to the
+    // public pipe format: that is exactly the poisoned-subscription state an
+    // unrelated peer can create by returning a clean empty response before
+    // the curator is reachable. Keep every non-catalog phase authenticated
+    // until a confirmed meta sync explicitly sets `metaSynced=true`.
+    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    const hasLocalData = sub?.synced === true;
+    // The persisted flag is necessary but not sufficient: older startup code
+    // could set `metaSynced=true` after creating only a local
+    // registrationStatus="unregistered" shadow. Re-check the store so that
+    // restart poison cannot suppress authentication either.
+    const authoritativeMetaConfirmed = sub?.metaSynced === true &&
+      sub.pendingMeta !== true &&
+      // Store/RPC uncertainty must keep the request on the authenticated
+      // path. A transient proof read failure is not a reason to abort sync or
+      // downgrade it to the public encoding.
+      await this.hasConfirmedMetaState(contextGraphId).catch(() => false);
+    const authoritativeMetaUnconfirmed = !authoritativeMetaConfirmed;
     // the catalog facet is public and served without the
     // allowlist gate, so an outsider (no CG identity) requests it unauthenticated.
     // R9: recovery serves plaintext member-to-member and is gated by the strict
     // members-only authorizer — it MUST be an authenticated (signed) envelope.
-    const needsAuth = recovery || (phase !== 'catalog' && (isPrivate || !hasLocalData));
+    const needsAuth = recovery || (
+      phase !== 'catalog' &&
+      (isPrivate || !hasLocalData || authoritativeMetaUnconfirmed)
+    );
     const claimedAgentAddress = await this.findLocalAgentForContextGraph(contextGraphId);
     const claimedAgent = claimedAgentAddress ? this.localAgents.get(claimedAgentAddress) : undefined;
     return buildSyncRequestEnvelope({
@@ -1739,14 +1786,21 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
+    const approvedCuratorPeerId = this.preferredSyncPeers.get(contextGraphId);
     const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
     const curatorDid = meta.curator ?? meta.curators[0] ?? '';
     if (!curatorDid) {
-      return undefined;
+      // Join approval authenticates the notification sender before recording
+      // this hint. It is the only curator route available during the bootstrap
+      // window where `_meta` has not arrived yet (and is restored from the
+      // durable join-approved membership row after restart). Once `_meta`
+      // identifies a curator, however, that authoritative route must win over
+      // the bootstrap hint.
+      return approvedCuratorPeerId;
     }
     const didPrefix = 'did:dkg:agent:';
     if (!curatorDid.startsWith(didPrefix)) {
-      return undefined;
+      return approvedCuratorPeerId;
     }
     const curatorIdentifier = curatorDid.slice(didPrefix.length);
 
@@ -1797,107 +1851,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         }
       }
 
-      if (!resolved) return undefined;
+      if (!resolved) return approvedCuratorPeerId;
     }
 
+    this.preferredSyncPeers.delete(contextGraphId);
     return curatorPeerId;
   }
 
   async refreshMetaFromCurator(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: CuratorMetaRefreshOptions = {},
   ): Promise<boolean> {
-    throwIfSyncAuthAborted(options.signal);
-    const now = Date.now();
-    const lastRefresh = this.metaRefreshTimestamps.get(contextGraphId) ?? 0;
-    if (now - lastRefresh < META_REFRESH_COOLDOWN_MS) {
-      return false;
-    }
-
-    const ctx = createOperationContext('sync');
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const curatorPeerId = await this.resolveCuratorPeerId(contextGraphId, options);
-    throwIfSyncAuthAborted(options.signal);
-    if (!curatorPeerId) {
-      return false;
-    }
-
-    if (curatorPeerId === this.peerId) {
-      return false;
-    }
-
-    let connections = this.node.libp2p.getConnections();
-    let isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
-
-    // If not directly connected, try dialing — first a regular dial (the peer
-    // store may already have direct multiaddrs), then via relay as fallback.
-    if (!isConnected) {
-      try {
-        const { peerIdFromString } = await import('@libp2p/peer-id');
-        const pid = peerIdFromString(curatorPeerId);
-
-        try {
-          await this.node.libp2p.dial(pid, { signal: options.signal });
-          throwIfSyncAuthAborted(options.signal);
-          connections = this.node.libp2p.getConnections();
-          isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
-        } catch { /* direct dial failed, try relay */ }
-
-        if (!isConnected) {
-          throwIfSyncAuthAborted(options.signal);
-          const agent = await this.discovery.findAgentByPeerId(curatorPeerId);
-          throwIfSyncAuthAborted(options.signal);
-          if (agent?.relayAddress) {
-            const { multiaddr } = await import('@multiformats/multiaddr');
-            const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`);
-            await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
-            await this.node.libp2p.dial(pid, { signal: options.signal });
-            throwIfSyncAuthAborted(options.signal);
-            connections = this.node.libp2p.getConnections();
-            isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
-          }
-        }
-      } catch (err) {
-        throwIfSyncAuthAborted(options.signal);
-        this.log.warn(ctx, `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    if (!isConnected) {
-      return false;
-    }
-
-    try {
-      const deadline = Date.now() + 10_000;
-      const metaResult = await this.fetchSyncPages(
-        ctx,
-        curatorPeerId,
-        contextGraphId,
-        false,
-        'meta',
-        cgMetaGraph,
-        deadline,
-        undefined,
-        undefined,
-        options.signal,
-      );
-      throwIfSyncAuthAborted(options.signal);
-      if (metaResult.quads.length > 0) {
-        await this.insertSyncedQuadsAndInvalidateListCache(metaResult.quads);
-        this.syncCheckpoints.delete(metaResult.checkpointKey);
-        this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaResult.quads.length} triples from curator ${curatorPeerId.slice(-8)}`);
-        return true;
-      }
-      this.syncCheckpoints.delete(metaResult.checkpointKey);
-      return false;
-    } catch (err) {
-      throwIfSyncAuthAborted(options.signal);
-      this.log.warn(ctx, `Meta refresh for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`);
-      return false;
-    } finally {
-      this.metaRefreshTimestamps.set(contextGraphId, now);
-    }
+    return runCuratorMetaRefresh(this, contextGraphId, options);
   }
 
   /**
@@ -2094,8 +2060,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         if (!uri || byUri.has(uri)) continue;
         byUri.set(uri, row);
       }
-      // Parallel lookups — sequential await per ontology row multiplied list latency noticeably.
-      const definitionSettled = await Promise.allSettled([...byUri.values()].map(async (row) => {
+      // Bounded parallel lookups avoid multiplying latency without flooding
+      // the store scheduler when the registry contains hundreds of rows.
+      const definitionSettled = await mapContextGraphListRowsSettled([...byUri.values()], async (row) => {
         const uri = row['ctxGraph'] ?? '';
         if (seen.has(uri)) return;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
@@ -2128,7 +2095,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           synced: sub?.synced ?? false,
           ...(onChainId ? { onChainId } : {}),
         }, policyPrivacy(row['access']));
-      }));
+      });
       for (const entry of definitionSettled) {
         if (entry.status === 'rejected') throw entry.reason;
       }
@@ -2314,7 +2281,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
      * for the same CG; projection resolves policy with _meta-first source
      * precedence, then AGENTS, then ONTOLOGY.
      */
-    const projectedRows = await Promise.allSettled(rows.map(async (r) => {
+    const projectedRows = await mapContextGraphListRowsSettled(rows, async (r) => {
       const metaRead = await withBudget(
         (signal) => this.getCgMeta(r.id, { signal }),
         `projection lookup for ${r.id}`,
@@ -2346,20 +2313,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         isSystem: meta.isSystem || r.isSystem,
         onChainId: meta.onChainId ?? r.onChainId,
       };
-    }));
+    });
     rows = projectedRows.map((entry) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;
     });
 
-    const curatorBackfills = await Promise.allSettled(rows.map(async (r) => {
+    const curatorBackfills = await mapContextGraphListRowsSettled(rows, async (r) => {
       if (r.curator?.trim()) return r;
       const c = await optional(
         (signal) => this.getContextGraphCurator(r.id, { signal }),
         `curator lookup for ${r.id}`,
       );
       return c ? { ...r, curator: c } : r;
-    }));
+    });
     rows = curatorBackfills.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;
@@ -2379,10 +2346,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
       return legacyRead.value ? 'private' : 'public';
     };
-    const privacySettled = await Promise.allSettled(rows.map(async (row) => ({
+    const privacySettled = await mapContextGraphListRowsSettled(rows, async (row) => ({
       uri: row.uri,
       privacy: await resolveRowPrivacy(row),
-    })));
+    }));
     const resolvedPrivacyByUri = new Map<string, ListContextGraphsPrivacy>();
     for (const entry of privacySettled) {
       if (entry.status === 'fulfilled') {
@@ -2408,7 +2375,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       };
     }
 
-    const annotatedSettled = await Promise.allSettled(rows.map(async (r): Promise<{
+    const annotatedSettled = await mapContextGraphListRowsSettled(rows, async (r): Promise<{
       row: ListContextGraphsRow;
       privacy: ListContextGraphsPrivacy;
     }> => {
@@ -2432,7 +2399,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
       if (!allowlistRead.ok) return { row: r, privacy };
       return { row: { ...r, callerInvolved: allowlistRead.value }, privacy };
-    }));
+    });
     const annotated = annotatedSettled.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;

@@ -72,6 +72,7 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
       "location": "/var/lib/dkg/oxigraph-data",
       "cacheDir": "/var/lib/dkg/oxigraph-bin",
       "readyTimeoutMs": 180000,
+      "clientTimeoutMs": 180000,
       "queryTimeoutS": 35,
       "memoryHighMiB": 2048,
       "memoryMaxMiB": 3072
@@ -82,7 +83,9 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
 
 `readyTimeoutMs` is the maximum startup readiness wait in milliseconds. It must be a positive integer; invalid values are ignored and the default 30-second timeout is used. Increase it when a large or recovering RocksDB database needs longer to open.
 
-`queryTimeoutS` is the native Oxigraph query timeout in seconds. The rewritten HTTP store timeout includes an additional five-second grace period so Oxigraph can return its timeout response before the client aborts the request.
+`clientTimeoutMs` is the SPARQL HTTP client deadline in milliseconds. It can be raised independently when a valid store mutation needs longer than the default 30 seconds, without enabling a native Oxigraph query timeout. When set, it takes precedence over the client deadline derived from `queryTimeoutS`.
+
+`queryTimeoutS` is the native Oxigraph query timeout in seconds and is passed to `oxigraph serve --timeout-s`. When `clientTimeoutMs` is omitted, the rewritten HTTP store timeout includes an additional five-second grace period so Oxigraph can return its timeout response before the client aborts the request.
 
 On Linux hosts using systemd, `memoryMaxMiB` runs managed Oxigraph in a dedicated transient user scope with a finite hard limit and disables swap for that scope, so database pressure cannot spill into host swap and stall the node. Optional `memoryHighMiB` sets its soft reclaim threshold and must not exceed `memoryMaxMiB`. This keeps Oxigraph outside the DKG daemon service's cgroup, so a finite `MemoryMax` on the daemon cannot kill the store or throttle the Node.js control plane as one combined process group. Enable lingering once for the node service account (`sudo loginctl enable-linger <dkg-user>`) so its user manager and bus exist before the system service starts at boot; verify with `systemctl --user is-system-running` as that account. The daemon supplies the required user-bus environment automatically. Startup fails rather than silently dropping configured limits when the scope cannot be created.
 

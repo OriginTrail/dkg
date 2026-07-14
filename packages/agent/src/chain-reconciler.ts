@@ -29,6 +29,11 @@ import {
   absorbConfirmed,
   ordinalsToReconcile,
 } from './reconcile-cursor.js';
+import {
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+  type VmReconcileSource,
+} from './vm-reconcile-service.js';
 
 /**
  * Outcome of attempting to reconcile a single per-CG registration ordinal.
@@ -98,6 +103,14 @@ export async function reconcileContextGraph(
   const head = await deps.getKCCount(onChainCgId);
   const before = state.watermark;
 
+  // The persisted contiguous watermark is durable completeness evidence. If
+  // it already covers the chain head, avoid the head-block RPC and all ordinal
+  // work. A watermark ahead of the observed head is surfaced by the caller as
+  // an evidence mismatch, but is equally non-actionable in this pass.
+  if (before >= head) {
+    return { head, watermark: before, reconciled: 0, pending: 0 };
+  }
+
   // Keep transient head-fetch failures distinct from truly head-less chains.
   // A thrown head read means the chain is temporarily unavailable; skip
   // materialization for this pass so reconcileOrdinal never falls back to a
@@ -163,95 +176,361 @@ export async function reconcileContextGraph(
  * live-failure hold, so invalid combinations of pending flags are impossible.
  * This is the single owner of per-key coalescing semantics: a burst produces at
  * most one trailing pass, with periodic work taking priority over live nudges.
+ * Trigger methods are deliberately fire-and-forget; callers that need a
+ * completion boundary must use waitForIdle() explicitly. Agent/API result
+ * models and route-facing errors live in `vm-reconcile-service.ts`.
  */
-type VmReconcileTriggerSource = 'live' | 'periodic';
 type VmReconcileHold = 'ready' | 'live-blocked';
 
-interface VmReconcileScheduleState {
-  inFlight?: Promise<void>;
-  queued: VmReconcileTriggerSource | null;
-  hold: VmReconcileHold;
+interface VmReconcileDispatchWork<T> {
+  key: string;
+  source: VmReconcileSource;
+  automatic: boolean;
+  periodicRequested: boolean;
+  sequence: number;
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
 }
 
-export class VmReconcileScheduler {
-  private readonly states = new Map<string, VmReconcileScheduleState>();
+interface VmReconcileDispatchState<T> {
+  hold: VmReconcileHold;
+  active?: VmReconcileDispatchWork<T>;
+  pending?: VmReconcileDispatchWork<T>;
+  trailing?: VmReconcileDispatchWork<T>;
+}
+
+export interface VmReconcileDispatcherOptions {
+  concurrency?: number;
+  maxPending?: number;
+  maxForegroundBurst?: number;
+}
+
+function vmReconcileSourceRank(source: VmReconcileSource): number {
+  if (source === 'manual') return 2;
+  if (source === 'live') return 1;
+  return 0;
+}
+
+/**
+ * Single admission and scheduling policy for chain-driven VM reconciliation.
+ *
+ * This dispatcher owns per-CG coalescing, live failure holds, pending priority
+ * upgrades, global concurrency, overload bounds, foreground fairness, and
+ * shutdown. Keeping those decisions in one state machine prevents a CG from
+ * looking active to one scheduler while it is only queued in another.
+ */
+export class VmReconcileDispatcher<T> {
+  private active = 0;
+  private queued = 0;
+  private sequence = 0;
+  private foregroundBurst = 0;
+  private closed = false;
+  private readonly states = new Map<string, VmReconcileDispatchState<T>>();
+  private readonly pending: Array<VmReconcileDispatchWork<T>> = [];
+  private readonly idleWaiters = new Set<() => void>();
+  private readonly keyIdleWaiters = new Map<string, Set<() => void>>();
+  private readonly concurrency: number;
+  private readonly maxPending: number;
+  private readonly maxForegroundBurst: number;
 
   constructor(
-    private readonly run: (key: string) => Promise<void>,
+    private readonly run: (key: string, source: VmReconcileSource) => Promise<T>,
     private readonly onFailure: (key: string, error: unknown) => void,
-  ) {}
-
-  /** Low-latency chain-event nudge; suppressed after failure until a sweep. */
-  triggerLive(key: string): Promise<void> {
-    return this.schedule(key, 'live');
+    options: VmReconcileDispatcherOptions = {},
+  ) {
+    const {
+      concurrency = 1,
+      maxPending = 256,
+      maxForegroundBurst = 8,
+    } = options;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+      throw new Error(`VM reconcile concurrency must be a positive safe integer, got ${concurrency}`);
+    }
+    if (!Number.isSafeInteger(maxPending) || maxPending < 1) {
+      throw new Error(`VM reconcile maxPending must be a positive safe integer, got ${maxPending}`);
+    }
+    if (!Number.isSafeInteger(maxForegroundBurst) || maxForegroundBurst < 1) {
+      throw new Error(`VM reconcile maxForegroundBurst must be a positive safe integer, got ${maxForegroundBurst}`);
+    }
+    this.concurrency = concurrency;
+    this.maxPending = maxPending;
+    this.maxForegroundBurst = maxForegroundBurst;
   }
 
-  /** Reliability path; every periodic sweep gets one retry after a failure. */
-  triggerPeriodic(key: string): Promise<void> {
-    return this.schedule(key, 'periodic');
+  /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
+  triggerLive(key: string): void {
+    if (this.states.get(key)?.hold === 'live-blocked') return;
+    void this.admit(key, 'live').catch(() => undefined);
+  }
+
+  /** Enqueue the reliability path; every periodic sweep gets one failure retry. */
+  triggerPeriodic(key: string): void {
+    void this.admit(key, 'periodic').catch(() => undefined);
+  }
+
+  /**
+   * Attempt periodic admission without hiding bounded-queue overflow.
+   *
+   * Sweep orchestration retains its round-robin cursor at the first rejected
+   * key, so stable iteration order cannot permanently starve the tail.
+   */
+  tryTriggerPeriodic(key: string): boolean {
+    if (!this.canAdmitWithoutOverflow(key)) return false;
+    void this.admit(key, 'periodic').catch(() => undefined);
+    return true;
+  }
+
+  /** Operator path; errors and the typed domain result propagate to the API. */
+  triggerManual(key: string): Promise<T> {
+    return this.dispatch(key, 'manual');
+  }
+
+  /** Typed admission used by the canonical agent operation and focused tests. */
+  dispatch(key: string, source: VmReconcileSource): Promise<T> {
+    return this.admit(key, source);
   }
 
   isInFlight(key: string): boolean {
-    return this.states.get(key)?.inFlight !== undefined;
+    const state = this.states.get(key);
+    return Boolean(state?.active || state?.pending || state?.trailing);
   }
 
-  private stateFor(key: string): VmReconcileScheduleState {
+  pendingSource(key: string): VmReconcileSource | undefined {
+    return this.states.get(key)?.pending?.source;
+  }
+
+  snapshot(): { active: number; queued: number; closed: boolean } {
+    return { active: this.active, queued: this.queued, closed: this.closed };
+  }
+
+  /** Reject queued work immediately and wait only for already-active work. */
+  close(): Promise<void> {
+    if (!this.closed) {
+      this.closed = true;
+      const error = new VmReconcileQueueClosedError();
+      for (const work of this.pending.splice(0)) {
+        const state = this.states.get(work.key);
+        if (state?.pending === work) state.pending = undefined;
+        work.reject(error);
+      }
+      for (const [key, state] of this.states) {
+        if (state.trailing) {
+          state.trailing.reject(error);
+          state.trailing = undefined;
+        }
+        if (!state.active) this.states.delete(key);
+        this.resolveKeyIdleWaiters(key);
+      }
+      this.queued = 0;
+      this.resolveIdleWaiters();
+    }
+    return this.waitForIdle();
+  }
+
+  /** Wait globally for shutdown, or for one CG including its trailing pass. */
+  waitForIdle(key?: string): Promise<void> {
+    if (key !== undefined) {
+      if (!this.isInFlight(key)) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        let waiters = this.keyIdleWaiters.get(key);
+        if (!waiters) {
+          waiters = new Set();
+          this.keyIdleWaiters.set(key, waiters);
+        }
+        waiters.add(resolve);
+      });
+    }
+    if (this.active === 0 && this.queued === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => this.idleWaiters.add(resolve));
+  }
+
+  private stateFor(key: string): VmReconcileDispatchState<T> {
     let state = this.states.get(key);
     if (!state) {
-      state = {
-        queued: null,
-        hold: 'ready',
-      };
+      state = { hold: 'ready' };
       this.states.set(key, state);
     }
     return state;
   }
 
-  private schedule(key: string, source: VmReconcileTriggerSource): Promise<void> {
-    const state = this.stateFor(key);
-    if (source === 'live' && state.hold === 'live-blocked') {
-      return Promise.resolve();
-    }
-    if (state.inFlight) {
-      // A periodic reliability pass always replaces a queued live nudge.
-      // Otherwise repeated triggers collapse into the existing queued source.
-      if (state.queued !== 'periodic') state.queued = source;
-      return state.inFlight;
-    }
-    if (source === 'periodic') state.hold = 'ready';
-    return this.start(key, state);
+  private canAdmitWithoutOverflow(key: string): boolean {
+    if (this.closed) return false;
+    const state = this.states.get(key);
+    if (state?.pending || state?.trailing) return true;
+    return this.queued < this.maxPending;
   }
 
-  private start(
-    key: string,
-    state: VmReconcileScheduleState,
-  ): Promise<void> {
-    const promise = (async () => {
-      try {
-        await this.run(key);
-        state.hold = 'ready';
-      } catch (error) {
-        state.hold = 'live-blocked';
-        try {
-          this.onFailure(key, error);
-        } catch {
-          // Observability must never break scheduling or surface to callers.
-        }
+  private admit(key: string, source: VmReconcileSource): Promise<T> {
+    if (this.closed) return Promise.reject(new VmReconcileQueueClosedError());
+    const state = this.stateFor(key);
+
+    if (state.pending) {
+      this.mergeWork(state.pending, source);
+      this.sortPending();
+      return state.pending.promise;
+    }
+
+    if (state.active) {
+      // An operator request must observe a head snapshot taken no earlier than
+      // that request. It may share an already-active operator pass, but never
+      // an older automatic pass. In that case it joins or creates one fresh
+      // trailing pass; repeated operator requests coalesce there.
+      if (source === 'manual' && state.active.source === 'manual') {
+        return state.active.promise;
       }
-    })().finally(() => {
-      state.inFlight = undefined;
-      const queued = state.queued;
-      state.queued = null;
-      if (queued) {
-        void this.schedule(key, queued);
-        return;
+      if (state.trailing) {
+        this.mergeWork(state.trailing, source);
+        return state.trailing.promise;
       }
-      // Keep only failed keys so a later live nudge remains suppressed. A
-      // periodic retry or successful run releases and removes the state.
+      const trailing = this.createQueuedWork(key, source);
+      if (!trailing) return Promise.reject(new VmReconcileQueueFullError(this.maxPending));
+      state.trailing = trailing;
+      return trailing.promise;
+    }
+
+    const work = this.createQueuedWork(key, source);
+    if (!work) {
       if (state.hold === 'ready') this.states.delete(key);
+      return Promise.reject(new VmReconcileQueueFullError(this.maxPending));
+    }
+    state.pending = work;
+    this.pending.push(work);
+    this.sortPending();
+    this.drain();
+    return work.promise;
+  }
+
+  private createQueuedWork(
+    key: string,
+    source: VmReconcileSource,
+  ): VmReconcileDispatchWork<T> | undefined {
+    if (this.queued >= this.maxPending) return undefined;
+    let resolveWork!: (value: T) => void;
+    let rejectWork!: (error: unknown) => void;
+    const promise = new Promise<T>((resolve, reject) => {
+      resolveWork = resolve;
+      rejectWork = reject;
     });
-    state.inFlight = promise;
-    return promise;
+    this.queued += 1;
+    return {
+      key,
+      source,
+      automatic: source !== 'manual',
+      periodicRequested: source === 'periodic',
+      sequence: this.sequence++,
+      promise,
+      resolve: resolveWork,
+      reject: rejectWork,
+    };
+  }
+
+  private sortPending(): void {
+    this.pending.sort((a, b) => {
+      const priorityDelta = (a.source === 'periodic' ? 1 : 0)
+        - (b.source === 'periodic' ? 1 : 0);
+      return priorityDelta || a.sequence - b.sequence;
+    });
+  }
+
+  private mergeWork(work: VmReconcileDispatchWork<T>, source: VmReconcileSource): void {
+    work.automatic ||= source !== 'manual';
+    work.periodicRequested ||= source === 'periodic';
+    if (vmReconcileSourceRank(source) > vmReconcileSourceRank(work.source)) {
+      work.source = source;
+    }
+  }
+
+  private takeNext(): VmReconcileDispatchWork<T> | undefined {
+    if (this.pending.length === 0) return undefined;
+    let index = 0;
+    if (this.foregroundBurst >= this.maxForegroundBurst) {
+      const backgroundIndex = this.pending.findIndex((work) => work.source === 'periodic');
+      if (backgroundIndex >= 0) index = backgroundIndex;
+    }
+    const [work] = this.pending.splice(index, 1);
+    if (!work) return undefined;
+    const state = this.states.get(work.key);
+    if (state?.pending === work) state.pending = undefined;
+    this.queued -= 1;
+    if (work.source !== 'periodic') this.foregroundBurst += 1;
+    else this.foregroundBurst = 0;
+    return work;
+  }
+
+  private resolveIdleWaiters(): void {
+    if (this.active !== 0 || this.queued !== 0) return;
+    for (const resolve of this.idleWaiters) resolve();
+    this.idleWaiters.clear();
+  }
+
+  private resolveKeyIdleWaiters(key: string): void {
+    if (this.isInFlight(key)) return;
+    const waiters = this.keyIdleWaiters.get(key);
+    if (!waiters) return;
+    this.keyIdleWaiters.delete(key);
+    for (const resolve of waiters) resolve();
+  }
+
+  private drain(): void {
+    while (!this.closed && this.active < this.concurrency && this.pending.length > 0) {
+      const work = this.takeNext();
+      if (!work) return;
+      const state = this.stateFor(work.key);
+      state.active = work;
+      if (work.periodicRequested) state.hold = 'ready';
+      this.active += 1;
+      let failure: unknown;
+      void Promise.resolve()
+        .then(() => this.run(work.key, work.source))
+        .then(
+          (result) => {
+            // Any successful full pass, including an operator-forced recovery,
+            // proves the failed-live hold can be released.
+            state.hold = 'ready';
+            work.resolve(result);
+          },
+          (error) => {
+            failure = error;
+            if (work.automatic) {
+              state.hold = 'live-blocked';
+              try {
+                this.onFailure(work.key, error);
+              } catch {
+                // Observability must never break admission or callers.
+              }
+            }
+            work.reject(error);
+          },
+        )
+        .finally(() => {
+          this.active -= 1;
+          state.active = undefined;
+          const trailing = state.trailing;
+          state.trailing = undefined;
+          if (
+            trailing
+            && state.hold === 'live-blocked'
+            && trailing.source === 'live'
+            && !trailing.periodicRequested
+          ) {
+            // A failing live pass must not immediately retry itself. Preserve
+            // the failure hold until the periodic reliability path arrives.
+            // A manual completion boundary is never suppressed by this rule.
+            this.queued -= 1;
+            trailing.reject(failure);
+          } else if (trailing && !this.closed) {
+            state.pending = trailing;
+            this.pending.push(trailing);
+            this.sortPending();
+          } else if (!trailing && state.hold === 'ready') {
+            this.states.delete(work.key);
+          }
+          this.drain();
+          this.resolveIdleWaiters();
+          this.resolveKeyIdleWaiters(work.key);
+        });
+    }
   }
 }
 

@@ -500,8 +500,10 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
-        SOURCES,
-        async () => (qs) => { accepts += 1; return qs; },
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => { accepts += 1; return qs; },
+        },
       );
 
       // Bounded read excluded the out-of-range graph, and the accept predicate
@@ -530,12 +532,42 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
-        SOURCES,
-        async () => (qs) => (qs.some((q) => q.object === outObj) ? qs : null),
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => (qs.some((q) => q.object === outObj) ? qs : null),
+        },
       );
 
       expect(accepted).not.toBeNull();
       expect(quads.map((q) => q.object).sort()).toEqual(['"in"', '"out"']);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('deprecated positional options preserve bounded widening behavior', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-legacy');
+    const root = 'urn:fb:legacy';
+    const widenedObject = '"widened"';
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"bounded"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+        { subject: root, predicate: 'urn:p', object: widenedObject, graph: `${swm}/${AUTHOR_B}/12` },
+      ]);
+
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+        SOURCES,
+        async () => (candidate) =>
+          candidate.some((quad) => quad.object === widenedObject) ? candidate : null,
+      );
+
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"bounded"', widenedObject]);
+      expect(accepted).toEqual(quads);
     } finally {
       await store.close();
     }
@@ -555,8 +587,10 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         undefined,
-        SOURCES,
-        async () => (qs) => { accepts += 1; return qs; },
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => { accepts += 1; return qs; },
+        },
       );
 
       // Unbounded ⇒ both authors read; accept applied exactly once.

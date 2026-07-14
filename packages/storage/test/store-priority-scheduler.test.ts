@@ -10,11 +10,13 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 describe('StorePriorityScheduler', () => {
   for (const priority of ['ack', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
     it(`bounds the ${priority} queue and returns a typed retryable rejection`, async () => {
-      const scheduler = new StorePriorityScheduler(1, 0, undefined, 0, {
-        ack: 1,
-        normal: 1,
-        background: 1,
-      }, 1_000);
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: { ack: 1, normal: 1, background: 1 },
+        queueWaitTimeoutMs: 1_000,
+      });
       let release!: () => void;
       let queuedStarted = false;
       let rejectedStarted = false;
@@ -45,7 +47,13 @@ describe('StorePriorityScheduler', () => {
     });
 
     it(`expires ${priority} work before dispatch and recovers after pressure clears`, async () => {
-      const scheduler = new StorePriorityScheduler(1, 0, undefined, 0, 2, 20);
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 2,
+        queueWaitTimeoutMs: 20,
+      });
       let release!: () => void;
       let expiredStarted = false;
       const blocker = scheduler.run(priority, `${priority}.blocker`, async () => {
@@ -75,7 +83,13 @@ describe('StorePriorityScheduler', () => {
   it('removes a cancelled queued entry and releases its abort listener and wait timer', async () => {
     vi.useFakeTimers();
     try {
-      const scheduler = new StorePriorityScheduler(1, 0, undefined, 0, 1, 100);
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 100,
+      });
       let release!: () => void;
       const blocker = scheduler.run('normal', 'normal.blocker', async () => {
         await new Promise<void>((resolve) => {
@@ -112,7 +126,13 @@ describe('StorePriorityScheduler', () => {
   it('cleans up admission state when queued work starts normally', async () => {
     vi.useFakeTimers();
     try {
-      const scheduler = new StorePriorityScheduler(1, 0, undefined, 0, 1, 100);
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 100,
+      });
       let release!: () => void;
       const blocker = scheduler.run('normal', 'normal.blocker', async () => {
         await new Promise<void>((resolve) => {
@@ -150,8 +170,96 @@ describe('StorePriorityScheduler', () => {
     });
   });
 
+  it('preserves queue admission settings in the deprecated positional constructor', async () => {
+    vi.useFakeTimers();
+    let releaseNormal1: (() => void) | undefined;
+    let releaseNormal2: (() => void) | undefined;
+    let releaseBackground: (() => void) | undefined;
+    const running: Array<Promise<unknown>> = [];
+    try {
+      const scheduler = new StorePriorityScheduler(
+        2,
+        0,
+        undefined,
+        1,
+        { ack: 3, normal: 2, background: 1 },
+        25,
+      );
+      expect(scheduler.snapshot).toMatchObject({
+        maxConcurrent: 2,
+        ackReservedSlots: 0,
+        backgroundReservedSlots: 1,
+        ackQueueLimit: 3,
+        normalQueueLimit: 2,
+        backgroundQueueLimit: 1,
+        queueWaitTimeoutMs: 25,
+      });
+
+      const events: string[] = [];
+      const normal1 = scheduler.run('normal', 'legacy.normal.1', async () => {
+        events.push('normal-1:start');
+        await new Promise<void>((resolve) => {
+          releaseNormal1 = resolve;
+        });
+        events.push('normal-1:end');
+      });
+      const normal2 = scheduler.run('normal', 'legacy.normal.2', async () => {
+        events.push('normal-2:start');
+        await new Promise<void>((resolve) => {
+          releaseNormal2 = resolve;
+        });
+      });
+      const background = scheduler.run('background', 'legacy.background', async () => {
+        events.push('background:start');
+        await new Promise<void>((resolve) => {
+          releaseBackground = resolve;
+        });
+      });
+      const timedOutNormal = scheduler.run('normal', 'legacy.normal.timeout', async () => {
+        events.push('timed-out-normal:start');
+      });
+      const timedOutNormalAssertion = expect(timedOutNormal).rejects.toMatchObject({
+        reason: 'queue_wait_timeout',
+        priority: 'normal',
+      });
+      running.push(normal1, normal2, background, timedOutNormal);
+
+      await expect(
+        scheduler.run('background', 'legacy.background.queue-full', async () => undefined),
+      ).rejects.toMatchObject({
+        reason: 'queue_full',
+        priority: 'background',
+      });
+
+      releaseNormal1();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(events).toEqual([
+        'normal-1:start',
+        'normal-2:start',
+        'normal-1:end',
+        'background:start',
+      ]);
+
+      await vi.advanceTimersByTimeAsync(25);
+      await timedOutNormalAssertion;
+      expect(events).not.toContain('timed-out-normal:start');
+
+      releaseBackground();
+      releaseNormal2();
+      await Promise.all([normal1, normal2, background]);
+    } finally {
+      releaseNormal1?.();
+      releaseNormal2?.();
+      await vi.advanceTimersByTimeAsync(0);
+      releaseBackground?.();
+      await vi.runAllTimersAsync();
+      await Promise.allSettled(running);
+      vi.useRealTimers();
+    }
+  });
+
   it('lets ACK work jump ahead of queued background work', async () => {
-    const scheduler = new StorePriorityScheduler(2, 1);
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
     const events: string[] = [];
     let releaseBackground!: () => void;
     const backgroundGate = new Promise<void>((resolve) => {
@@ -199,8 +307,136 @@ describe('StorePriorityScheduler', () => {
     ]);
   });
 
+  it('keeps normal capacity available while long background work is in flight', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 3,
+      ackReservedSlots: 1,
+      normalReservedSlots: 1,
+      backgroundReservedSlots: 1,
+      queueLimits: 64,
+      queueWaitTimeoutMs: 1_000,
+    });
+    const events: string[] = [];
+    let releaseBackground!: () => void;
+
+    const firstBackground = scheduler.run('background', 'finalization.slice.1', async () => {
+      events.push('background-1:start');
+      await new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      });
+      events.push('background-1:end');
+      return 'background-1';
+    });
+    await tick();
+
+    const secondBackground = scheduler.run('background', 'finalization.slice.2', async () => {
+      events.push('background-2:start');
+      return 'background-2';
+    });
+    await tick();
+
+    expect(scheduler.snapshot).toMatchObject({
+      backgroundInflight: 1,
+      backgroundQueued: 1,
+      normalReservedSlots: 1,
+    });
+
+    const normal = scheduler.run('normal', 'join-policy.validation', async () => {
+      events.push('normal:start');
+      return 'normal';
+    });
+    await expect(normal).resolves.toBe('normal');
+    expect(events).toEqual(['background-1:start', 'normal:start']);
+
+    releaseBackground();
+    await expect(Promise.all([firstBackground, secondBackground])).resolves.toEqual([
+      'background-1',
+      'background-2',
+    ]);
+  });
+
+  it('normalizes conflicting reserves so normal work can use idle capacity', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 4,
+      ackReservedSlots: 1,
+      normalReservedSlots: 2,
+      backgroundReservedSlots: 2,
+    });
+    const events: string[] = [];
+    let releaseBackground!: () => void;
+
+    const firstBackground = scheduler.run('background', 'finalization.slice.1', async () => {
+      events.push('background-1:start');
+      await new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      });
+      return 'background-1';
+    });
+    const secondBackground = scheduler.run('background', 'finalization.slice.2', async () => {
+      events.push('background-2:start');
+      return 'background-2';
+    });
+    await tick();
+
+    expect(scheduler.snapshot).toMatchObject({
+      normalReservedSlots: 2,
+      backgroundReservedSlots: 1,
+      backgroundInflight: 1,
+      backgroundQueued: 1,
+    });
+
+    const normal = scheduler.run('normal', 'join-policy.validation', async () => {
+      events.push('normal:start');
+      return 'normal';
+    });
+    await expect(normal).resolves.toBe('normal');
+    expect(events).toEqual(['background-1:start', 'normal:start']);
+
+    releaseBackground();
+    await expect(Promise.all([firstBackground, secondBackground])).resolves.toEqual([
+      'background-1',
+      'background-2',
+    ]);
+  });
+
+  it('reads the normal reserve from DKG_STORE_NORMAL_RESERVED_SLOTS', async () => {
+    const previous = process.env.DKG_STORE_NORMAL_RESERVED_SLOTS;
+    let releaseBackground: (() => void) | undefined;
+    const backgroundWork: Array<Promise<unknown>> = [];
+    process.env.DKG_STORE_NORMAL_RESERVED_SLOTS = '2';
+    try {
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 4,
+        ackReservedSlots: 1,
+        backgroundReservedSlots: 1,
+      });
+      const firstBackground = scheduler.run('background', 'env.background.1', async () => {
+        await new Promise<void>((resolve) => {
+          releaseBackground = resolve;
+        });
+      });
+      const secondBackground = scheduler.run('background', 'env.background.2', async () => undefined);
+      backgroundWork.push(firstBackground, secondBackground);
+      await tick();
+
+      expect(scheduler.snapshot).toMatchObject({
+        normalReservedSlots: 2,
+        backgroundInflight: 1,
+        backgroundQueued: 1,
+      });
+
+      releaseBackground?.();
+      await Promise.all([firstBackground, secondBackground]);
+    } finally {
+      releaseBackground?.();
+      await Promise.allSettled(backgroundWork);
+      if (previous === undefined) delete process.env.DKG_STORE_NORMAL_RESERVED_SLOTS;
+      else process.env.DKG_STORE_NORMAL_RESERVED_SLOTS = previous;
+    }
+  });
+
   it('releases an inflight slot when work throws synchronously', async () => {
-    const scheduler = new StorePriorityScheduler(1, 0);
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0 });
     const boom = () => {
       throw new Error('sync boom');
     };
@@ -219,7 +455,7 @@ describe('StorePriorityScheduler', () => {
   });
 
   it('reserves a non-ACK slot for queued background work behind normal traffic', async () => {
-    const scheduler = new StorePriorityScheduler(2, 0);
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
     const events: string[] = [];
     let releaseNormal1!: () => void;
     let releaseNormal2!: () => void;
@@ -280,7 +516,7 @@ describe('StorePriorityScheduler', () => {
   });
 
   it('does not reserve the only non-ACK slot for background work', async () => {
-    const scheduler = new StorePriorityScheduler(2, 1);
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
     const events: string[] = [];
     let releaseAck!: () => void;
     let releaseBackground!: () => void;
@@ -319,6 +555,7 @@ describe('StorePriorityScheduler', () => {
       backgroundInflight: 1,
       backgroundQueued: 1,
       normalQueued: 1,
+      normalReservedSlots: 0,
       backgroundReservedSlots: 0,
     });
 

@@ -30,9 +30,10 @@ interface AgentInternals {
   ): Promise<string | null>;
   handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
-  vmReconcileScheduler: {
+  vmReconcileDispatcher: {
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
+    tryTriggerPeriodic: (cg: string) => boolean;
   } | null;
   store: TripleStore;
 }
@@ -75,9 +76,13 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(LOCAL, { subscribed: true });
 
     const triggered: string[] = [];
-    internals.vmReconcileScheduler = {
+    internals.vmReconcileDispatcher = {
       triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
       triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
+      tryTriggerPeriodic: (cg: string) => {
+        triggered.push(`periodic:${cg}`);
+        return true;
+      },
     };
 
     // Precondition: unbound before the sweep (so the assertion below is meaningful).
@@ -153,9 +158,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_MISS_B, { subscribed: true });
 
     const triggered: string[] = [];
-    internals.vmReconcileScheduler = {
+    internals.vmReconcileDispatcher = {
       triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
       triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
+      tryTriggerPeriodic: () => true,
     };
 
     // The event names ON_HIT's on-chain id. None is bound yet.
@@ -183,9 +189,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_BOUND, { subscribed: true, onChainId: ON_BOUND });
 
     const triggered: string[] = [];
-    internals.vmReconcileScheduler = {
+    internals.vmReconcileDispatcher = {
       triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
       triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
+      tryTriggerPeriodic: () => true,
     };
 
     const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'));

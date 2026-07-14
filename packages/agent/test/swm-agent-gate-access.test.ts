@@ -86,6 +86,18 @@ async function insertAccessMeta(
       object: `"${options.accessPolicy ?? 'private'}"`,
       graph: metaGraph,
     },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CREATOR,
+      object: `did:dkg:agent:${LOCAL_PEER_ID}`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: 'did:dkg:agent:0x0000000000000000000000000000000000000001',
+      graph: metaGraph,
+    },
   ];
 
   for (const peerId of options.allowedPeers ?? []) {

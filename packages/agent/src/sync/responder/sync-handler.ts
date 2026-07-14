@@ -30,6 +30,19 @@ import {
   SyncRowSnapshotBudgetError,
   type SyncResponderSnapshotBudgetOptions,
 } from './snapshot-budget.js';
+import {
+  contextGraphPriority,
+  syncPriorityClass,
+  validateSyncResponderSnapshotLimitsConfig,
+  type SyncContextGraphPriorityConfig,
+  type SyncPriorityClass,
+  type SyncSchedulerLane,
+  type SyncResponderSnapshotLimitsConfig,
+} from '../policy.js';
+import {
+  PriorityAdmissionQueue,
+  type PriorityAdmission,
+} from '../priority-admission-queue.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -41,7 +54,12 @@ type SyncSessionTokenEntry = {
 type PreparedResponderSession = {
   rowListCacheKey: string;
   refreshRowList: boolean;
+  refreshGeneration: string;
 };
+
+type PreparedResponderStage =
+  | { kind: 'respond'; bytes: Uint8Array }
+  | { kind: 'authorized'; authDurationMs: number };
 
 interface RegisterSyncHandlerParams {
   /**
@@ -85,12 +103,14 @@ interface RegisterSyncHandlerParams {
   logDebug: (ctx: OperationContext, message: string) => void;
   /** Primarily injectable for deterministic tests; production uses the bounded defaults below. */
   snapshotBudget?: SyncResponderSnapshotBudgetOptions;
+  /** Local-only policy; consulted only after authorizeSyncRequest accepts the CG. */
+  contextGraphPriorities?: Readonly<SyncContextGraphPriorityConfig>;
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
 const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 1;
 const SYNC_RESPONDER_QUEUE_LIMIT = 64;
-const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
+export const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
 const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
 export const SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT = 128;
 export const SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT = 64;
@@ -116,37 +136,92 @@ function positiveIntegerEnv(
   env: Readonly<Record<string, string | undefined>>,
   name: string,
   fallback: number,
+  warn: (message: string) => void,
 ): number {
-  const parsed = Number(env[name]?.trim());
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  warn(`Ignoring invalid ${name}="${raw}"; expected a positive safe integer`);
+  return fallback;
 }
 
-/** Production snapshot limits, with explicit operator overrides in rows/bytes. */
-export function resolveSyncResponderSnapshotBudgetOptions(
+export interface ResolvedSyncResponderSnapshotPolicy {
+  budget: SyncResponderSnapshotBudgetOptions;
+  localRowsClamped: boolean;
+  localBytesEstimateClamped: boolean;
+}
+
+/** Resolve each leaf independently: environment, then config, then the compatibility default. */
+export function resolveSyncResponderSnapshotPolicy(
+  config?: SyncResponderSnapshotLimitsConfig,
   env: Readonly<Record<string, string | undefined>> = process.env,
-): SyncResponderSnapshotBudgetOptions {
-  return {
-    maxRows: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxRows,
-      SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
-    ),
-    maxBytesEstimate: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxBytesEstimate,
-      SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
-    ),
-    maxSnapshotRows: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxSnapshotRows,
-      SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
-    ),
-    maxSnapshotBytesEstimate: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxSnapshotBytesEstimate,
-      SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
-    ),
+  onWarning: (message: string) => void = () => {},
+): ResolvedSyncResponderSnapshotPolicy {
+  validateSyncResponderSnapshotLimitsConfig(config);
+  const warnings = new Set<string>();
+  const warnOnce = (message: string) => {
+    if (warnings.has(message)) return;
+    warnings.add(message);
+    onWarning(message);
   };
+  const maxRows = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxRows,
+    config?.global?.rows ?? SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+    warnOnce,
+  );
+  const maxBytesEstimate = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxBytesEstimate,
+    config?.global?.bytesEstimate ?? SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    warnOnce,
+  );
+  const configuredMaxSnapshotRows = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxSnapshotRows,
+    config?.local?.rows ?? SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
+    warnOnce,
+  );
+  const configuredMaxSnapshotBytesEstimate = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxSnapshotBytesEstimate,
+    config?.local?.bytesEstimate ?? SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    warnOnce,
+  );
+  const maxSnapshotRows = Math.min(configuredMaxSnapshotRows, maxRows);
+  const maxSnapshotBytesEstimate = Math.min(configuredMaxSnapshotBytesEstimate, maxBytesEstimate);
+  const localRowsClamped = maxSnapshotRows !== configuredMaxSnapshotRows;
+  const localBytesEstimateClamped = maxSnapshotBytesEstimate !== configuredMaxSnapshotBytesEstimate;
+  if (localRowsClamped) {
+    warnOnce(
+      `Clamped syncResponderSnapshotLimits.local.rows from ${configuredMaxSnapshotRows} to global.rows ${maxRows}`,
+    );
+  }
+  if (localBytesEstimateClamped) {
+    warnOnce(
+      `Clamped syncResponderSnapshotLimits.local.bytesEstimate from ${configuredMaxSnapshotBytesEstimate} to global.bytesEstimate ${maxBytesEstimate}`,
+    );
+  }
+  return {
+    budget: {
+      maxRows,
+      maxBytesEstimate,
+      maxSnapshotRows,
+      maxSnapshotBytesEstimate,
+    },
+    localRowsClamped,
+    localBytesEstimateClamped,
+  };
+}
+
+/** Production snapshot limits, with explicit config and environment overrides in rows/bytes. */
+export function resolveSyncResponderSnapshotBudgetOptions(
+  config?: SyncResponderSnapshotLimitsConfig,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  onWarning?: (message: string) => void,
+): SyncResponderSnapshotBudgetOptions {
+  return resolveSyncResponderSnapshotPolicy(config, env, onWarning).budget;
 }
 
 class SyncResponderBusyError extends Error {
@@ -156,118 +231,144 @@ class SyncResponderBusyError extends Error {
   }
 }
 
-interface SyncResponderQueueEntry {
+interface SyncResponderQueuePayload {
   peerId: string;
-  resolve: (release: () => void) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  timer: ReturnType<typeof setTimeout>;
-  onAbort?: () => void;
+  contextGraphId?: string;
 }
+
+type SyncResponderScheduling = {
+  contextGraphId?: string;
+  lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
+  priority: number;
+  priorityClass: SyncPriorityClass;
+};
 
 function createSyncResponderLimiter() {
   let running = 0;
   const runningByPeer = new Map<string, number>();
-  const queuedByPeer = new Map<string, number>();
-  const queue: SyncResponderQueueEntry[] = [];
-
-  const canRun = (peerId: string): boolean =>
-    running < SYNC_RESPONDER_GLOBAL_CONCURRENCY &&
-    (runningByPeer.get(peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY;
-
-  const releaseFor = (peerId: string): (() => void) => {
-    let released = false;
-    running += 1;
-    runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
-    return () => {
-      if (released) return;
-      released = true;
-      running -= 1;
-      const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
-      if (peerRunning <= 0) runningByPeer.delete(peerId);
-      else runningByPeer.set(peerId, peerRunning);
-      pump();
-    };
-  };
-
-  const incrementQueued = (peerId: string): void => {
-    queuedByPeer.set(peerId, (queuedByPeer.get(peerId) ?? 0) + 1);
-  };
-
-  const decrementQueued = (peerId: string): void => {
-    const count = (queuedByPeer.get(peerId) ?? 1) - 1;
-    if (count <= 0) queuedByPeer.delete(peerId);
-    else queuedByPeer.set(peerId, count);
-  };
-
-  const removeQueued = (entry: SyncResponderQueueEntry): boolean => {
-    const index = queue.indexOf(entry);
-    if (index < 0) return false;
-    queue.splice(index, 1);
-    decrementQueued(entry.peerId);
-    clearTimeout(entry.timer);
-    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
-    return true;
-  };
-
-  const startQueued = (entry: SyncResponderQueueEntry): void => {
-    decrementQueued(entry.peerId);
-    clearTimeout(entry.timer);
-    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
-    entry.resolve(releaseFor(entry.peerId));
-  };
-
-  const pump = (): void => {
-    for (let i = 0; i < queue.length && running < SYNC_RESPONDER_GLOBAL_CONCURRENCY;) {
-      const entry = queue[i];
-      if (!canRun(entry.peerId)) {
-        i += 1;
-        continue;
-      }
-      queue.splice(i, 1);
-      startQueued(entry);
-    }
-  };
-
-  const acquire = (peerId: string, signal?: AbortSignal): Promise<() => void> => {
-    throwIfAborted(signal);
-    if (canRun(peerId)) return Promise.resolve(releaseFor(peerId));
-    if (queue.length >= SYNC_RESPONDER_QUEUE_LIMIT) {
-      throw new SyncResponderBusyError('sync responder queue full');
-    }
-    if ((queuedByPeer.get(peerId) ?? 0) >= SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT) {
-      throw new SyncResponderBusyError('sync responder peer queue full');
-    }
-    return new Promise((resolve, reject) => {
-      const entry: SyncResponderQueueEntry = {
-        peerId,
-        resolve,
-        reject,
-        signal,
-        timer: setTimeout(() => {
-          if (removeQueued(entry)) reject(new SyncResponderBusyError('sync responder queue wait exceeded'));
-        }, SYNC_RESPONDER_MAX_QUEUE_WAIT_MS),
+  const queue = new PriorityAdmissionQueue<SyncResponderQueuePayload>({
+    canRun: (entry) => (
+      running < SYNC_RESPONDER_GLOBAL_CONCURRENCY
+      && (runningByPeer.get(entry.payload.peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY
+    ),
+    onStart: (entry) => {
+      const { peerId } = entry.payload;
+      running += 1;
+      runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
+      return () => {
+        running = Math.max(0, running - 1);
+        const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
+        if (peerRunning <= 0) runningByPeer.delete(peerId);
+        else runningByPeer.set(peerId, peerRunning);
       };
-      entry.onAbort = () => {
-        if (removeQueued(entry)) reject(asAbortError(signal?.reason));
-      };
-      incrementQueued(peerId);
-      queue.push(entry);
-      if (signal) {
-        signal.addEventListener('abort', entry.onAbort, { once: true });
-        if (signal.aborted) entry.onAbort();
-      }
-    });
-  };
+    },
+  });
+
+  const schedulingOptions = (
+    peerId: string,
+    scheduling: SyncResponderScheduling,
+    signal?: AbortSignal,
+  ) => ({
+    payload: { peerId, contextGraphId: scheduling.contextGraphId },
+    lane: scheduling.lane,
+    priority: scheduling.priority,
+    priorityClass: scheduling.priorityClass,
+    signal,
+    timeoutMs: SYNC_RESPONDER_MAX_QUEUE_WAIT_MS,
+    agingThresholdMs: SYNC_RESPONDER_MAX_QUEUE_WAIT_MS / 2,
+    createBusyError: (reason: 'global_queue_full' | 'owner_queue_full') => new SyncResponderBusyError(
+      reason === 'global_queue_full'
+        ? 'sync responder queue full'
+        : 'sync responder peer queue full',
+    ),
+    createDisplacedError: () => new SyncResponderBusyError(
+      'sync responder queued request displaced',
+    ),
+    createTimeoutError: () => new SyncResponderBusyError(
+      'sync responder queue wait exceeded',
+    ),
+  });
+
+  const acquire = (
+    peerId: string,
+    scheduling: SyncResponderScheduling,
+    signal?: AbortSignal,
+    reserveForHandoff = false,
+  ): PriorityAdmission<SyncResponderQueuePayload> => queue.acquire({
+    ...schedulingOptions(peerId, scheduling, signal),
+    ownerKey: peerId,
+    queueLimit: SYNC_RESPONDER_QUEUE_LIMIT,
+    ownerQueueLimit: SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT,
+    reserveForHandoff,
+  });
 
   return {
-    async run<T>(peerId: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
-      const release = await acquire(peerId, signal);
+    async run<T>(
+      peerId: string,
+      signal: AbortSignal | undefined,
+      scheduling: SyncResponderScheduling,
+      fn: () => Promise<T>,
+    ): Promise<T> {
+      const admission = acquire(peerId, scheduling, signal);
+      const release = await admission.release;
       try {
         throwIfAborted(signal);
         return await fn();
       } finally {
         release();
+      }
+    },
+
+    async runTwoStage<T, U>(
+      peerId: string,
+      signal: AbortSignal | undefined,
+      firstScheduling: SyncResponderScheduling,
+      first: () => Promise<T>,
+      transition: (value: T) => {
+        scheduling: SyncResponderScheduling;
+        work: () => Promise<U>;
+      } | undefined,
+    ): Promise<T | U> {
+      const firstAdmission = acquire(peerId, firstScheduling, signal, true);
+      const releaseFirst = await firstAdmission.release;
+      let value: T;
+      try {
+        throwIfAborted(signal);
+        value = await first();
+      } catch (error) {
+        releaseFirst();
+        throw error;
+      }
+
+      const next = transition(value);
+      if (!next) {
+        releaseFirst();
+        return value;
+      }
+
+      let secondAdmission: PriorityAdmission<SyncResponderQueuePayload>;
+      try {
+        // The first stage reserved one bounded global + per-peer queue slot.
+        // Consuming it here preserves the original arrival sequence without
+        // temporarily or persistently exceeding either queue cap.
+        if (!firstAdmission.handoff) {
+          throw new Error('sync responder handoff reservation missing');
+        }
+        secondAdmission = firstAdmission.handoff(
+          schedulingOptions(peerId, next.scheduling, signal),
+        );
+      } catch (error) {
+        releaseFirst();
+        throw error;
+      }
+      releaseFirst();
+
+      const releaseSecond = await secondAdmission.release;
+      try {
+        throwIfAborted(signal);
+        return await next.work();
+      } finally {
+        releaseSecond();
       }
     },
   };
@@ -308,6 +409,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logWarn,
     logDebug,
     snapshotBudget,
+    contextGraphPriorities,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
   const responderSnapshotBudget = createSyncResponderSnapshotBudget(snapshotBudget ?? {
@@ -335,6 +437,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
   const limiter = createSyncResponderLimiter();
+  // Preserve the original one-admission auth+serve path unless an operator
+  // actually configures a non-zero priority. An empty/all-zero map is a true
+  // compatibility no-op for responder scheduling.
+  const prioritySchedulingEnabled = Object.values(contextGraphPriorities ?? {})
+    .some((priority) => priority !== 0);
   let warnedPreDispatchCancellation = false;
 
   const pruneSyncSessionTokens = (now = Date.now()) => {
@@ -378,6 +485,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     return {
       rowListCacheKey: key,
       refreshRowList,
+      // Include the server-derived row-list scope so two remote peers choosing
+      // the same opaque token cannot make global prerequisite memos treat their
+      // otherwise-independent sessions as one generation.
+      refreshGeneration: `${key}\u0000${token}`,
     };
   };
 
@@ -430,7 +541,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       logDebug(createOperationContext('sync'), message());
     };
 
-    return limiter.run(peerId, signal, async () => {
+    const prepareResponderStage = async (): Promise<PreparedResponderStage> => {
       throwIfAborted(signal);
 
       // facet open-serve. The public `_catalog` subgraph (a DCAT
@@ -441,7 +552,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const rows = await raceAgainstAbort(readCatalogPage({ store, contextGraphId, offset, limit }), signal);
         const serialized = serializeResponderRows(rows);
         logFirstPageDetail(() => `Sync responder catalog facet for "${contextGraphId}": rows=${rows.length}`);
-        return new TextEncoder().encode(serialized ?? '');
+        return { kind: 'respond', bytes: new TextEncoder().encode(serialized ?? '') };
       }
 
       const authStartedAt = Date.now();
@@ -450,8 +561,13 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       throwIfAborted(signal);
       if (!authorized) {
         logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
-        return new TextEncoder().encode(syncDeniedResponse);
+        return { kind: 'respond', bytes: new TextEncoder().encode(syncDeniedResponse) };
       }
+      return { kind: 'authorized', authDurationMs };
+    };
+
+    const serveAuthorizedStage = async (authDurationMs: number): Promise<Uint8Array> => {
+      throwIfAborted(signal);
 
       if (store.queryCancellation === 'pre-dispatch' && !warnedPreDispatchCancellation) {
         warnedPreDispatchCancellation = true;
@@ -487,10 +603,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmMetaPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+            graphList: await graphListMemo.get({
+              refresh: session?.refreshRowList ?? offset === 0,
+              refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+              signal,
+            }),
             registeredSubGraphNames: await swmAdmissionMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             contextGraphId,
             cutoffIso: cutoff,
@@ -500,6 +624,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -517,10 +642,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmDataPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+            graphList: await graphListMemo.get({
+              refresh: session?.refreshRowList ?? offset === 0,
+              refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+              signal,
+            }),
             registeredSubGraphNames: await swmAdmissionMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             contextGraphId,
             cutoffIso: cutoff,
@@ -530,6 +663,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -571,7 +705,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             registeredSubGraphNames: await subGraphRegistrationMemo.get(
               contextGraphId,
-              { refresh: offset === 0, signal },
+              {
+                refresh: session?.refreshRowList ?? offset === 0,
+                refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+                signal,
+              },
             ),
             offset,
             limit,
@@ -579,6 +717,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListMemo: session ? durableMetaRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
+            refreshGeneration: session?.refreshGeneration,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -597,7 +736,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
         const rows = await readDurableDataPage({
           store,
-          graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+          graphList: await graphListMemo.get({
+            refresh: session?.refreshRowList ?? offset === 0,
+            refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
+            signal,
+          }),
           contextGraphId,
           sinceBatchId,
           offset,
@@ -606,6 +749,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           rowListMemo: session ? durableDataRowsMemo : undefined,
           rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
+          refreshGeneration: session?.refreshGeneration,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
@@ -620,7 +764,50 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
       return new TextEncoder().encode(nquads.join('\n'));
-    }).then((res) => {
+    };
+
+    const preAuthorizationScheduling: SyncResponderScheduling = {
+      lane: 'pre_authorization',
+      priority: 0,
+      priorityClass: 'default',
+    };
+    const response: Promise<Uint8Array> = prioritySchedulingEnabled
+      ? limiter.runTwoStage(
+          peerId,
+          signal,
+          preAuthorizationScheduling,
+          prepareResponderStage,
+          (prepared) => {
+            if (prepared.kind === 'respond') return undefined;
+            const priority = contextGraphPriority(contextGraphPriorities, contextGraphId);
+            return {
+              scheduling: {
+                contextGraphId,
+                lane: 'responder' as const,
+                priority,
+                priorityClass: syncPriorityClass(priority),
+              },
+              work: () => serveAuthorizedStage(prepared.authDurationMs),
+            };
+          },
+        ).then((result) => {
+          if (result instanceof Uint8Array) return result;
+          if (result.kind === 'respond') return result.bytes;
+          throw new Error('sync responder authorized stage did not produce response bytes');
+        })
+      : limiter.run(
+          peerId,
+          signal,
+          { contextGraphId, lane: 'responder', priority: 0, priorityClass: 'default' },
+          async () => {
+            const prepared = await prepareResponderStage();
+            return prepared.kind === 'respond'
+              ? prepared.bytes
+              : serveAuthorizedStage(prepared.authDurationMs);
+          },
+        );
+
+    return response.then((res) => {
       getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
       return res;
     }).catch((err) => {
