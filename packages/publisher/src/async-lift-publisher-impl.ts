@@ -597,6 +597,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
             // temporarily blocked (for example while SWM catch-up is still in
             // progress). Keep the job tx-bearing and retry recovery later. It
             // is never safe to reset this job and submit a second transaction.
+            //
+            // Holding the wallet lock here does not strand the wallet even if
+            // the repair never succeeds: the lock carries the claim lease taken
+            // at claim time (`claimLeaseExpiresAt`), `syncWalletLockForJob`
+            // re-writes that same fixed deadline rather than extending it, and
+            // `recover()` sweeps expired locks before it retries. The wallet is
+            // freed at the lease deadline; the job stays tx-bearing regardless.
             return false;
           }
 
