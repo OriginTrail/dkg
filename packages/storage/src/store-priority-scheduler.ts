@@ -11,6 +11,7 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   backgroundQueued: number;
   maxConcurrent: number;
   ackReservedSlots: number;
+  normalReservedSlots: number;
   backgroundReservedSlots: number;
   ackQueueLimit: number;
   normalQueueLimit: number;
@@ -54,6 +55,7 @@ interface QueueEntry<T> {
 
 const DEFAULT_MAX_CONCURRENT = 8;
 const DEFAULT_ACK_RESERVED_SLOTS = 1;
+const DEFAULT_NORMAL_RESERVED_SLOTS = 1;
 const DEFAULT_BACKGROUND_RESERVED_SLOTS = 1;
 export const DEFAULT_STORE_QUEUE_LIMIT = 64;
 export const DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS = 10_000;
@@ -143,6 +145,10 @@ export class StorePriorityScheduler {
       'DKG_STORE_QUEUE_WAIT_TIMEOUT_MS',
       DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
     ),
+    private readonly normalReservedSlots = parseNonNegativeIntegerEnv(
+      'DKG_STORE_NORMAL_RESERVED_SLOTS',
+      DEFAULT_NORMAL_RESERVED_SLOTS,
+    ),
   ) {
     this.queueLimits = normalizeQueueLimits(queueLimits);
   }
@@ -157,6 +163,7 @@ export class StorePriorityScheduler {
       backgroundQueued: this.queues.background.length,
       maxConcurrent: this.maxConcurrent,
       ackReservedSlots: this.effectiveAckReserve(),
+      normalReservedSlots: this.effectiveNormalReserve(),
       backgroundReservedSlots: this.effectiveBackgroundReserve(),
       ackQueueLimit: this.queueLimits.ack,
       normalQueueLimit: this.queueLimits.normal,
@@ -251,6 +258,7 @@ export class StorePriorityScheduler {
     const nonAckLimit = this.nonAckLimit();
     const nonAckInflight = this.normalInflight + this.backgroundInflight;
     if (nonAckInflight >= nonAckLimit) return false;
+    if (priority === 'background' && this.backgroundInflight >= this.backgroundLimit()) return false;
     if (priority === 'normal' && this.shouldHoldBackgroundFloor()) return false;
     return true;
   }
@@ -272,6 +280,14 @@ export class StorePriorityScheduler {
 
   private effectiveBackgroundReserve(): number {
     return Math.min(this.backgroundReservedSlots, Math.max(0, this.nonAckLimit() - 1));
+  }
+
+  private effectiveNormalReserve(): number {
+    return Math.min(this.normalReservedSlots, Math.max(0, this.nonAckLimit() - 1));
+  }
+
+  private backgroundLimit(): number {
+    return Math.max(1, this.nonAckLimit() - this.effectiveNormalReserve());
   }
 
   private start(entry: QueueEntry<unknown>): void {

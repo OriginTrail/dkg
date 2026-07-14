@@ -80,6 +80,7 @@ already have reached the store.
 |---|---:|---|
 | `DKG_STORE_MAX_CONCURRENT` | `8` | Maximum external-store operations in flight. |
 | `DKG_STORE_ACK_RESERVED_SLOTS` | `1` | In-flight capacity reserved for ACK work. |
+| `DKG_STORE_NORMAL_RESERVED_SLOTS` | `1` | Non-ACK capacity kept available for normal work while background operations are in flight. |
 | `DKG_STORE_BACKGROUND_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for background progress. |
 | `DKG_STORE_QUEUE_LIMIT` | `64` | Maximum waiting operations in each priority queue. |
 | `DKG_STORE_ACK_QUEUE_LIMIT` | common limit | Optional ACK queue override. |

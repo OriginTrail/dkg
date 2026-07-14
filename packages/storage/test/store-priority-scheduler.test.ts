@@ -199,6 +199,47 @@ describe('StorePriorityScheduler', () => {
     ]);
   });
 
+  it('keeps normal capacity available while long background work is in flight', async () => {
+    const scheduler = new StorePriorityScheduler(3, 1, undefined, 1, 64, 1_000, 1);
+    const events: string[] = [];
+    let releaseBackground!: () => void;
+
+    const firstBackground = scheduler.run('background', 'finalization.slice.1', async () => {
+      events.push('background-1:start');
+      await new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      });
+      events.push('background-1:end');
+      return 'background-1';
+    });
+    await tick();
+
+    const secondBackground = scheduler.run('background', 'finalization.slice.2', async () => {
+      events.push('background-2:start');
+      return 'background-2';
+    });
+    await tick();
+
+    expect(scheduler.snapshot).toMatchObject({
+      backgroundInflight: 1,
+      backgroundQueued: 1,
+      normalReservedSlots: 1,
+    });
+
+    const normal = scheduler.run('normal', 'join-policy.validation', async () => {
+      events.push('normal:start');
+      return 'normal';
+    });
+    await expect(normal).resolves.toBe('normal');
+    expect(events).toEqual(['background-1:start', 'normal:start']);
+
+    releaseBackground();
+    await expect(Promise.all([firstBackground, secondBackground])).resolves.toEqual([
+      'background-1',
+      'background-2',
+    ]);
+  });
+
   it('releases an inflight slot when work throws synchronously', async () => {
     const scheduler = new StorePriorityScheduler(1, 0);
     const boom = () => {
@@ -319,6 +360,7 @@ describe('StorePriorityScheduler', () => {
       backgroundInflight: 1,
       backgroundQueued: 1,
       normalQueued: 1,
+      normalReservedSlots: 0,
       backgroundReservedSlots: 0,
     });
 

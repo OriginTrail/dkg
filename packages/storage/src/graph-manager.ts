@@ -437,6 +437,7 @@ export interface SwmSliceSourceTags {
  * With no bound this is a single complete read (safe by construction). With a
  * bound the result is exactly what the unbounded read would have produced on any
  * input — never accept→defer, sometimes defer→accept under recurrence.
+ * `queryOptions` is applied to graph discovery and every bounded or widened read.
  */
 export async function loadSharedMemorySliceWithKaBoundFallback(
   store: TripleStore,
@@ -445,12 +446,14 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
   kaGraphBound: SwmKaGraphBound | undefined,
   sources: SwmSliceSourceTags,
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  queryOptions: QueryOptions = {},
 ): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
   const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
-    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { querySource: source });
+    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { queryOptions, querySource: source });
 
   let quads = kaGraphBound
     ? await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+        queryOptions,
         querySource: sources.bounded,
       })
     : await readComplete(sources.unbounded);
