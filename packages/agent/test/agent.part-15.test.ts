@@ -270,6 +270,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const pendingMeta = contextGraphMetaUri(pendingId);
       const confirmedUri = contextGraphDataGraphUri(confirmedId);
       const confirmedMeta = contextGraphMetaUri(confirmedId);
+      const confirmedDelegation =
+        `did:dkg:agent-delegation:${confirmedId}:${localAgentAddress.toLowerCase()}`;
       await agent.store.insert([
         {
           subject: pendingUri,
@@ -322,6 +324,24 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         {
           subject: confirmedUri,
           predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+          object: sparqlString(localAgentAddress),
+          graph: confirmedMeta,
+        },
+        {
+          subject: confirmedDelegation,
+          predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT,
+          object: sparqlString(localAgentAddress),
+          graph: confirmedMeta,
+        },
+        {
+          subject: confirmedDelegation,
+          predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT,
+          object: sparqlString(String(Date.now() - 1_000)),
+          graph: confirmedMeta,
+        },
+        {
+          subject: confirmedDelegation,
+          predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY,
           object: sparqlString(localAgentAddress),
           graph: confirmedMeta,
         },
