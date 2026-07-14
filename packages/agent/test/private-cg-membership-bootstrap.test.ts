@@ -584,7 +584,7 @@ describe('private CG membership bootstrap recovery', () => {
       })),
       newer.delegateePeerId!,
     )));
-    expect(newerResponse).toEqual({ ok: true });
+    expect(newerResponse).toEqual({ ok: true, status: 'pending' });
 
     const olderResponse = JSON.parse(decoder.decode(await handler(
       encoder.encode(JSON.stringify({
@@ -679,11 +679,13 @@ describe('private CG membership bootstrap recovery', () => {
     let markApprovalStarted!: () => void;
     const approvalStarted = new Promise<void>((resolve) => { markApprovalStarted = resolve; });
     const approvalBlocked = new Promise<void>((resolve) => { releaseApproval = resolve; });
-    const actualInvite = agent.inviteAgentToContextGraph.bind(agent);
-    (agent as any).inviteAgentToContextGraph = async (...args: Parameters<typeof actualInvite>) => {
+    const actualCommitPrepared = agent.commitPreparedInviteAgentToContextGraph.bind(agent);
+    (agent as any).commitPreparedInviteAgentToContextGraph = async (
+      ...args: Parameters<typeof actualCommitPrepared>
+    ) => {
       markApprovalStarted();
       await approvalBlocked;
-      return actualInvite(...args);
+      return actualCommitPrepared(...args);
     };
     (agent as any).notifyJoinApproval = vi.fn(async () => {});
     const actualStoreOnce = agent.storePendingJoinRequestOnce.bind(agent);
@@ -1155,18 +1157,21 @@ describe('private CG membership bootstrap recovery', () => {
       agentPrivateKey: member.privateKey,
     });
 
-    const actualInvite = agent.inviteAgentToContextGraph.bind(agent);
+    const actualPrepare = agent.prepareInviteAgentToContextGraph.bind(agent);
+    const actualCommitPrepared = agent.commitPreparedInviteAgentToContextGraph.bind(agent);
     let persistenceFinished = false;
     let notificationObservedPersistence = false;
-    (agent as any).inviteAgentToContextGraph = async (
-      cg: string,
-      address: string,
-      caller: string | undefined,
-      freshDelegation: SignedAgentDelegation | undefined,
+    (agent as any).prepareInviteAgentToContextGraph = async (
+      ...args: Parameters<typeof actualPrepare>
     ) => {
-      expect(freshDelegation).toEqual(delegation);
-      expect(caller?.toLowerCase()).toBe(owner.toLowerCase());
-      await actualInvite(cg, address, caller, freshDelegation);
+      expect(args[4]).toEqual(delegation);
+      expect(args[3]?.toLowerCase()).toBe(owner.toLowerCase());
+      return actualPrepare(...args);
+    };
+    (agent as any).commitPreparedInviteAgentToContextGraph = async (
+      ...args: Parameters<typeof actualCommitPrepared>
+    ) => {
+      await actualCommitPrepared(...args);
       persistenceFinished = true;
     };
     (agent as any).notifyJoinApproval = async () => {
@@ -1183,7 +1188,7 @@ describe('private CG membership bootstrap recovery', () => {
       delegateePeerId,
     )));
 
-    expect(response).toEqual({ ok: true, alreadyMember: true });
+    expect(response).toEqual({ ok: true, status: 'approved', alreadyMember: true });
     expect(notificationObservedPersistence).toBe(true);
     expect((await (agent as any).getContextGraphAllowedDelegateePeers(contextGraphId))
       .get(member.address.toLowerCase())).toContain(delegateePeerId);
@@ -1251,7 +1256,7 @@ describe('private CG membership bootstrap recovery', () => {
       })),
       delegateePeerId,
     )));
-    expect(idempotentResponse).toEqual({ ok: true, alreadyMember: true });
+    expect(idempotentResponse).toEqual({ ok: true, status: 'approved', alreadyMember: true });
   });
 
   it('serializes concurrent already-member refreshes so an older delayed write cannot replace a newer credential', async () => {
@@ -1307,14 +1312,20 @@ describe('private CG membership bootstrap recovery', () => {
     });
     let newWriteStarted = false;
     const inviteOrder: string[] = [];
-    const actualInvite = agent.inviteAgentToContextGraph.bind(agent);
-    (agent as any).inviteAgentToContextGraph = async (
-      cg: string,
-      address: string,
-      caller: string | undefined,
-      delegation: SignedAgentDelegation | undefined,
+    const preparedPeers = new WeakMap<object, string>();
+    const actualPrepare = agent.prepareInviteAgentToContextGraph.bind(agent);
+    (agent as any).prepareInviteAgentToContextGraph = async (
+      ...args: Parameters<typeof actualPrepare>
     ) => {
-      const peerId = delegation?.delegateePeerId ?? '<missing>';
+      const prepared = await actualPrepare(...args);
+      preparedPeers.set(prepared, args[4]?.delegateePeerId ?? '<missing>');
+      return prepared;
+    };
+    const actualCommitPrepared = agent.commitPreparedInviteAgentToContextGraph.bind(agent);
+    (agent as any).commitPreparedInviteAgentToContextGraph = async (
+      ...args: Parameters<typeof actualCommitPrepared>
+    ) => {
+      const peerId = preparedPeers.get(args[2]) ?? '<missing>';
       inviteOrder.push(`${peerId}:start`);
       if (peerId === oldPeerId) {
         markOldWriteStarted();
@@ -1322,26 +1333,10 @@ describe('private CG membership bootstrap recovery', () => {
       } else if (peerId === newPeerId) {
         newWriteStarted = true;
       }
-      await actualInvite(cg, address, caller, delegation);
+      await actualCommitPrepared(...args);
       inviteOrder.push(`${peerId}:finish`);
     };
     (agent as any).notifyJoinApproval = vi.fn(async () => {});
-
-    // Observe that the second request reached the already-member branch while
-    // the first write is blocked. This distinguishes genuine concurrency from
-    // simply invoking the handlers one after another.
-    const actualAllowedAgents = agent.getContextGraphAllowedAgents.bind(agent);
-    let allowedReadCount = 0;
-    let markSecondAllowedRead!: () => void;
-    const secondAllowedRead = new Promise<void>((resolve) => {
-      markSecondAllowedRead = resolve;
-    });
-    (agent as any).getContextGraphAllowedAgents = async (cg: string) => {
-      const allowed = await actualAllowedAgents(cg);
-      allowedReadCount += 1;
-      if (allowedReadCount === 2) markSecondAllowedRead();
-      return allowed;
-    };
 
     const handler = joinRequestHandler(agent);
     const oldResponsePromise = handler(
@@ -1367,7 +1362,9 @@ describe('private CG membership bootstrap recovery', () => {
       () => { newResponseSettled = true; },
       () => { newResponseSettled = true; },
     );
-    await secondAllowedRead;
+    // Both handlers are live concurrently, but the newer request must remain
+    // queued before its membership read/write while the older commit owns the
+    // per-CG admission lock.
     await new Promise((resolve) => setTimeout(resolve, 50));
     const escapedQueueBeforeOldWrite = newWriteStarted || newResponseSettled;
 
@@ -1378,8 +1375,8 @@ describe('private CG membership bootstrap recovery', () => {
     ]).then((responses) => responses.map((bytes) => JSON.parse(decoder.decode(bytes))));
 
     expect(escapedQueueBeforeOldWrite).toBe(false);
-    expect(oldResponse).toEqual({ ok: true, alreadyMember: true });
-    expect(newResponse).toEqual({ ok: true, alreadyMember: true });
+    expect(oldResponse).toEqual({ ok: true, status: 'approved', alreadyMember: true });
+    expect(newResponse).toEqual({ ok: true, status: 'approved', alreadyMember: true });
     expect(inviteOrder).toEqual([
       `${oldPeerId}:start`,
       `${oldPeerId}:finish`,
