@@ -67,17 +67,30 @@ jobs:
       evm_matrix: ${{ steps.plan.outputs.evm_matrix }}
       plan_json: ${{ steps.plan.outputs.plan_json }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # The merge candidate is untrusted input: use it only to calculate the
+      # changed-file set, and never execute its CI planner or validator here.
+      - name: Checkout merge candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           # The PR checkout is a synthetic merge commit; depth 2 normally
           # includes that commit and both parents without cloning full history.
           fetch-depth: 2
-      # Package README files are documentation for routing purposes, but they
-      # are also npm metadata. Keep this cheap gate in the always-run planner
-      # so a docs-only PR cannot bypass the existing stale-v9 check.
-      - name: Validate npm metadata points to v10
-        run: node scripts/check-npm-metadata.mjs
+          path: candidate
+      # This immutable controller is the authority for test selection. A
+      # policy update intentionally uses a new reviewed commit SHA; never use
+      # the merge candidate or a mutable branch here.
+      - name: Checkout trusted CI controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: OriginTrail/dkg
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          persist-credentials: false
+          path: trusted-ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/lib
+          sparse-checkout-cone-mode: false
       - name: Compute fail-closed CI plan
         id: plan
         env:
@@ -99,14 +112,15 @@ jobs:
               echo "::error::Missing pull-request base/merge SHA"
               exit 1
             fi
-            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-              git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+            if ! git -C candidate cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              git -C candidate fetch --no-tags --depth=1 origin "${BASE_SHA}"
             fi
-            git cat-file -e "${MERGE_SHA}^{commit}"
+            git -C candidate cat-file -e "${MERGE_SHA}^{commit}"
             # Compare the latest base with GitHub's synthetic merge candidate.
             # Comparing base directly to a behind PR head would misclassify
             # unrelated changes that landed on base as part of this PR.
-            git diff --name-status -z "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
+            git -C candidate diff --name-status -z \
+              "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
           fi
 
           PLAN_EVENT="${EVENT_NAME}"
@@ -114,13 +128,18 @@ jobs:
             PLAN_EVENT="pull_request_delta_disabled"
           fi
 
-          node scripts/ci/plan-ci.mjs \
+          node trusted-ci/scripts/ci/plan-ci.mjs \
             --event "${PLAN_EVENT}" \
             --changes-z "${CHANGES_FILE}" \
             --labels-json "${PR_LABELS:-[]}" \
             --sample-key "${SAMPLE_KEY}" \
             --github-output "${GITHUB_OUTPUT}" \
             --summary "${GITHUB_STEP_SUMMARY}"
+      # Package README files are documentation for routing purposes, but they
+      # are also npm metadata. Candidate code runs only after the trusted plan
+      # has finalized its outputs, so it cannot influence test selection.
+      - name: Validate npm metadata points to v10
+        run: node candidate/scripts/check-npm-metadata.mjs
 
   # ------------------------------------------------------------------
   # One canonical build. Every test job downloads this artifact instead
@@ -1369,12 +1388,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # The aggregate verdict must come from the same immutable controller as
+      # the planner, never from the merge candidate being evaluated.
+      - name: Checkout trusted CI controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          repository: OriginTrail/dkg
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
           persist-credentials: false
+          path: trusted-ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/lib
+          sparse-checkout-cone-mode: false
       - name: Verify selected lanes completed
         env:
           EVENT_NAME: ${{ github.event_name }}
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: node scripts/ci/assert-ci-results.mjs --workflow primary
+        run: node trusted-ci/scripts/ci/assert-ci-results.mjs --workflow primary

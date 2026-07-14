@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +22,7 @@ import {
 } from '../ci-results.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const TRUSTED_CI_CONTROLLER_SHA = 'c441bd6766ace67e331c0dfc6e22cb1325a6e1f6';
 
 function change(filePath, status = 'M') {
   return { status, paths: [filePath] };
@@ -156,6 +159,36 @@ test('highest-risk, global, unknown, manifest, large, and ambiguous changes fail
   assert.equal(hugePlan.changedFiles.length, 200, 'GitHub output must stay bounded');
 });
 
+test('workflow, planner, and aggregate-gate changes always force every CI lane', () => {
+  const controlPlanePaths = [
+    '.github/workflows/ci.yml',
+    '.github/workflows/evm-integration.yml',
+    '.github/workflows/nested/policy.yml',
+    'scripts/ci/plan-ci.mjs',
+    'scripts/ci/assert-ci-results.mjs',
+    'scripts/lib/ci-delta.mjs',
+    'scripts/lib/ci-results.mjs',
+    'scripts/unrelated-maintenance.mjs',
+  ];
+
+  for (const filePath of controlPlanePaths) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.mode, 'full', filePath);
+    assert.equal(plan.fullCi, true, filePath);
+    assert.equal(plan.runNode, true, filePath);
+    assert.deepEqual(selectedLanes(plan), CI_LANES, filePath);
+    assert.deepEqual(plan.evmScopes, EVM_SCOPES, filePath);
+  }
+});
+
+test('ordinary network-sim changes remain a narrow delta after the trust hardening', () => {
+  const plan = pullRequestPlan([change('packages/network-sim/src/index.ts')]);
+  assert.equal(plan.mode, 'delta');
+  assert.equal(plan.fullCi, false);
+  assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
+  assert.deepEqual(plan.evmScopes, []);
+});
+
 test('Blazegraph provisioning changes include the native arm64 contract lane', () => {
   const rootContract = pullRequestPlan([change('blazegraph-image.json')]);
   assert.deepEqual(selectedLanes(rootContract), ['bura_cli', 'bura_blazegraph_arm64']);
@@ -263,6 +296,127 @@ test('routing rules cover every current reverse workspace dependency', () => {
   }
 });
 
+test('workflows execute the planner and aggregate gates from one immutable trusted checkout', () => {
+  const workflows = new Map([
+    ['primary', fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')],
+    ['evm', fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/evm-integration.yml'), 'utf8')],
+  ]);
+
+  for (const [name, workflow] of workflows) {
+    const trustedCheckoutCount = workflow.match(/^\s+path: trusted-ci$/gm)?.length ?? 0;
+    const trustedPinCount = workflow.match(
+      new RegExp(`^\\s+ref: ${TRUSTED_CI_CONTROLLER_SHA}$`, 'gm'),
+    )?.length ?? 0;
+    const trustedRepositoryCount = workflow.match(
+      /^\s+repository: OriginTrail\/dkg$/gm,
+    )?.length ?? 0;
+
+    assert.match(TRUSTED_CI_CONTROLLER_SHA, /^[0-9a-f]{40}$/);
+    assert.ok(trustedCheckoutCount >= 2, `${name} must trust-pin both its planner and gate`);
+    assert.equal(
+      trustedPinCount,
+      trustedCheckoutCount,
+      `${name} trusted checkouts must all use the reviewed controller SHA`,
+    );
+    assert.equal(
+      trustedRepositoryCount,
+      trustedCheckoutCount,
+      `${name} trusted checkouts must all use the base repository`,
+    );
+    assert.match(workflow, /node trusted-ci\/scripts\/ci\/plan-ci\.mjs\b/);
+    assert.match(workflow, /node trusted-ci\/scripts\/ci\/assert-ci-results\.mjs\b/);
+    assert.doesNotMatch(
+      workflow,
+      /node (?:\.\/)?scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/,
+      `${name} must not execute CI policy from the merge candidate`,
+    );
+  }
+
+  const primaryWorkflow = workflows.get('primary');
+  assert.ok(
+    primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
+      > primaryWorkflow.indexOf('node trusted-ci/scripts/ci/plan-ci.mjs'),
+    'candidate npm metadata validation must happen only after the trusted plan is fixed',
+  );
+});
+
+test('trusted planner and gates reject the all-skipped candidate-control attack', (t) => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-trust-'));
+  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
+
+  // Model a candidate that edits both control scripts. Even if its copies
+  // would emit an all-false plan and exit zero, the trusted planner must force
+  // a full run and the trusted gates must reject the resulting skipped jobs.
+  const changesPath = path.join(temporaryDirectory, 'changes.z');
+  fs.writeFileSync(
+    changesPath,
+    Buffer.from('M\0scripts/ci/plan-ci.mjs\0M\0scripts/ci/assert-ci-results.mjs\0'),
+  );
+
+  const planner = spawnSync(process.execPath, [
+    path.join(REPO_ROOT, 'scripts/ci/plan-ci.mjs'),
+    '--event',
+    'pull_request',
+    '--changes-z',
+    changesPath,
+    '--sample-key',
+    'ffffffffffffffffffffffffffffffffffffffff',
+  ], { encoding: 'utf8' });
+  assert.equal(planner.status, 0, planner.stderr);
+  const plan = JSON.parse(planner.stdout);
+  assert.equal(plan.mode, 'full');
+  assert.deepEqual(selectedLanes(plan), CI_LANES);
+  assert.deepEqual(plan.evmScopes, EVM_SCOPES);
+
+  const primaryNeeds = {
+    changes: { result: 'success' },
+    build: { result: 'skipped' },
+    'evm-node-test-artifacts': { result: 'skipped' },
+    'evm-devnet-test-artifacts': { result: 'skipped' },
+    ...Object.fromEntries(
+      Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'skipped' }]),
+    ),
+    'abi-freshness': { result: 'skipped' },
+    solidity: { result: 'skipped' },
+    'solidity-coverage': { result: 'skipped' },
+    'tornado-static-analysis': { result: 'skipped' },
+  };
+  const primaryGate = spawnSync(process.execPath, [
+    path.join(REPO_ROOT, 'scripts/ci/assert-ci-results.mjs'),
+    '--workflow',
+    'primary',
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      EVENT_NAME: 'pull_request',
+      PLAN_JSON: JSON.stringify(plan),
+      NEEDS_JSON: JSON.stringify(primaryNeeds),
+    },
+  });
+  assert.equal(primaryGate.status, 1);
+  assert.match(primaryGate.stderr, /selected but ended with skipped/);
+
+  const evmGate = spawnSync(process.execPath, [
+    path.join(REPO_ROOT, 'scripts/ci/assert-ci-results.mjs'),
+    '--workflow',
+    'evm',
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      EVENT_NAME: 'pull_request',
+      PLAN_JSON: JSON.stringify(plan),
+      NEEDS_JSON: JSON.stringify({
+        plan: { result: 'success' },
+        'evm-integration': { result: 'skipped' },
+      }),
+    },
+  });
+  assert.equal(evmGate.status, 1);
+  assert.match(evmGate.stderr, /selected but ended with skipped/);
+});
+
 test('every planner output is wired to a real workflow job and omitted tests stay covered', () => {
   const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
   for (const [lane, job] of Object.entries(PRIMARY_LANE_JOBS)) {
@@ -274,7 +428,7 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
   assert.ok(
-    workflow.includes('run: node scripts/check-npm-metadata.mjs'),
+    workflow.includes('run: node candidate/scripts/check-npm-metadata.mjs'),
     'docs-only package README changes must retain the npm metadata gate',
   );
   assert.ok(
@@ -282,8 +436,9 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     'delta rollout must remain default-off until repository safeguards are active',
   );
   assert.ok(workflow.includes("github.base_ref == 'main'"));
-  assert.ok(workflow.includes('git diff --name-status -z "${BASE_SHA}" "${MERGE_SHA}"'));
-  assert.equal(workflow.includes('git diff --name-status -z "${BASE_SHA}" "${HEAD_SHA}"'), false);
+  assert.ok(workflow.includes('git -C candidate diff --name-status -z \\\n'));
+  assert.ok(workflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
+  assert.equal(workflow.includes('"${BASE_SHA}" "${HEAD_SHA}"'), false);
   assert.match(workflow, /^  evm-node-test-artifacts:/m);
   assert.match(workflow, /^  evm-devnet-test-artifacts:/m);
   assert.ok(workflow.includes('plan-vitest-shard.mjs chain "$SHARD_ID"'));
@@ -314,7 +469,8 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(evmWorkflow.includes('fromJSON(needs.plan.outputs.evm_matrix)'));
   assert.ok(evmWorkflow.includes("vars.CI_DELTA_ENABLED == 'true'"));
   assert.ok(evmWorkflow.includes("github.base_ref == 'main'"));
-  assert.ok(evmWorkflow.includes('git diff --name-status -z "${BASE_SHA}" "${MERGE_SHA}"'));
+  assert.ok(evmWorkflow.includes('git -C candidate diff --name-status -z \\\n'));
+  assert.ok(evmWorkflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.match(evmWorkflow, /^  evm-gate:/m);
 
   const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));

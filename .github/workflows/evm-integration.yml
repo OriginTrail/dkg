@@ -26,10 +26,27 @@ jobs:
       evm_matrix: ${{ steps.plan.outputs.evm_matrix }}
       plan_json: ${{ steps.plan.outputs.plan_json }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # The merge candidate is untrusted input: use it only to calculate the
+      # changed-file set, and never execute its CI planner or validator here.
+      - name: Checkout merge candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           fetch-depth: 2
+          path: candidate
+      # Keep CI policy outside the merge candidate and pin it to an immutable,
+      # reviewed commit. Policy updates deliberately rotate this SHA.
+      - name: Checkout trusted CI controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: OriginTrail/dkg
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          persist-credentials: false
+          path: trusted-ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/lib
+          sparse-checkout-cone-mode: false
       - name: Compute fail-closed EVM plan
         id: plan
         env:
@@ -49,11 +66,12 @@ jobs:
               echo "::error::Missing pull-request base/merge SHA"
               exit 1
             fi
-            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-              git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+            if ! git -C candidate cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              git -C candidate fetch --no-tags --depth=1 origin "${BASE_SHA}"
             fi
-            git cat-file -e "${MERGE_SHA}^{commit}"
-            git diff --name-status -z "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
+            git -C candidate cat-file -e "${MERGE_SHA}^{commit}"
+            git -C candidate diff --name-status -z \
+              "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
           fi
 
           PLAN_EVENT="${EVENT_NAME}"
@@ -61,7 +79,7 @@ jobs:
             PLAN_EVENT="pull_request_delta_disabled"
           fi
 
-          node scripts/ci/plan-ci.mjs \
+          node trusted-ci/scripts/ci/plan-ci.mjs \
             --event "${PLAN_EVENT}" \
             --changes-z "${CHANGES_FILE}" \
             --labels-json "${PR_LABELS:-[]}" \
@@ -125,12 +143,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Checkout trusted CI controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          repository: OriginTrail/dkg
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
           persist-credentials: false
+          path: trusted-ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/lib
+          sparse-checkout-cone-mode: false
       - name: Verify selected EVM scopes completed
         env:
           EVENT_NAME: ${{ github.event_name }}
           PLAN_JSON: ${{ needs.plan.outputs.plan_json }}
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: node scripts/ci/assert-ci-results.mjs --workflow evm
+        run: node trusted-ci/scripts/ci/assert-ci-results.mjs --workflow evm
