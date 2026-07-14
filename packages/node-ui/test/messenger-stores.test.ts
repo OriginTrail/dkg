@@ -189,10 +189,11 @@ describe('SqliteProtocolOutboxStore', () => {
 
   it('listMetadata preserves diagnostic order without returning payloads', () => {
     const store = new SqliteProtocolOutboxStore(db);
+    const outbox = new ProtocolOutbox(store);
     store.enqueue(PEER_A, PROTO, MSG_2, new Uint8Array(1024), 'newer', 2_000);
     store.enqueue(PEER_A, PROTO, MSG_1, new Uint8Array(1024), 'older', 1_000);
 
-    const pending = store.listMetadata();
+    const pending = outbox.listMetadata();
 
     expect(pending.map((entry) => entry.messageId)).toEqual([MSG_1, MSG_2]);
     expect(pending.every((entry) => !Object.hasOwn(entry, 'payload'))).toBe(true);
@@ -200,6 +201,8 @@ describe('SqliteProtocolOutboxStore', () => {
 
   it('keeps payload columns out of facade metadata listing and expiration queries', () => {
     const store = new SqliteProtocolOutboxStore(db, { maxAgeMs: 60_000 });
+    expect('listMetadata' in store).toBe(false);
+    expect('dropExpiredMetadata' in store).toBe(false);
     const outbox = new ProtocolOutbox(store, { maxAgeMs: 60_000 });
     outbox.enqueueFailure(PEER_A, PROTO, MSG_1, new Uint8Array(1024), 'old', 0);
     const prepareSpy = vi.spyOn(db.db, 'prepare');
@@ -314,9 +317,10 @@ describe('SqliteProtocolOutboxStore', () => {
     const store = new SqliteProtocolOutboxStore(db, {
       maxAgeMs: 60_000,
     });
+    const outbox = new ProtocolOutbox(store, { maxAgeMs: 60_000 });
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'old', 0);
     store.enqueue(PEER_A, PROTO, MSG_2, PAYLOAD, 'new', 100_000);
-    const dropped = store.dropExpiredMetadata(100_001);
+    const dropped = outbox.dropExpiredMetadata(100_001);
     expect(dropped).toHaveLength(1);
     expect(dropped[0].messageId).toBe(MSG_1);
     expect(dropped[0]).not.toHaveProperty('payload');

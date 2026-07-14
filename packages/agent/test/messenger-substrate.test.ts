@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
+  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   decodeReliableEnvelope,
   encodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
@@ -422,11 +423,13 @@ describe('Messenger outbox snapshots', () => {
       nextAttemptAt: 7_000,
       lastError: 'offline',
     };
-    Object.assign(outboxStore, {
-      list: () => [expected],
+    Object.assign(outboxStore[PROTOCOL_OUTBOX_METADATA_CAPABILITY], {
       listMetadata: () => {
         throw new Error('listOutbox dropped payloads');
       },
+    });
+    Object.assign(outboxStore, {
+      list: () => [expected],
     });
     const messenger = new Messenger({
       router: makeRouter() as unknown as ProtocolRouter,
@@ -450,8 +453,10 @@ describe('Messenger outbox snapshots', () => {
       lastError: 'offline',
     };
     const listMetadata = recorder(() => [expected]);
-    Object.assign(outboxStore, {
+    Object.assign(outboxStore[PROTOCOL_OUTBOX_METADATA_CAPABILITY], {
       listMetadata,
+    });
+    Object.assign(outboxStore, {
       list: () => {
         throw new Error('diagnostics materialized payloads');
       },
@@ -479,8 +484,10 @@ describe('Messenger outbox snapshots', () => {
       lastError: 'offline',
     };
     const dropExpiredMetadata = recorder((_now: number) => [expired]);
-    Object.assign(outboxStore, {
+    Object.assign(outboxStore[PROTOCOL_OUTBOX_METADATA_CAPABILITY], {
       dropExpiredMetadata,
+    });
+    Object.assign(outboxStore, {
       dropExpired: () => {
         throw new Error('expiration materialized payloads');
       },

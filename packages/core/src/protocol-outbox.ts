@@ -36,7 +36,6 @@ import type {
   ProtocolOutboxEntry,
   ProtocolOutboxMetadata,
   ProtocolOutboxMetadataCapability,
-  ProtocolOutboxMetadataStore,
   ProtocolOutboxStore,
 } from './messenger-types.js';
 import {
@@ -365,18 +364,18 @@ export class ProtocolOutbox {
  * Implements the same backoff ladder the wrapper `ProtocolOutbox`
  * uses so the test fixture is self-contained.
  */
-export class InMemoryProtocolOutboxStore
-  implements ProtocolOutboxStore, ProtocolOutboxMetadataStore {
+export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   private readonly entries = new Map<string, ProtocolOutboxEntry>();
   private backoffs: readonly number[] = DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
   private maxAgeMs = DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS;
 
+  readonly [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: ProtocolOutboxMetadataCapability = {
+    dropExpiredMetadata: (now) => this.dropExpiredWith(now, cloneOutboxMetadata),
+    listMetadata: () => Array.from(this.entries.values()).map(cloneOutboxMetadata),
+  };
+
   constructor(options: ProtocolOutboxOptions = {}) {
     this.configurePolicy(options);
-  }
-
-  get [PROTOCOL_OUTBOX_METADATA_CAPABILITY](): ProtocolOutboxMetadataCapability {
-    return this;
   }
 
   private static key(peer: string, protocol: string, messageId: string): string {
@@ -463,10 +462,6 @@ export class InMemoryProtocolOutboxStore
     return this.dropExpiredWith(now, cloneOutboxEntry);
   }
 
-  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    return this.dropExpiredWith(now, cloneOutboxMetadata);
-  }
-
   private dropExpiredWith<Result>(
     now: number,
     project: (entry: ProtocolOutboxEntry) => Result,
@@ -487,10 +482,6 @@ export class InMemoryProtocolOutboxStore
 
   list(): ProtocolOutboxEntry[] {
     return Array.from(this.entries.values()).map(cloneOutboxEntry);
-  }
-
-  listMetadata(): ProtocolOutboxMetadata[] {
-    return Array.from(this.entries.values()).map(cloneOutboxMetadata);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {

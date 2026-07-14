@@ -536,6 +536,8 @@ describe('ProtocolOutbox.listMetadata', () => {
 
   it('uses the in-memory metadata paths without calling full-entry methods', () => {
     const store = new InMemoryProtocolOutboxStore();
+    expect('listMetadata' in store).toBe(false);
+    expect('dropExpiredMetadata' in store).toBe(false);
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'offline', 0);
     Object.assign(store, {
       list: () => {

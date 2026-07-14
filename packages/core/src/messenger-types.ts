@@ -184,21 +184,16 @@ export const PROTOCOL_OUTBOX_METADATA_CAPABILITY: unique symbol = Symbol.for(
   '@origintrail-official/dkg-core/protocol-outbox-metadata/v1',
 );
 
-/** Payload-free outbox operations exposed by an explicit store capability. */
+/**
+ * Payload-free outbox operations supplied through the explicit symbol-keyed
+ * store extension.
+ */
 export interface ProtocolOutboxMetadataCapability {
   /** Delete expired rows without reading or returning payload bytes. */
   dropExpiredMetadata(now: number): ProtocolOutboxMetadata[];
 
   /** Read diagnostics metadata without materializing payload bytes. */
   listMetadata(): ProtocolOutboxMetadata[];
-}
-
-/**
- * Store that explicitly opts into payload-free outbox operations.
- * Implementations commonly return themselves from the symbol-keyed property.
- */
-export interface ProtocolOutboxMetadataStore extends ProtocolOutboxMetadataCapability {
-  readonly [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: ProtocolOutboxMetadataCapability;
 }
 
 interface ProtocolOutboxStoreBase {

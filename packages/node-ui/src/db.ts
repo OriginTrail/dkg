@@ -10,7 +10,6 @@ import {
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
   type ProtocolOutboxMetadataCapability,
-  type ProtocolOutboxMetadataStore,
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
 
@@ -2688,19 +2687,35 @@ const PROTOCOL_OUTBOX_METADATA_COLUMNS =
   'peer_id, protocol, message_id, attempts, ' +
   'first_failure_at, last_attempt_at, next_attempt_at, last_error';
 
-export class SqliteProtocolOutboxStore
-  implements ProtocolOutboxStore, ProtocolOutboxMetadataStore {
+export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   private readonly db: Database.Database;
   private maxAgeMs = 24 * 60 * 60 * 1000;
   private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
 
+  readonly [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: ProtocolOutboxMetadataCapability = {
+    dropExpiredMetadata: (now) => this.dropExpiredRows<
+      ProtocolOutboxMetadataRow,
+      ProtocolOutboxMetadata
+    >(
+      now,
+      PROTOCOL_OUTBOX_METADATA_COLUMNS,
+      SqliteProtocolOutboxStore.rowToMetadata,
+    ),
+    listMetadata: () => {
+      const rows = this.db
+        .prepare(
+          `SELECT ${PROTOCOL_OUTBOX_METADATA_COLUMNS}
+           FROM protocol_outbox
+           ORDER BY first_failure_at ASC`,
+        )
+        .all() as ProtocolOutboxMetadataRow[];
+      return rows.map(SqliteProtocolOutboxStore.rowToMetadata);
+    },
+  };
+
   constructor(dashboard: DashboardDB, options: SqliteProtocolOutboxStoreOptions = {}) {
     this.db = dashboard.db;
     this.configurePolicy(options);
-  }
-
-  get [PROTOCOL_OUTBOX_METADATA_CAPABILITY](): ProtocolOutboxMetadataCapability {
-    return this;
   }
 
   configurePolicy(options: SqliteProtocolOutboxStoreOptions = {}): void {
@@ -2880,14 +2895,6 @@ export class SqliteProtocolOutboxStore
     );
   }
 
-  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    return this.dropExpiredRows<ProtocolOutboxMetadataRow, ProtocolOutboxMetadata>(
-      now,
-      PROTOCOL_OUTBOX_METADATA_COLUMNS,
-      SqliteProtocolOutboxStore.rowToMetadata,
-    );
-  }
-
   private dropExpiredRows<Row, Result>(
     now: number,
     columns: string,
@@ -2923,17 +2930,6 @@ export class SqliteProtocolOutboxStore
       last_error: string | null;
     }>;
     return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  listMetadata(): ProtocolOutboxMetadata[] {
-    const rows = this.db
-      .prepare(
-        `SELECT ${PROTOCOL_OUTBOX_METADATA_COLUMNS}
-         FROM protocol_outbox
-         ORDER BY first_failure_at ASC`,
-      )
-      .all() as ProtocolOutboxMetadataRow[];
-    return rows.map(SqliteProtocolOutboxStore.rowToMetadata);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {

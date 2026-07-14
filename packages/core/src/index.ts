@@ -177,7 +177,6 @@ export {
   PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   type ProtocolOutboxStore,
   type ProtocolOutboxMetadataCapability,
-  type ProtocolOutboxMetadataStore,
   type LegacyProtocolOutboxStore,
   type CompatibleProtocolOutboxStore,
   type ProtocolOutboxEntry,

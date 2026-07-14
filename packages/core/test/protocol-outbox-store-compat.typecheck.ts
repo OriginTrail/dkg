@@ -1,4 +1,6 @@
 import {
+  InMemoryProtocolOutboxStore,
+  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   ProtocolOutbox,
   type ProtocolOutboxStore,
 } from '../dist/index.js';
@@ -23,3 +25,10 @@ const existingStore = {
 
 const acceptedStore: ProtocolOutboxStore = existingStore;
 new ProtocolOutbox(acceptedStore);
+
+const firstPartyStore = new InMemoryProtocolOutboxStore();
+firstPartyStore[PROTOCOL_OUTBOX_METADATA_CAPABILITY].listMetadata();
+// @ts-expect-error The fast path has one extension point: the symbol capability.
+firstPartyStore.listMetadata();
+// @ts-expect-error The fast path has one extension point: the symbol capability.
+firstPartyStore.dropExpiredMetadata(0);
