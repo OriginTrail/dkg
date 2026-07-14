@@ -4,6 +4,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
+  DKGEvent,
   DKG_ONTOLOGY,
   PROTOCOL_JOIN_REQUEST,
 } from '@origintrail-official/dkg-core';
@@ -264,6 +265,448 @@ describe('private CG membership bootstrap recovery', () => {
     }
   });
 
+  it('keeps requester decisions local, preserves queued generations, and drops stale decisions', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapGenerationBoundDecision'));
+    const contextGraphId = 'private-bootstrap-generation-bound-decision';
+    const agentAddress = agent.getDefaultAgentAddress()!;
+    const curatorPeerId = '12D3KooWGenerationBoundCurator';
+    const previousGeneration = `0x${'a'.repeat(64)}`;
+
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      agentAddress,
+      previousGeneration,
+      curatorPeerId,
+    );
+    expect(await agent.applyRequesterJoinDecision(
+      contextGraphId,
+      agentAddress,
+      previousGeneration,
+      'rejected',
+    )).toBe(true);
+
+    const delegation = await agent.signJoinRequest(contextGraphId, agentAddress);
+    const currentGeneration = agent.getJoinRequestGeneration(delegation);
+    const sendReliable = vi.fn()
+      // A synchronous curator NACK is not accepted for delivery and must
+      // restore the previous terminal state.
+      .mockResolvedValueOnce({
+        delivered: true,
+        response: encoder.encode(JSON.stringify({ ok: false, error: 'unknown CG' })),
+      })
+      // `delivered:false` means the Messenger substrate durably queued the
+      // exact request. Its generation must survive for the eventual decision.
+      .mockResolvedValueOnce({ delivered: false, error: 'queued for retry' })
+      .mockResolvedValueOnce({ delivered: false, error: 'queued for retry' });
+    (agent as any).messenger.sendReliable = sendReliable;
+    (agent.node.libp2p as any).getPeers = () => [];
+
+    const nacked = await agent.forwardJoinRequest(
+      contextGraphId,
+      delegation,
+      'requester',
+      curatorPeerId,
+    );
+    expect(nacked.delivered).toBe(0);
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('rejected');
+
+    const queued = await agent.forwardJoinRequest(
+      contextGraphId,
+      delegation,
+      'requester',
+      curatorPeerId,
+    );
+    expect(queued.delivered).toBe(0);
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
+
+    const handler = joinRequestHandler(agent);
+    for (const type of ['join-approved', 'join-rejected']) {
+      const stale = JSON.parse(decoder.decode(await handler(
+        encoder.encode(JSON.stringify({
+          type,
+          contextGraphId,
+          agentAddress,
+          requestGeneration: previousGeneration,
+        })),
+        curatorPeerId,
+      )));
+      expect(stale).toEqual({ ok: true, skipped: true });
+      expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
+    }
+    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+
+    const accepted = JSON.parse(decoder.decode(await handler(
+      encoder.encode(JSON.stringify({
+        type: 'join-rejected',
+        contextGraphId,
+        agentAddress,
+        requestGeneration: currentGeneration,
+      })),
+      curatorPeerId,
+    )));
+    expect(accepted).toEqual({ ok: true });
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('rejected');
+
+    const nextCuratorPeerId = '12D3KooWGenerationBoundNextCurator';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(delegation.issuedAtMs + 1);
+    const nextDelegation = await agent.signJoinRequest(contextGraphId, agentAddress);
+    now.mockRestore();
+    const nextGeneration = agent.getJoinRequestGeneration(nextDelegation);
+    await agent.forwardJoinRequest(
+      contextGraphId,
+      nextDelegation,
+      'requester',
+      nextCuratorPeerId,
+    );
+
+    const oldCuratorForgery = JSON.parse(decoder.decode(await handler(
+      encoder.encode(JSON.stringify({
+        type: 'join-approved',
+        contextGraphId,
+        agentAddress,
+        requestGeneration: nextGeneration,
+      })),
+      curatorPeerId,
+    )));
+    expect(oldCuratorForgery).toEqual({ ok: true, skipped: true });
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
+
+    const nextCuratorDecision = JSON.parse(decoder.decode(await handler(
+      encoder.encode(JSON.stringify({
+        type: 'join-rejected',
+        contextGraphId,
+        agentAddress,
+        requestGeneration: nextGeneration,
+      })),
+      nextCuratorPeerId,
+    )));
+    expect(nextCuratorDecision).toEqual({ ok: true });
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('rejected');
+
+    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const rootMetaStatus = await (agent as any).store.query(
+      `ASK WHERE {
+        GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> {
+          <${requestUri}> <https://dkg.network/ontology#requestStatus> ?status .
+        }
+      }`,
+    );
+    expect(rootMetaStatus).toEqual({ type: 'boolean', value: false });
+  });
+
+  it('accepts an immediate curator decision that arrives before the request ACK', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapImmediateDecision'));
+    const contextGraphId = 'private-bootstrap-immediate-decision';
+    const agentAddress = agent.getDefaultAgentAddress()!;
+    const curatorPeerId = '12D3KooWPrivateBootstrapImmediateCurator';
+    const delegation = await agent.signJoinRequest(contextGraphId, agentAddress);
+    const requestGeneration = agent.getJoinRequestGeneration(delegation);
+    const handler = joinRequestHandler(agent);
+
+    (agent as any).messenger.sendReliable = vi.fn(async (
+      peerId: string,
+      protocol: string,
+    ) => {
+      expect(peerId).toBe(curatorPeerId);
+      expect(protocol).toBe(PROTOCOL_JOIN_REQUEST);
+      // The already-member curator path sends its decision before returning
+      // the ACK to the original join request. Trust must therefore already be
+      // durable when transport begins, not learned from the later ACK.
+      const decision = JSON.parse(decoder.decode(await handler(
+        encoder.encode(JSON.stringify({
+          type: 'join-rejected',
+          contextGraphId,
+          agentAddress,
+          requestGeneration,
+        })),
+        curatorPeerId,
+      )));
+      expect(decision).toEqual({ ok: true });
+      return {
+        delivered: true,
+        response: encoder.encode(JSON.stringify({ ok: true })),
+      };
+    });
+
+    const result = await agent.forwardJoinRequest(
+      contextGraphId,
+      delegation,
+      'requester',
+      curatorPeerId,
+    );
+
+    expect(result.delivered).toBe(1);
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('rejected');
+  });
+
+  it('trusts the generation-bound curator after requester restart', async () => {
+    const created = await createAgent('PrivateBootstrapRestartBeforeDecision');
+    const original = created.agent;
+    agent = original;
+    const contextGraphId = 'private-bootstrap-restart-before-decision';
+    const agentAddress = original.getDefaultAgentAddress()!;
+    const localAgent = (original as any).localAgents.get(agentAddress);
+    const curatorPeerId = '12D3KooWPrivateBootstrapRestartCurator';
+    const delegation = await original.signJoinRequest(contextGraphId, agentAddress);
+    const requestGeneration = original.getJoinRequestGeneration(delegation);
+    const sharedStore = (original as any).store;
+    (original as any).messenger.sendReliable = vi.fn()
+      .mockResolvedValue({ delivered: false, error: 'queued for retry' });
+    (original.node.libp2p as any).getPeers = () => [];
+
+    await original.forwardJoinRequest(
+      contextGraphId,
+      delegation,
+      'requester',
+      curatorPeerId,
+    );
+    expect(await original.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
+
+    const restarted = await DKGAgent.create({
+      name: 'PrivateBootstrapRestartedRequester',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+      store: sharedStore,
+    });
+    await restarted.start();
+    (restarted as any).localAgents.set(agentAddress, localAgent);
+    (restarted as any).defaultAgentAddress = agentAddress;
+    (restarted as any).senderIsContextGraphCurator = vi.fn(async () => false);
+    agent = restarted;
+
+    try {
+      const response = JSON.parse(decoder.decode(await joinRequestHandler(restarted)(
+        encoder.encode(JSON.stringify({
+          type: 'join-rejected',
+          contextGraphId,
+          agentAddress,
+          requestGeneration,
+        })),
+        curatorPeerId,
+      )));
+
+      expect(response).toEqual({ ok: true });
+      expect((restarted as any).senderIsContextGraphCurator).not.toHaveBeenCalled();
+      expect(await restarted.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('rejected');
+    } finally {
+      await original.stop().catch(() => {});
+    }
+  });
+
+  it('does not let a delayed older join request replace the curator pending generation', async () => {
+    const created = await createAgent('PrivateBootstrapCuratorGenerationOrder');
+    agent = created.agent;
+    const contextGraphId = 'private-bootstrap-curator-generation-order';
+    const owner = agent.getDefaultAgentAddress()!;
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Private bootstrap curator generation order',
+      accessPolicy: 1,
+      callerAgentAddress: owner,
+    });
+    const requester = ethers.Wallet.createRandom();
+    const scope = joinDelegationScope(created.chain.deploymentId, contextGraphId);
+    const baseIssuedAt = Date.now() - 1_000;
+    const older = await signAgentDelegation({
+      agentAddress: requester.address,
+      scope,
+      issuedAtMs: baseIssuedAt,
+      expiresAtMs: baseIssuedAt + 60_000,
+      delegateePeerId: '12D3KooWOlderQueuedRequester',
+      agentPrivateKey: requester.privateKey,
+    });
+    const newer = await signAgentDelegation({
+      agentAddress: requester.address,
+      scope,
+      issuedAtMs: baseIssuedAt + 1,
+      expiresAtMs: baseIssuedAt + 60_001,
+      delegateePeerId: '12D3KooWNewerRequester',
+      agentPrivateKey: requester.privateKey,
+    });
+
+    const handler = joinRequestHandler(agent);
+    const newerResponse = JSON.parse(decoder.decode(await handler(
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: newer,
+        agentName: 'newer',
+        requestGeneration: agent.getJoinRequestGeneration(newer),
+      })),
+      newer.delegateePeerId!,
+    )));
+    expect(newerResponse).toEqual({ ok: true });
+
+    const olderResponse = JSON.parse(decoder.decode(await handler(
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: older,
+        agentName: 'older',
+        requestGeneration: agent.getJoinRequestGeneration(older),
+      })),
+      older.delegateePeerId!,
+    )));
+    expect(olderResponse.ok).toBe(false);
+    expect(olderResponse.error).toContain('Stale join request generation');
+    expect(await agent.loadPendingJoinDelegation(contextGraphId, requester.address))
+      .toMatchObject({
+        issuedAtMs: newer.issuedAtMs,
+        delegateePeerId: newer.delegateePeerId,
+        signature: newer.signature,
+      });
+    const currentOriginKey = (agent as any).joinRequestTrackingKey(
+      contextGraphId,
+      requester.address,
+      agent.getJoinRequestGeneration(newer),
+    );
+    expect((agent as any).joinRequestOriginPeers.get(currentOriginKey))
+      .toBe(newer.delegateePeerId);
+    expect([...(agent as any).joinRequestOriginPeers.values()])
+      .not.toContain(older.delegateePeerId);
+  });
+
+  it('treats an exact curator replay as a no-op without reopening a terminal request', async () => {
+    const created = await createAgent('PrivateBootstrapCuratorReplay');
+    agent = created.agent;
+    const contextGraphId = 'private-bootstrap-curator-replay';
+    const owner = agent.getDefaultAgentAddress()!;
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Private bootstrap curator replay',
+      accessPolicy: 1,
+      callerAgentAddress: owner,
+    });
+    const requester = ethers.Wallet.createRandom();
+    const issuedAtMs = Date.now();
+    const delegation = await signAgentDelegation({
+      agentAddress: requester.address,
+      scope: joinDelegationScope(created.chain.deploymentId, contextGraphId),
+      issuedAtMs,
+      expiresAtMs: issuedAtMs + 60_000,
+      delegateePeerId: '12D3KooWCuratorReplayRequester',
+      agentPrivateKey: requester.privateKey,
+    });
+    const emit = vi.spyOn((agent as any).eventBus, 'emit');
+
+    expect(await agent.storePendingJoinRequest(contextGraphId, delegation, 'requester'))
+      .toBe(true);
+    (agent as any).notifyJoinRejection = vi.fn(async () => {});
+    await agent.rejectJoinRequest(contextGraphId, requester.address, owner);
+    expect(await agent.getJoinRequestStatus(contextGraphId, requester.address)).toBe('rejected');
+
+    expect(await agent.storePendingJoinRequest(contextGraphId, delegation, 'requester'))
+      .toBe(false);
+    expect(await agent.getJoinRequestStatus(contextGraphId, requester.address)).toBe('rejected');
+    expect(emit.mock.calls.filter(([event]) => event === DKGEvent.JOIN_REQUEST_RECEIVED))
+      .toHaveLength(1);
+  });
+
+  it('serializes approval with a newer curator-side request generation', async () => {
+    const created = await createAgent('PrivateBootstrapApproveGenerationRace');
+    agent = created.agent;
+    const contextGraphId = 'private-bootstrap-approve-generation-race';
+    const owner = agent.getDefaultAgentAddress()!;
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Private bootstrap approval generation race',
+      accessPolicy: 1,
+      callerAgentAddress: owner,
+    });
+    const requester = ethers.Wallet.createRandom();
+    const issuedAtMs = Date.now();
+    const makeDelegation = (timestamp: number, peerId: string) => signAgentDelegation({
+      agentAddress: requester.address,
+      scope: joinDelegationScope(created.chain.deploymentId, contextGraphId),
+      issuedAtMs: timestamp,
+      expiresAtMs: timestamp + 60_000,
+      delegateePeerId: peerId,
+      agentPrivateKey: requester.privateKey,
+    });
+    const older = await makeDelegation(issuedAtMs, '12D3KooWApproveRaceOlder');
+    const newer = await makeDelegation(issuedAtMs + 1, '12D3KooWApproveRaceNewer');
+    await agent.storePendingJoinRequest(contextGraphId, older, 'older');
+
+    let releaseApproval!: () => void;
+    let markApprovalStarted!: () => void;
+    const approvalStarted = new Promise<void>((resolve) => { markApprovalStarted = resolve; });
+    const approvalBlocked = new Promise<void>((resolve) => { releaseApproval = resolve; });
+    const actualInvite = agent.inviteAgentToContextGraph.bind(agent);
+    (agent as any).inviteAgentToContextGraph = async (...args: Parameters<typeof actualInvite>) => {
+      markApprovalStarted();
+      await approvalBlocked;
+      return actualInvite(...args);
+    };
+    (agent as any).notifyJoinApproval = vi.fn(async () => {});
+    const actualStoreOnce = agent.storePendingJoinRequestOnce.bind(agent);
+    let newerStoreStarted = false;
+    (agent as any).storePendingJoinRequestOnce = async (
+      ...args: Parameters<typeof actualStoreOnce>
+    ) => {
+      if (args[1].signature === newer.signature) newerStoreStarted = true;
+      return actualStoreOnce(...args);
+    };
+
+    const approval = agent.approveJoinRequest(contextGraphId, requester.address, owner);
+    await approvalStarted;
+    const newerStore = agent.storePendingJoinRequest(contextGraphId, newer, 'newer');
+    await Promise.resolve();
+    expect(newerStoreStarted).toBe(false);
+
+    releaseApproval();
+    await Promise.all([approval, newerStore]);
+    expect(newerStoreStarted).toBe(true);
+    expect(await agent.loadPendingJoinDelegation(contextGraphId, requester.address))
+      .toMatchObject({ signature: newer.signature, delegateePeerId: newer.delegateePeerId });
+    expect(await agent.getJoinRequestStatus(contextGraphId, requester.address)).toBe('pending');
+  });
+
+  it.each(['queued', 'ok'] as const)(
+    'rolls requester state back when only an unrelated fallback peer is %s',
+    async (unrelatedResult) => {
+      ({ agent } = await createAgent(`PrivateBootstrapUnrelatedFallback${unrelatedResult}`));
+      const contextGraphId = `private-bootstrap-unrelated-fallback-${unrelatedResult}`;
+      const agentAddress = agent.getDefaultAgentAddress()!;
+      const previousGeneration = `0x${'c'.repeat(64)}`;
+      await agent.setRequesterJoinRequestPending(
+        contextGraphId,
+        agentAddress,
+        previousGeneration,
+        '12D3KooWPreviousUnavailableCurator',
+      );
+      await agent.applyRequesterJoinDecision(
+        contextGraphId,
+        agentAddress,
+        previousGeneration,
+        'rejected',
+      );
+      const delegation = await agent.signJoinRequest(contextGraphId, agentAddress);
+      const curatorPeerId = '12D3KooWUnavailableExplicitCurator';
+      const unrelatedPeerId = '12D3KooWUnrelatedFallbackPeer';
+      (agent.node.libp2p as any).getPeers = () => [{ toString: () => unrelatedPeerId }];
+      const sendReliable = vi.fn()
+        .mockRejectedValueOnce(new Error('curator dial failed'));
+      if (unrelatedResult === 'queued') {
+        sendReliable.mockResolvedValueOnce({ delivered: false, error: 'queued unrelated peer' });
+      } else {
+        sendReliable.mockResolvedValueOnce({
+          delivered: true,
+          response: encoder.encode(JSON.stringify({ ok: true })),
+        });
+      }
+      (agent as any).messenger.sendReliable = sendReliable;
+
+      const result = await agent.forwardJoinRequest(
+        contextGraphId,
+        delegation,
+        'requester',
+        curatorPeerId,
+      );
+      expect(result.delivered).toBe(0);
+      expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('rejected');
+    },
+  );
+
   it('join-approved awaits membership persistence, then clears stale flags and starts bootstrap', async () => {
     ({ agent } = await createAgent('PrivateBootstrapApproval'));
     const contextGraphId = 'private-bootstrap-approval-reset';
@@ -304,12 +747,20 @@ describe('private CG membership bootstrap recovery', () => {
     };
     const immediateSync = vi.fn(async () => {});
     (agent as any).runImmediatePostApprovalSync = immediateSync;
+    const requestGeneration = `0x${'1'.repeat(64)}`;
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      approvedAddress!,
+      requestGeneration,
+      '12D3KooWPrivateBootstrapCurator',
+    );
 
     const responsePromise = joinRequestHandler(agent)(
       encoder.encode(JSON.stringify({
         type: 'join-approved',
         contextGraphId,
         agentAddress: approvedAddress,
+        requestGeneration,
       })),
       '12D3KooWPrivateBootstrapCurator',
     );
@@ -379,18 +830,23 @@ describe('private CG membership bootstrap recovery', () => {
       };
       const immediateSync = vi.fn(async () => {});
       (agent as any).runImmediatePostApprovalSync = immediateSync;
+      const requestGeneration = `0x${'2'.repeat(64)}`;
+      await agent.setRequesterJoinRequestPending(
+        contextGraphId,
+        approvedAddress!,
+        requestGeneration,
+        '12D3KooWPrivateBootstrapFailingCurator',
+      );
 
-      const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      await expect(joinRequestHandler(agent)(
         encoder.encode(JSON.stringify({
           type: 'join-approved',
           contextGraphId,
           agentAddress: approvedAddress,
+          requestGeneration,
         })),
         '12D3KooWPrivateBootstrapFailingCurator',
-      )));
-
-      expect(response.ok).toBe(false);
-      expect(response.error).toContain(`${failingStore} persistence failed`);
+      )).rejects.toThrow(`${failingStore} persistence failed`);
       expect(immediateSync).not.toHaveBeenCalled();
     },
   );
@@ -452,7 +908,12 @@ describe('private CG membership bootstrap recovery', () => {
     };
 
     const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
-      encoder.encode(JSON.stringify({ contextGraphId, delegation, agentName: 'existing-member' })),
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation,
+        agentName: 'existing-member',
+        requestGeneration: agent.getJoinRequestGeneration(delegation),
+      })),
       delegateePeerId,
     )));
 
@@ -473,7 +934,11 @@ describe('private CG membership bootstrap recovery', () => {
       agentPrivateKey: member.privateKey,
     });
     const mismatchResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
-      encoder.encode(JSON.stringify({ contextGraphId, delegation: carrierMismatch })),
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: carrierMismatch,
+        requestGeneration: agent.getJoinRequestGeneration(carrierMismatch),
+      })),
       '12D3KooWDifferentCarrier',
     )));
     expect(mismatchResponse.ok).toBe(false);
@@ -485,7 +950,11 @@ describe('private CG membership bootstrap recovery', () => {
       agentPrivateKey: member.privateKey,
     });
     const staleResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
-      encoder.encode(JSON.stringify({ contextGraphId, delegation: staleDelegation })),
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: staleDelegation,
+        requestGeneration: agent.getJoinRequestGeneration(staleDelegation),
+      })),
       delegateePeerId,
     )));
     expect(staleResponse.ok).toBe(false);
@@ -497,7 +966,11 @@ describe('private CG membership bootstrap recovery', () => {
       agentPrivateKey: member.privateKey,
     });
     const conflictResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
-      encoder.encode(JSON.stringify({ contextGraphId, delegation: conflictingDelegation })),
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: conflictingDelegation,
+        requestGeneration: agent.getJoinRequestGeneration(conflictingDelegation),
+      })),
       delegateePeerId,
     )));
     expect(conflictResponse.ok).toBe(false);
@@ -505,9 +978,151 @@ describe('private CG membership bootstrap recovery', () => {
 
     // Exact same-timestamp credential replay is idempotent and remains valid.
     const idempotentResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
-      encoder.encode(JSON.stringify({ contextGraphId, delegation })),
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation,
+        requestGeneration: agent.getJoinRequestGeneration(delegation),
+      })),
       delegateePeerId,
     )));
     expect(idempotentResponse).toEqual({ ok: true, alreadyMember: true });
+  });
+
+  it('serializes concurrent already-member refreshes so an older delayed write cannot replace a newer credential', async () => {
+    const created = await createAgent('PrivateBootstrapConcurrentMember');
+    agent = created.agent;
+    const contextGraphId = 'private-bootstrap-concurrent-member';
+    const owner = agent.getDefaultAgentAddress();
+    expect(owner).toMatch(/^0x[0-9a-f]{40}$/i);
+
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Private bootstrap concurrent member test',
+      accessPolicy: 1,
+      callerAgentAddress: owner,
+    });
+
+    const member = ethers.Wallet.createRandom();
+    await agent.inviteAgentToContextGraph(contextGraphId, member.address, owner);
+
+    const oldPeerId = '12D3KooWPrivateBootstrapOlderPeer';
+    const newPeerId = '12D3KooWPrivateBootstrapNewerPeer';
+    const oldOpKey = ethers.Wallet.createRandom().address;
+    const newOpKey = ethers.Wallet.createRandom().address;
+    const oldIssuedAtMs = Date.now();
+    const newIssuedAtMs = oldIssuedAtMs + 1;
+    const scope = joinDelegationScope(created.chain.deploymentId, contextGraphId);
+    const oldDelegation = await signAgentDelegation({
+      agentAddress: member.address,
+      scope,
+      issuedAtMs: oldIssuedAtMs,
+      expiresAtMs: oldIssuedAtMs + 60_000,
+      delegateePeerId: oldPeerId,
+      delegateeOpKey: oldOpKey,
+      agentPrivateKey: member.privateKey,
+    });
+    const newDelegation = await signAgentDelegation({
+      agentAddress: member.address,
+      scope,
+      issuedAtMs: newIssuedAtMs,
+      expiresAtMs: newIssuedAtMs + 60_000,
+      delegateePeerId: newPeerId,
+      delegateeOpKey: newOpKey,
+      agentPrivateKey: member.privateKey,
+    });
+
+    let releaseOldWrite!: () => void;
+    let markOldWriteStarted!: () => void;
+    const oldWriteStarted = new Promise<void>((resolve) => {
+      markOldWriteStarted = resolve;
+    });
+    const oldWriteBlocked = new Promise<void>((resolve) => {
+      releaseOldWrite = resolve;
+    });
+    let newWriteStarted = false;
+    const inviteOrder: string[] = [];
+    const actualInvite = agent.inviteAgentToContextGraph.bind(agent);
+    (agent as any).inviteAgentToContextGraph = async (
+      cg: string,
+      address: string,
+      caller: string | undefined,
+      delegation: SignedAgentDelegation | undefined,
+    ) => {
+      const peerId = delegation?.delegateePeerId ?? '<missing>';
+      inviteOrder.push(`${peerId}:start`);
+      if (peerId === oldPeerId) {
+        markOldWriteStarted();
+        await oldWriteBlocked;
+      } else if (peerId === newPeerId) {
+        newWriteStarted = true;
+      }
+      await actualInvite(cg, address, caller, delegation);
+      inviteOrder.push(`${peerId}:finish`);
+    };
+    (agent as any).notifyJoinApproval = vi.fn(async () => {});
+
+    // Observe that the second request reached the already-member branch while
+    // the first write is blocked. This distinguishes genuine concurrency from
+    // simply invoking the handlers one after another.
+    const actualAllowedAgents = agent.getContextGraphAllowedAgents.bind(agent);
+    let allowedReadCount = 0;
+    let markSecondAllowedRead!: () => void;
+    const secondAllowedRead = new Promise<void>((resolve) => {
+      markSecondAllowedRead = resolve;
+    });
+    (agent as any).getContextGraphAllowedAgents = async (cg: string) => {
+      const allowed = await actualAllowedAgents(cg);
+      allowedReadCount += 1;
+      if (allowedReadCount === 2) markSecondAllowedRead();
+      return allowed;
+    };
+
+    const handler = joinRequestHandler(agent);
+    const oldResponsePromise = handler(
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: oldDelegation,
+        requestGeneration: agent.getJoinRequestGeneration(oldDelegation),
+      })),
+      oldPeerId,
+    );
+    await oldWriteStarted;
+
+    let newResponseSettled = false;
+    const newResponsePromise = handler(
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: newDelegation,
+        requestGeneration: agent.getJoinRequestGeneration(newDelegation),
+      })),
+      newPeerId,
+    );
+    void newResponsePromise.then(
+      () => { newResponseSettled = true; },
+      () => { newResponseSettled = true; },
+    );
+    await secondAllowedRead;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const escapedQueueBeforeOldWrite = newWriteStarted || newResponseSettled;
+
+    releaseOldWrite();
+    const [oldResponse, newResponse] = await Promise.all([
+      oldResponsePromise,
+      newResponsePromise,
+    ]).then((responses) => responses.map((bytes) => JSON.parse(decoder.decode(bytes))));
+
+    expect(escapedQueueBeforeOldWrite).toBe(false);
+    expect(oldResponse).toEqual({ ok: true, alreadyMember: true });
+    expect(newResponse).toEqual({ ok: true, alreadyMember: true });
+    expect(inviteOrder).toEqual([
+      `${oldPeerId}:start`,
+      `${oldPeerId}:finish`,
+      `${newPeerId}:start`,
+      `${newPeerId}:finish`,
+    ]);
+    expect((await agent.getContextGraphAllowedDelegateePeers(contextGraphId))
+      .get(member.address.toLowerCase())).toEqual([newPeerId]);
+    expect((await agent.getContextGraphAllowedDelegateeKeys(contextGraphId))
+      .get(member.address.toLowerCase())).toEqual([newOpKey.toLowerCase()]);
   });
 });

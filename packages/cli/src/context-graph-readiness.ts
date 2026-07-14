@@ -4,6 +4,12 @@ import type {
   ContextGraphReadinessProvenance,
   DashboardDB,
 } from '@origintrail-official/dkg-node-ui';
+import {
+  catchupPlaneCompletedWithoutFailure,
+  type CatchupJobResult,
+} from './catchup-runner.js';
+
+export { catchupPlaneCompletedWithoutFailure } from './catchup-runner.js';
 
 export const CONTEXT_GRAPH_READINESS_VERSION = 1;
 
@@ -12,23 +18,320 @@ export type ContextGraphReadinessStore = Pick<
   'getContextGraphReadinessProvenance' | 'setContextGraphReadinessProvenance'
 >;
 
-export interface CatchupPlaneDiagnostics {
-  timedOutPhases?: number;
-  completedPhases?: number;
-  failedPeers?: number;
-  failedPhases?: number;
-  deniedPhases?: number;
+export interface ContextGraphSubscriptionReadinessState {
+  synced?: boolean;
+  sharedMemorySynced?: boolean;
+  metaSynced?: boolean;
+  pendingMeta?: boolean;
 }
 
-export function catchupPlaneCompletedWithoutFailure(
-  diagnostics: CatchupPlaneDiagnostics | null | undefined,
+export interface ContextGraphSubscriptionStatePatch {
+  synced: boolean;
+  sharedMemorySynced: boolean;
+  metaSynced: boolean;
+  pendingMeta: boolean;
+}
+
+export interface ContextGraphReadinessPatch {
+  durableVerified: boolean;
+  sharedMemoryVerified: boolean;
+}
+
+export function classifyExistingContextGraphReadiness(input: {
+  subscription: ContextGraphSubscriptionReadinessState;
+  readiness: ContextGraphReadinessProvenance;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+}): {
+  alreadyReady: boolean;
+  statePatch?: ContextGraphSubscriptionStatePatch;
+  readinessPatch?: ContextGraphReadinessPatch;
+} {
+  const currentReadinessProvenance =
+    input.readiness.version >= CONTEXT_GRAPH_READINESS_VERSION;
+  const overallReadinessVerified =
+    input.readiness.durableVerified || input.readiness.sharedMemoryVerified;
+  const requestedPlanesVerified =
+    currentReadinessProvenance &&
+    overallReadinessVerified &&
+    (!input.includeSharedMemory || input.readiness.sharedMemoryVerified);
+  const alreadyReady =
+    input.hasConfirmedMeta &&
+    requestedPlanesVerified &&
+    input.subscription.synced === true &&
+    (!input.includeSharedMemory || input.subscription.sharedMemorySynced === true);
+
+  if (alreadyReady) return { alreadyReady: true };
+
+  if (
+    !input.hasConfirmedMeta &&
+    (input.subscription.metaSynced ||
+      input.subscription.synced ||
+      input.subscription.sharedMemorySynced)
+  ) {
+    return {
+      alreadyReady: false,
+      statePatch: {
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        pendingMeta: true,
+      },
+      readinessPatch: {
+        durableVerified: false,
+        sharedMemoryVerified: false,
+      },
+    };
+  }
+
+  if (!input.hasConfirmedMeta) return { alreadyReady: false };
+
+  const durableVerified =
+    currentReadinessProvenance && input.readiness.durableVerified;
+  const sharedMemoryVerified =
+    currentReadinessProvenance && input.readiness.sharedMemoryVerified;
+  const overallVerified = durableVerified || sharedMemoryVerified;
+  const statePatch =
+    input.subscription.synced !== overallVerified ||
+    input.subscription.sharedMemorySynced !== sharedMemoryVerified
+      ? {
+          synced: overallVerified,
+          sharedMemorySynced: sharedMemoryVerified,
+          metaSynced: true,
+          pendingMeta: false,
+        }
+      : undefined;
+
+  return {
+    alreadyReady: false,
+    statePatch,
+    readinessPatch: currentReadinessProvenance
+      ? undefined
+      : {
+          durableVerified: false,
+          sharedMemoryVerified: false,
+        },
+  };
+}
+
+function catchupServedUsableData(result: CatchupJobResult): boolean {
+  return result.dataSynced > 0 || result.sharedMemorySynced > 0;
+}
+
+function cleanCompletionHasResponse(
+  completion: { verifiedDataPeers: number; emptyPeers: number } | undefined,
 ): boolean {
-  return diagnostics != null
-    && (diagnostics.completedPhases ?? 0) > 0
-    && (diagnostics.timedOutPhases ?? 0) === 0
-    && (diagnostics.failedPeers ?? 0) === 0
-    && (diagnostics.failedPhases ?? 0) === 0
-    && (diagnostics.deniedPhases ?? 0) === 0;
+  return (completion?.verifiedDataPeers ?? 0) > 0 ||
+    (completion?.emptyPeers ?? 0) > 0;
+}
+
+function catchupHasRequestedCleanPeerResponse(
+  result: CatchupJobResult,
+  includeSharedMemory: boolean,
+): boolean {
+  return cleanCompletionHasResponse(result.cleanPlaneCompletions?.durable) ||
+    (
+      includeSharedMemory &&
+      cleanCompletionHasResponse(result.cleanPlaneCompletions?.sharedMemory)
+    );
+}
+
+export function catchupResultHasCleanResponse(result: CatchupJobResult): boolean {
+  const durable = result.diagnostics?.durable;
+  const sharedMemory = result.diagnostics?.sharedMemory;
+  const peerReturnedMetadata =
+    (durable?.metaOnlyResponses ?? 0) > 0 ||
+    (durable?.fetchedMetaTriples ?? 0) > 0 ||
+    (sharedMemory?.fetchedMetaTriples ?? 0) > 0;
+
+  return cleanCompletionHasResponse(result.cleanPlaneCompletions?.durable) ||
+    cleanCompletionHasResponse(result.cleanPlaneCompletions?.sharedMemory) ||
+    catchupServedUsableData(result) ||
+    (durable?.emptyResponses ?? 0) > 0 ||
+    (sharedMemory?.emptyResponses ?? 0) > 0 ||
+    (!result.denied && peerReturnedMetadata);
+}
+
+function catchupPlaneReadyThisRun(input: {
+  result: CatchupJobResult;
+  plane: 'durable' | 'sharedMemory';
+  isPrivate: boolean;
+}): boolean {
+  const completion = input.result.cleanPlaneCompletions?.[input.plane];
+  if (completion) {
+    return completion.verifiedDataPeers > 0 ||
+      (!input.isPrivate && completion.emptyPeers > 0);
+  }
+
+  // Backward compatibility for callers that construct a legacy result (for
+  // example, an older in-process runner during a rolling upgrade). New worker
+  // results always carry cleanPlaneCompletions, so aggregate failures are not
+  // used as readiness evidence on the production path.
+  const diagnostics = input.result.diagnostics?.[input.plane];
+  const dataProgress = input.plane === 'durable'
+    ? input.result.dataSynced > 0
+    : input.result.sharedMemorySynced > 0;
+  return catchupPlaneCompletedWithoutFailure(diagnostics) &&
+    (dataProgress || (!input.isPrivate && (diagnostics?.emptyResponses ?? 0) > 0));
+}
+
+export interface ContextGraphCatchupReadinessClassification {
+  jobStatus: 'done' | 'failed' | 'denied' | 'unreachable';
+  error?: string;
+  statePatch?: ContextGraphSubscriptionStatePatch;
+  readinessPatch?: ContextGraphReadinessPatch;
+  eventPayload?: {
+    dataSynced: number;
+    sharedMemorySynced: number;
+  };
+}
+
+/**
+ * Canonical policy for converting one catch-up result into externally visible
+ * subscription readiness. The HTTP route gathers live metadata and applies
+ * the returned patches; all readiness decisions remain in this pure function.
+ */
+export function classifyContextGraphCatchupReadiness(input: {
+  result: CatchupJobResult;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+  isPrivate: boolean;
+  readinessBeforeCatchup: ContextGraphReadinessProvenance;
+}): ContextGraphCatchupReadinessClassification {
+  const { result } = input;
+  const durableDataProgress = result.dataSynced > 0;
+  const sharedMemoryProgress = result.sharedMemorySynced > 0;
+  const servedUsableData = durableDataProgress || sharedMemoryProgress;
+  const totalConnectedPeers = result.totalPeers ?? result.connectedPeers;
+  const selectedConnectedPeers = result.selectedPeers ?? result.connectedPeers;
+  const hasRequestedCleanPeerResponse = catchupHasRequestedCleanPeerResponse(
+    result,
+    input.includeSharedMemory,
+  );
+
+  if (result.denied && !servedUsableData && !hasRequestedCleanPeerResponse) {
+    return {
+      jobStatus: 'denied',
+      error: result.deniedPeers > 1
+        ? `Sync denied by ${result.deniedPeers} remote peers`
+        : 'Sync denied by remote peer',
+    };
+  }
+
+  if (catchupResultHasCleanResponse(result)) {
+    if (!input.hasConfirmedMeta) {
+      return {
+        jobStatus: 'unreachable',
+        error: 'No peer delivered authoritative context-graph metadata — the curator may be offline, or responding peers do not host this project.',
+        statePatch: {
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          pendingMeta: true,
+        },
+        readinessPatch: {
+          durableVerified: false,
+          sharedMemoryVerified: false,
+        },
+      };
+    }
+
+    const durableReadyThisRun = catchupPlaneReadyThisRun({
+      result,
+      plane: 'durable',
+      isPrivate: input.isPrivate,
+    });
+    const sharedMemoryReadyThisRun = input.includeSharedMemory &&
+      catchupPlaneReadyThisRun({
+        result,
+        plane: 'sharedMemory',
+        isPrivate: input.isPrivate,
+      });
+    const currentReadinessProvenance =
+      input.readinessBeforeCatchup.version >= CONTEXT_GRAPH_READINESS_VERSION;
+    const durableVerified =
+      (currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified) ||
+      durableReadyThisRun;
+    const sharedMemoryVerified =
+      (currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified) ||
+      sharedMemoryReadyThisRun;
+    const overallVerified = durableVerified || sharedMemoryVerified;
+    const missingGraphProof = !overallVerified;
+    const missingRequestedSharedMemory =
+      input.includeSharedMemory && !sharedMemoryVerified;
+    const madeIncompleteProgress =
+      (durableDataProgress && !durableReadyThisRun) ||
+      (sharedMemoryProgress && !sharedMemoryReadyThisRun);
+
+    let jobStatus: ContextGraphCatchupReadinessClassification['jobStatus'] = 'done';
+    let error: string | undefined;
+    if (missingGraphProof || missingRequestedSharedMemory) {
+      jobStatus = 'unreachable';
+      if (madeIncompleteProgress) {
+        error = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+      } else if (input.isPrivate && missingGraphProof) {
+        error = 'No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.';
+      } else if (input.isPrivate) {
+        error = 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
+      } else {
+        error = 'Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.';
+      }
+    }
+
+    return {
+      jobStatus,
+      error,
+      statePatch: {
+        synced: overallVerified,
+        sharedMemorySynced: sharedMemoryVerified,
+        metaSynced: true,
+        pendingMeta: false,
+      },
+      readinessPatch: {
+        durableVerified,
+        sharedMemoryVerified,
+      },
+      eventPayload: durableReadyThisRun || sharedMemoryReadyThisRun
+        ? {
+            dataSynced: durableReadyThisRun ? result.dataSynced : 0,
+            sharedMemorySynced: sharedMemoryReadyThisRun
+              ? result.sharedMemorySynced
+              : 0,
+          }
+        : undefined,
+    };
+  }
+
+  if (result.peersTried > 0 && (result.peersResponded ?? result.peersSucceeded) === 0) {
+    return {
+      jobStatus: 'unreachable',
+      error: "No peer could deliver this project's data — the curator may be offline, or no node currently holds the data. You can still send a signed join request; they will receive it next time they come online.",
+    };
+  }
+  if (result.peersTried > 0) {
+    return {
+      jobStatus: 'failed',
+      error: 'Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.',
+    };
+  }
+  if (
+    totalConnectedPeers > 0 &&
+    selectedConnectedPeers >= totalConnectedPeers &&
+    result.syncCapablePeers === 0
+  ) {
+    return {
+      jobStatus: 'unreachable',
+      error: 'No sync-capable peers found for catch-up — the curator may be offline.',
+    };
+  }
+  if (totalConnectedPeers === 0) {
+    return {
+      jobStatus: 'unreachable',
+      error: "No peers connected — couldn't reach the curator. They may be offline, or your node hasn't bootstrapped to the network yet.",
+    };
+  }
+
+  return { jobStatus: 'done' };
 }
 
 export function readContextGraphReadiness(

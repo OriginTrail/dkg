@@ -14,9 +14,14 @@
  * Mirrors the e2e-context-graph harness: real agents, real libp2p
  * (`joiner.connectTo(curator multiaddr)`), shared EVMChainAdapter.
  */
-import { describe, it, expect, afterAll, beforeAll } from 'vitest';
+import { describe, it, expect, afterAll, beforeAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { DKGAgent } from '../src/index.js';
+import {
+  decodeReliableEnvelope,
+  DKGEvent,
+  PROTOCOL_JOIN_REQUEST,
+} from '@origintrail-official/dkg-core';
 import {
   createEVMAdapter,
   getSharedContext,
@@ -65,6 +70,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
   let joiner: DKGAgent; // hosts the requesting agents
   let approvedAddr: string;
   let rejectedAddr: string;
+  let retryAddr: string;
 
   afterAll(async () => {
     try { await curator?.stop(); } catch { /* ignore */ }
@@ -91,6 +97,18 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
 
     await curator.start();
     await joiner.start();
+    // Production always wires durable membership/subscription stores. Keep
+    // the e2e harness faithful so strict approval ACKs do not fail merely
+    // because this test constructed the agent API directly.
+    (joiner as any).config.contextGraphMembershipStore = {
+      upsert: async () => {},
+      delete: async () => {},
+    };
+    (joiner as any).config.contextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => {},
+      delete: async () => {},
+    };
     await sleep(800);
 
     const addrA = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
@@ -104,10 +122,13 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     // signing key so signJoinRequest can produce a real SignedAgentDelegation).
     const recApprove = await joiner.registerAgent('joiner-approve', { framework: 'test' });
     const recReject = await joiner.registerAgent('joiner-reject', { framework: 'test' });
+    const recRetry = await joiner.registerAgent('joiner-retry', { framework: 'test' });
     approvedAddr = recApprove.agentAddress;
     rejectedAddr = recReject.agentAddress;
+    retryAddr = recRetry.agentAddress;
     expect(approvedAddr).toMatch(/^0x[0-9a-fA-F]{40}$/);
     expect(rejectedAddr).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(retryAddr).toMatch(/^0x[0-9a-fA-F]{40}$/);
   }, 25_000);
 
   it('the curator owns a CURATED context graph (join-gated)', async () => {
@@ -160,4 +181,122 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     );
     expect(status, 'rejection did not reach the requester node over P2P').toBe('rejected');
   }, 30_000);
+
+  it('retries the identical approval envelope when requester persistence aborts the first receive', async () => {
+    const delegation = await joiner.signJoinRequest(CG, retryAddr);
+    const requestGeneration = joiner.getJoinRequestGeneration(delegation);
+    const forwarded = await joiner.forwardJoinRequest(
+      CG,
+      delegation,
+      'joiner-retry',
+      curator.peerId,
+    );
+    expect(forwarded.delivered, `forward(retry) result: ${JSON.stringify(forwarded)}`)
+      .toBeGreaterThanOrEqual(1);
+    await pollUntil(
+      () => curator.listPendingJoinRequests(CG),
+      (rows) => rows.some((row: any) =>
+        String(row.agentAddress).toLowerCase() === retryAddr.toLowerCase()),
+    );
+
+    let failMembershipPersistence = true;
+    let membershipAttempts = 0;
+    let subscriptionWrites = 0;
+    let approvedEvents = 0;
+    (joiner as any).config.contextGraphMembershipStore = {
+      upsert: async (record: any) => {
+        if (
+          record.source === 'join-approved' &&
+          String(record.principalId).toLowerCase() === retryAddr.toLowerCase()
+        ) {
+          membershipAttempts += 1;
+          if (failMembershipPersistence) {
+            throw new Error('simulated durable membership failure');
+          }
+        }
+      },
+      delete: async () => {},
+    };
+    (joiner as any).config.contextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => { subscriptionWrites += 1; },
+      delete: async () => {},
+    };
+    const immediateSync = vi.fn(async () => {});
+    (joiner as any).runImmediatePostApprovalSync = immediateSync;
+    const onApproved = (event: any) => {
+      if (String(event?.agentAddress).toLowerCase() === retryAddr.toLowerCase()) {
+        approvedEvents += 1;
+      }
+    };
+    (joiner as any).eventBus.on(DKGEvent.JOIN_APPROVED, onApproved);
+
+    try {
+      await curator.approveJoinRequest(CG, retryAddr);
+      await pollUntil(
+        async () => membershipAttempts,
+        (attempts) => attempts > 0,
+        10_000,
+        100,
+      );
+      expect(approvedEvents).toBe(0);
+      expect(immediateSync).not.toHaveBeenCalled();
+
+      const pending = await pollUntil(
+        async () => (curator as any).messenger.listOutbox()
+          .filter((entry: any) =>
+            entry.peer === joiner.peerId && entry.protocol === PROTOCOL_JOIN_REQUEST),
+        (entries) => entries.length === 1,
+        10_000,
+        100,
+      );
+      expect(pending).toHaveLength(1);
+      const entry = pending[0];
+      const envelope = decodeReliableEnvelope(entry.payload);
+      expect(JSON.parse(new TextDecoder().decode(envelope.payload))).toMatchObject({
+        type: 'join-approved',
+        contextGraphId: CG,
+        agentAddress: retryAddr,
+        requestGeneration,
+      });
+      expect((joiner as any).messenger.idempotencyStore.check(
+        curator.peerId,
+        PROTOCOL_JOIN_REQUEST,
+        envelope.messageId,
+        'in',
+      ).seen).toBe(false);
+
+      const attemptsBeforeRecovery = membershipAttempts;
+      failMembershipPersistence = false;
+      await (curator as any).messenger.processOutboxTick(entry.nextAttemptAt);
+      await pollUntil(
+        async () => (curator as any).messenger.listOutbox()
+          .filter((row: any) => row.messageId === envelope.messageId),
+        (entries) => entries.length === 0,
+        10_000,
+        100,
+      );
+
+      // ProtocolRouter may make more than one bounded wire attempt before
+      // Messenger queues the envelope. The outbox recovery must add exactly
+      // one successful application attempt, regardless of that retry count.
+      expect(membershipAttempts).toBe(attemptsBeforeRecovery + 1);
+      expect(subscriptionWrites).toBeGreaterThan(0);
+      expect(approvedEvents).toBe(1);
+      expect(immediateSync).toHaveBeenCalledTimes(1);
+      expect((joiner as any).messenger.idempotencyStore.check(
+        curator.peerId,
+        PROTOCOL_JOIN_REQUEST,
+        envelope.messageId,
+        'in',
+      ).seen).toBe(true);
+
+      const attemptsAfterRecovery = membershipAttempts;
+      await (curator as any).messenger.processOutboxTick(entry.nextAttemptAt + 60_000);
+      expect(membershipAttempts).toBe(attemptsAfterRecovery);
+      expect(approvedEvents).toBe(1);
+    } finally {
+      (joiner as any).eventBus.off(DKGEvent.JOIN_APPROVED, onApproved);
+    }
+  }, 45_000);
 });

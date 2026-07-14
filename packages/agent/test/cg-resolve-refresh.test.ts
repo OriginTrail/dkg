@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import {
+  buildAuthoritativePrivateMetaAskQuery,
+  hasAuthoritativePrivateMetaDefinition,
+} from '../src/context-graph-private-meta-proof.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
@@ -14,6 +18,104 @@ function noop(): void {}
 function operationContext(): OperationContext {
   return { kind: 'sync', id: 'cg-refresh-test', startedAt: Date.now() } as never;
 }
+
+function authoritativePrivateMetaQuads(contextGraphId: string): Quad[] {
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  return [
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"PRIVATE"',
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CREATOR,
+      object: `did:dkg:agent:${CURATOR_PEER_ID}`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: 'did:dkg:agent:0x0000000000000000000000000000000000000001',
+      graph: metaGraph,
+    },
+  ];
+}
+
+describe('authoritative private metadata proof', () => {
+  it('keeps fetched-quad evaluation and the generated store query in lockstep', async () => {
+    const cases = [
+      {
+        name: 'complete private definition',
+        mutate: (quads: Quad[]) => quads,
+        expected: true,
+      },
+      {
+        name: 'normalized private policy whitespace',
+        mutate: (quads: Quad[]) => quads.map((quad) => (
+          quad.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY
+            ? { ...quad, object: '"  PrIvAtE  "' }
+            : quad
+        )),
+        expected: true,
+      },
+      {
+        name: 'missing curator',
+        mutate: (quads: Quad[]) => quads.filter(
+          (quad) => quad.predicate !== DKG_ONTOLOGY.DKG_CURATOR,
+        ),
+        expected: false,
+      },
+      {
+        name: 'public policy',
+        mutate: (quads: Quad[]) => quads.map((quad) => (
+          quad.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY
+            ? { ...quad, object: '"public"' }
+            : quad
+        )),
+        expected: false,
+      },
+      {
+        name: 'literal creator DID',
+        mutate: (quads: Quad[]) => quads.map((quad) => (
+          quad.predicate === DKG_ONTOLOGY.DKG_CREATOR
+            ? { ...quad, object: `"did:dkg:agent:${CURATOR_PEER_ID}"` }
+            : quad
+        )),
+        expected: false,
+      },
+    ];
+
+    for (const [index, proofCase] of cases.entries()) {
+      const contextGraphId = `private/proof-parity-${index}`;
+      const quads = proofCase.mutate(authoritativePrivateMetaQuads(contextGraphId));
+      const store = new OxigraphStore();
+      try {
+        await store.insert(quads);
+        const queryResult = await store.query(
+          buildAuthoritativePrivateMetaAskQuery(contextGraphId),
+        );
+        expect(queryResult.type, proofCase.name).toBe('boolean');
+        if (queryResult.type !== 'boolean') throw new Error('expected boolean ASK result');
+        expect(
+          hasAuthoritativePrivateMetaDefinition(contextGraphId, quads),
+          proofCase.name,
+        ).toBe(proofCase.expected);
+        expect(queryResult.value, proofCase.name).toBe(proofCase.expected);
+      } finally {
+        await store.close();
+      }
+    }
+  });
+});
 
 describe('refreshMetaFromCurator', () => {
   it('passes caller abort signal to direct and relay curator dials', async () => {

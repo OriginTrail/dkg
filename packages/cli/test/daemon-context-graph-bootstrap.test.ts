@@ -224,13 +224,14 @@ describe('configured context graph daemon bootstrap', () => {
     });
   });
 
-  it('keeps explicit network defaults and reserved devnet fixtures on the local bootstrap path', async () => {
+  it('keeps network defaults and caller-supplied devnet fixtures on the local bootstrap path', async () => {
     const fixture = createAgent();
 
     await bootstrapConfiguredContextGraphs({
       agent: fixture.agent,
       configuredContextGraphIds: ['configured-public-target', 'testing', 'devnet-test'],
       networkDefaultContextGraphIds: ['testing'],
+      localBootstrapContextGraphIds: ['devnet-test'],
       log: vi.fn(),
     });
 

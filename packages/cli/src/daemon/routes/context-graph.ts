@@ -106,8 +106,9 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
-  CONTEXT_GRAPH_READINESS_VERSION,
-  catchupPlaneCompletedWithoutFailure,
+  catchupResultHasCleanResponse,
+  classifyContextGraphCatchupReadiness,
+  classifyExistingContextGraphReadiness,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
@@ -1572,21 +1573,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // live graph before taking the already-ready shortcut.
       const hasConfirmedExistingMeta = existingSub.metaSynced === true &&
         await agent.hasConfirmedMetaState(contextGraphId).catch(() => false);
-      const currentReadinessProvenance =
-        readinessBeforeCatchup.version >= CONTEXT_GRAPH_READINESS_VERSION;
-      const overallReadinessVerified =
-        readinessBeforeCatchup.durableVerified ||
-        readinessBeforeCatchup.sharedMemoryVerified;
-      const requestedPlanesVerified =
-        currentReadinessProvenance &&
-        overallReadinessVerified &&
-        (!shouldSyncSharedMemory || readinessBeforeCatchup.sharedMemoryVerified);
-      if (
-        hasConfirmedExistingMeta &&
-        requestedPlanesVerified &&
-        existingSub.synced &&
-        (!shouldSyncSharedMemory || existingSub.sharedMemorySynced)
-      ) {
+      const existingReadiness = classifyExistingContextGraphReadiness({
+        subscription: existingSub,
+        readiness: readinessBeforeCatchup,
+        includeSharedMemory: shouldSyncSharedMemory,
+        hasConfirmedMeta: hasConfirmedExistingMeta,
+      });
+      if (existingReadiness.alreadyReady) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
         const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         if (!reusableDoneJob) {
@@ -1612,53 +1605,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         });
       }
 
-      // A pre-admission catch-up on v10.0.6 could persist `synced=true` and
-      // `sharedMemorySynced=true` after an unrelated peer returned a clean
-      // empty response, even though no authoritative `_meta` state existed.
-      // Do not let that poisoned row remain externally ready while the
-      // corrective catch-up runs. A live authoritative-meta proof is the
-      // readiness prerequisite; undefined and stale true bits are deliberately
-      // treated as unconfirmed.
-      if (
-        !hasConfirmedExistingMeta &&
-        (existingSub.metaSynced || existingSub.synced || existingSub.sharedMemorySynced)
-      ) {
-        agent.markContextGraphSubscriptionState(contextGraphId, {
-          synced: false,
-          sharedMemorySynced: false,
-          metaSynced: false,
-          pendingMeta: true,
-        });
-        writeContextGraphReadiness(dashDb, contextGraphId, {
-          durableVerified: false,
-          sharedMemoryVerified: false,
-        });
-      } else if (hasConfirmedExistingMeta) {
-        // A v10.0.6 row can have valid metadata alongside false-ready data
-        // bits. Until current-version provenance backs each plane, expose the
-        // conservative state while the corrective catch-up runs.
-        const durableVerified = currentReadinessProvenance &&
-          readinessBeforeCatchup.durableVerified;
-        const sharedMemoryVerified = currentReadinessProvenance &&
-          readinessBeforeCatchup.sharedMemoryVerified;
-        const overallVerified = durableVerified || sharedMemoryVerified;
-        if (
-          existingSub.synced !== overallVerified ||
-          existingSub.sharedMemorySynced !== sharedMemoryVerified
-        ) {
-          agent.markContextGraphSubscriptionState(contextGraphId, {
-            synced: overallVerified,
-            sharedMemorySynced: sharedMemoryVerified,
-            metaSynced: true,
-            pendingMeta: false,
-          });
-        }
-        if (!currentReadinessProvenance) {
-          writeContextGraphReadiness(dashDb, contextGraphId, {
-            durableVerified: false,
-            sharedMemoryVerified: false,
-          });
-        }
+      if (existingReadiness.statePatch) {
+        agent.markContextGraphSubscriptionState(
+          contextGraphId,
+          existingReadiness.statePatch,
+        );
+      }
+      if (existingReadiness.readinessPatch) {
+        writeContextGraphReadiness(
+          dashDb,
+          contextGraphId,
+          existingReadiness.readinessPatch,
+        );
       }
     }
 
@@ -1706,155 +1664,53 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           includeSharedMemory: shouldSyncSharedMemory,
         });
         job.result = result;
-        job.status = "done";
+        const inspectReadiness = catchupResultHasCleanResponse(result);
+        const hasConfirmedMeta = inspectReadiness
+          ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
+          : false;
+        const isPrivate = hasConfirmedMeta
+          ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
+          : false;
+        const classification = classifyContextGraphCatchupReadiness({
+          result,
+          includeSharedMemory: shouldSyncSharedMemory,
+          hasConfirmedMeta,
+          isPrivate,
+          readinessBeforeCatchup,
+        });
 
-        const d = result.diagnostics?.durable;
-        const s = result.diagnostics?.sharedMemory;
-        const durableDataProgress = result.dataSynced > 0;
-        const sharedMemoryProgress = result.sharedMemorySynced > 0;
-        const servedUsableData = durableDataProgress || sharedMemoryProgress;
-        // Receipt diagnostics are useful for classifying a reachable peer,
-        // but are not authorization/readiness proof: fetched/meta-only counts
-        // are recorded before Merkle verification and storage.
-        const peerReturnedMetadata =
-          (d?.metaOnlyResponses ?? 0) > 0 ||
-          (d?.fetchedMetaTriples ?? 0) > 0 ||
-          (s?.fetchedMetaTriples ?? 0) > 0;
-        const totalConnectedPeers = result.totalPeers ?? result.connectedPeers;
-        const selectedConnectedPeers = result.selectedPeers ?? result.connectedPeers;
-        const cleanResponse =
-          servedUsableData ||
-          (d?.emptyResponses ?? 0) > 0 ||
-          (s?.emptyResponses ?? 0) > 0 ||
-          (!result.denied && peerReturnedMetadata);
-        if (result.denied && !servedUsableData) {
-          job.status = "denied";
-          job.error = result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : "Sync denied by remote peer";
-          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
+        job.status = classification.jobStatus;
+        job.error = classification.error;
+        if (classification.readinessPatch) {
+          writeContextGraphReadiness(
+            dashDb,
+            contextGraphId,
+            classification.readinessPatch,
+          );
+        }
+        if (classification.statePatch) {
+          agent.markContextGraphSubscriptionState(
+            contextGraphId,
+            classification.statePatch,
+          );
+        }
+        if (classification.eventPayload) {
+          agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
+            contextGraphId,
+            ...classification.eventPayload,
+          });
         }
 
-        if (job.status === "done") {
-          if (cleanResponse) {
-            // An empty response is only a valid completion when this node has
-            // authoritative CG metadata (a confirmed `_meta` graph, or the
-            // agent's confirmably-public ontology fallback). An unrelated peer
-            // that does not know the CG returns the same empty data shape, so
-            // treating emptiness alone as success permanently wedges a private
-            // pre-admission subscription in a false-ready state.
-            const hasConfirmedMeta = await agent.hasConfirmedMetaState(contextGraphId).catch(() => false);
-            const isPrivate = hasConfirmedMeta &&
-              await agent.isPrivateContextGraph(contextGraphId).catch(() => true);
-            if (hasConfirmedMeta) {
-              // A positive insert count is progress, not completion. A plane
-              // becomes ready only when its diagnostics show at least one
-              // completed phase and no timeout, failed phase, or failed peer.
-              // Public graphs retain clean-empty completion; private graphs
-              // require verified payload until the protocol exposes a
-              // curator-authenticated empty proof.
-              const durableReadyThisRun =
-                catchupPlaneCompletedWithoutFailure(d) &&
-                (durableDataProgress || (!isPrivate && (d?.emptyResponses ?? 0) > 0));
-              const sharedMemoryReadyThisRun =
-                shouldSyncSharedMemory &&
-                catchupPlaneCompletedWithoutFailure(s) &&
-                (sharedMemoryProgress || (!isPrivate && (s?.emptyResponses ?? 0) > 0));
-              const currentReadinessProvenance =
-                readinessBeforeCatchup.version >= CONTEXT_GRAPH_READINESS_VERSION;
-              const durableVerified =
-                (currentReadinessProvenance && readinessBeforeCatchup.durableVerified) ||
-                durableReadyThisRun;
-              const sharedMemoryVerified =
-                (currentReadinessProvenance && readinessBeforeCatchup.sharedMemoryVerified) ||
-                sharedMemoryReadyThisRun;
-              const overallVerified = durableVerified || sharedMemoryVerified;
-
-              writeContextGraphReadiness(dashDb, contextGraphId, {
-                durableVerified,
-                sharedMemoryVerified,
-              });
-              agent.markContextGraphSubscriptionState(contextGraphId, {
-                synced: overallVerified,
-                sharedMemorySynced: sharedMemoryVerified,
-                metaSynced: true,
-                pendingMeta: false,
-              });
-              if (durableReadyThisRun || sharedMemoryReadyThisRun) {
-                agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
-                  contextGraphId,
-                  dataSynced: durableReadyThisRun ? result.dataSynced : 0,
-                  sharedMemorySynced: sharedMemoryReadyThisRun
-                    ? result.sharedMemorySynced
-                    : 0,
-                });
-              }
-
-              const missingGraphProof = !overallVerified;
-              const missingRequestedSharedMemory =
-                shouldSyncSharedMemory && !sharedMemoryVerified;
-              if (missingGraphProof || missingRequestedSharedMemory) {
-                job.status = "unreachable";
-                const madeIncompleteProgress =
-                  (durableDataProgress && !durableReadyThisRun) ||
-                  (sharedMemoryProgress && !sharedMemoryReadyThisRun);
-                if (madeIncompleteProgress) {
-                  job.error = "Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.";
-                } else if (isPrivate && missingGraphProof) {
-                  job.error = "No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.";
-                } else if (isPrivate) {
-                  job.error = "Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.";
-                } else {
-                  job.error = "Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.";
-                }
-              }
-            } else {
-              agent.markContextGraphSubscriptionState(contextGraphId, {
-                synced: false,
-                sharedMemorySynced: false,
-                metaSynced: false,
-                pendingMeta: true,
-              });
-              writeContextGraphReadiness(dashDb, contextGraphId, {
-                durableVerified: false,
-                sharedMemoryVerified: false,
-              });
-              job.status = "unreachable";
-              job.error = "No peer delivered authoritative context-graph metadata — the curator may be offline, or responding peers do not host this project.";
-            }
-          } else if (result.peersTried > 0 && (result.peersResponded ?? result.peersSucceeded) === 0) {
-            // No peer answered within the run — curator likely offline
-            // or no node currently holds this CG. Distinct from `denied`
-            // so the UI can render "couldn't reach the curator" copy +
-            // the signed-join-request CTA. The previous behaviour
-            // collapsed this case into a generic `failed` whose message
-            // ("all reachable peers failed") was easy to misread as a
-            // local error. See `JoinProjectModal.tsx` `unreachable`
-            // branch and `CatchupJobState`.
-            job.status = "unreachable";
-            job.error = "No peer could deliver this project's data — the curator may be offline, or no node currently holds the data. You can still send a signed join request; they will receive it next time they come online.";
-          } else if (result.peersTried > 0) {
-            job.status = "failed";
-            job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
-          } else if (totalConnectedPeers > 0 && selectedConnectedPeers >= totalConnectedPeers && result.syncCapablePeers === 0) {
-            // Connected to peers, but none speak the sync protocol —
-            // i.e. all our connections are non-DKG / mismatched
-            // versions. From the joiner's perspective this is the same
-            // unreachable outcome ("nobody can answer my sync"), so
-            // reuse the dedicated terminal status.
-            job.status = "unreachable";
-            job.error = "No sync-capable peers found for catch-up — the curator may be offline.";
-          } else if (totalConnectedPeers === 0) {
-            // No peers connected at all → definitionally unreachable.
-            job.status = "unreachable";
-            job.error = "No peers connected — couldn't reach the curator. They may be offline, or your node hasn't bootstrapped to the network yet.";
+        if (DEBUG_SYNC_TRACE) {
+          if (job.status === 'denied') {
+            console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
           }
-
-          if (DEBUG_SYNC_TRACE) {
-            console.log(
-              `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
-                `peers=${result.peersTried}/${result.syncCapablePeers} connected=${totalConnectedPeers} ` +
-                `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
-            );
-          }
+          console.log(
+            `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
+              `peers=${result.peersTried}/${result.syncCapablePeers} ` +
+              `connected=${result.totalPeers ?? result.connectedPeers} ` +
+              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+          );
         }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);

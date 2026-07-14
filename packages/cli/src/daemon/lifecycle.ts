@@ -999,9 +999,9 @@ export async function resolveDaemonPublishEncryption(
  * bootstrap required by curated graphs.
  *
  * System graphs are activated by `DKGAgent.start()`. Network defaults and
- * explicit network defaults retain their historical local-bootstrap semantics
- * (the devnet relies on this before registering its seed graphs). A configured
- * graph, bare or namespaced, is otherwise a remote sync target: both forms are
+ * caller-supplied local-bootstrap IDs retain their intentional local semantics
+ * (devnets rely on this before registering seed graphs). A configured graph,
+ * bare or namespaced, is otherwise a remote sync target: both forms are
  * accepted by the CG API and therefore neither spelling proves ownership.
  * Confirmed local subscriptions keep their existing state; every other target
  * remains fail-closed until sync supplies its authoritative definition.
@@ -1010,24 +1010,16 @@ export async function bootstrapConfiguredContextGraphs(input: {
   agent: DKGAgent;
   configuredContextGraphIds: Iterable<string>;
   networkDefaultContextGraphIds: Iterable<string>;
+  localBootstrapContextGraphIds?: Iterable<string>;
   readinessStore?: Partial<ContextGraphReadinessStore>;
   log: (message: string) => void;
 }): Promise<void> {
   const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
   const configuredContextGraphIds = new Set(input.configuredContextGraphIds);
   const networkDefaultContextGraphIds = new Set(input.networkDefaultContextGraphIds);
-  // These repository devnet fixtures predate network.defaultContextGraphs and
-  // are still written into config.contextGraphs by scripts/devnet.sh. Keep
-  // their established local semantics without generalising that exception to
-  // arbitrary bare IDs (which are valid private CG identifiers).
-  const legacyDevnetLocalContextGraphIds = new Set([
-    'devnet-test',
-    'devnet-isolation',
-    'testing',
-  ]);
   const localBootstrapContextGraphIds = new Set([
     ...networkDefaultContextGraphIds,
-    ...[...configuredContextGraphIds].filter((id) => legacyDevnetLocalContextGraphIds.has(id)),
+    ...(input.localBootstrapContextGraphIds ?? []),
   ]);
   const contextGraphIds = new Set([
     ...configuredContextGraphIds,
@@ -2208,13 +2200,14 @@ export async function runDaemonInner(
   // Namespaced configured graphs are remote sync targets. Unknown ones must
   // remain pending until their authoritative `_meta` arrives; creating a local
   // definition here would fabricate a public graph and suppress the
-  // authenticated bootstrap required by curated graphs. Keep the historical
-  // local bootstrap only for explicit network defaults; bare IDs are also
-  // valid private CG identifiers and cannot safely imply local ownership.
+  // authenticated bootstrap required by curated graphs. Local creation must
+  // come from a network default or explicit localBootstrapContextGraphs input;
+  // bare IDs are valid private CG identifiers and imply no ownership.
   await bootstrapConfiguredContextGraphs({
     agent,
     configuredContextGraphIds: resolveContextGraphs(config),
     networkDefaultContextGraphIds: resolveNetworkDefaultContextGraphs(network),
+    localBootstrapContextGraphIds: config.localBootstrapContextGraphs,
     readinessStore: dashDb,
     log,
   });

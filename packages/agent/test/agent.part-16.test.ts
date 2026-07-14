@@ -398,7 +398,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             bytesReceived: 0,
             resumedPhases: 0,
             timedOutPhases: 0,
-            completedPhases: 0,
+            completedPhases: 1,
             checkpointAdvances: 0,
             emptyResponses: 0,
             metaOnlyResponses: 0,
@@ -416,6 +416,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.peersResponded).toBe(2);
         expect(result.peersSucceeded).toBe(1);
         expect(result.dataSynced).toBe(1);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.synced).toBe(true);
       } finally {
         await agent.stop().catch(() => {});
       }

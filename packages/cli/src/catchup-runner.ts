@@ -31,6 +31,22 @@ export interface CatchupJobResult {
   sharedMemorySynced: number;
   denied: boolean;
   deniedPeers: number;
+  /**
+   * Per-plane evidence produced before peer results are aggregated. Aggregate
+   * diagnostics intentionally retain every timeout/denial for observability,
+   * but readiness must not let one bad peer mask another peer that completed
+   * the same plane cleanly and stored verified data.
+   */
+  cleanPlaneCompletions?: {
+    durable: {
+      verifiedDataPeers: number;
+      emptyPeers: number;
+    };
+    sharedMemory: {
+      verifiedDataPeers: number;
+      emptyPeers: number;
+    };
+  };
   diagnostics?: {
     noProtocolPeers: number;
     durable: {
@@ -86,6 +102,19 @@ export interface CatchupPhaseProgress {
   insertedDataTriples?: number;
   insertedMetaTriples?: number;
   metaOnlyResponses?: number;
+  emptyResponses?: number;
+  deniedPhases?: number;
+}
+
+export function catchupPlaneCompletedWithoutFailure(
+  progress: CatchupPhaseProgress | null | undefined,
+): boolean {
+  return progress != null
+    && (progress.completedPhases ?? 0) > 0
+    && (progress.timedOutPhases ?? 0) === 0
+    && (progress.failedPeers ?? 0) === 0
+    && (progress.failedPhases ?? 0) === 0
+    && (progress.deniedPhases ?? 0) === 0;
 }
 
 export function catchupPeerSucceeded(

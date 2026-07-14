@@ -136,6 +136,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -955,6 +956,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       resolvePeer: async (peerId, { signal }) => {
         await peerResolver.resolve(peerId, { signal }).catch(() => undefined);
       },
+    });
+    // A remote join handler that aborts before persisting its decision can be
+    // observed by libp2p as either a stream reset or clean EOF. Treat only a
+    // parseable join ACK/NACK as delivery so clean EOF/garbage retains the
+    // exact envelope in the durable outbox for retry.
+    this.messenger.setResponseAcceptanceValidator(PROTOCOL_JOIN_REQUEST, (response) => {
+      if (response.byteLength === 0) return false;
+      try {
+        const body = JSON.parse(new TextDecoder().decode(response));
+        return body !== null && typeof body === 'object' && typeof body.ok === 'boolean';
+      } catch {
+        return false;
+      }
     });
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
@@ -1989,11 +2003,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Join-request protocol: receives signed join requests forwarded by peers.
     // Stores them locally if this node is the curator; ACKs with "ok" or "error".
     // rc.9 PR-10: migrated onto the Universal Messenger substrate
-    // (wire prefix bumped to /dkg/10.0.1/join-request). messenger.register
+    // (generation-bound wire prefix /dkg/10.0.2/join-request). messenger.register
     // wraps the handler with envelope-decode + receiver-side dedup;
     // the application logic below is unchanged.
     this.messenger.register(PROTOCOL_JOIN_REQUEST, async (data, peerIdStr) => {
       const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
+      let trustedDecisionInProgress = false;
       try {
         const payload = JSON.parse(new TextDecoder().decode(data));
 
@@ -2004,13 +2019,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // matches the curator triple in our local _meta graph — which
         // works for already-approved members getting re-approved).
         if (payload.type === 'join-approved') {
-          const { contextGraphId, agentAddress: approvedAddr } = payload;
+          const {
+            contextGraphId,
+            agentAddress: approvedAddr,
+            requestGeneration,
+          } = payload;
           // Require BOTH fields. Earlier the address was treated as
           // optional, so a forged payload carrying only `contextGraphId`
           // would skip the trusted-sender check, subscribe this node,
           // and emit JOIN_APPROVED unconditionally. Mirror the
           // rejection handler: if either field is missing, drop.
-          if (contextGraphId && approvedAddr) {
+          if (contextGraphId && approvedAddr && typeof requestGeneration === 'string') {
             const isLocalAgent = [...this.localAgents.keys()].some(
               (addr) => addr.toLowerCase() === approvedAddr.toLowerCase(),
             );
@@ -2020,12 +2039,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             const senderTrusted = await this.isTrustedJoinDecisionSender(
               contextGraphId,
               approvedAddr,
+              requestGeneration,
               peerId.toString(),
             );
             if (!senderTrusted) {
               this.log.warn(
                 createOperationContext('system'),
                 `Dropping join-approved for "${contextGraphId}" from ${peerId.toString()} — sender did not previously accept the join request and is not the recorded curator`,
+              );
+              return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+            }
+            trustedDecisionInProgress = true;
+            const decisionApplied = await this.applyRequesterJoinDecision(
+              contextGraphId,
+              approvedAddr,
+              requestGeneration,
+              'approved',
+            );
+            if (!decisionApplied) {
+              this.log.warn(
+                createOperationContext('system'),
+                `Dropping join-approved for "${contextGraphId}" from ${peerId.toString()} — request generation is stale, unknown, or already terminal`,
               );
               return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
             }
@@ -2089,7 +2123,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               metadata: { curatorPeerId: peerId.toString() },
             }, { strict: true });
             await this.persistContextGraphSubscriptionStrict(contextGraphId);
-            this.joinRequestAcceptedBy.delete(`${contextGraphId}::${approvedAddr.toLowerCase()}`);
+            this.joinRequestAcceptedBy.delete(this.joinRequestTrackingKey(
+              contextGraphId,
+              approvedAddr,
+              requestGeneration,
+            ));
             // Sync immediately by targeting the curator peer we just received
             // this notification from, instead of relying on the periodic
             // catchup reconciler to pick it up minutes later. The previous
@@ -2115,8 +2153,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // catch-up denial path, which is gated on the curator's actual
         // ACL response.
         if (payload.type === 'join-rejected') {
-          const { contextGraphId, agentAddress: rejectedAddr } = payload;
-          if (!contextGraphId || !rejectedAddr) {
+          const {
+            contextGraphId,
+            agentAddress: rejectedAddr,
+            requestGeneration,
+          } = payload;
+          if (!contextGraphId || !rejectedAddr || typeof requestGeneration !== 'string') {
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
           // The rejection target must be one of our local agents (Codex
@@ -2139,12 +2181,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const senderTrusted = await this.isTrustedJoinDecisionSender(
             contextGraphId,
             rejectedAddr,
+            requestGeneration,
             peerId.toString(),
           );
           if (!senderTrusted) {
             this.log.warn(
               createOperationContext('system'),
               `Dropping join-rejected for "${contextGraphId}" from ${peerId.toString()} — sender did not previously accept the join request and is not the recorded curator`,
+            );
+            return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+          }
+          trustedDecisionInProgress = true;
+          const decisionApplied = await this.applyRequesterJoinDecision(
+            contextGraphId,
+            rejectedAddr,
+            requestGeneration,
+            'rejected',
+          );
+          if (!decisionApplied) {
+            this.log.warn(
+              createOperationContext('system'),
+              `Dropping join-rejected for "${contextGraphId}" from ${peerId.toString()} — request generation is stale, unknown, or already terminal`,
             );
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
@@ -2157,7 +2214,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             status: 'removed',
             source: 'join-rejected',
           });
-          this.joinRequestAcceptedBy.delete(`${contextGraphId}::${rejectedAddr.toLowerCase()}`);
+          this.joinRequestAcceptedBy.delete(this.joinRequestTrackingKey(
+            contextGraphId,
+            rejectedAddr,
+            requestGeneration,
+          ));
           // Drop the optimistic "this CG belongs to <rejectedAddr>" hint
           // seeded by `signJoinRequest`. Otherwise multi-agent nodes keep
           // building authenticated sync requests on behalf of the rejected
@@ -2175,10 +2236,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return new TextEncoder().encode(JSON.stringify({ ok: true }));
         }
 
-        const { contextGraphId, delegation, agentName } = payload as {
+        const { contextGraphId, delegation, agentName, requestGeneration } = payload as {
           contextGraphId?: string;
           delegation?: SignedAgentDelegation;
           agentName?: string;
+          requestGeneration?: string;
         };
         // Diagnostic surface for the rejection paths below. Without this
         // every silent-reject path (`missing fields`, `unknown CG`, `not
@@ -2189,7 +2251,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const remotePeer = peerId.toString();
         const peerTag = remotePeer.slice(-8);
         const requestCtx = createOperationContext('system');
-        if (!contextGraphId || !delegation?.agentAddress || !delegation?.signature) {
+        if (
+          !contextGraphId ||
+          !delegation?.agentAddress ||
+          !delegation?.signature
+        ) {
           this.log.warn(
             requestCtx,
             `PROTOCOL_JOIN_REQUEST from ${peerTag}: rejected — missing fields ` +
@@ -2236,6 +2302,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": accepted, verifying delegation for ${delegation.agentAddress}`,
         );
         this.verifyJoinRequest(contextGraphId, delegation);
+        const derivedRequestGeneration = this.getJoinRequestGeneration(delegation);
+        if (
+          requestGeneration !== undefined &&
+          (
+            typeof requestGeneration !== 'string' ||
+            requestGeneration.toLowerCase() !== derivedRequestGeneration
+          )
+        ) {
+          return new TextEncoder().encode(JSON.stringify({
+            ok: false,
+            error: 'request generation does not match signed delegation',
+          }));
+        }
+        if (
+          delegation.delegateePeerId &&
+          delegation.delegateePeerId !== peerId.toString()
+        ) {
+          return new TextEncoder().encode(JSON.stringify({
+            ok: false,
+            error: `join request carrier mismatch: signed delegatee peer ${delegation.delegateePeerId} ` +
+              `does not match transport peer ${peerId.toString()}`,
+          }));
+        }
 
         // Already-member short-circuit: if the requester is already in
         // the allowlist (e.g. they were added directly via add-agent,
@@ -2254,8 +2343,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // same-timestamp substitution before mutating curator state. Keep
           // the read/check/write in a per-delegation queue so two concurrent
           // refreshes cannot race an older credential over a newer one.
-          const originKey = `${contextGraphId}::${addrLower}`;
-          await runAlreadyMemberDelegationRefresh(this, originKey, async () => {
+          const refreshKey = `${contextGraphId}::${addrLower}`;
+          await runAlreadyMemberDelegationRefresh(this, refreshKey, async () => {
             await this.assertAlreadyMemberDelegationRefresh(
               contextGraphId,
               delegation,
@@ -2273,21 +2362,39 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               delegation,
             );
           });
+          const originKey = this.joinRequestTrackingKey(
+            contextGraphId,
+            addrLower,
+            derivedRequestGeneration,
+          );
           this.joinRequestOriginPeers.set(originKey, peerId.toString());
           this.log.info(
             requestCtx,
             `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": already-member delegation refreshed for ${delegation.agentAddress}`,
           );
-          this.notifyJoinApproval(contextGraphId, delegation.agentAddress).catch(() => {});
+          this.notifyJoinApproval(
+            contextGraphId,
+            delegation.agentAddress,
+            derivedRequestGeneration,
+          ).catch(() => {});
           return new TextEncoder().encode(JSON.stringify({ ok: true, alreadyMember: true }));
         }
 
         // Remember which peer actually delivered this request so we can
         // send approval/rejection back to the same peer later, even if
         // the agent registry hasn't indexed them yet.
-        const originKey = `${contextGraphId}::${addrLower}`;
+        await this.storePendingJoinRequest(
+          contextGraphId,
+          delegation,
+          agentName,
+          derivedRequestGeneration,
+        );
+        const originKey = this.joinRequestTrackingKey(
+          contextGraphId,
+          addrLower,
+          derivedRequestGeneration,
+        );
         this.joinRequestOriginPeers.set(originKey, peerId.toString());
-        await this.storePendingJoinRequest(contextGraphId, delegation, agentName);
         // Note: `storePendingJoinRequest` itself now emits JOIN_REQUEST_RECEIVED.
         // No duplicate emit here.
         return new TextEncoder().encode(JSON.stringify({ ok: true }));
@@ -2301,6 +2408,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           createOperationContext('system'),
           `PROTOCOL_JOIN_REQUEST handler error: ${msg}`,
         );
+        // Once a decision sender has passed authentication, persistence and
+        // bootstrap failures must escape the application handler. Messenger
+        // then leaves the message unhandled so the sender's durable outbox can
+        // retry it; returning `{ok:false}` bytes would be cached as a terminal
+        // handled response and silently lose the decision.
+        if (trustedDecisionInProgress) throw err;
         return new TextEncoder().encode(JSON.stringify({ ok: false, error: msg }));
       }
     });
@@ -2573,7 +2686,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     // rc.9 PR-10: dedicated join-approval retry tick removed. The
     // substrate's Messenger.processOutboxTick (set up immediately
-    // below) now drives retries for /dkg/10.0.1/join-request the
+    // below) now drives retries for /dkg/10.0.2/join-request the
     // same way it does for chat — same cadence, same backoff ladder,
     // persisted across daemon restart.
 
@@ -4684,8 +4797,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
     );
     let accessDeniedPeers = 0;
-    let durableDeniedPhases = 0;
-    let sharedMemoryDeniedPhases = 0;
+    let cleanDurableDataSynced = 0;
+    let cleanSharedMemoryDataSynced = 0;
     let peersSucceeded = 0;
     for (const r of results) {
       // A peer "succeeded" when its sync round finished without a transport
@@ -4714,6 +4827,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         || (r.shared ? r.shared.insertedMetaTriples > 0 : false)
       );
       const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
+      // Readiness is a per-plane, per-peer proof. Keep aggregate failures in
+      // diagnostics, but do not let a stale/denied peer erase the completed
+      // snapshot delivered by another peer. Requiring the inserts and clean
+      // completion to belong to the same result also preserves the protection
+      // against promoting a partially inserted, subsequently timed-out round.
+      const durableCompletedCleanly = r.durable.insertedDataTriples > 0
+        && r.durable.completedPhases > 0
+        && r.durable.timedOutPhases === 0
+        && (r.durable.failedPhases ?? 0) === 0
+        && r.durable.failedPeers === 0
+        && (r.durable.deniedPhases ?? 0) === 0;
+      const sharedMemoryCompletedCleanly = r.shared != null
+        && r.shared.insertedDataTriples > 0
+        && r.shared.completedPhases > 0
+        && r.shared.timedOutPhases === 0
+        && (r.shared.failedPhases ?? 0) === 0
+        && r.shared.failedPeers === 0
+        && (r.shared.deniedPhases ?? 0) === 0;
+      if (durableCompletedCleanly) {
+        cleanDurableDataSynced += r.durable.insertedDataTriples;
+      }
+      if (sharedMemoryCompletedCleanly) {
+        cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
+      }
       if (!durableFailed || (r.shared && !sharedFailed)) {
         peersResponded++;
       }
@@ -4744,7 +4881,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.rejectedKcs += r.durable.rejectedKcs;
       diagnostics.durable.failedPeers += r.durable.failedPeers;
       diagnostics.durable.failedPhases += r.durable.failedPhases ?? 0;
-      durableDeniedPhases += r.durable.deniedPhases ?? 0;
       let peerDenied = (r.durable.deniedPhases ?? 0) > 0;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
@@ -4761,7 +4897,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         diagnostics.sharedMemory.droppedDataTriples += r.shared.droppedDataTriples;
         diagnostics.sharedMemory.failedPeers += r.shared.failedPeers;
         diagnostics.sharedMemory.failedPhases += r.shared.failedPhases ?? 0;
-        sharedMemoryDeniedPhases += r.shared.deniedPhases ?? 0;
         peerDenied = peerDenied || (r.shared.deniedPhases ?? 0) > 0;
       }
       if (peerDenied) accessDeniedPeers++;
@@ -4779,18 +4914,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // snapshot completed. A timeout/failure can arrive after inserting an
     // early page; promoting readiness from that count poisons the persisted
     // subscription flags and suppresses the next restart/bootstrap attempt.
-    const durableCompletedCleanly = dataSynced > 0
-      && diagnostics.durable.completedPhases > 0
-      && diagnostics.durable.timedOutPhases === 0
-      && diagnostics.durable.failedPhases === 0
-      && diagnostics.durable.failedPeers === 0
-      && durableDeniedPhases === 0;
-    const sharedMemoryCompletedCleanly = sharedMemorySynced > 0
-      && diagnostics.sharedMemory.completedPhases > 0
-      && diagnostics.sharedMemory.timedOutPhases === 0
-      && diagnostics.sharedMemory.failedPhases === 0
-      && diagnostics.sharedMemory.failedPeers === 0
-      && sharedMemoryDeniedPhases === 0;
+    const durableCompletedCleanly = cleanDurableDataSynced > 0;
+    const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
       this.markContextGraphSubscriptionState(contextGraphId, {
         // `synced` is the overall graph-readiness bit. A clean SWM-only
@@ -4801,8 +4926,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
       this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
         contextGraphId,
-        dataSynced: durableCompletedCleanly ? dataSynced : 0,
-        sharedMemorySynced: sharedMemoryCompletedCleanly ? sharedMemorySynced : 0,
+        dataSynced: cleanDurableDataSynced,
+        sharedMemorySynced: cleanSharedMemoryDataSynced,
       });
     }
 
@@ -5876,24 +6001,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Requiring both identities prevents an incidental/provenance type triple
     // (or a lone allowlist/policy write) from making bootstrap look complete.
     const authoritativeDefinitionResult = await this.store.query(
-      `ASK WHERE {
-        GRAPH <${metaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private" .
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator .
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator .
-          FILTER(
-            isIRI(?creator) &&
-            STRSTARTS(STR(?creator), "did:dkg:agent:") &&
-            STRLEN(STR(?creator)) > 14
-          )
-          FILTER(
-            isIRI(?curator) &&
-            STRSTARTS(STR(?curator), "did:dkg:agent:") &&
-            STRLEN(STR(?curator)) > 14
-          )
-        }
-      }`,
+      buildAuthoritativePrivateMetaAskQuery(contextGraphId),
     );
     if (
       authoritativeDefinitionResult.type === 'boolean' &&

@@ -178,6 +178,28 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
     expect(check.seen && Array.from(check.cachedResponse ?? [])).toEqual([0x42]);
   });
 
+  it('queues a protocol-invalid response and validates it again before retry completion', async () => {
+    let valid = false;
+    const router = makeRouter(async () => valid ? new Uint8Array([0x42]) : new Uint8Array());
+    const { messenger, idempotencyStore, outboxStore, clock } = makeSubstrate({ router });
+    messenger.setResponseAcceptanceValidator(PROTO, (response) => response.byteLength > 0);
+
+    const first = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID,
+    });
+
+    expect(first).toMatchObject({ delivered: false, queued: true });
+    expect(outboxStore.size()).toBe(1);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(false);
+
+    valid = true;
+    await messenger.processOutboxTick(clock() + 100);
+
+    expect(router.send.calls).toHaveLength(2);
+    expect(outboxStore.size()).toBe(0);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(true);
+  });
+
   it('generates a UUID when no messageId is supplied', async () => {
     const { messenger } = makeSubstrate();
     const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]));

@@ -11,6 +11,7 @@ import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
+import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -1175,81 +1176,95 @@ async function readFreshSwmRoots(
   return new Set(res.bindings.map((row) => row['root']).filter(Boolean));
 }
 
-// NOTE: this in-memory filter and its store-bounded, page-safe twin
-// {@link readDurableMetaRowsPage} MUST return the same SET of rows. Edit them
-// together — the paged variant only runs in the rare oversized-snapshot fallback,
-// so a divergence would hide until it silently corrupts an oversized CG's meta
-// sync. `sync-responder-oversized-fallback.test.ts` asserts their equivalence.
+function buildDurableMetaRowsQuery(
+  contextGraphId: string,
+  registeredSubGraphNames: readonly string[],
+  page?: { offset: number; limit: number },
+): string {
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const cgEntity = contextGraphDataGraphUri(contextGraphId);
+  const activeDelegationSubjectExpression =
+    durableMetaDelegationSubjectAdmissionExpression(contextGraphId);
+  const notWorking = `FILTER(?ml != ${sparqlString(MemoryLayer.WorkingMemory)})`;
+  const registeredSubGraphSubjects = dedupeStrings(registeredSubGraphNames)
+    .filter((name) => validateSubGraphName(name).valid)
+    .map((name) => `<${assertSafeIri(`${cgEntity}/${name}`)}>`);
+  const registeredSubGraphClause = registeredSubGraphSubjects.length
+    ? `|| ?s IN (${registeredSubGraphSubjects.join(', ')})`
+    : '';
+  const pagination = page
+    ? `\n    OFFSET ${Math.max(0, Math.floor(page.offset))}\n    LIMIT ${Math.max(0, Math.floor(page.limit))}`
+    : '';
+  return `
+    SELECT ?g ?s ?p ?o WHERE {
+      VALUES ?g { <${assertSafeIri(metaGraph)}> }
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(
+        ?s = <${assertSafeIri(cgEntity)}>
+        || ${activeDelegationSubjectExpression}
+        ${registeredSubGraphClause}
+        || STRSTARTS(STR(?s), "did:dkg:activity:")
+        || STRSTARTS(STR(?s), "did:dkg:join-request:")
+        || EXISTS { GRAPH ?g { ?s <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
+        || EXISTS { GRAPH ?g { ?agLifecycle <${DKG_ASSERTION_GRAPH}> ?s ; <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
+        || EXISTS {
+             GRAPH ?g { ?s (<${PROV_GENERATED}>|<${PROV_USED}>) ?evLifecycle . ?evLifecycle <${DKG_MEMORY_LAYER}> ?ml }
+             ${notWorking}
+           }
+        || (
+             CONTAINS(STR(?s), "/assertion/") &&
+             EXISTS {
+               GRAPH ?g { ?anLifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml }
+               ${notWorking}
+               FILTER(STR(?an) != "")
+               FILTER(STRENDS(STR(?s), CONCAT("/", STR(?an))))
+             }
+           )
+      )
+    }
+    ORDER BY ?g ?s ?p ?o${pagination}
+  `;
+}
+
+async function queryDurableMetaRows(
+  store: TripleStore,
+  contextGraphId: string,
+  registeredSubGraphNames: readonly string[],
+  page: { offset: number; limit: number } | undefined,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  if (page && Math.max(0, Math.floor(page.limit)) === 0) return [];
+  const res = await store.query(
+    buildDurableMetaRowsQuery(contextGraphId, registeredSubGraphNames, page),
+    syncResponderStoreOptions(
+      signal,
+      page ? 'sync.responder.readDurableMetaRowsPage' : 'sync.responder.readDurableMetaRows',
+    ),
+  );
+  if (res.type !== 'bindings') return [];
+  const rows = res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g);
+  return page ? rows : rows.sort(compareRows);
+}
+
+/**
+ * Read admitted durable metadata from one store snapshot. The delegation
+ * credential and its allow/revoke facts are evaluated in the same query, so
+ * an ACL mutation cannot race a separately materialized JavaScript subject set.
+ */
 async function readDurableMetaRows(
   store: TripleStore,
   contextGraphId: string,
   registeredSubGraphNames: readonly string[],
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
-  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const cgEntity = contextGraphDataGraphUri(contextGraphId);
-  const agentDelegationSubjectPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
-  const registeredSubGraphSubjects = new Set(dedupeStrings(registeredSubGraphNames)
-    .filter((name) => validateSubGraphName(name).valid)
-    .map((name) => `${cgEntity}/${name}`));
-  const rows = await readRowsAcrossGraphs(store, [metaGraph], signal);
-  const allowedAgents = new Set(rows
-    .filter((row) => row.s === cgEntity && row.p === DKG_ONTOLOGY.DKG_ALLOWED_AGENT)
-    .map((row) => stripLiteral(row.o).toLowerCase())
-    .filter(Boolean));
-  const revokedAgents = new Set(rows
-    .filter((row) => row.s === cgEntity && row.p === DKG_ONTOLOGY.DKG_REVOKED_AGENT)
-    .map((row) => stripLiteral(row.o).toLowerCase())
-    .filter(Boolean));
-  const activeDelegationSubjects = new Set(rows
-    .filter((row) =>
-      row.s.startsWith(agentDelegationSubjectPrefix) &&
-      row.p === DKG_ONTOLOGY.DKG_DELEGATION_AGENT)
-    .filter((row) => {
-      const agent = stripLiteral(row.o).toLowerCase();
-      return allowedAgents.has(agent) && !revokedAgents.has(agent);
-    })
-    .map((row) => row.s));
-  const nonWorkingLifecycles = new Set<string>();
-  for (const row of rows) {
-    if (row.p === DKG_MEMORY_LAYER && stripLiteral(row.o) !== MemoryLayer.WorkingMemory) {
-      nonWorkingLifecycles.add(row.s);
-    }
-  }
-
-  const assertionGraphs = new Set<string>();
-  const assertionNames = new Set<string>();
-  const eventSubjects = new Set<string>();
-  for (const row of rows) {
-    if (nonWorkingLifecycles.has(row.s) && row.p === DKG_ASSERTION_GRAPH) {
-      assertionGraphs.add(row.o);
-    }
-    if (nonWorkingLifecycles.has(row.s) && row.p === DKG_ASSERTION_NAME) {
-      const name = stripLiteral(row.o);
-      if (name) assertionNames.add(name);
-    }
-    if ((row.p === PROV_GENERATED || row.p === PROV_USED) && nonWorkingLifecycles.has(row.o)) {
-      eventSubjects.add(row.s);
-    }
-  }
-
-  return rows.filter((row) =>
-    row.s === cgEntity ||
-    // Private-CG admission stores the signed peer/op-key credential on a
-    // delegation resource rather than on the CG entity. Omitting this subject
-    // family lets the allowlist sync while the credential needed to authorize
-    // the very next request remains curator-local.
-    activeDelegationSubjects.has(row.s) ||
-    registeredSubGraphSubjects.has(row.s) ||
-    row.s.startsWith('did:dkg:activity:') ||
-    row.s.startsWith('did:dkg:join-request:') ||
-    nonWorkingLifecycles.has(row.s) ||
-    assertionGraphs.has(row.s) ||
-    eventSubjects.has(row.s) ||
-    (
-      row.s.includes('/assertion/') &&
-      [...assertionNames].some((name) => row.s.endsWith(`/${name}`))
-    ),
+  return queryDurableMetaRows(
+    store,
+    contextGraphId,
+    registeredSubGraphNames,
+    undefined,
+    signal,
   );
 }
 
@@ -1278,65 +1293,13 @@ async function readDurableMetaRowsPage(
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
-  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const cgEntity = contextGraphDataGraphUri(contextGraphId);
-  const agentDelegationSubjectPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
-  const notWorking = `FILTER(?ml != ${sparqlString(MemoryLayer.WorkingMemory)})`;
-  const registeredSubGraphSubjects = dedupeStrings(registeredSubGraphNames)
-    .filter((name) => validateSubGraphName(name).valid)
-    .map((name) => `<${assertSafeIri(`${cgEntity}/${name}`)}>`);
-  const registeredSubGraphClause = registeredSubGraphSubjects.length
-    ? `|| ?s IN (${registeredSubGraphSubjects.join(', ')})`
-    : '';
-  const res = await store.query(`
-    SELECT ?g ?s ?p ?o WHERE {
-      VALUES ?g { <${assertSafeIri(metaGraph)}> }
-      GRAPH ?g { ?s ?p ?o }
-      FILTER(
-        ?s = <${assertSafeIri(cgEntity)}>
-        || (
-             STRSTARTS(STR(?s), ${sparqlString(agentDelegationSubjectPrefix)})
-             && EXISTS {
-               GRAPH ?g {
-                 ?s <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?delegatedAgent .
-                 <${assertSafeIri(cgEntity)}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?allowedAgent .
-                 FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?allowedAgent)))
-                 FILTER NOT EXISTS {
-                   <${assertSafeIri(cgEntity)}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
-                   FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?revokedAgent)))
-                 }
-               }
-             }
-           )
-        ${registeredSubGraphClause}
-        || STRSTARTS(STR(?s), "did:dkg:activity:")
-        || STRSTARTS(STR(?s), "did:dkg:join-request:")
-        || EXISTS { GRAPH ?g { ?s <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
-        || EXISTS { GRAPH ?g { ?agLifecycle <${DKG_ASSERTION_GRAPH}> ?s ; <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
-        || EXISTS {
-             GRAPH ?g { ?s (<${PROV_GENERATED}>|<${PROV_USED}>) ?evLifecycle . ?evLifecycle <${DKG_MEMORY_LAYER}> ?ml }
-             ${notWorking}
-           }
-        || (
-             CONTAINS(STR(?s), "/assertion/") &&
-             EXISTS {
-               GRAPH ?g { ?anLifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml }
-               ${notWorking}
-               FILTER(STR(?an) != "")
-               FILTER(STRENDS(STR(?s), CONCAT("/", STR(?an))))
-             }
-           )
-      )
-    }
-    ORDER BY ?g ?s ?p ?o
-    OFFSET ${safeOffset}
-    LIMIT ${safeLimit}
-  `, syncResponderStoreOptions(signal, 'sync.responder.readDurableMetaRowsPage'));
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
-    .filter((row) => row.s && row.p && row.o && row.g);
+  return queryDurableMetaRows(
+    store,
+    contextGraphId,
+    registeredSubGraphNames,
+    { offset: safeOffset, limit: safeLimit },
+    signal,
+  );
 }
 
 async function readDurableDeltaRowsPageAcrossGraphs(

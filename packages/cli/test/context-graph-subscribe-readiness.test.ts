@@ -17,6 +17,10 @@ function cleanEmptyResult(): CatchupJobResult {
     sharedMemorySynced: 0,
     denied: false,
     deniedPeers: 0,
+    cleanPlaneCompletions: {
+      durable: { verifiedDataPeers: 0, emptyPeers: 1 },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 1 },
+    },
     diagnostics: {
       noProtocolPeers: 0,
       durable: {
@@ -62,6 +66,8 @@ function privateMetaOnlyResult(): CatchupJobResult {
   result.diagnostics.durable.fetchedMetaTriples = 7;
   result.diagnostics.durable.insertedMetaTriples = 1;
   result.diagnostics.durable.metaOnlyResponses = 1;
+  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
+  result.cleanPlaneCompletions.durable.emptyPeers = 0;
   return result;
 }
 
@@ -77,6 +83,9 @@ function privateDataOnlyResult(): CatchupJobResult {
   result.diagnostics.sharedMemory.emptyResponses = 0;
   result.diagnostics.sharedMemory.completedPhases = 0;
   result.diagnostics.sharedMemory.timedOutPhases = 1;
+  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
+  result.cleanPlaneCompletions.durable = { verifiedDataPeers: 1, emptyPeers: 0 };
+  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 0, emptyPeers: 0 };
   return result;
 }
 
@@ -89,6 +98,8 @@ function privateSharedMemoryOnlyResult(): CatchupJobResult {
   result.diagnostics.sharedMemory.emptyResponses = 0;
   result.diagnostics.sharedMemory.fetchedDataTriples = 4;
   result.diagnostics.sharedMemory.insertedDataTriples = 4;
+  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
+  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 1, emptyPeers: 0 };
   return result;
 }
 
@@ -345,6 +356,44 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
   });
 
+  it('keeps a public clean-empty peer valid when another peer denies', async () => {
+    const mixed = cleanEmptyResult();
+    mixed.connectedPeers = 2;
+    mixed.totalPeers = 2;
+    mixed.selectedPeers = 2;
+    mixed.syncCapablePeers = 2;
+    mixed.peersTried = 2;
+    mixed.peersResponded = 2;
+    mixed.denied = true;
+    mixed.deniedPeers = 1;
+    if (!mixed.diagnostics?.durable) throw new Error('durable diagnostics missing');
+    mixed.diagnostics.durable.deniedPhases = 1;
+
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      includeSharedMemory: false,
+      result: mixed,
+      initial: {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.job.status).toBe('done');
+    expect(result.job.error).toBeUndefined();
+    expect(result.state).toMatchObject({
+      synced: true,
+      sharedMemorySynced: false,
+      metaSynced: true,
+    });
+    expect(result.readiness).toMatchObject({
+      durableVerified: true,
+      sharedMemoryVerified: false,
+    });
+  });
+
   it('does not promote private data readiness from unrelated empty responders after metadata is local', async () => {
     const result = await subscribe({
       hasConfirmedMeta: true,
@@ -460,7 +509,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
   it('does not promote positive durable inserts when the plane also timed out', async () => {
     const partial = privateDataOnlyResult();
     if (!partial.diagnostics?.durable) throw new Error('durable diagnostics missing');
+    if (!partial.cleanPlaneCompletions) throw new Error('clean completion proof missing');
     partial.diagnostics.durable.timedOutPhases = 1;
+    partial.cleanPlaneCompletions.durable.verifiedDataPeers = 0;
 
     const result = await subscribe({
       hasConfirmedMeta: true,
@@ -493,9 +544,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
   it('does not promote positive durable inserts when the plane was also denied', async () => {
     const partial = privateDataOnlyResult();
     if (!partial.diagnostics?.durable) throw new Error('durable diagnostics missing');
+    if (!partial.cleanPlaneCompletions) throw new Error('clean completion proof missing');
     partial.denied = true;
     partial.deniedPeers = 1;
     partial.diagnostics.durable.deniedPhases = 1;
+    partial.cleanPlaneCompletions.durable.verifiedDataPeers = 0;
 
     const result = await subscribe({
       hasConfirmedMeta: true,
@@ -518,6 +571,40 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
     expect(result.readiness).toMatchObject({
       durableVerified: false,
+      sharedMemoryVerified: false,
+    });
+  });
+
+  it('promotes a clean private plane when another peer denies and times out', async () => {
+    const mixed = privateDataOnlyResult();
+    if (!mixed.diagnostics?.durable) throw new Error('durable diagnostics missing');
+    mixed.denied = true;
+    mixed.deniedPeers = 1;
+    mixed.diagnostics.durable.deniedPhases = 1;
+    mixed.diagnostics.durable.timedOutPhases = 1;
+
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      includeSharedMemory: false,
+      result: mixed,
+      initial: {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.job.status).toBe('done');
+    expect(result.job.error).toBeUndefined();
+    expect(result.state).toMatchObject({
+      synced: true,
+      sharedMemorySynced: false,
+      metaSynced: true,
+    });
+    expect(result.readiness).toMatchObject({
+      durableVerified: true,
       sharedMemoryVerified: false,
     });
   });
