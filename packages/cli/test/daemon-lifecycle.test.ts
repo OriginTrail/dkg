@@ -258,13 +258,19 @@ async function createSupervisorFixture(opts: {
   };
 }
 
-/** A TCP listener standing in for the managed Oxigraph a worker owns. */
-function managedStoreListenerLines(port: number, readyFile: string): string[] {
+/**
+ * A TCP listener standing in for the managed Oxigraph a worker owns.
+ *
+ * Its port and ready-file arrive as argv rather than being interpolated into
+ * the source, so no test-controlled value is ever spliced into generated code.
+ */
+function managedStoreListenerLines(): string[] {
   return [
     "const fs = require('node:fs');",
     "const net = require('node:net');",
+    'const [port, ready] = process.argv.slice(2);',
     'const server = net.createServer(() => {});',
-    `server.listen(${port}, '127.0.0.1', () => fs.writeFileSync(${JSON.stringify(readyFile)}, String(process.pid)));`,
+    "server.listen(Number(port), '127.0.0.1', () => fs.writeFileSync(ready, String(process.pid)));",
     'setInterval(() => {}, 1000);',
     '',
   ];
@@ -325,7 +331,7 @@ describe('daemon lifecycle control-plane files', () => {
       const replacementBound = fixture.file('replacement-bound');
       const listenerScript = await fixture.writeScript(
         'listener.cjs',
-        managedStoreListenerLines(managedPort, listenerReady),
+        managedStoreListenerLines(),
       );
 
       // First worker: leaks a store listener, then SIGKILLs itself so it has no
@@ -343,7 +349,7 @@ describe('daemon lifecycle control-plane files', () => {
         "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
         'if (!fs.existsSync(state)) {',
         "  fs.writeFileSync(state, '1');",
-        "  spawn(process.execPath, [listener], { stdio: 'ignore' });",
+        "  spawn(process.execPath, [listener, String(port), ready], { stdio: 'ignore' });",
         '  const deadline = Date.now() + 5000;',
         '  const timer = setInterval(() => {',
         '    if (fs.existsSync(ready)) {',
@@ -388,7 +394,7 @@ describe('daemon lifecycle control-plane files', () => {
       const listenerReady = fixture.file('listener-ready');
       const listenerScript = await fixture.writeScript(
         'listener.cjs',
-        managedStoreListenerLines(managedPort, listenerReady),
+        managedStoreListenerLines(),
       );
 
       // The foreground worker owns a store listener and then idles forever: only
@@ -399,8 +405,10 @@ describe('daemon lifecycle control-plane files', () => {
         "const { spawn } = require('node:child_process');",
         `const listener = ${JSON.stringify(listenerScript)};`,
         `const pidFile = ${JSON.stringify(workerPidFile)};`,
+        `const ready = ${JSON.stringify(listenerReady)};`,
+        `const port = ${managedPort};`,
         "if (process.argv[2] !== 'daemon-foreground-worker') process.exit(2);",
-        "spawn(process.execPath, [listener], { stdio: 'ignore' });",
+        "spawn(process.execPath, [listener, String(port), ready], { stdio: 'ignore' });",
         'fs.writeFileSync(pidFile, String(process.pid));',
         'setInterval(() => {}, 1000);',
         '',
@@ -490,7 +498,7 @@ describe('daemon lifecycle control-plane files', () => {
       const listenerReady = fixture.file('listener-ready');
       const listenerScript = await fixture.writeScript(
         'listener.cjs',
-        managedStoreListenerLines(managedPort, listenerReady),
+        managedStoreListenerLines(),
       );
 
       await fixture.writeWorker([
@@ -499,8 +507,10 @@ describe('daemon lifecycle control-plane files', () => {
         "const { spawn } = require('node:child_process');",
         `const listener = ${JSON.stringify(listenerScript)};`,
         `const pidFile = ${JSON.stringify(workerPidFile)};`,
+        `const ready = ${JSON.stringify(listenerReady)};`,
+        `const port = ${managedPort};`,
         "if (process.argv[2] !== 'daemon-foreground-worker') process.exit(2);",
-        "spawn(process.execPath, [listener], { stdio: 'ignore' });",
+        "spawn(process.execPath, [listener, String(port), ready], { stdio: 'ignore' });",
         'fs.writeFileSync(pidFile, String(process.pid));',
         'setInterval(() => {}, 1000);',
         '',
@@ -591,7 +601,7 @@ describe('daemon lifecycle control-plane files', () => {
       const replacementStarted = fixture.file('replacement-started');
       const listenerScript = await fixture.writeScript(
         'external-listener.cjs',
-        managedStoreListenerLines(managedPort, listenerReady),
+        managedStoreListenerLines(),
       );
 
       // The listener is detached, so reaping the worker's group cannot remove
@@ -603,6 +613,7 @@ describe('daemon lifecycle control-plane files', () => {
         `const state = ${JSON.stringify(stateFile)};`,
         `const ready = ${JSON.stringify(listenerReady)};`,
         `const replacement = ${JSON.stringify(replacementStarted)};`,
+        `const port = ${managedPort};`,
         `const listener = ${JSON.stringify(listenerScript)};`,
         "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
         'if (fs.existsSync(state)) {',
@@ -610,7 +621,7 @@ describe('daemon lifecycle control-plane files', () => {
         '  process.exit(0);',
         '}',
         "fs.writeFileSync(state, '1');",
-        "const external = spawn(process.execPath, [listener], { detached: true, stdio: 'ignore' });",
+        "const external = spawn(process.execPath, [listener, String(port), ready], { detached: true, stdio: 'ignore' });",
         'external.unref();',
         'const deadline = Date.now() + 5000;',
         'const timer = setInterval(() => {',
