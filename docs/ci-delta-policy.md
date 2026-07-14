@@ -105,11 +105,34 @@ for about 86% of compute.
 - A leaf supporting-package change should take roughly 3 minutes instead of 14
   (shared build plus the supporting lane).
 - A Hardhat-plugin-only change should take roughly 5 minutes.
-- UI and shared protocol changes retain expensive downstream E2E lanes, so
-  their isolated wall time may not fall much. They still launch fewer runners,
-  reducing queue pressure for every concurrent PR.
+- UI and shared protocol changes still run the real-node E2E suite, but its 326
+  tests now run in seven isolated devnet shards instead of one serial lane.
 
-These are measured projections, not latency guarantees; runner availability
+The full PR path was also measured independently of delta selection. On the
+same PR, the original full workflow took
+[13m07s](https://github.com/OriginTrail/dkg/actions/runs/29321182804); after
+sharing EVM compilation and sharding the long CLI, chain, and real-node suites,
+the full workflow and its final gate passed in
+[6m05s](https://github.com/OriginTrail/dkg/actions/runs/29325452377), a 53.5%
+wall-time reduction. That validation deliberately ran with delta disabled and
+retained the complete key-suite totals:
+
+- CLI: 2,705 passed + 12 skipped = 2,717 tests across 190 files.
+- Chain: 1,033 passed + 1 skipped = 1,034 tests across 58 files.
+- Real-node Playwright: 318 passed + 8 skipped = 326 tests.
+
+Parallelizing a forced-full PR trades compute for latency: the measured runner
+total increased from 87.9 to 109.0 minutes. Delta routing is what reduces
+runner use on ordinary leaf/documentation PRs; full global/high-risk changes
+pay the extra parallel compute to keep feedback near six minutes.
+
+Protected-branch pushes and manual runs additionally retain the unsharded
+Solidity coverage ratchet. That post-merge safety net currently takes about
+25 minutes and is intentionally outside the PR feedback target. Safely
+parallelizing it requires merging raw coverage counters and proving the merged
+result equals the full baseline; concatenating LCOV files would be incorrect.
+
+Measured runs and projections are not latency guarantees; runner availability
 and test variance still affect elapsed time.
 
 ## Local verification
