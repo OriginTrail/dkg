@@ -331,12 +331,21 @@ count_is_absent() {
 query_count() {
   local node="$1" graph_suffix="$2" pattern="$3" sub_graph="${4:-}" body response
   body="$(CG="$CG_ID" SUFFIX="$graph_suffix" PATTERN="$pattern" SUB="$sub_graph" node -e '
+    const suffix = process.env.SUFFIX;
+    const subGraph = process.env.SUB;
+    const graphPattern = suffix === "_meta"
+      ? `GRAPH <did:dkg:context-graph:${process.env.CG}/_meta> { ${process.env.PATTERN} }`
+      : process.env.PATTERN;
     const out = {
       contextGraphId: process.env.CG,
-      graphSuffix: process.env.SUFFIX,
-      sparql: `SELECT (COUNT(*) AS ?n) WHERE { ${process.env.PATTERN} }`,
+      sparql: `SELECT (COUNT(*) AS ?n) WHERE { ${graphPattern} }`,
     };
-    if (process.env.SUB) out.subGraphName = process.env.SUB;
+    // `_meta` is not a memory-layer route. It is queried through the
+    // query engine same-CG explicit-GRAPH allow-list; passing the unknown
+    // suffix used to silently route this probe to the data graph and report
+    // a false zero after an otherwise successful recovery.
+    if (suffix !== "_meta") out.graphSuffix = suffix;
+    if (subGraph) out.subGraphName = subGraph;
     process.stdout.write(JSON.stringify(out));
   ')"
   response="$(api_call "$node" POST /api/query "$body" 2>/dev/null || true)"

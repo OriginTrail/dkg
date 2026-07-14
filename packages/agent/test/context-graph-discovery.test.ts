@@ -2901,6 +2901,7 @@ describe('runImmediatePostApprovalSync', () => {
     const calls = {
       ensureAdmittedCalls: [] as string[],
       ensurePeerConnectedCalls: [] as string[],
+      refreshMetaCalls: [] as Array<{ cg: string; peer?: string; force?: boolean }>,
       runCatchupCalls: [] as Array<{ cg: string; includeSwm: boolean; peers: string[] }>,
       broadcastCalls: [] as Array<{ cg: string; includeSwm: boolean }>,
     };
@@ -2916,6 +2917,21 @@ describe('runImmediatePostApprovalSync', () => {
       (opts.connectedPeers ?? []).map((pid) => ({
         remotePeer: { toString: () => pid },
       }));
+    let metaConfirmed = false;
+    (a as any).refreshMetaFromCurator = async (
+      cg: string,
+      refreshOpts?: { trustedCuratorPeerId?: string; force?: boolean },
+    ) => {
+      calls.refreshMetaCalls.push({
+        cg,
+        peer: refreshOpts?.trustedCuratorPeerId,
+        force: refreshOpts?.force,
+      });
+      metaConfirmed = true;
+      return true;
+    };
+    (a as any).hasConfirmedMetaState = async () => metaConfirmed;
+    (a as any).refreshMetaSyncedFlags = async () => undefined;
     (a as any).runCatchupOverPeers = async (
       cg: string,
       includeSwm: boolean,
@@ -2962,6 +2978,11 @@ describe('runImmediatePostApprovalSync', () => {
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
     expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
+    expect(calls.refreshMetaCalls).toEqual([{
+      cg: 'test-cg-success',
+      peer: CURATOR_PEER,
+      force: true,
+    }]);
     expect(calls.runCatchupCalls).toHaveLength(1);
     expect(calls.runCatchupCalls[0]).toMatchObject({
       cg: 'test-cg-success',

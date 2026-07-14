@@ -39,17 +39,26 @@ function syncResponderStoreOptions(signal: AbortSignal | undefined, source: stri
 }
 
 export interface GraphListMemo {
-  get(options?: { refresh?: boolean; signal?: AbortSignal }): Promise<readonly string[]>;
+  get(options?: {
+    refresh?: boolean;
+    refreshGeneration?: string;
+    signal?: AbortSignal;
+  }): Promise<readonly string[]>;
 }
 
 export interface SubGraphNameMemo {
-  get(contextGraphId: string, options?: { refresh?: boolean; signal?: AbortSignal }): Promise<readonly string[]>;
+  get(contextGraphId: string, options?: {
+    refresh?: boolean;
+    refreshGeneration?: string;
+    signal?: AbortSignal;
+  }): Promise<readonly string[]>;
 }
 
 interface RowListCache {
   memo: SyncRowListMemo;
   key: string;
   refresh?: boolean;
+  refreshGeneration?: string;
   expiredMessage?: string;
 }
 
@@ -57,29 +66,62 @@ export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): GraphListMemo {
-  let cached: readonly string[] | null = null;
-  let cachedAt = 0;
-  let inflight: Promise<readonly string[]> | null = null;
+  let cached: {
+    value: readonly string[];
+    cachedAt: number;
+    refreshGeneration?: string;
+  } | null = null;
+  let inflight: {
+    promise: Promise<readonly string[]>;
+    refreshGeneration?: string;
+  } | null = null;
   return {
-    async get(options?: { refresh?: boolean; signal?: AbortSignal }) {
+    async get(options?: {
+      refresh?: boolean;
+      refreshGeneration?: string;
+      signal?: AbortSignal;
+    }) {
       throwIfAborted(options?.signal);
+      while (inflight) {
+        const pending = inflight;
+        const supersedesPending = options?.refreshGeneration !== undefined &&
+          options.refreshGeneration !== pending.refreshGeneration;
+        if (!supersedesPending) {
+          return [...(await raceAgainstAbort(pending.promise, options?.signal))];
+        }
+        try {
+          await raceAgainstAbort(pending.promise, options?.signal);
+        } catch {
+          throwIfAborted(options?.signal);
+        }
+      }
       const now = Date.now();
-      if (inflight) return [...(await raceAgainstAbort(inflight, options?.signal))];
-      if (!options?.refresh && cached && now - cachedAt < ttlMs) return [...cached];
+      if (
+        cached &&
+        options?.refreshGeneration !== undefined &&
+        cached.refreshGeneration !== options.refreshGeneration
+      ) cached = null;
+      if (!options?.refresh && cached && now - cached.cachedAt < ttlMs) return [...cached.value];
       // This load is shared by concurrent responders. Do not bind it to the
       // first stream's abort signal; waiters race their own abort locally via
       // raceAgainstAbort/throwIfAborted below.
       const load = store.listGraphs(syncResponderStoreOptions(undefined, 'sync.responder.listGraphs'))
         .then((graphs) => {
           const sorted = [...new Set(graphs)].sort(compareCodePoint);
-          cached = sorted;
-          cachedAt = Date.now();
+          cached = {
+            value: sorted,
+            cachedAt: Date.now(),
+            refreshGeneration: options?.refreshGeneration,
+          };
           return sorted;
         })
         .finally(() => {
-          inflight = null;
+          if (inflight?.promise === load) inflight = null;
         });
-      inflight = load;
+      inflight = {
+        promise: load,
+        refreshGeneration: options?.refreshGeneration,
+      };
       const graphs = await load;
       throwIfAborted(options?.signal);
       return [...graphs];
@@ -111,25 +153,63 @@ function createSubGraphNameMemo(
   loadNames: (contextGraphId: string) => Promise<string[]>,
   ttlMs: number,
 ): SubGraphNameMemo {
-  const cached = new Map<string, { value: readonly string[]; cachedAt: number }>();
-  const inflight = new Map<string, Promise<readonly string[]>>();
+  const cached = new Map<string, {
+    value: readonly string[];
+    cachedAt: number;
+    refreshGeneration?: string;
+  }>();
+  const inflight = new Map<string, {
+    promise: Promise<readonly string[]>;
+    refreshGeneration?: string;
+  }>();
   return {
-    async get(contextGraphId: string, options?: { refresh?: boolean; signal?: AbortSignal }) {
+    async get(contextGraphId: string, options?: {
+      refresh?: boolean;
+      refreshGeneration?: string;
+      signal?: AbortSignal;
+    }) {
       throwIfAborted(options?.signal);
+      while (true) {
+        const pending = inflight.get(contextGraphId);
+        if (!pending) break;
+        const supersedesPending = options?.refreshGeneration !== undefined &&
+          options.refreshGeneration !== pending.refreshGeneration;
+        if (!supersedesPending) {
+          return [...(await raceAgainstAbort(pending.promise, options?.signal))];
+        }
+        try {
+          await raceAgainstAbort(pending.promise, options?.signal);
+        } catch {
+          throwIfAborted(options?.signal);
+        }
+      }
       const now = Date.now();
-      const existing = cached.get(contextGraphId);
+      let existing = cached.get(contextGraphId);
+      if (
+        existing &&
+        options?.refreshGeneration !== undefined &&
+        existing.refreshGeneration !== options.refreshGeneration
+      ) {
+        cached.delete(contextGraphId);
+        existing = undefined;
+      }
       if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) return [...existing.value];
-      const pending = inflight.get(contextGraphId);
-      if (pending) return [...(await raceAgainstAbort(pending, options?.signal))];
       const load = loadNames(contextGraphId)
         .then((names) => {
-          cached.set(contextGraphId, { value: names, cachedAt: Date.now() });
+          cached.set(contextGraphId, {
+            value: names,
+            cachedAt: Date.now(),
+            refreshGeneration: options?.refreshGeneration,
+          });
           return names;
         })
         .finally(() => {
-          inflight.delete(contextGraphId);
+          if (inflight.get(contextGraphId)?.promise === load) inflight.delete(contextGraphId);
         });
-      inflight.set(contextGraphId, load);
+      inflight.set(contextGraphId, {
+        promise: load,
+        refreshGeneration: options?.refreshGeneration,
+      });
       const names = await load;
       throwIfAborted(options?.signal);
       return [...names];
@@ -175,6 +255,7 @@ export async function readSwmMetaPage(params: {
   rowListMemo?: SyncRowListMemo;
   rowListCacheKey?: string;
   refreshRowList?: boolean;
+  refreshGeneration?: string;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
   const graphSet = new Set(params.graphList);
@@ -184,6 +265,7 @@ export async function readSwmMetaPage(params: {
       memo: params.rowListMemo,
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
+      refreshGeneration: params.refreshGeneration,
       expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
     }
     : undefined;
@@ -216,6 +298,7 @@ export async function readSwmDataPage(params: {
   rowListMemo?: SyncRowListMemo;
   rowListCacheKey?: string;
   refreshRowList?: boolean;
+  refreshGeneration?: string;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
@@ -227,6 +310,7 @@ export async function readSwmDataPage(params: {
       memo: params.rowListMemo,
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
+      refreshGeneration: params.refreshGeneration,
       expiredMessage: 'Shared-memory data sync session snapshot expired before page completion',
     }
     : undefined;
@@ -281,6 +365,7 @@ export async function readDurableMetaPage(params: {
   rowListMemo?: SyncRowListMemo;
   rowListCacheKey?: string;
   refreshRowList?: boolean;
+  refreshGeneration?: string;
 }): Promise<SyncRow[]> {
   const loadRows = (signal?: AbortSignal) =>
     readDurableMetaRows(params.store, params.contextGraphId, params.registeredSubGraphNames, signal);
@@ -289,6 +374,7 @@ export async function readDurableMetaPage(params: {
       memo: params.rowListMemo,
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
+      refreshGeneration: params.refreshGeneration,
       expiredMessage: 'Durable meta sync session snapshot expired before page completion',
     }
     : undefined;
@@ -470,6 +556,7 @@ export async function readDurableDataPage(params: {
   rowListMemo?: SyncRowListMemo;
   rowListCacheScope?: string;
   refreshRowList?: boolean;
+  refreshGeneration?: string;
 }): Promise<SyncRow[]> {
   // Admission context (candidate exclusions + RFC-49 `isAdmitted`) — extracted to
   // a module factory so `readChangelogDeltaPage` reuses it verbatim. Behaviour
@@ -490,6 +577,7 @@ export async function readDurableDataPage(params: {
           memo: params.rowListMemo,
           key: durableDataRowListCacheKey(params.rowListCacheScope ?? 'default', params.contextGraphId, params.sinceBatchId),
           refresh: params.refreshRowList,
+          refreshGeneration: params.refreshGeneration,
         }
         : undefined,
       params.signal,
@@ -520,6 +608,7 @@ export async function readDurableDataPage(params: {
         memo: params.rowListMemo,
         key: durableDataRowListCacheKey(params.rowListCacheScope ?? 'default', params.contextGraphId, params.sinceBatchId),
         refresh: params.refreshRowList,
+        refreshGeneration: params.refreshGeneration,
       }
       : undefined,
     params.signal,
@@ -680,6 +769,7 @@ async function readCachedRowsPage(
   if (safeLimit === 0) return [];
   const rows = await cache.memo.get(cache.key, loadRows, {
     refresh: cache.refresh,
+    refreshGeneration: cache.refreshGeneration,
     requireExisting: safeOffset > 0,
     signal,
   });
@@ -1098,10 +1188,28 @@ async function readDurableMetaRows(
 ): Promise<SyncRow[]> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const cgEntity = contextGraphDataGraphUri(contextGraphId);
+  const agentDelegationSubjectPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
   const registeredSubGraphSubjects = new Set(dedupeStrings(registeredSubGraphNames)
     .filter((name) => validateSubGraphName(name).valid)
     .map((name) => `${cgEntity}/${name}`));
   const rows = await readRowsAcrossGraphs(store, [metaGraph], signal);
+  const allowedAgents = new Set(rows
+    .filter((row) => row.s === cgEntity && row.p === DKG_ONTOLOGY.DKG_ALLOWED_AGENT)
+    .map((row) => stripLiteral(row.o).toLowerCase())
+    .filter(Boolean));
+  const revokedAgents = new Set(rows
+    .filter((row) => row.s === cgEntity && row.p === DKG_ONTOLOGY.DKG_REVOKED_AGENT)
+    .map((row) => stripLiteral(row.o).toLowerCase())
+    .filter(Boolean));
+  const activeDelegationSubjects = new Set(rows
+    .filter((row) =>
+      row.s.startsWith(agentDelegationSubjectPrefix) &&
+      row.p === DKG_ONTOLOGY.DKG_DELEGATION_AGENT)
+    .filter((row) => {
+      const agent = stripLiteral(row.o).toLowerCase();
+      return allowedAgents.has(agent) && !revokedAgents.has(agent);
+    })
+    .map((row) => row.s));
   const nonWorkingLifecycles = new Set<string>();
   for (const row of rows) {
     if (row.p === DKG_MEMORY_LAYER && stripLiteral(row.o) !== MemoryLayer.WorkingMemory) {
@@ -1127,6 +1235,11 @@ async function readDurableMetaRows(
 
   return rows.filter((row) =>
     row.s === cgEntity ||
+    // Private-CG admission stores the signed peer/op-key credential on a
+    // delegation resource rather than on the CG entity. Omitting this subject
+    // family lets the allowlist sync while the credential needed to authorize
+    // the very next request remains curator-local.
+    activeDelegationSubjects.has(row.s) ||
     registeredSubGraphSubjects.has(row.s) ||
     row.s.startsWith('did:dkg:activity:') ||
     row.s.startsWith('did:dkg:join-request:') ||
@@ -1168,6 +1281,7 @@ async function readDurableMetaRowsPage(
   if (safeLimit === 0) return [];
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const cgEntity = contextGraphDataGraphUri(contextGraphId);
+  const agentDelegationSubjectPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
   const notWorking = `FILTER(?ml != ${sparqlString(MemoryLayer.WorkingMemory)})`;
   const registeredSubGraphSubjects = dedupeStrings(registeredSubGraphNames)
     .filter((name) => validateSubGraphName(name).valid)
@@ -1181,6 +1295,20 @@ async function readDurableMetaRowsPage(
       GRAPH ?g { ?s ?p ?o }
       FILTER(
         ?s = <${assertSafeIri(cgEntity)}>
+        || (
+             STRSTARTS(STR(?s), ${sparqlString(agentDelegationSubjectPrefix)})
+             && EXISTS {
+               GRAPH ?g {
+                 ?s <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?delegatedAgent .
+                 <${assertSafeIri(cgEntity)}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?allowedAgent .
+                 FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?allowedAgent)))
+                 FILTER NOT EXISTS {
+                   <${assertSafeIri(cgEntity)}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
+                   FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?revokedAgent)))
+                 }
+               }
+             }
+           )
         ${registeredSubGraphClause}
         || STRSTARTS(STR(?s), "did:dkg:activity:")
         || STRSTARTS(STR(?s), "did:dkg:join-request:")

@@ -94,7 +94,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -208,6 +208,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
+import { insertWithOversizeGuard } from './sync/oversize-filter.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -423,6 +424,105 @@ function syncAuthAbortError(reason: unknown): Error {
 
 function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw syncAuthAbortError(signal.reason);
+}
+
+function raceSyncAuthAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(syncAuthAbortError(signal.reason));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(syncAuthAbortError(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+interface CuratorMetaRefreshState {
+  active: Promise<boolean>;
+  /** Source of the newest scheduled replacement in `active`. */
+  activeSource: string;
+  /** Exactly one fresh run queued behind `active`; forced followers share it. */
+  queued?: Promise<boolean>;
+  queuedSource?: string;
+}
+
+const inFlightCuratorMetaRefreshesByAgent = new WeakMap<
+  DKGAgent,
+  Map<string, CuratorMetaRefreshState>
+>();
+
+function inFlightCuratorMetaRefreshesFor(agent: DKGAgent): Map<string, CuratorMetaRefreshState> {
+  let refreshes = inFlightCuratorMetaRefreshesByAgent.get(agent);
+  if (!refreshes) {
+    refreshes = new Map();
+    inFlightCuratorMetaRefreshesByAgent.set(agent, refreshes);
+  }
+  return refreshes;
+}
+
+function hasAuthoritativePrivateMetaDefinition(
+  contextGraphId: string,
+  quads: readonly Quad[],
+): boolean {
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const isAgentDid = (value: string): boolean => value.startsWith('did:dkg:agent:')
+    && value.length > 'did:dkg:agent:'.length
+    && isSafeIri(value);
+  let hasType = false;
+  let hasPrivatePolicy = false;
+  let hasCreator = false;
+  let hasCurator = false;
+  for (const quad of quads) {
+    if (quad.subject !== contextGraphUri) continue;
+    if (quad.predicate === DKG_ONTOLOGY.RDF_TYPE) {
+      hasType ||= quad.object === DKG_ONTOLOGY.DKG_CONTEXT_GRAPH;
+    } else if (quad.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY) {
+      hasPrivatePolicy ||= stripLiteral(quad.object).trim().toLowerCase() === 'private';
+    } else if (quad.predicate === DKG_ONTOLOGY.DKG_CREATOR) {
+      hasCreator ||= isAgentDid(quad.object);
+    } else if (quad.predicate === DKG_ONTOLOGY.DKG_CURATOR) {
+      hasCurator ||= isAgentDid(quad.object);
+    }
+  }
+  return hasType && hasPrivatePolicy && hasCreator && hasCurator;
+}
+
+/**
+ * Replace only the curator-replicated portion of a CG's root `_meta` graph.
+ * `dkg:revokedAgent` is deliberately excluded from the DELETE: its write site
+ * documents it as a node-local tombstone, so a remote snapshot must not erase
+ * a local revocation decision. The UNION keeps the update linear in the old +
+ * new row counts while performing the target-graph delete/insert atomically.
+ */
+function replaceCuratorMetaProjectionSparql(metaGraph: string, stagingGraph: string): string {
+  assertSafeIri(metaGraph);
+  assertSafeIri(stagingGraph);
+  return `DELETE {
+    GRAPH <${metaGraph}> { ?staleSubject ?stalePredicate ?staleObject . }
+  }
+  INSERT {
+    GRAPH <${metaGraph}> { ?freshSubject ?freshPredicate ?freshObject . }
+  }
+  WHERE {
+    {
+      GRAPH <${metaGraph}> {
+        ?staleSubject ?stalePredicate ?staleObject .
+        FILTER (?stalePredicate != <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}>)
+      }
+    }
+    UNION
+    {
+      GRAPH <${stagingGraph}> { ?freshSubject ?freshPredicate ?freshObject . }
+    }
+  }`;
 }
 
 type InternalContextGraphListRow = ListContextGraphsRow & {
@@ -1057,18 +1157,38 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     syncSessionId?: string,
     recovery?: boolean,
   ): Promise<Uint8Array> {
-    const isPrivate = await this.isPrivateContextGraph(contextGraphId);
+    // Policy-read uncertainty must not abort bootstrap or downgrade it to the
+    // public pipe encoding. Treat an unreadable policy as private; catalog is
+    // explicitly exempt below and stays public.
+    const isPrivate = await this.isPrivateContextGraph(contextGraphId).catch(() => true);
 
-    // If we don't have any local data for this CG yet (e.g. just subscribed
-    // via invite), we can't determine the access policy. Send an
-    // authenticated request so the remote peer can verify our identity
-    // against its allowlist.
-    const hasLocalData = this.subscribedContextGraphs.get(contextGraphId)?.synced === true;
+    // Until `_meta` is authoritative locally, the access policy is UNKNOWN.
+    // A stale/incorrect `synced=true` must not downgrade the request to the
+    // public pipe format: that is exactly the poisoned-subscription state an
+    // unrelated peer can create by returning a clean empty response before
+    // the curator is reachable. Keep every non-catalog phase authenticated
+    // until a confirmed meta sync explicitly sets `metaSynced=true`.
+    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    const hasLocalData = sub?.synced === true;
+    // The persisted flag is necessary but not sufficient: older startup code
+    // could set `metaSynced=true` after creating only a local
+    // registrationStatus="unregistered" shadow. Re-check the store so that
+    // restart poison cannot suppress authentication either.
+    const authoritativeMetaConfirmed = sub?.metaSynced === true &&
+      sub.pendingMeta !== true &&
+      // Store/RPC uncertainty must keep the request on the authenticated
+      // path. A transient proof read failure is not a reason to abort sync or
+      // downgrade it to the public encoding.
+      await this.hasConfirmedMetaState(contextGraphId).catch(() => false);
+    const authoritativeMetaUnconfirmed = !authoritativeMetaConfirmed;
     // the catalog facet is public and served without the
     // allowlist gate, so an outsider (no CG identity) requests it unauthenticated.
     // R9: recovery serves plaintext member-to-member and is gated by the strict
     // members-only authorizer — it MUST be an authenticated (signed) envelope.
-    const needsAuth = recovery || (phase !== 'catalog' && (isPrivate || !hasLocalData));
+    const needsAuth = recovery || (
+      phase !== 'catalog' &&
+      (isPrivate || !hasLocalData || authoritativeMetaUnconfirmed)
+    );
     const claimedAgentAddress = await this.findLocalAgentForContextGraph(contextGraphId);
     const claimedAgent = claimedAgentAddress ? this.localAgents.get(claimedAgentAddress) : undefined;
     return buildSyncRequestEnvelope({
@@ -1739,14 +1859,21 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
+    const approvedCuratorPeerId = this.preferredSyncPeers.get(contextGraphId);
     const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
     const curatorDid = meta.curator ?? meta.curators[0] ?? '';
     if (!curatorDid) {
-      return undefined;
+      // Join approval authenticates the notification sender before recording
+      // this hint. It is the only curator route available during the bootstrap
+      // window where `_meta` has not arrived yet (and is restored from the
+      // durable join-approved membership row after restart). Once `_meta`
+      // identifies a curator, however, that authoritative route must win over
+      // the bootstrap hint.
+      return approvedCuratorPeerId;
     }
     const didPrefix = 'did:dkg:agent:';
     if (!curatorDid.startsWith(didPrefix)) {
-      return undefined;
+      return approvedCuratorPeerId;
     }
     const curatorIdentifier = curatorDid.slice(didPrefix.length);
 
@@ -1797,27 +1924,39 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         }
       }
 
-      if (!resolved) return undefined;
+      if (!resolved) return approvedCuratorPeerId;
     }
 
+    this.preferredSyncPeers.delete(contextGraphId);
     return curatorPeerId;
   }
 
   async refreshMetaFromCurator(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: {
+      signal?: AbortSignal;
+      /**
+       * A curator peer whose authority was already established by the caller.
+       * The join-approved path uses the authenticated notification sender so
+       * metadata recovery does not depend on metadata that has not arrived yet.
+       */
+      trustedCuratorPeerId?: string;
+      /** Bypass the normal auth-probe cooldown for an explicit recovery event. */
+      force?: boolean;
+    } = {},
   ): Promise<boolean> {
     throwIfSyncAuthAborted(options.signal);
     const now = Date.now();
     const lastRefresh = this.metaRefreshTimestamps.get(contextGraphId) ?? 0;
-    if (now - lastRefresh < META_REFRESH_COOLDOWN_MS) {
+    if (!options.force && now - lastRefresh < META_REFRESH_COOLDOWN_MS) {
       return false;
     }
 
     const ctx = createOperationContext('sync');
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const curatorPeerId = await this.resolveCuratorPeerId(contextGraphId, options);
+    const curatorPeerId = options.trustedCuratorPeerId
+      ?? await this.resolveCuratorPeerId(contextGraphId, options);
     throwIfSyncAuthAborted(options.signal);
     if (!curatorPeerId) {
       return false;
@@ -1827,76 +1966,240 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       return false;
     }
 
-    let connections = this.node.libp2p.getConnections();
-    let isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+    // Refreshes are snapshot replacement transactions, not additive sync
+    // reads. Serialize by TARGET graph, not by source: two curator candidates
+    // replacing the same `_meta` graph must never race and let the older
+    // response win last.
+    const refreshKey = contextGraphId;
+    const refreshes = inFlightCuratorMetaRefreshesFor(this);
+    const runRefresh = (runOptions: typeof options) => (async (): Promise<boolean> => {
+      let connections = this.node.libp2p.getConnections();
+      let isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
 
-    // If not directly connected, try dialing — first a regular dial (the peer
-    // store may already have direct multiaddrs), then via relay as fallback.
-    if (!isConnected) {
-      try {
-        const { peerIdFromString } = await import('@libp2p/peer-id');
-        const pid = peerIdFromString(curatorPeerId);
-
+      // If not directly connected, try dialing — first a regular dial (the peer
+      // store may already have direct multiaddrs), then via relay as fallback.
+      if (!isConnected) {
         try {
-          await this.node.libp2p.dial(pid, { signal: options.signal });
-          throwIfSyncAuthAborted(options.signal);
-          connections = this.node.libp2p.getConnections();
-          isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
-        } catch { /* direct dial failed, try relay */ }
+          const { peerIdFromString } = await import('@libp2p/peer-id');
+          const pid = peerIdFromString(curatorPeerId);
 
-        if (!isConnected) {
-          throwIfSyncAuthAborted(options.signal);
-          const agent = await this.discovery.findAgentByPeerId(curatorPeerId);
-          throwIfSyncAuthAborted(options.signal);
-          if (agent?.relayAddress) {
-            const { multiaddr } = await import('@multiformats/multiaddr');
-            const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`);
-            await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
-            await this.node.libp2p.dial(pid, { signal: options.signal });
-            throwIfSyncAuthAborted(options.signal);
+          try {
+            await this.node.libp2p.dial(pid, { signal: runOptions.signal });
+            throwIfSyncAuthAborted(runOptions.signal);
             connections = this.node.libp2p.getConnections();
             isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+          } catch { /* direct dial failed, try relay */ }
+
+          if (!isConnected) {
+            throwIfSyncAuthAborted(runOptions.signal);
+            const agent = await this.discovery.findAgentByPeerId(curatorPeerId);
+            throwIfSyncAuthAborted(runOptions.signal);
+            if (agent?.relayAddress) {
+              const { multiaddr } = await import('@multiformats/multiaddr');
+              const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`);
+              await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+              await this.node.libp2p.dial(pid, { signal: runOptions.signal });
+              throwIfSyncAuthAborted(runOptions.signal);
+              connections = this.node.libp2p.getConnections();
+              isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+            }
+          }
+        } catch (err) {
+          throwIfSyncAuthAborted(runOptions.signal);
+          this.log.warn(ctx, `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      if (!isConnected) {
+        return false;
+      }
+
+      try {
+        // Clearing the offset alone is insufficient: page-fetch also retains
+        // unfinished responder-session tokens, and reusing one at offset zero
+        // makes the responder serve its old cached row list. forceFreshSession
+        // clears both pieces before minting a guaranteed-new syncSessionId.
+        const snapshotCheckpointKey = getSyncCheckpointKey(
+          curatorPeerId,
+          contextGraphId,
+          false,
+          'meta',
+        );
+        this.syncCheckpoints.delete(snapshotCheckpointKey);
+        const deadline = Date.now() + 10_000;
+        const metaResult = await this.fetchSyncPages(
+          ctx,
+          curatorPeerId,
+          contextGraphId,
+          false,
+          'meta',
+          cgMetaGraph,
+          deadline,
+          undefined,
+          undefined,
+          runOptions.signal,
+          undefined,
+          true,
+        );
+        throwIfSyncAuthAborted(runOptions.signal);
+        // The shared N-Quads parser admits any graph under the CG prefix. This
+        // trusted-control path must never bypass durable/SWM verification for a
+        // data-plane graph, so retain only the exact requested `_meta` graph.
+        const controlMetaQuads = metaResult.quads.filter((quad) => quad.graph === cgMetaGraph);
+        // A timed-out fetch may contain only the first page of an ACL, while a
+        // resumed completed fetch may contain only its tail. Persisting either
+        // fragment could make one curator/allowlist triple look authoritative.
+        if (!metaResult.completed || metaResult.resumedFromOffset !== 0) {
+          this.syncCheckpoints.delete(snapshotCheckpointKey);
+          this.syncCheckpoints.delete(metaResult.checkpointKey);
+          return false;
+        }
+        if (!hasAuthoritativePrivateMetaDefinition(contextGraphId, controlMetaQuads)) {
+          this.syncCheckpoints.delete(snapshotCheckpointKey);
+          this.syncCheckpoints.delete(metaResult.checkpointKey);
+          this.log.warn(
+            ctx,
+            `Rejected curator metadata snapshot for "${contextGraphId}": missing the complete private type/policy/creator/curator definition`,
+          );
+          return false;
+        }
+
+        // Stage the fully fetched snapshot first. The target `_meta` graph is
+        // untouched until one SPARQL DELETE/INSERT commits, so failed staging
+        // or oversize filtering can never leave a half-replaced ACL.
+        const stagingGraph = `urn:dkg:curator-meta-refresh:${randomUUID()}`;
+        try {
+          const stagedControlMetaQuads = await insertWithOversizeGuard(
+            (kept) => this.store.insert(
+              kept.map((quad) => ({ ...quad, graph: stagingGraph })),
+              { source: 'agent.metaRefresh.stage' },
+            ),
+            controlMetaQuads,
+            { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+            'curator-meta-refresh',
+          );
+          if (stagedControlMetaQuads.length !== controlMetaQuads.length) {
+            throw new Error(
+              `Refusing partial curator metadata replacement: staged ${stagedControlMetaQuads.length}/${controlMetaQuads.length} triples`,
+            );
+          }
+          // ChangelogStore.update can commit its inner UPDATE and then throw
+          // while appending the post-mutation marker. From this point onward we
+          // must invalidate read projections even on an exception: retaining an
+          // old auth projection after a possibly-committed ACL replacement is
+          // less safe than forcing the next lookup back to the store.
+          const invalidateTargetProjections = () => {
+            // Mark the auth projection first: it is the security boundary for
+            // allowed/revoked/delegated principals. The list cache follows for
+            // discovery/read-model consistency.
+            this.contextGraphMetaProjection.markDirty(contextGraphId);
+            this.invalidateListContextGraphsCache();
+          };
+          // Pre-invalidate because a decorated store can commit its inner
+          // UPDATE and then remain pending while it appends changelog markers.
+          // No auth lookup may keep using the old ACL during that interval.
+          invalidateTargetProjections();
+          let replaced = false;
+          try {
+            replaced = await tryUpdateWithTouchedGraphs(
+              this.store,
+              replaceCuratorMetaProjectionSparql(cgMetaGraph, stagingGraph),
+              [cgMetaGraph],
+              { source: 'agent.metaRefresh.replace' },
+            );
+          } finally {
+            // A rebuild may have started after the pre-invalidation but before
+            // the target committed. Invalidate again as soon as the replacement
+            // attempt settles, before potentially slow staging cleanup.
+            invalidateTargetProjections();
+          }
+          if (!replaced) {
+            throw new Error('Triple store does not support atomic curator metadata replacement');
+          }
+        } finally {
+          try {
+            await this.store.dropGraph(stagingGraph, { source: 'agent.metaRefresh.cleanup' });
+          } catch (cleanupError) {
+            this.log.warn(ctx, `Failed to clean curator metadata staging graph: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
           }
         }
-      } catch (err) {
-        throwIfSyncAuthAborted(options.signal);
-        this.log.warn(ctx, `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
 
-    if (!isConnected) {
-      return false;
-    }
-
-    try {
-      const deadline = Date.now() + 10_000;
-      const metaResult = await this.fetchSyncPages(
-        ctx,
-        curatorPeerId,
-        contextGraphId,
-        false,
-        'meta',
-        cgMetaGraph,
-        deadline,
-        undefined,
-        undefined,
-        options.signal,
-      );
-      throwIfSyncAuthAborted(options.signal);
-      if (metaResult.quads.length > 0) {
-        await this.insertSyncedQuadsAndInvalidateListCache(metaResult.quads);
         this.syncCheckpoints.delete(metaResult.checkpointKey);
-        this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaResult.quads.length} triples from curator ${curatorPeerId.slice(-8)}`);
+        this.log.info(ctx, `Meta refresh for "${contextGraphId}": replaced curator projection with ${controlMetaQuads.length} triples from ${curatorPeerId.slice(-8)}`);
         return true;
+      } catch (err) {
+        throwIfSyncAuthAborted(runOptions.signal);
+        this.log.warn(ctx, `Meta refresh for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      } finally {
+        this.metaRefreshTimestamps.set(contextGraphId, Date.now());
       }
-      this.syncCheckpoints.delete(metaResult.checkpointKey);
-      return false;
-    } catch (err) {
-      throwIfSyncAuthAborted(options.signal);
-      this.log.warn(ctx, `Meta refresh for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`);
-      return false;
+    })();
+
+    const existingState = refreshes.get(refreshKey);
+    if (existingState) {
+      // Ordinary auth probes may reuse the best already-scheduled result. A
+      // force trigger represents an explicit post-approval/credential event:
+      // joining the pre-event snapshot would lose that mutation, so queue one
+      // new generation after it. Concurrent force followers share that one
+      // trailing run; a force arriving after the trailing run starts queues the
+      // next generation in turn.
+      const sameNewestSource = existingState.activeSource === curatorPeerId;
+      if (!options.force && sameNewestSource) {
+        return raceSyncAuthAbort(existingState.active, options.signal);
+      }
+      if (
+        options.force &&
+        existingState.queued &&
+        existingState.queuedSource === curatorPeerId
+      ) {
+        return raceSyncAuthAbort(existingState.queued, options.signal);
+      }
+
+      const predecessor = existingState.active;
+      let queued!: Promise<boolean>;
+      const startFreshGeneration = () => {
+        if (existingState.queued === queued) {
+          existingState.queued = undefined;
+          existingState.queuedSource = undefined;
+        }
+        // This is shared mutation-triggered work. The caller can stop waiting,
+        // but its AbortSignal must not cancel the generation that concurrent
+        // forced followers also rely on.
+        return runRefresh({ ...options, signal: undefined, force: true });
+      };
+      queued = predecessor.then(startFreshGeneration, startFreshGeneration);
+      existingState.active = queued;
+      existingState.activeSource = curatorPeerId;
+      existingState.queued = queued;
+      existingState.queuedSource = curatorPeerId;
+      const cleanup = () => {
+        if (
+          refreshes.get(refreshKey) === existingState &&
+          existingState.active === queued &&
+          !existingState.queued
+        ) refreshes.delete(refreshKey);
+      };
+      queued.then(cleanup, cleanup);
+      return raceSyncAuthAbort(queued, options.signal);
+    }
+
+    const refresh = runRefresh(options);
+    const state: CuratorMetaRefreshState = {
+      active: refresh,
+      activeSource: curatorPeerId,
+    };
+    refreshes.set(refreshKey, state);
+    try {
+      return await refresh;
     } finally {
-      this.metaRefreshTimestamps.set(contextGraphId, now);
+      if (
+        refreshes.get(refreshKey) === state &&
+        state.active === refresh &&
+        !state.queued
+      ) {
+        refreshes.delete(refreshKey);
+      }
     }
   }
 

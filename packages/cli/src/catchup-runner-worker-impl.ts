@@ -74,6 +74,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       rejectedKcs: 0,
       failedPeers: 0,
       failedPhases: 0,
+      deniedPhases: 0,
     },
     sharedMemory: {
       fetchedMetaTriples: 0,
@@ -89,6 +90,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       droppedDataTriples: 0,
       failedPeers: 0,
       failedPhases: 0,
+      deniedPhases: 0,
     },
   };
 
@@ -197,6 +199,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.rejectedKcs += durable.rejectedKcs;
     diagnostics.durable.failedPeers += durable.failedPeers;
     diagnostics.durable.failedPhases += durable.failedPhases ?? 0;
+    diagnostics.durable.deniedPhases =
+      (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
     peerDenied = peerDenied || durable.deniedPhases > 0;
 
     if (shared) {
@@ -214,6 +218,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
       diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
+      diagnostics.sharedMemory.deniedPhases =
+        (diagnostics.sharedMemory.deniedPhases ?? 0) + (shared.deniedPhases ?? 0);
       peerDenied = peerDenied || shared.deniedPhases > 0;
     }
 

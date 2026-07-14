@@ -201,6 +201,213 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
+    it('restores join-approved signer hints across restart, including capped dormant subscriptions', async () => {
+      const localAgentAddress = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+      const pendingId = 'approved-a-pending';
+      const confirmedId = 'approved-b-confirmed';
+      const dormantId = 'approved-z-dormant';
+      const subscriptionStore = {
+        loadAll: async () => [
+          // Reproduce the v10.0.6 poison: an unrelated empty peer promoted all
+          // completion flags before the curator metadata arrived.
+          { id: pendingId, subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true, syncScoped: true },
+          { id: confirmedId, subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true, syncScoped: true },
+          { id: dormantId, subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: false, syncScoped: true },
+        ],
+        save: async () => {},
+        delete: async () => {},
+      };
+      const membershipStore = {
+        loadAll: async () => [
+          ...[pendingId, confirmedId, dormantId].map((contextGraphId, index) => ({
+            contextGraphId,
+            principalType: 'agent' as const,
+            principalId: localAgentAddress,
+            role: 'participant',
+            status: 'active' as const,
+            source: 'join-approved',
+            metadata: { curatorPeerId: `12D3KooWRestartCurator${index}` },
+            firstSeenAt: 100 + index,
+            updatedAt: 200 + index,
+          })),
+          // A newer but non-local approval must not steer this node's signer.
+          {
+            contextGraphId: pendingId,
+            principalType: 'agent' as const,
+            principalId: ethers.Wallet.createRandom().address,
+            role: 'participant',
+            status: 'active' as const,
+            source: 'join-approved',
+            updatedAt: 999,
+          },
+          // Only explicit join-approved facts carry the bootstrap signer hint.
+          {
+            contextGraphId: pendingId,
+            principalType: 'agent' as const,
+            principalId: localAgentAddress,
+            role: 'participant',
+            status: 'active' as const,
+            source: 'allowed-agent',
+            updatedAt: 1_000,
+          },
+        ],
+        upsert: async () => {},
+        delete: async () => {},
+      };
+
+      const agent = await DKGAgent.create({
+        name: 'ApprovedMembershipRestart',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: subscriptionStore,
+        contextGraphMembershipStore: membershipStore,
+        maxRehydratedContextGraphSubscriptions: 2,
+      });
+      // Both active rows have complete private control-plane definitions, but
+      // only the confirmed row currently authorizes this local agent. Definition
+      // metadata alone must not make a stale join-approved row ready on restart.
+      const pendingUri = contextGraphDataGraphUri(pendingId);
+      const pendingMeta = contextGraphMetaUri(pendingId);
+      const confirmedUri = contextGraphDataGraphUri(confirmedId);
+      const confirmedMeta = contextGraphMetaUri(confirmedId);
+      await agent.store.insert([
+        {
+          subject: pendingUri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: pendingMeta,
+        },
+        {
+          subject: pendingUri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: sparqlString('private'),
+          graph: pendingMeta,
+        },
+        {
+          subject: pendingUri,
+          predicate: DKG_ONTOLOGY.DKG_CREATOR,
+          object: 'did:dkg:agent:12D3KooWRestartCuratorCreator',
+          graph: pendingMeta,
+        },
+        {
+          subject: pendingUri,
+          predicate: DKG_ONTOLOGY.DKG_CURATOR,
+          object: `did:dkg:agent:${localAgentAddress}`,
+          graph: pendingMeta,
+        },
+        {
+          subject: confirmedUri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: confirmedMeta,
+        },
+        {
+          subject: confirmedUri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: sparqlString('private'),
+          graph: confirmedMeta,
+        },
+        {
+          subject: confirmedUri,
+          predicate: DKG_ONTOLOGY.DKG_CREATOR,
+          object: 'did:dkg:agent:12D3KooWRestartCuratorCreator',
+          graph: confirmedMeta,
+        },
+        {
+          subject: confirmedUri,
+          predicate: DKG_ONTOLOGY.DKG_CURATOR,
+          object: `did:dkg:agent:${localAgentAddress}`,
+          graph: confirmedMeta,
+        },
+        {
+          subject: confirmedUri,
+          predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+          object: sparqlString(localAgentAddress),
+          graph: confirmedMeta,
+        },
+      ]);
+
+      try {
+        await agent.start();
+        expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(localAgentAddress.toLowerCase());
+
+        const approvedByCg = (agent as any).localApprovedAgentByCG as Map<string, string>;
+        const preferredByCg = (agent as any).preferredSyncPeers as Map<string, string>;
+        expect(approvedByCg.get(pendingId)).toBe(localAgentAddress.toLowerCase());
+        expect(approvedByCg.get(confirmedId)).toBe(localAgentAddress.toLowerCase());
+        expect(approvedByCg.get(dormantId)).toBe(localAgentAddress.toLowerCase());
+        expect(preferredByCg.get(pendingId)).toBe('12D3KooWRestartCurator0');
+        expect(preferredByCg.get(confirmedId)).toBe('12D3KooWRestartCurator1');
+        expect(preferredByCg.get(dormantId)).toBe('12D3KooWRestartCurator2');
+
+        expect(agent.getSubscribedContextGraphs().get(pendingId)).toMatchObject({
+          subscribed: true,
+          metaSynced: false,
+          pendingMeta: true,
+        });
+        expect(agent.getSubscribedContextGraphs().get(confirmedId)).toMatchObject({
+          subscribed: true,
+          metaSynced: true,
+        });
+        expect(agent.getSubscribedContextGraphs().get(confirmedId)?.pendingMeta).toBeUndefined();
+        expect(agent.getSubscribedContextGraphs().get(dormantId)).toBeUndefined();
+        expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantIds).toEqual([dormantId]);
+
+        // Even while capped/dormant, explicit activation can immediately pick
+        // the approved local signer without waiting for another join decision.
+        expect((await (agent as any).findLocalAgentForContextGraph(dormantId))?.toLowerCase())
+          .toBe(localAgentAddress.toLowerCase());
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
+    it('keeps subscription rehydration best-effort when membership loading fails', async () => {
+      const contextGraphId = 'approved-membership-load-failure';
+      const subscriptionStore = {
+        loadAll: async () => [{
+          id: contextGraphId,
+          subscribed: true,
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          syncScoped: true,
+        }],
+        save: async () => {},
+        delete: async () => {},
+      };
+      const membershipStore = {
+        loadAll: async () => { throw new Error('membership store unavailable'); },
+        upsert: async () => {},
+        delete: async () => {},
+      };
+      const agent = await DKGAgent.create({
+        name: 'ApprovedMembershipLoadFailure',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: subscriptionStore,
+        contextGraphMembershipStore: membershipStore,
+      });
+
+      try {
+        await agent.start();
+        expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+          subscribed: true,
+          metaSynced: false,
+        });
+        expect(agent.getSubscribedContextGraphs().get(contextGraphId)?.pendingMeta).toBeUndefined();
+        expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          persistedTotal: 1,
+          activated: 1,
+          dormant: 0,
+        });
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
     it('default rehydration deterministically activates 64 of a large persisted backlog (#997/#1180)', async () => {
       const rows = Array.from({ length: 173 }, (_, i) => ({
         id: `cap-cg-${String(i).padStart(3, '0')}`,

@@ -66,6 +66,8 @@ export default defineConfig({
       "test/explicit-connect-admission.test.ts",
       "test/sync-responder-agents-meta-serve-skip.test.ts",
       "test/messenger-substrate.test.ts",
+      "test/cg-resolve-refresh.test.ts",
+      "test/private-cg-membership-bootstrap.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

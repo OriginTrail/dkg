@@ -531,6 +531,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<Map<string, string[]>> {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const cgEntity = contextGraphDataGraphUri(contextGraphId);
     // SELECT also returns `expiresAtMs` so we can filter expired rows in
     // JS — pushing the FILTER into SPARQL would force a string→long
     // cast that not every store backend handles uniformly.
@@ -544,6 +545,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         GRAPH <${cgMetaGraph}> {
           ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer .
+          <${cgEntity}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?allowedAgent .
+          FILTER(LCASE(STR(?agent)) = LCASE(STR(?allowedAgent)))
+          FILTER NOT EXISTS {
+            <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
+            FILTER(LCASE(STR(?agent)) = LCASE(STR(?revokedAgent)))
+          }
           OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
         }
       }`,
@@ -586,11 +593,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<Map<string, string[]>> {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const cgEntity = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?agent ?key ?expiresAt WHERE {
         GRAPH <${cgMetaGraph}> {
           ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?key .
+          <${cgEntity}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?allowedAgent .
+          FILTER(LCASE(STR(?agent)) = LCASE(STR(?allowedAgent)))
+          FILTER NOT EXISTS {
+            <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
+            FILTER(LCASE(STR(?agent)) = LCASE(STR(?revokedAgent)))
+          }
           OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
         }
       }`,

@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { DKGEvent, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -23,7 +23,7 @@ export interface CatchupJobResult {
   peersResponded: number;
   /**
    * Subset of `peersTried` whose per-peer sync round finished without a
-   * transport failure, without an explicit ACL denial, and with either real
+   * transport failure, timeout, or explicit ACL denial, and with either real
    * progress or a clean non-metadata-only empty completion.
    */
   peersSucceeded: number;
@@ -49,6 +49,7 @@ export interface CatchupJobResult {
       rejectedKcs: number;
       failedPeers: number;
       failedPhases: number;
+      deniedPhases?: number;
     };
     sharedMemory: {
       fetchedMetaTriples: number;
@@ -64,6 +65,7 @@ export interface CatchupJobResult {
       droppedDataTriples: number;
       failedPeers: number;
       failedPhases: number;
+      deniedPhases?: number;
     };
   };
 }
@@ -111,7 +113,7 @@ export function catchupPeerSucceeded(
     || (shared ? (shared.insertedMetaTriples ?? 0) > 0 : false)
   );
   const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);
-  return peerMadeProgress || (!peerTimedOut && !peerMetadataOnly);
+  return !peerTimedOut && (peerMadeProgress || !peerMetadataOnly);
 }
 
 export function catchupPeerResponded(
@@ -263,19 +265,12 @@ class WorkerCatchupRunner implements CatchupRunner {
         return agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId]);
       }
       case 'finalizeCatchup': {
-        const [contextGraphId, dataSynced, sharedMemorySynced] = args as [string, number, number];
+        const [contextGraphId] = args as [string, number, number];
         await agent.refreshMetaSyncedFlags([contextGraphId]);
-        if (dataSynced > 0 || sharedMemorySynced > 0) {
-          agent.markContextGraphSubscriptionState?.(contextGraphId, {
-            synced: true,
-            ...(sharedMemorySynced > 0 ? { sharedMemorySynced: true } : {}),
-          });
-          agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
-            contextGraphId,
-            dataSynced,
-            sharedMemorySynced,
-          });
-        }
+        // Readiness is classified by the daemon route after the worker returns
+        // its complete per-plane diagnostics. Insert counts alone can describe
+        // an early page followed by a timeout; marking here would persist a
+        // false-ready window before the route can reject that partial result.
         return null;
       }
       default:

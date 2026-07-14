@@ -31,6 +31,10 @@ export default defineConfig({
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
           'test/daemon-context-graph-register.test.ts',
+          // Private-CG bootstrap readiness: clean-empty responses are only
+          // terminal when authoritative metadata has been confirmed.
+          'test/context-graph-subscribe-readiness.test.ts',
+          'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.
           'test/pca-confirmation-wire.test.ts',
@@ -116,6 +120,7 @@ export default defineConfig({
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
           // wallets) — no hardhat.
+          'test/daemon-context-graph-bootstrap.test.ts',
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
         ],
