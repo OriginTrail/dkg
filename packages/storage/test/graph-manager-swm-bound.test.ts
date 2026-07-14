@@ -545,6 +545,34 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
     }
   });
 
+  it('deprecated positional options preserve bounded widening behavior', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-legacy');
+    const root = 'urn:fb:legacy';
+    const widenedObject = '"widened"';
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"bounded"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+        { subject: root, predicate: 'urn:p', object: widenedObject, graph: `${swm}/${AUTHOR_B}/12` },
+      ]);
+
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+        SOURCES,
+        async () => (candidate) =>
+          candidate.some((quad) => quad.object === widenedObject) ? candidate : null,
+      );
+
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"bounded"', widenedObject]);
+      expect(accepted).toEqual(quads);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('no bound: one complete read, accept predicate applied once', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('fb-none');

@@ -405,6 +405,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
 import {
   runCuratorMetaRefresh,
   type CuratorMetaRefreshOptions,
@@ -430,6 +431,30 @@ function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
 type InternalContextGraphListRow = ListContextGraphsRow & {
   policyKnown?: boolean;
 };
+
+function mapContextGraphListRows<T, R>(
+  items: readonly T[],
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  return mapWithConcurrency(
+    items,
+    DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY,
+    fn,
+  );
+}
+
+async function mapContextGraphListRowsSettled<T, R>(
+  items: readonly T[],
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  return mapContextGraphListRows(items, async (item, index) => {
+    try {
+      return { status: 'fulfilled', value: await fn(item, index) } as const;
+    } catch (reason) {
+      return { status: 'rejected', reason } as const;
+    }
+  });
+}
 
 function listContextGraphsProjectionEnabled(): boolean {
   // Before enabling this default-on: thread the caller signal into getCgMeta
@@ -479,11 +504,11 @@ async function applyContextGraphListPrivacy(
       .map(({ policyKnown: _policyKnown, ...row }) => row);
   }
 
-  const annotated = await Promise.all(visibleRows.map(async (r) => {
+  const annotated = await mapContextGraphListRows(visibleRows, async (r) => {
     const curatorMatch = agent.curatorDidMatchesChecksumAgent(r.curator, checksum);
     const allowlisted = await agent.callerIsAllowlistedAgentParticipant(r.id, checksum);
     return { ...r, callerInvolved: curatorMatch || allowlisted };
-  }));
+  });
 
   return annotated
     .filter((r) => {
@@ -517,7 +542,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       candidateIds.add(id);
     }
 
-    const rows = await Promise.all([...candidateIds].sort().map(async (id): Promise<InternalContextGraphListRow | null> => {
+    const rows = await mapContextGraphListRows([...candidateIds].sort(), async (id): Promise<InternalContextGraphListRow | null> => {
       if (!id) return null;
       const sub = this.subscribedContextGraphs.get(id);
       const meta = await this.getCgMeta(id);
@@ -546,7 +571,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         onChainId: sub?.onChainId ?? meta.onChainId,
         policyKnown,
       };
-    }));
+    });
 
     return applyContextGraphListPrivacy(
       this,
@@ -2035,8 +2060,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         if (!uri || byUri.has(uri)) continue;
         byUri.set(uri, row);
       }
-      // Parallel lookups — sequential await per ontology row multiplied list latency noticeably.
-      const definitionSettled = await Promise.allSettled([...byUri.values()].map(async (row) => {
+      // Bounded parallel lookups avoid multiplying latency without flooding
+      // the store scheduler when the registry contains hundreds of rows.
+      const definitionSettled = await mapContextGraphListRowsSettled([...byUri.values()], async (row) => {
         const uri = row['ctxGraph'] ?? '';
         if (seen.has(uri)) return;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
@@ -2069,7 +2095,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           synced: sub?.synced ?? false,
           ...(onChainId ? { onChainId } : {}),
         }, policyPrivacy(row['access']));
-      }));
+      });
       for (const entry of definitionSettled) {
         if (entry.status === 'rejected') throw entry.reason;
       }
@@ -2255,7 +2281,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
      * for the same CG; projection resolves policy with _meta-first source
      * precedence, then AGENTS, then ONTOLOGY.
      */
-    const projectedRows = await Promise.allSettled(rows.map(async (r) => {
+    const projectedRows = await mapContextGraphListRowsSettled(rows, async (r) => {
       const metaRead = await withBudget(
         (signal) => this.getCgMeta(r.id, { signal }),
         `projection lookup for ${r.id}`,
@@ -2287,20 +2313,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         isSystem: meta.isSystem || r.isSystem,
         onChainId: meta.onChainId ?? r.onChainId,
       };
-    }));
+    });
     rows = projectedRows.map((entry) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;
     });
 
-    const curatorBackfills = await Promise.allSettled(rows.map(async (r) => {
+    const curatorBackfills = await mapContextGraphListRowsSettled(rows, async (r) => {
       if (r.curator?.trim()) return r;
       const c = await optional(
         (signal) => this.getContextGraphCurator(r.id, { signal }),
         `curator lookup for ${r.id}`,
       );
       return c ? { ...r, curator: c } : r;
-    }));
+    });
     rows = curatorBackfills.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;
@@ -2320,10 +2346,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
       return legacyRead.value ? 'private' : 'public';
     };
-    const privacySettled = await Promise.allSettled(rows.map(async (row) => ({
+    const privacySettled = await mapContextGraphListRowsSettled(rows, async (row) => ({
       uri: row.uri,
       privacy: await resolveRowPrivacy(row),
-    })));
+    }));
     const resolvedPrivacyByUri = new Map<string, ListContextGraphsPrivacy>();
     for (const entry of privacySettled) {
       if (entry.status === 'fulfilled') {
@@ -2349,7 +2375,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       };
     }
 
-    const annotatedSettled = await Promise.allSettled(rows.map(async (r): Promise<{
+    const annotatedSettled = await mapContextGraphListRowsSettled(rows, async (r): Promise<{
       row: ListContextGraphsRow;
       privacy: ListContextGraphsPrivacy;
     }> => {
@@ -2373,7 +2399,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
       if (!allowlistRead.ok) return { row: r, privacy };
       return { row: { ...r, callerInvolved: allowlistRead.value }, privacy };
-    }));
+    });
     const annotated = annotatedSettled.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;

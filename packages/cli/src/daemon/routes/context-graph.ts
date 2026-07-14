@@ -1109,11 +1109,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   }
   if (req.method === 'PUT' && joinPolicyMatch) {
     const contextGraphId = decodeURIComponent(joinPolicyMatch[1]);
+    // A node-admin token intentionally has no agent-scoped identity, while
+    // requestAgentAddress resolves it to the node's default owner. Use that
+    // same owner for exact preflight and the policy mutation; otherwise a
+    // private CG cannot fast-accept and falls back to the global CG listing.
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
       res,
-      writePreflightContextGraphOpts,
+      {
+        callerAgentAddress: requestAgentAddress,
+        allowLocalExactFallback: !requestAgentAddress,
+      },
     );
     if (!resolvedContextGraphId) return;
     try {
