@@ -1,0 +1,858 @@
+#!/usr/bin/env bash
+#
+# Private context-graph membership recovery regression harness.
+#
+# Reproduces the v10.0.6 bootstrap inconsistency without mocks:
+#
+#   * node 5 creates a curated CG and is its only member;
+#   * node 5 writes root + sub-graph shared-memory fixtures;
+#   * node 5 goes offline;
+#   * fresh node 6 subscribes while only unrelated cores can answer;
+#   * the subscription state is inspected through both HTTP and node-ui.db;
+#   * node 5 returns, node 6 requests admission, and node 5 approves it;
+#   * recovery (or the persistent v10.0.6 wedge) is measured across a node-6
+#     restart.
+#
+# The harness assumes a PRESTARTED default six-node devnet:
+#
+#   ./scripts/devnet.sh start 6
+#   HARNESS_EXPECT=broken ./scripts/devnet-test-private-cg-membership-recovery.sh
+#   HARNESS_EXPECT=fixed  ./scripts/devnet-test-private-cg-membership-recovery.sh
+#
+# `broken` passes only after observing the exact false-ready state:
+# synced=1, shared_memory_synced=1, meta_synced!=1, no local CG data, and at
+# least one clean empty response from an unrelated peer. Post-approval recovery
+# is still exercised and recorded, but is not required: the invariant breach is
+# already the regression witness.
+#
+# `fixed` requires the pre-admission subscription to remain pending/not-ready,
+# then requires metadata, authorization, root SWM, and sub-graph SWM to recover
+# exactly and survive a node-6 restart.
+
+# The JavaScript snippets deliberately use single-quoted shell strings and JS
+# template literals; their `$` expressions belong to JavaScript, not Bash.
+# The sourced helper path is computed from this script's absolute location.
+# shellcheck disable=SC1091,SC2016
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$REPO_ROOT/scripts"
+DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
+API_PORT_BASE="${API_PORT_BASE:-9201}"
+CURATOR_NODE="${CURATOR_NODE:-5}"
+JOINER_NODE="${JOINER_NODE:-6}"
+NUM_NODES="${NUM_NODES:-6}"
+SUB_GRAPH_NAME="${SUB_GRAPH_NAME:-ai-tools}"
+ROOT_TRIPLES="${ROOT_TRIPLES:-3}"
+SUB_GRAPH_TRIPLES="${SUB_GRAPH_TRIPLES:-5}"
+HARNESS_EXPECT="${HARNESS_EXPECT:-}"
+HARNESS_ARTIFACT_DIR="${HARNESS_ARTIFACT_DIR:-$REPO_ROOT/.harness-artifacts}"
+CATCHUP_TIMEOUT_S="${CATCHUP_TIMEOUT_S:-120}"
+JOIN_DELIVERY_TIMEOUT_S="${JOIN_DELIVERY_TIMEOUT_S:-90}"
+RECOVERY_TIMEOUT_S="${RECOVERY_TIMEOUT_S:-150}"
+POST_RESTART_TIMEOUT_S="${POST_RESTART_TIMEOUT_S:-120}"
+BROKEN_RECOVERY_OBSERVE_S="${BROKEN_RECOVERY_OBSERVE_S:-35}"
+BROKEN_POST_RESTART_OBSERVE_S="${BROKEN_POST_RESTART_OBSERVE_S:-20}"
+POLL_INTERVAL_S="${POLL_INTERVAL_S:-2}"
+API_TIMEOUT_S="${API_TIMEOUT_S:-30}"
+DEVNET_SH="$SCRIPT_DIR/devnet.sh"
+
+case "$HARNESS_EXPECT" in
+  broken|fixed) ;;
+  *)
+    echo "Usage: HARNESS_EXPECT=broken|fixed $0" >&2
+    exit 2
+    ;;
+esac
+
+for numeric in \
+  "$CURATOR_NODE" "$JOINER_NODE" "$NUM_NODES" "$ROOT_TRIPLES" \
+  "$SUB_GRAPH_TRIPLES" "$CATCHUP_TIMEOUT_S" "$JOIN_DELIVERY_TIMEOUT_S" \
+  "$RECOVERY_TIMEOUT_S" "$POST_RESTART_TIMEOUT_S"; do
+  [[ "$numeric" =~ ^[0-9]+$ ]] || {
+    echo "All node/count/timeout settings must be non-negative integers (got: $numeric)" >&2
+    exit 2
+  }
+done
+
+if [ "$NUM_NODES" -ne 6 ] || [ "$CURATOR_NODE" -ne 5 ] || [ "$JOINER_NODE" -ne 6 ]; then
+  echo "This regression requires the default six-node topology: cores 1-4, curator edge 5, joiner edge 6." >&2
+  exit 2
+fi
+
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_DIR="$HARNESS_ARTIFACT_DIR/private-cg-membership-recovery-$RUN_ID-$HARNESS_EXPECT"
+mkdir -p "$RUN_DIR"
+exec > >(tee -a "$RUN_DIR/harness.log") 2>&1
+
+# shellcheck source=devnet-publish-helpers.sh
+source "$SCRIPT_DIR/devnet-publish-helpers.sh"
+
+CG_ID=""
+CG_ENCODED=""
+CURATOR_AGENT=""
+CURATOR_PEER=""
+JOINER_AGENT=""
+JOINER_PEER=""
+CURATOR_STOPPED=0
+JOINER_STOPPED=0
+FAIL_REASON=""
+BROKEN_RECOVERED_BEFORE_RESTART=0
+BROKEN_RECOVERED_AFTER_RESTART=0
+
+log()  { echo "[private-cg-recovery] $*"; }
+warn() { echo "[private-cg-recovery] WARN: $*" >&2; }
+act()  { echo; echo "[private-cg-recovery] === $* ==="; }
+fail() {
+  FAIL_REASON="$*"
+  echo "[private-cg-recovery] FAIL: $*" >&2
+  exit 1
+}
+
+node_dir()   { echo "$DEVNET_DIR/node$1"; }
+node_port()  { echo $((API_PORT_BASE + $1 - 1)); }
+node_db()    { echo "$(node_dir "$1")/node-ui.db"; }
+node_log()   { echo "$(node_dir "$1")/daemon.log"; }
+node_token() {
+  grep -v '^#' "$(node_dir "$1")/auth.token" 2>/dev/null | head -1 | tr -d '\r\n'
+}
+
+urlencode() {
+  VALUE="$1" node -e 'process.stdout.write(encodeURIComponent(process.env.VALUE || ""))'
+}
+
+json_get() {
+  local json="$1" path="$2"
+  printf '%s' "$json" | node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        let value = JSON.parse(d);
+        for (const part of process.argv[1].split(".")) {
+          if (!part) continue;
+          value = value == null ? undefined : value[part];
+        }
+        if (value === undefined) return;
+        if (value === null) process.stdout.write("null");
+        else if (typeof value === "object") process.stdout.write(JSON.stringify(value));
+        else process.stdout.write(String(value));
+      } catch {}
+    });
+  ' "$path"
+}
+
+json_empty_response_count() {
+  printf '%s' "$1" | node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const root = JSON.parse(d);
+        let total = 0;
+        const visit = value => {
+          if (!value || typeof value !== "object") return;
+          for (const [key, child] of Object.entries(value)) {
+            if (key === "emptyResponses" && Number.isFinite(Number(child))) total += Number(child);
+            else visit(child);
+          }
+        };
+        visit(root);
+        process.stdout.write(String(total));
+      } catch { process.stdout.write("0"); }
+    });
+  '
+}
+
+json_inserted_triple_count() {
+  printf '%s' "$1" | node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const root = JSON.parse(d);
+        let total = 0;
+        const visit = value => {
+          if (!value || typeof value !== "object") return;
+          for (const [key, child] of Object.entries(value)) {
+            if ((key === "insertedMetaTriples" || key === "insertedDataTriples")
+                && Number.isFinite(Number(child))) total += Number(child);
+            else visit(child);
+          }
+        };
+        visit(root);
+        process.stdout.write(String(total));
+      } catch { process.stdout.write("0"); }
+    });
+  '
+}
+
+sanitize_stream() {
+  node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      d = d
+        .replace(/("(?:signature|privateKey|private_key|authToken|auth_token|token)"\s*:\s*")[^"]*(")/gi, "$1<redacted>$2")
+        .replace(/0x[0-9a-f]{96,}/gi, "<redacted-long-hex>");
+      process.stdout.write(d);
+    });
+  '
+}
+
+save_artifact() {
+  local name="$1" content="${2:-}"
+  printf '%s\n' "$content" | sanitize_stream > "$RUN_DIR/$name"
+}
+
+api_call() {
+  local node="$1" method="$2" path="$3" data="${4:-}"
+  local token port
+  token="$(node_token "$node")"
+  port="$(node_port "$node")"
+  [ -n "$token" ] || return 1
+  local -a args=(
+    -sS --max-time "$API_TIMEOUT_S" -X "$method"
+    -H "Authorization: Bearer $token"
+    -H 'Content-Type: application/json'
+  )
+  [ -n "$data" ] && args+=(-d "$data")
+  args+=("http://127.0.0.1:${port}${path}")
+  curl "${args[@]}"
+}
+
+node_ready() {
+  local node="$1" body
+  body="$(api_call "$node" GET /api/status 2>/dev/null || true)"
+  [ -n "$(json_get "$body" peerId)" ]
+}
+
+wait_node_ready() {
+  local node="$1" timeout="${2:-90}" start
+  start="$(date +%s)"
+  while [ $(( $(date +%s) - start )) -lt "$timeout" ]; do
+    if node_ready "$node"; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_node_down() {
+  local node="$1" timeout="${2:-45}" start
+  start="$(date +%s)"
+  while [ $(( $(date +%s) - start )) -lt "$timeout" ]; do
+    if ! node_ready "$node"; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+node_role() {
+  local config
+  config="$(node_dir "$1")/config.json"
+  node -e '
+    const fs = require("fs");
+    try { process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).nodeRole || ""); }
+    catch {}
+  ' "$config"
+}
+
+db_subscription_row() {
+  local node="$1" db
+  db="$(node_db "$node")"
+  [ -f "$db" ] || { printf 'null'; return 0; }
+  # Open the live WAL database read-only (not immutable) so SQLite still sees
+  # committed WAL frames while the daemon is running. Resolve better-sqlite3
+  # from packages/cli, which owns the daemon-side subscription-store wiring.
+  (
+    cd "$REPO_ROOT/packages/cli"
+    DB_PATH="$db" DB_CG_ID="$CG_ID" node --input-type=module <<'NODE'
+import Database from 'better-sqlite3';
+
+try {
+  const db = new Database(process.env.DB_PATH, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  const row = db.prepare(`
+    SELECT context_graph_id, subscribed, synced, shared_memory_synced,
+           meta_synced, on_chain_id, sync_scoped, updated_at
+      FROM context_graph_subscriptions
+     WHERE context_graph_id = ?
+  `).get(process.env.DB_CG_ID);
+  db.close();
+  process.stdout.write(JSON.stringify(row || null));
+} catch {
+  process.stdout.write('null');
+}
+NODE
+  )
+}
+
+wait_subscription_row() {
+  local timeout="${1:-15}" start row
+  start="$(date +%s)"
+  while [ $(( $(date +%s) - start )) -lt "$timeout" ]; do
+    row="$(db_subscription_row "$JOINER_NODE")"
+    if [ "$row" != "null" ] && [ -n "$row" ]; then
+      printf '%s' "$row"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+sparql_count() {
+  printf '%s' "$1" | node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d);
+        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.results?.bindings ?? j?.bindings ?? [];
+        const b = bindings[0] || {};
+        const term = b.n ?? b.cnt ?? b.count;
+        const raw = term && typeof term === "object" ? term.value : term;
+        const match = String(raw ?? "").match(/-?\d+/);
+        if (match) process.stdout.write(match[0]);
+      } catch {}
+    });
+  '
+}
+
+# The query API returns an empty bindings array (rather than COUNT=0) when the
+# caller has no local catalog entry for the requested private graph. For the
+# pre-admission security checks, both forms mean "no readable local material".
+count_is_absent() {
+  [ -z "${1:-}" ] || [ "$1" = "0" ]
+}
+
+query_count() {
+  local node="$1" graph_suffix="$2" pattern="$3" sub_graph="${4:-}" body response
+  body="$(CG="$CG_ID" SUFFIX="$graph_suffix" PATTERN="$pattern" SUB="$sub_graph" node -e '
+    const out = {
+      contextGraphId: process.env.CG,
+      graphSuffix: process.env.SUFFIX,
+      sparql: `SELECT (COUNT(*) AS ?n) WHERE { ${process.env.PATTERN} }`,
+    };
+    if (process.env.SUB) out.subGraphName = process.env.SUB;
+    process.stdout.write(JSON.stringify(out));
+  ')"
+  response="$(api_call "$node" POST /api/query "$body" 2>/dev/null || true)"
+  sparql_count "$response"
+}
+
+root_count() {
+  query_count "$1" _shared_memory '?s <http://schema.org/name> ?o'
+}
+
+subgraph_count() {
+  query_count "$1" _shared_memory '?s <http://schema.org/name> ?o' "$SUB_GRAPH_NAME"
+}
+
+meta_count() {
+  query_count "$1" _meta '?s ?p ?o'
+}
+
+private_policy_count() {
+  query_count "$1" _meta \
+    "<did:dkg:context-graph:$CG_ID> <https://dkg.network/ontology#accessPolicy> \"private\""
+}
+
+joiner_allowlist_count() {
+  query_count "$1" _meta \
+    "<did:dkg:context-graph:$CG_ID> <https://dkg.network/ontology#allowedAgent> \"$JOINER_AGENT\""
+}
+
+joiner_delegation_count() {
+  query_count "$1" _meta \
+    "?delegation <https://dkg.network/ontology#allowedDelegateePeer> \"$JOINER_PEER\""
+}
+
+context_graph_exists() {
+  local node="$1" response
+  response="$(api_call "$node" GET "/api/context-graph/exists?id=$CG_ENCODED" 2>/dev/null || true)"
+  json_get "$response" exists
+}
+
+catchup_status() {
+  api_call "$JOINER_NODE" GET "/api/sync/catchup-status?contextGraphId=$CG_ENCODED" 2>/dev/null || true
+}
+
+poll_catchup_terminal() {
+  local start status response last=""
+  start="$(date +%s)"
+  while [ $(( $(date +%s) - start )) -lt "$CATCHUP_TIMEOUT_S" ]; do
+    response="$(catchup_status)"
+    status="$(json_get "$response" status)"
+    if [ -n "$status" ] && [ "$status" != "$last" ]; then
+      # The caller captures this function's stdout as the terminal JSON body.
+      # Keep progress on stderr so it reaches the transcript without corrupting
+      # that captured JSON value.
+      log "catch-up status: $status" >&2
+      last="$status"
+    fi
+    case "$status" in
+      done|failed|denied|unreachable)
+        printf '%s' "$response"
+        return 0
+        ;;
+    esac
+    sleep "$POLL_INTERVAL_S"
+  done
+  return 1
+}
+
+build_swm_payload() {
+  local count="$1" label="$2" sub_graph="${3:-}"
+  CG="$CG_ID" COUNT="$count" LABEL="$label" SUB="$sub_graph" RUN="$RUN_ID" node -e '
+    const count = Number(process.env.COUNT);
+    const quads = [];
+    for (let i = 0; i < count; i++) {
+      quads.push({
+        subject: `urn:private-cg-recovery:${process.env.RUN}:${process.env.LABEL}:${i}`,
+        predicate: "http://schema.org/name",
+        object: `"private-cg-recovery-${process.env.LABEL}-${i}"`,
+        graph: `did:dkg:context-graph:${process.env.CG}`,
+      });
+    }
+    const out = { contextGraphId: process.env.CG, quads };
+    if (process.env.SUB) out.subGraphName = process.env.SUB;
+    process.stdout.write(JSON.stringify(out));
+  '
+}
+
+subscription_flags_ready() {
+  local row="$1"
+  [ "$(json_get "$row" subscribed)" = "1" ] \
+    && [ "$(json_get "$row" synced)" = "1" ] \
+    && [ "$(json_get "$row" shared_memory_synced)" = "1" ] \
+    && [ "$(json_get "$row" meta_synced)" = "1" ]
+}
+
+full_recovery_present() {
+  local row root sub meta policy allowed delegation
+  row="$(db_subscription_row "$JOINER_NODE")"
+  subscription_flags_ready "$row" || return 1
+  root="$(root_count "$JOINER_NODE")"
+  sub="$(subgraph_count "$JOINER_NODE")"
+  meta="$(meta_count "$JOINER_NODE")"
+  policy="$(private_policy_count "$JOINER_NODE")"
+  allowed="$(joiner_allowlist_count "$JOINER_NODE")"
+  delegation="$(joiner_delegation_count "$JOINER_NODE")"
+  [ "$root" = "$ROOT_TRIPLES" ] \
+    && [ "$sub" = "$SUB_GRAPH_TRIPLES" ] \
+    && [ -n "$meta" ] && [ "$meta" -gt 0 ] \
+    && [ "$policy" = "1" ] \
+    && [ "$allowed" = "1" ] \
+    && [ "$delegation" -ge 1 ] 2>/dev/null
+}
+
+wait_full_recovery() {
+  local timeout="$1" start
+  start="$(date +%s)"
+  while [ $(( $(date +%s) - start )) -lt "$timeout" ]; do
+    if full_recovery_present; then return 0; fi
+    sleep "$POLL_INTERVAL_S"
+  done
+  return 1
+}
+
+list_row() {
+  local response
+  response="$(api_call "$JOINER_NODE" GET /api/context-graph/list 2>/dev/null || true)"
+  printf '%s' "$response" | CG="$CG_ID" node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d);
+        const row = (j.contextGraphs || []).find(x => x && x.id === process.env.CG);
+        process.stdout.write(JSON.stringify(row || null));
+      } catch { process.stdout.write("null"); }
+    });
+  '
+}
+
+assert_fixed_list_state() {
+  local row
+  row="$(list_row)"
+  [ "$row" != "null" ] || fail "recovered CG is absent from node $JOINER_NODE /api/context-graph/list"
+  [ "$(json_get "$row" callerInvolved)" = "true" ] \
+    || fail "recovered CG does not report callerInvolved=true: $row"
+  [ "$(json_get "$row" subscribed)" = "true" ] \
+    || fail "recovered CG does not report subscribed=true: $row"
+  [ "$(json_get "$row" synced)" = "true" ] \
+    || fail "recovered CG does not report synced=true: $row"
+}
+
+snapshot_phase() {
+  local phase="$1" row list subscriptions catchup root sub meta policy allowed delegation
+  row="$(db_subscription_row "$JOINER_NODE" 2>/dev/null || printf 'null')"
+  list="$(api_call "$JOINER_NODE" GET /api/context-graph/list 2>/dev/null || true)"
+  subscriptions="$(api_call "$JOINER_NODE" GET /api/context-graph/subscriptions 2>/dev/null || true)"
+  catchup="$(catchup_status)"
+  root="$(root_count "$JOINER_NODE")"
+  sub="$(subgraph_count "$JOINER_NODE")"
+  meta="$(meta_count "$JOINER_NODE")"
+  policy="$(private_policy_count "$JOINER_NODE")"
+  allowed="$(joiner_allowlist_count "$JOINER_NODE")"
+  delegation="$(joiner_delegation_count "$JOINER_NODE")"
+  save_artifact "$phase-subscription-db.json" "$row"
+  save_artifact "$phase-context-graph-list.json" "$list"
+  save_artifact "$phase-subscriptions-api.json" "$subscriptions"
+  save_artifact "$phase-catchup.json" "$catchup"
+  save_artifact "$phase-counts.json" "$(ROOT="$root" SUB="$sub" META="$meta" POLICY="$policy" ALLOWED="$allowed" DELEGATION="$delegation" node -e '
+    process.stdout.write(JSON.stringify({
+      rootSwm: process.env.ROOT || null,
+      subgraphSwm: process.env.SUB || null,
+      meta: process.env.META || null,
+      privatePolicy: process.env.POLICY || null,
+      joinerAllowed: process.env.ALLOWED || null,
+      joinerDelegateePeer: process.env.DELEGATION || null,
+    }, null, 2));
+  ')"
+}
+
+collect_filtered_logs() {
+  [ -n "$CG_ID" ] || return 0
+  local node log_path
+  for node in $(seq 1 "$NUM_NODES"); do
+    log_path="$(node_log "$node")"
+    [ -f "$log_path" ] || continue
+    grep -F "$CG_ID" "$log_path" 2>/dev/null | tail -n 500 | sanitize_stream \
+      > "$RUN_DIR/node${node}-cg-filtered.log" || true
+  done
+}
+
+write_summary() {
+  local exit_code="$1"
+  EXPECT="$HARNESS_EXPECT" EXIT_CODE="$exit_code" RUN_ID_ENV="$RUN_ID" \
+    CG="$CG_ID" CURATOR="$CURATOR_NODE" JOINER="$JOINER_NODE" \
+    FAILURE="$FAIL_REASON" RECOVERED_BEFORE="$BROKEN_RECOVERED_BEFORE_RESTART" \
+    RECOVERED_AFTER="$BROKEN_RECOVERED_AFTER_RESTART" node -e '
+      process.stdout.write(JSON.stringify({
+        runId: process.env.RUN_ID_ENV,
+        expectation: process.env.EXPECT,
+        exitCode: Number(process.env.EXIT_CODE),
+        contextGraphId: process.env.CG || null,
+        curatorNode: Number(process.env.CURATOR),
+        joinerNode: Number(process.env.JOINER),
+        failure: process.env.FAILURE || null,
+        brokenModeRecovery: {
+          beforeJoinerRestart: process.env.RECOVERED_BEFORE === "1",
+          afterJoinerRestart: process.env.RECOVERED_AFTER === "1",
+        },
+      }, null, 2));
+    ' | sanitize_stream > "$RUN_DIR/summary.json"
+}
+
+cleanup() {
+  local exit_code=$?
+  trap - EXIT
+  set +e
+  collect_filtered_logs
+
+  if [ "$JOINER_STOPPED" -eq 1 ]; then
+    warn "cleanup: restarting node $JOINER_NODE"
+    "$DEVNET_SH" restart-node "$JOINER_NODE" >/dev/null 2>&1
+    wait_node_ready "$JOINER_NODE" 90 || warn "cleanup: node $JOINER_NODE did not become ready"
+  fi
+  if [ "$CURATOR_STOPPED" -eq 1 ]; then
+    warn "cleanup: restarting node $CURATOR_NODE"
+    "$DEVNET_SH" restart-node "$CURATOR_NODE" >/dev/null 2>&1
+    wait_node_ready "$CURATOR_NODE" 90 || warn "cleanup: node $CURATOR_NODE did not become ready"
+  fi
+
+  write_summary "$exit_code"
+  log "artifacts: $RUN_DIR"
+  exit "$exit_code"
+}
+trap cleanup EXIT
+
+cd "$REPO_ROOT"
+
+act "Preflight: exact six-node devnet topology"
+for command in curl node; do
+  command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
+done
+[ -x "$DEVNET_SH" ] || fail "missing executable: $DEVNET_SH"
+
+for node in $(seq 1 "$NUM_NODES"); do
+  [ -f "$(node_dir "$node")/auth.token" ] || fail "node $node auth token is missing under $DEVNET_DIR"
+  [ -f "$(node_db "$node")" ] || fail "node $node database is missing: $(node_db "$node")"
+  wait_node_ready "$node" 10 || fail "node $node is not ready; start a six-node devnet first"
+  role="$(node_role "$node")"
+  expected_role=edge
+  [ "$node" -le 4 ] && expected_role=core
+  [ "$role" = "$expected_role" ] \
+    || fail "node $node role is '$role', expected '$expected_role' for the deterministic topology"
+  status="$(api_call "$node" GET /api/status)"
+  save_artifact "preflight-node${node}-status.json" "$status"
+  log "node $node ready (role=$role, peer=$(json_get "$status" peerId))"
+done
+
+PACKAGE_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || true)"
+{
+  echo "gitCommit=$(git rev-parse HEAD 2>/dev/null || true)"
+  echo "gitDescribe=$(git describe --tags --always --dirty 2>/dev/null || true)"
+  echo "packageVersion=$PACKAGE_VERSION"
+  echo "devnetDir=$DEVNET_DIR"
+  echo "apiPortBase=$API_PORT_BASE"
+} > "$RUN_DIR/runtime.txt"
+
+CURATOR_IDENTITY="$(api_call "$CURATOR_NODE" GET /api/agent/identity)"
+JOINER_IDENTITY="$(api_call "$JOINER_NODE" GET /api/agent/identity)"
+CURATOR_AGENT="$(json_get "$CURATOR_IDENTITY" agentAddress)"
+CURATOR_PEER="$(json_get "$CURATOR_IDENTITY" peerId)"
+JOINER_AGENT="$(json_get "$JOINER_IDENTITY" agentAddress)"
+JOINER_PEER="$(json_get "$JOINER_IDENTITY" peerId)"
+[ -n "$CURATOR_AGENT" ] && [ -n "$CURATOR_PEER" ] \
+  || fail "could not resolve node $CURATOR_NODE curator identity"
+[ -n "$JOINER_AGENT" ] && [ -n "$JOINER_PEER" ] \
+  || fail "could not resolve node $JOINER_NODE joiner identity"
+save_artifact "curator-identity.json" "$CURATOR_IDENTITY"
+save_artifact "joiner-identity.json" "$JOINER_IDENTITY"
+log "curator: node $CURATOR_NODE agent=$CURATOR_AGENT peer=$CURATOR_PEER"
+log "joiner:  node $JOINER_NODE agent=$JOINER_AGENT peer=$JOINER_PEER"
+
+STAMP="$(date -u +%s)"
+CG_ID="${CURATOR_AGENT}/private-cg-recovery-${STAMP}-$$"
+CG_ENCODED="$(urlencode "$CG_ID")"
+
+act "Create a curated CG with only the curator allowlisted"
+CREATE_BODY="$(CG="$CG_ID" CURATOR="$CURATOR_AGENT" RUN="$RUN_ID" node -e '
+  process.stdout.write(JSON.stringify({
+    id: process.env.CG,
+    name: `private-cg-recovery ${process.env.RUN}`,
+    description: "Private CG membership recovery harness",
+    accessPolicy: 1,
+    publishPolicy: 0,
+    allowedAgents: [process.env.CURATOR],
+    register: true,
+  }));
+')"
+CREATE_RESPONSE="$(api_call "$CURATOR_NODE" POST /api/context-graph/create "$CREATE_BODY")"
+ON_CHAIN_ID="$(json_get "$CREATE_RESPONSE" onChainId)"
+[ -n "$ON_CHAIN_ID" ] && [ "$ON_CHAIN_ID" != "null" ] \
+  || fail "curated CG create/register failed: $CREATE_RESPONSE"
+save_artifact "create-response.json" "$CREATE_RESPONSE"
+log "created $CG_ID (onChainId=$ON_CHAIN_ID)"
+
+SUBGRAPH_RESPONSE="$(api_call "$CURATOR_NODE" POST /api/sub-graph/create \
+  "$(CG="$CG_ID" SUB="$SUB_GRAPH_NAME" node -e 'process.stdout.write(JSON.stringify({contextGraphId:process.env.CG,subGraphName:process.env.SUB}))')")"
+[ "$(json_get "$SUBGRAPH_RESPONSE" created)" = "$SUB_GRAPH_NAME" ] \
+  || fail "sub-graph create failed: $SUBGRAPH_RESPONSE"
+save_artifact "subgraph-create-response.json" "$SUBGRAPH_RESPONSE"
+
+act "Seed and verify $ROOT_TRIPLES root + $SUB_GRAPH_TRIPLES sub-graph SWM triples"
+ROOT_WRITE="$(devnet_create_shared_ka "$CURATOR_NODE" \
+  "$(build_swm_payload "$ROOT_TRIPLES" root)" private-cg-recovery-root)"
+[ "$(json_get "$ROOT_WRITE" triplesWritten)" = "$ROOT_TRIPLES" ] \
+  || fail "root SWM write failed: $ROOT_WRITE"
+SUB_WRITE="$(devnet_create_shared_ka "$CURATOR_NODE" \
+  "$(build_swm_payload "$SUB_GRAPH_TRIPLES" sub "$SUB_GRAPH_NAME")" private-cg-recovery-sub)"
+[ "$(json_get "$SUB_WRITE" triplesWritten)" = "$SUB_GRAPH_TRIPLES" ] \
+  || fail "sub-graph SWM write failed: $SUB_WRITE"
+save_artifact "root-write-summary.json" "$ROOT_WRITE"
+save_artifact "subgraph-write-summary.json" "$SUB_WRITE"
+
+CURATOR_ROOT="$(root_count "$CURATOR_NODE")"
+CURATOR_SUB="$(subgraph_count "$CURATOR_NODE")"
+[ "$CURATOR_ROOT" = "$ROOT_TRIPLES" ] \
+  || fail "curator root SWM count is '$CURATOR_ROOT', expected $ROOT_TRIPLES"
+[ "$CURATOR_SUB" = "$SUB_GRAPH_TRIPLES" ] \
+  || fail "curator sub-graph SWM count is '$CURATOR_SUB', expected $SUB_GRAPH_TRIPLES"
+log "curator fixture verified: root=$CURATOR_ROOT subgraph=$CURATOR_SUB"
+
+act "Prove nodes 1-4 and fresh joiner 6 do not already hold the private CG"
+for node in 1 2 3 4 "$JOINER_NODE"; do
+  exists="$(context_graph_exists "$node")"
+  root="$(root_count "$node")"
+  sub="$(subgraph_count "$node")"
+  meta="$(meta_count "$node")"
+  [ "$exists" = "false" ] \
+    || fail "node $node already reports contextGraphExists=$exists for the private CG; empty-peer precondition is invalid"
+  if ! count_is_absent "$root" || ! count_is_absent "$sub" || ! count_is_absent "$meta"; then
+    fail "node $node already has private-CG material (root=${root:-unreadable} sub=${sub:-unreadable} meta=${meta:-unreadable})"
+  fi
+  log "node $node is unrelated: exists=false root=0 subgraph=0 meta=0"
+done
+
+act "Stop curator node $CURATOR_NODE"
+CURATOR_STOPPED=1
+"$DEVNET_SH" stop-node "$CURATOR_NODE"
+wait_node_down "$CURATOR_NODE" 45 \
+  || fail "curator node $CURATOR_NODE did not become unreachable"
+log "curator is offline; unrelated core peers remain online"
+
+act "Joiner subscribes before admission while curator is offline"
+SUBSCRIBE_RESPONSE="$(api_call "$JOINER_NODE" POST /api/context-graph/subscribe \
+  "$(CG="$CG_ID" node -e 'process.stdout.write(JSON.stringify({contextGraphId:process.env.CG,includeSharedMemory:true}))')")"
+[ "$(json_get "$SUBSCRIBE_RESPONSE" subscribed)" = "$CG_ID" ] \
+  || fail "joiner subscribe failed: $SUBSCRIBE_RESPONSE"
+save_artifact "pre-admission-subscribe-response.json" "$SUBSCRIBE_RESPONSE"
+
+CATCHUP_RESPONSE="$(poll_catchup_terminal)" \
+  || fail "pre-admission catch-up did not reach a terminal state within ${CATCHUP_TIMEOUT_S}s"
+save_artifact "pre-admission-catchup-terminal.json" "$CATCHUP_RESPONSE"
+CATCHUP_STATE="$(json_get "$CATCHUP_RESPONSE" status)"
+EMPTY_RESPONSES="$(json_empty_response_count "$CATCHUP_RESPONSE")"
+INSERTED_TRIPLES="$(json_inserted_triple_count "$CATCHUP_RESPONSE")"
+RESULT_DATA_SYNCED="$(json_get "$CATCHUP_RESPONSE" result.dataSynced)"
+RESULT_SWM_SYNCED="$(json_get "$CATCHUP_RESPONSE" result.sharedMemorySynced)"
+SYNC_CAPABLE_PEERS="$(json_get "$CATCHUP_RESPONSE" result.syncCapablePeers)"
+[ "$EMPTY_RESPONSES" -ge 1 ] 2>/dev/null \
+  || fail "catch-up had no empty response; the unrelated-peer reproduction precondition was not reached: $CATCHUP_RESPONSE"
+[ -n "$SYNC_CAPABLE_PEERS" ] && [ "$SYNC_CAPABLE_PEERS" -ge 1 ] 2>/dev/null \
+  || fail "catch-up had no sync-capable responder; the curator-offline topology was not exercised: $CATCHUP_RESPONSE"
+[ "$INSERTED_TRIPLES" = "0" ] \
+  && [ "$RESULT_DATA_SYNCED" = "0" ] \
+  && [ "$RESULT_SWM_SYNCED" = "0" ] \
+  || fail "pre-admission catch-up unexpectedly inserted private-CG material: $CATCHUP_RESPONSE"
+
+SUB_ROW="$(wait_subscription_row 20)" \
+  || fail "joiner subscription row was not persisted"
+ROOT_BEFORE="$(root_count "$JOINER_NODE")"
+SUB_BEFORE="$(subgraph_count "$JOINER_NODE")"
+META_BEFORE="$(meta_count "$JOINER_NODE")"
+if ! count_is_absent "$ROOT_BEFORE" || ! count_is_absent "$SUB_BEFORE" || ! count_is_absent "$META_BEFORE"; then
+  fail "pre-admission joiner unexpectedly holds CG material (root=${ROOT_BEFORE:-unreadable} sub=${SUB_BEFORE:-unreadable} meta=${META_BEFORE:-unreadable})"
+fi
+
+SUBSCRIBED_FLAG="$(json_get "$SUB_ROW" subscribed)"
+SYNCED_FLAG="$(json_get "$SUB_ROW" synced)"
+SHARED_FLAG="$(json_get "$SUB_ROW" shared_memory_synced)"
+META_FLAG="$(json_get "$SUB_ROW" meta_synced)"
+[ "$SUBSCRIBED_FLAG" = "1" ] || fail "subscription row is not active: $SUB_ROW"
+
+if [ "$HARNESS_EXPECT" = "broken" ]; then
+  [ "$CATCHUP_STATE" = "done" ] \
+    || fail "broken oracle expected catch-up status=done, got '$CATCHUP_STATE'"
+  [ "$SYNCED_FLAG" = "1" ] && [ "$SHARED_FLAG" = "1" ] && [ "$META_FLAG" != "1" ] \
+    || fail "broken oracle not observed; expected synced=1 shared_memory_synced=1 meta_synced!=1, got $SUB_ROW"
+  log "RED ORACLE OBSERVED: status=done syncCapablePeers=$SYNC_CAPABLE_PEERS emptyResponses=$EMPTY_RESPONSES synced=1 shared=1 meta=${META_FLAG:-null}, with no metadata or data"
+else
+  [ "$SYNCED_FLAG" != "1" ] && [ "$SHARED_FLAG" != "1" ] && [ "$META_FLAG" != "1" ] \
+    || fail "fixed oracle violated: pre-admission state claims readiness: $SUB_ROW"
+  log "GREEN PRECONDITION: syncCapablePeers=$SYNC_CAPABLE_PEERS emptyResponses=$EMPTY_RESPONSES but subscription remains pending/not-ready"
+fi
+snapshot_phase pre-admission
+
+act "Restart curator and deliver a signed admission request"
+"$DEVNET_SH" restart-node "$CURATOR_NODE"
+wait_node_ready "$CURATOR_NODE" 90 \
+  || fail "curator node $CURATOR_NODE did not become ready after restart"
+CURATOR_STOPPED=0
+
+SIGN_RESPONSE="$(api_call "$JOINER_NODE" POST "/api/context-graph/$CG_ENCODED/sign-join" '{}')"
+[ "$(json_get "$SIGN_RESPONSE" ok)" = "true" ] \
+  || fail "sign-join failed: $(json_get "$SIGN_RESPONSE" error)"
+DELEGATION="$(json_get "$SIGN_RESPONSE" delegation)"
+[ -n "$DELEGATION" ] && [ "$DELEGATION" != "null" ] \
+  || fail "sign-join returned no delegation"
+
+REQUEST_BODY="$(DELEGATION="$DELEGATION" CURATOR_PEER_ENV="$CURATOR_PEER" node -e '
+  process.stdout.write(JSON.stringify({
+    delegation: JSON.parse(process.env.DELEGATION),
+    curatorPeerId: process.env.CURATOR_PEER_ENV,
+    agentName: "private-cg-recovery-harness",
+  }));
+')"
+
+REQUEST_RESPONSE=""
+REQUEST_STATUS=""
+REQUEST_START="$(date +%s)"
+while [ $(( $(date +%s) - REQUEST_START )) -lt "$JOIN_DELIVERY_TIMEOUT_S" ]; do
+  REQUEST_RESPONSE="$(api_call "$JOINER_NODE" POST "/api/context-graph/$CG_ENCODED/request-join" "$REQUEST_BODY" 2>/dev/null || true)"
+  REQUEST_STATUS="$(json_get "$REQUEST_RESPONSE" status)"
+  case "$REQUEST_STATUS" in
+    pending|already-member) break ;;
+  esac
+  sleep 3
+done
+save_artifact "join-request-response.json" "$REQUEST_RESPONSE"
+[ "$REQUEST_STATUS" = "pending" ] \
+  || fail "join request was not delivered as pending within ${JOIN_DELIVERY_TIMEOUT_S}s: $REQUEST_RESPONSE"
+
+PENDING_FOUND=0
+PENDING_RESPONSE=""
+PENDING_START="$(date +%s)"
+while [ $(( $(date +%s) - PENDING_START )) -lt "$JOIN_DELIVERY_TIMEOUT_S" ]; do
+  PENDING_RESPONSE="$(api_call "$CURATOR_NODE" GET "/api/context-graph/$CG_ENCODED/join-requests" 2>/dev/null || true)"
+  PENDING_FOUND="$(printf '%s' "$PENDING_RESPONSE" | AGENT="$JOINER_AGENT" node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d);
+        const target = process.env.AGENT.toLowerCase();
+        process.stdout.write((j.requests || []).some(r => String(r.agentAddress || "").toLowerCase() === target) ? "1" : "0");
+      } catch { process.stdout.write("0"); }
+    });
+  ')"
+  [ "$PENDING_FOUND" = "1" ] && break
+  sleep 2
+done
+save_artifact "curator-pending-join-requests.json" "$PENDING_RESPONSE"
+[ "$PENDING_FOUND" = "1" ] \
+  || fail "curator never exposed the joiner's pending request"
+
+APPROVE_RESPONSE="$(api_call "$CURATOR_NODE" POST "/api/context-graph/$CG_ENCODED/approve-join" \
+  "$(AGENT="$JOINER_AGENT" node -e 'process.stdout.write(JSON.stringify({agentAddress:process.env.AGENT}))')")"
+save_artifact "approve-response.json" "$APPROVE_RESPONSE"
+[ "$(json_get "$APPROVE_RESPONSE" status)" = "approved" ] \
+  || fail "approve-join failed: $APPROVE_RESPONSE"
+log "curator approved $JOINER_AGENT"
+
+act "Measure post-approval metadata/data recovery"
+if [ "$HARNESS_EXPECT" = "fixed" ]; then
+  wait_full_recovery "$RECOVERY_TIMEOUT_S" \
+    || { snapshot_phase post-approval-timeout; fail "fixed build did not recover metadata + exact SWM fixtures within ${RECOVERY_TIMEOUT_S}s"; }
+  assert_fixed_list_state
+  log "recovered: metadata private+allowlisted+delegated, root=$ROOT_TRIPLES, subgraph=$SUB_GRAPH_TRIPLES"
+else
+  if wait_full_recovery "$BROKEN_RECOVERY_OBSERVE_S"; then
+    BROKEN_RECOVERED_BEFORE_RESTART=1
+    log "v10.0.6 red invariant was observed, but approval subsequently healed the node"
+  else
+    log "v10.0.6 remains wedged after approval (recorded as part of the red witness)"
+  fi
+fi
+snapshot_phase post-approval
+
+act "Restart joiner node $JOINER_NODE and recheck durable state"
+JOINER_STOPPED=1
+"$DEVNET_SH" restart-node "$JOINER_NODE"
+wait_node_ready "$JOINER_NODE" 90 \
+  || fail "joiner node $JOINER_NODE did not become ready after restart"
+JOINER_STOPPED=0
+
+if [ "$HARNESS_EXPECT" = "fixed" ]; then
+  wait_full_recovery "$POST_RESTART_TIMEOUT_S" \
+    || { snapshot_phase post-restart-timeout; fail "fixed state did not survive/recover after joiner restart"; }
+  assert_fixed_list_state
+  log "restart persistence verified"
+else
+  if wait_full_recovery "$BROKEN_POST_RESTART_OBSERVE_S"; then
+    BROKEN_RECOVERED_AFTER_RESTART=1
+    log "restart/post-approval reconciliation eventually healed the node; the earlier false-ready red oracle remains proven"
+  else
+    row_after="$(db_subscription_row "$JOINER_NODE")"
+    root_after="$(root_count "$JOINER_NODE")"
+    sub_after="$(subgraph_count "$JOINER_NODE")"
+    meta_after="$(meta_count "$JOINER_NODE")"
+    log "wedge persisted after restart: row=$row_after root=${root_after:-unreadable} sub=${sub_after:-unreadable} meta=${meta_after:-unreadable}"
+  fi
+fi
+snapshot_phase post-restart
+
+echo
+if [ "$HARNESS_EXPECT" = "broken" ]; then
+  log "PASS (broken oracle): v10.0.6 claimed a private CG was synced without authoritative metadata or data."
+else
+  log "PASS (fixed oracle): empty unrelated responses never claimed readiness; admission recovery survived restart."
+fi
+log "CG: $CG_ID"
+log "artifacts: $RUN_DIR"
