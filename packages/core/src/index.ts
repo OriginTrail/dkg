@@ -174,7 +174,6 @@ export {
   type MessageIdempotencyStore,
   type MessageDirection,
   type IdempotencyCheckResult,
-  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   type ProtocolOutboxStore,
   type ProtocolOutboxMetadataCapability,
   type LegacyProtocolOutboxStore,

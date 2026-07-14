@@ -174,18 +174,7 @@ export interface ProtocolOutboxEntry extends ProtocolOutboxMetadata {
 }
 
 /**
- * Explicit opt-in key for payload-free outbox storage operations.
- *
- * A registry-backed symbol keeps the capability stable across duplicate
- * package instances while preventing unrelated, same-named store methods from
- * being mistaken for DKG outbox operations.
- */
-export const PROTOCOL_OUTBOX_METADATA_CAPABILITY: unique symbol = Symbol.for(
-  '@origintrail-official/dkg-core/protocol-outbox-metadata/v1',
-);
-
-/**
- * Payload-free outbox operations supplied through the explicit symbol-keyed
+ * Payload-free outbox operations supplied through the explicit, branded
  * store extension.
  */
 export interface ProtocolOutboxMetadataCapability {
@@ -197,8 +186,8 @@ export interface ProtocolOutboxMetadataCapability {
 }
 
 interface ProtocolOutboxStoreBase {
-  /** Optional explicit payload-free storage capability. */
-  readonly [PROTOCOL_OUTBOX_METADATA_CAPABILITY]?: ProtocolOutboxMetadataCapability;
+  /** Optional explicit payload-free OriginTrail storage capability. */
+  readonly originTrailProtocolOutboxMetadata?: ProtocolOutboxMetadataCapability;
 
   /**
    * Insert or update an outbox entry for `(peer, protocol, messageId)`.

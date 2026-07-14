@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
-  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   decodeReliableEnvelope,
   encodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
@@ -423,7 +422,7 @@ describe('Messenger outbox snapshots', () => {
       nextAttemptAt: 7_000,
       lastError: 'offline',
     };
-    Object.assign(outboxStore[PROTOCOL_OUTBOX_METADATA_CAPABILITY], {
+    Object.assign(outboxStore.originTrailProtocolOutboxMetadata, {
       listMetadata: () => {
         throw new Error('listOutbox dropped payloads');
       },
@@ -453,7 +452,7 @@ describe('Messenger outbox snapshots', () => {
       lastError: 'offline',
     };
     const listMetadata = recorder(() => [expected]);
-    Object.assign(outboxStore[PROTOCOL_OUTBOX_METADATA_CAPABILITY], {
+    Object.assign(outboxStore.originTrailProtocolOutboxMetadata, {
       listMetadata,
     });
     Object.assign(outboxStore, {
@@ -484,7 +483,7 @@ describe('Messenger outbox snapshots', () => {
       lastError: 'offline',
     };
     const dropExpiredMetadata = recorder((_now: number) => [expired]);
-    Object.assign(outboxStore[PROTOCOL_OUTBOX_METADATA_CAPABILITY], {
+    Object.assign(outboxStore.originTrailProtocolOutboxMetadata, {
       dropExpiredMetadata,
     });
     Object.assign(outboxStore, {

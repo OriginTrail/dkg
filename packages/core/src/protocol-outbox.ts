@@ -38,10 +38,7 @@ import type {
   ProtocolOutboxMetadataCapability,
   ProtocolOutboxStore,
 } from './messenger-types.js';
-import {
-  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
-  RESPONSE_CACHE_BYTES,
-} from './messenger-types.js';
+import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
 
 export interface ProtocolOutboxOptions {
   /**
@@ -157,7 +154,7 @@ function normalizeOutboxStore(
 
   const legacy = store as LegacyProtocolOutboxStore;
   const normalized: ProtocolOutboxStore = {
-    [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: legacy[PROTOCOL_OUTBOX_METADATA_CAPABILITY],
+    originTrailProtocolOutboxMetadata: legacy.originTrailProtocolOutboxMetadata,
     enqueue: legacy.enqueue.bind(legacy),
     markDelivered: legacy.markDelivered.bind(legacy),
     hasEntry: legacy.hasEntry.bind(legacy),
@@ -313,7 +310,7 @@ export class ProtocolOutbox {
 
   /** Metadata-only expiration, with a compatibility fallback for legacy stores. */
   dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    const metadataStore = this.store[PROTOCOL_OUTBOX_METADATA_CAPABILITY];
+    const metadataStore = this.store.originTrailProtocolOutboxMetadata;
     const dropped = metadataStore?.dropExpiredMetadata(now) ?? this.store.dropExpired(now);
     return dropped.map(cloneOutboxMetadata);
   }
@@ -334,7 +331,7 @@ export class ProtocolOutbox {
 
   /** Metadata-only diagnostics snapshot, with a compatibility fallback. */
   listMetadata(): ProtocolOutboxMetadata[] {
-    const metadataStore = this.store[PROTOCOL_OUTBOX_METADATA_CAPABILITY];
+    const metadataStore = this.store.originTrailProtocolOutboxMetadata;
     const entries = metadataStore?.listMetadata() ?? this.store.list();
     return entries.map(cloneOutboxMetadata);
   }
@@ -369,7 +366,7 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   private backoffs: readonly number[] = DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
   private maxAgeMs = DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS;
 
-  readonly [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: ProtocolOutboxMetadataCapability = {
+  readonly originTrailProtocolOutboxMetadata: ProtocolOutboxMetadataCapability = {
     dropExpiredMetadata: (now) => this.dropExpiredWith(now, cloneOutboxMetadata),
     listMetadata: () => Array.from(this.entries.values()).map(cloneOutboxMetadata),
   };

@@ -6,7 +6,6 @@ import {
   ProtocolOutbox,
 } from '../src/protocol-outbox.js';
 import {
-  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   RESPONSE_CACHE_BYTES,
   type LegacyProtocolOutboxStore,
   type ProtocolOutboxEntry,
@@ -399,6 +398,7 @@ describe('ProtocolOutbox.listMetadata', () => {
         unrelatedExpirationReads += 1;
         return ['last store vacuum: yesterday'];
       },
+      protocolOutboxMetadata: ['store schema', 'vacuum history'],
     };
     const outbox = new ProtocolOutbox(existingStore);
 
@@ -457,7 +457,7 @@ describe('ProtocolOutbox.listMetadata', () => {
     let metadataListReads = 0;
     let metadataExpirationReads = 0;
     const legacyStore: LegacyProtocolOutboxStore = {
-      [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: {
+      originTrailProtocolOutboxMetadata: {
         dropExpiredMetadata: () => {
           metadataExpirationReads += 1;
           return [metadata];
@@ -514,7 +514,7 @@ describe('ProtocolOutbox.listMetadata', () => {
       lastError: 'offline',
     };
     const store: ProtocolOutboxStore = {
-      [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: {
+      originTrailProtocolOutboxMetadata: {
         dropExpiredMetadata: () => [entry],
         listMetadata: () => [entry],
       },
@@ -538,6 +538,7 @@ describe('ProtocolOutbox.listMetadata', () => {
     const store = new InMemoryProtocolOutboxStore();
     expect('listMetadata' in store).toBe(false);
     expect('dropExpiredMetadata' in store).toBe(false);
+    expect(Object.hasOwn(store, 'originTrailProtocolOutboxMetadata')).toBe(true);
     store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'offline', 0);
     Object.assign(store, {
       list: () => {

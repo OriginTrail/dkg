@@ -1,7 +1,6 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import {
-  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   RESPONSE_CACHE_BYTES,
   type IdempotencyCheckResult,
   type KaNumberStore,
@@ -2692,7 +2691,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   private maxAgeMs = 24 * 60 * 60 * 1000;
   private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
 
-  readonly [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: ProtocolOutboxMetadataCapability = {
+  readonly originTrailProtocolOutboxMetadata: ProtocolOutboxMetadataCapability = {
     dropExpiredMetadata: (now) => this.dropExpiredRows<
       ProtocolOutboxMetadataRow,
       ProtocolOutboxMetadata

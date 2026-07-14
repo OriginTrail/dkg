@@ -1,6 +1,5 @@
 import {
   InMemoryProtocolOutboxStore,
-  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   ProtocolOutbox,
   type ProtocolOutboxStore,
 } from '../dist/index.js';
@@ -21,14 +20,15 @@ const existingStore = {
   // Pre-existing store-private methods unrelated to DKG outbox metadata.
   listMetadata: () => ['store schema v7'],
   dropExpiredMetadata: () => ['last store vacuum: yesterday'],
+  protocolOutboxMetadata: ['store schema', 'vacuum history'],
 };
 
 const acceptedStore: ProtocolOutboxStore = existingStore;
 new ProtocolOutbox(acceptedStore);
 
 const firstPartyStore = new InMemoryProtocolOutboxStore();
-firstPartyStore[PROTOCOL_OUTBOX_METADATA_CAPABILITY].listMetadata();
-// @ts-expect-error The fast path has one extension point: the symbol capability.
+firstPartyStore.originTrailProtocolOutboxMetadata.listMetadata();
+// @ts-expect-error The fast path has one branded extension point.
 firstPartyStore.listMetadata();
-// @ts-expect-error The fast path has one extension point: the symbol capability.
+// @ts-expect-error The fast path has one branded extension point.
 firstPartyStore.dropExpiredMetadata(0);

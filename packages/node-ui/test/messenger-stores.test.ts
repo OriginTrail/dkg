@@ -203,6 +203,7 @@ describe('SqliteProtocolOutboxStore', () => {
     const store = new SqliteProtocolOutboxStore(db, { maxAgeMs: 60_000 });
     expect('listMetadata' in store).toBe(false);
     expect('dropExpiredMetadata' in store).toBe(false);
+    expect(Object.hasOwn(store, 'originTrailProtocolOutboxMetadata')).toBe(true);
     const outbox = new ProtocolOutbox(store, { maxAgeMs: 60_000 });
     outbox.enqueueFailure(PEER_A, PROTO, MSG_1, new Uint8Array(1024), 'old', 0);
     const prepareSpy = vi.spyOn(db.db, 'prepare');
