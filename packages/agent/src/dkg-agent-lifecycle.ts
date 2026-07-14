@@ -4301,15 +4301,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // back NOW to advance pagination); `sendToPeer` returns the
       // response bytes directly, and sync's own `withRetry`
       // (sync-transport.ts) handles retry + backoff. Force one lower-layer
-      // attempt per signed envelope: ProtocolRouter's default retry loop would
-      // otherwise resend the same requestId after a slow response, and the
-      // responder's replay defence would correctly deny it before the outer
-      // sync retry could mint fresh bytes. The per-attempt `messageId` remains
-      // unused by this raw adapter.
-      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId, sendSignal, maxTransportAttempts) =>
+      // attempt per signed envelope: ProtocolRouter's default retry/pooling
+      // paths would otherwise resend the same requestId after a slow response,
+      // and the responder's replay defence would correctly deny it before the
+      // outer sync retry could mint fresh bytes. The per-attempt `messageId`
+      // remains unused by this raw adapter.
+      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId, sendSignal) =>
         this.messenger.sendToPeer(peerId, protocolId, data, {
           timeoutMs: sendTimeoutMs,
-          maxAttempts: maxTransportAttempts,
+          payloadReuse: 'single-use',
           signal: sendSignal,
         }),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),

@@ -132,9 +132,9 @@ interface FetchSyncPagesParams {
    * enabled silent replay of stale cached responses past sync's
    * app-layer freshness gate (`SYNC_AUTH_MAX_AGE_MS`). Fresh-per-
    * attempt is the only design that holds under all timing scenarios —
-   * see jsdoc on `sendSyncRequest` for the full rationale. The final argument
-   * is always `1`: a lower-layer retry would resend the same authenticated
-   * bytes instead of returning control here to build a fresh envelope.
+   * see jsdoc on `sendSyncRequest` for the full rationale. The production
+   * adapter independently marks each envelope as single-use at the router
+   * boundary so lower layers cannot replay it.
    */
   send: (
     peerId: string,
@@ -142,8 +142,7 @@ interface FetchSyncPagesParams {
     data: Uint8Array,
     timeoutMs: number,
     messageId: string,
-    signal: AbortSignal | undefined,
-    maxTransportAttempts: 1,
+    signal?: AbortSignal,
   ) => Promise<Uint8Array>;
   logWarn: (ctx: OperationContext, message: string) => void;
   logInfo: (ctx: OperationContext, message: string) => void;

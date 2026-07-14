@@ -66,15 +66,15 @@ export interface SendOptions {
   /** Overall send timeout (resolver + dial + write + read). Default {@link DEFAULT_SEND_TIMEOUT_MS}. */
   timeoutMs?: number;
   /**
-   * Maximum one-shot wire attempts for this exact payload. Defaults to **3**.
+   * Whether these exact payload bytes may be reused by router-level delivery
+   * optimizations. Defaults to `reusable`.
    *
-   * Set this to `1` when a higher layer owns retries and must rebuild the
-   * payload between attempts (for example, authenticated sync envelopes with
-   * single-use request IDs). Retrying those bytes inside `ProtocolRouter`
-   * would replay an already-consumed nonce before the higher layer can mint a
-   * fresh envelope.
+   * `single-use` forces the one-shot transport, disables internal retries, and
+   * rejects multi-path fan-out. Use it for authenticated envelopes containing
+   * a single-use nonce; any retry must happen above `ProtocolRouter` after the
+   * caller rebuilds the payload.
    */
-  maxAttempts?: number;
+  payloadReuse?: 'reusable' | 'single-use';
   /**
    * Race up to N parallel `newStream` attempts across the peer's live
    * connections (different relay paths where the natural connection
@@ -596,10 +596,12 @@ export class ProtocolRouter {
     const opts: SendOptions =
       typeof timeoutMsOrOpts === 'number' ? { timeoutMs: timeoutMsOrOpts } : timeoutMsOrOpts;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
-    const maxAttempts = opts.maxAttempts === undefined || !Number.isFinite(opts.maxAttempts)
-      ? 3
-      : Math.max(1, Math.floor(opts.maxAttempts));
+    const singleUsePayload = opts.payloadReuse === 'single-use';
+    const maxAttempts = singleUsePayload ? 1 : 3;
     const parallelPaths = Math.max(1, Math.floor(opts.parallelPaths ?? 1));
+    if (singleUsePayload && parallelPaths > 1) {
+      throw new Error('single-use payloads cannot use parallelPaths > 1');
+    }
     const overallStartedAt = Date.now();
     const overallDeadline = AbortSignal.timeout(timeoutMs);
     const stopSignal = this.node.stopSignal;
@@ -636,7 +638,7 @@ export class ProtocolRouter {
     // is exhausted.
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
-    if (overlay && memoizedVariant !== 'one-shot') {
+    if (!singleUsePayload && overlay && memoizedVariant !== 'one-shot') {
       try {
         const remainingForPool = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
         const response = await overlay.pool.send(peerIdStr, data, {
@@ -761,8 +763,8 @@ export class ProtocolRouter {
     // dialProtocol/newStream (peerStore.merge triggers the connection manager
     // to dial the peer directly, closing the relay and any in-flight streams).
     // By default we retry up to 3 times with back-off so the direct connection
-    // can stabilise before the next attempt. Callers whose payload is
-    // single-use can set maxAttempts=1 and rebuild it in their outer retry.
+    // can stabilise before the next attempt. A single-use payload gets exactly
+    // one one-shot attempt and must be rebuilt by its caller before retrying.
     //
     // Per-call exclude-set for the fast path: when an existing-connection
     // reuse hits a recoverable failure (stream came back live but

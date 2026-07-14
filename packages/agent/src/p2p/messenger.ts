@@ -186,11 +186,11 @@ export interface MessengerDeps {
 export interface SendOpts {
   timeoutMs?: number;
   /**
-   * Maximum ProtocolRouter attempts for these exact bytes. Authenticated
-   * callers with single-use nonces should set `1` and own fresh-payload
-   * retries above Messenger.
+   * Whether the router may reuse these exact bytes for retry, pooling, or
+   * multi-path delivery. Authenticated callers with single-use nonces should
+   * select `single-use` and rebuild the payload above Messenger when retrying.
    */
-  maxAttempts?: number;
+  payloadReuse?: 'reusable' | 'single-use';
   signal?: AbortSignal;
 }
 

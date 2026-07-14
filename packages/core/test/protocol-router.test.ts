@@ -929,14 +929,51 @@ describe('ProtocolRouter', () => {
       expect(resolveCalls).toBe(3);
     });
 
-    it('honors maxAttempts=1 when a higher layer must rebuild single-use payloads', async () => {
+    it('uses one one-shot attempt for a single-use payload and skips pooling', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      let poolCalls = 0;
+      const protocolId = '/dkg/test/single-use/1.0.0';
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('The operation was aborted due to timeout');
+        },
+      });
+      (router as any).pooledByLogical.set(protocolId, {
+        logicalProtocolId: protocolId,
+        wireProtocolId: '/dkg/test/single-use-pooled/1.0.0',
+        pool: {
+          send: async () => {
+            poolCalls += 1;
+            return new Uint8Array([0xFF]);
+          },
+        },
+      });
+
+      await expect(
+        router.send(
+          FAKE_PEER_ID,
+          protocolId,
+          new Uint8Array([1, 2, 3]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        ),
+      ).rejects.toThrow(/timeout/);
+
+      expect(poolCalls).toBe(0);
+      expect(dialCalls).toBe(1);
+      expect(resolveCalls).toBe(1);
+    });
+
+    it('rejects multi-path fan-out for a single-use payload before any wire attempt', async () => {
       let resolveCalls = 0;
       let dialCalls = 0;
       const router = makeRouter({
         onResolve: () => { resolveCalls += 1; },
         dialBehavior: async () => {
           dialCalls += 1;
-          throw new Error('The operation was aborted due to timeout');
+          return makeStubStream(new Uint8Array([0xFF])) as any;
         },
       });
 
@@ -945,12 +982,12 @@ describe('ProtocolRouter', () => {
           FAKE_PEER_ID,
           '/dkg/test/single-use/1.0.0',
           new Uint8Array([1, 2, 3]),
-          { timeoutMs: 5_000, maxAttempts: 1 },
+          { payloadReuse: 'single-use', parallelPaths: 2 },
         ),
-      ).rejects.toThrow(/timeout/);
+      ).rejects.toThrow(/single-use payloads cannot use parallelPaths > 1/);
 
-      expect(dialCalls).toBe(1);
-      expect(resolveCalls).toBe(1);
+      expect(dialCalls).toBe(0);
+      expect(resolveCalls).toBe(0);
     });
 
     it('stops retrying once a resolver-re-prime followed by dial succeeds', async () => {

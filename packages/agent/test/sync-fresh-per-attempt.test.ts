@@ -1057,56 +1057,6 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     }
   });
 
-  it('caps the lower transport at one attempt for every signed envelope', async () => {
-    const observedTransportAttemptCaps: Array<number | undefined> = [];
-    let sendAttempts = 0;
-
-    await runFetchWithFakeTimers(
-      fetchSyncPages({
-        ctx: makeCtx(),
-        remotePeerId: REMOTE_PEER_ID,
-        contextGraphId: CG_ID,
-        includeSharedMemory: true,
-        phase: 'meta',
-        graphUri: GRAPH_URI,
-        deadline: Date.now() + 60_000,
-        syncPageTimeoutMs: 5_000,
-        syncRouterAttempts: 3,
-        syncPageRetryAttempts: 3,
-        syncPageSize: 100,
-        syncDeniedResponse: '#DENIED',
-        debugSyncProgress: false,
-        protocolSync: PROTOCOL_ID,
-        checkpointStore: {
-          get: () => undefined,
-          set: () => {},
-          delete: () => {},
-        },
-        buildSyncRequest: async () => new TextEncoder().encode(`request-${sendAttempts + 1}`),
-        parseAndFilter: singleQuadParser,
-        send: async (
-          _peerId,
-          _protocolId,
-          _data,
-          _timeoutMs,
-          _messageId,
-          _signal,
-          maxTransportAttempts,
-        ) => {
-          observedTransportAttemptCaps.push(maxTransportAttempts);
-          sendAttempts++;
-          if (sendAttempts < 3) throw new Error(`slow response ${sendAttempts}`);
-          return new Uint8Array();
-        },
-        logWarn: noopLog,
-        logInfo: noopLog,
-        logDebug: noopLog,
-      }),
-    );
-
-    expect(observedTransportAttemptCaps).toEqual([1, 1, 1]);
-  });
-
   /**
    * Codex review #569 follow-up #8: stable messageId across retries
    * is unsafe because the substrate's 24h outbox-retry window can
