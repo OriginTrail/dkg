@@ -1,10 +1,16 @@
+import { execFileSync, spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import {
   createForegroundSignalRelay,
+  FOREGROUND_RELAY_KILL_GRACE_MS,
   FOREGROUND_TERMINATING_SIGNALS,
   type ForegroundSignalRelayIo,
   type RelayWorker,
 } from '../src/daemon/foreground-signal-relay.js';
+import {
+  SHUTDOWN_HARD_TIMEOUT_MS,
+  SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
+} from '../src/daemon/shutdown.js';
 
 function esrch(): NodeJS.ErrnoException {
   return Object.assign(new Error('missing process'), { code: 'ESRCH' });
@@ -173,20 +179,31 @@ describe('foreground signal relay', () => {
     expect(h.childKills).toEqual(['SIGINT']);
   });
 
-  it('stops the worker before suspending itself, then resumes both', () => {
+  it('stops the worker with SIGSTOP before suspending itself, then resumes both', () => {
     const h = harness();
     const relay = createForegroundSignalRelay({ onTerminate: () => {}, io: h.io });
     relay.attach(h.worker(4242));
 
     h.raise('SIGTSTP');
+    // Must be SIGSTOP, not SIGTSTP: the worker's group is orphaned, and POSIX
+    // discards SIGTSTP sent to a default-disposition process in such a group.
     // Ctrl-Z must halt the job as a unit: worker first, supervisor second.
-    expect(h.kills).toEqual(['-4242:SIGTSTP']);
+    expect(h.kills).toEqual(['-4242:SIGSTOP']);
     expect(h.suspended).toBe(1);
     // A stop is not a shutdown — `fg` must be able to resume the node.
     expect(relay.signalled()).toBeNull();
 
     h.raise('SIGCONT');
-    expect(h.kills).toEqual(['-4242:SIGTSTP', '-4242:SIGCONT']);
+    expect(h.kills).toEqual(['-4242:SIGSTOP', '-4242:SIGCONT']);
+  });
+
+  it('waits out the worker\'s own shutdown budget before force-killing it', () => {
+    // The escalation is a backstop for a worker that CANNOT exit, so it must sit
+    // outside the worker's graceful-shutdown contract. Escalating sooner would
+    // SIGKILL a healthy node mid-flush on every slow Ctrl-C.
+    expect(FOREGROUND_RELAY_KILL_GRACE_MS).toBeGreaterThan(
+      SHUTDOWN_HARD_TIMEOUT_MS + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
+    );
   });
 
   it('keeps the first terminating signal as the shutdown cause', () => {
@@ -217,6 +234,62 @@ describe('foreground signal relay', () => {
     h.raise('SIGTERM');
     expect(h.childKills).toEqual(['SIGTERM']);
   });
+
+  // The mocked-kill tests above can only prove which signal was ISSUED. Whether
+  // the kernel DELIVERS it to a setsid'd worker is the part that actually broke:
+  // an orphaned process group silently discards SIGTSTP. This exercises a real
+  // detached child so a stop signal that no-ops cannot pass as a green test.
+  it.runIf(process.platform !== 'win32')(
+    'really suspends a setsid worker group, and resumes it',
+    async () => {
+      const child = spawn(
+        process.execPath,
+        // Mirrors the daemon worker: handlers for SIGINT/SIGTERM only, so its
+        // stop-signal disposition stays SIG_DFL.
+        ['-e', "process.on('SIGINT',()=>{});process.on('SIGTERM',()=>{});setInterval(()=>{},1000);"],
+        { detached: true, stdio: 'ignore' },
+      );
+      const pid = child.pid!;
+      const stateOf = (): string => {
+        try {
+          return execFileSync('ps', ['-o', 'stat=', '-p', String(pid)]).toString().trim();
+        } catch {
+          return 'GONE';
+        }
+      };
+      const settle = () => new Promise<void>(done => setTimeout(done, 300));
+
+      // Real kill(), real signal delivery — only the self-suspend is stubbed,
+      // since SIGSTOPping the test runner would deadlock it.
+      const relay = createForegroundSignalRelay({
+        onTerminate: () => {},
+        io: { suspendSelf: () => {} },
+      });
+      try {
+        await settle();
+        expect(stateOf()).not.toMatch(/^T/);
+
+        relay.attach({ pid, kill: (signal: NodeJS.Signals) => child.kill(signal) });
+
+        // Ctrl-Z: the worker group must actually stop, not merely be signalled.
+        process.emit('SIGTSTP' as never);
+        await settle();
+        expect(stateOf()).toMatch(/^T/);
+
+        // `fg`: both halves come back.
+        process.emit('SIGCONT' as never);
+        await settle();
+        expect(stateOf()).not.toMatch(/^T/);
+      } finally {
+        relay.dispose();
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+    },
+  );
 
   it('removes its process listeners on dispose', () => {
     const h = harness();
