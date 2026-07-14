@@ -158,7 +158,11 @@ function createIpcWatchdogLaunchStrategy(
   input: Parameters<typeof createOxigraphLaunchStrategy>[0],
 ) {
   const watchdogPath = fileURLToPath(new URL(
-    '../dist/daemon/oxigraph-parent-watchdog.js',
+    '../src/daemon/oxigraph-parent-watchdog.ts',
+    import.meta.url,
+  ));
+  const tsxLoader = fileURLToPath(new URL(
+    '../../../node_modules/tsx/dist/loader.mjs',
     import.meta.url,
   ));
   const strategy = createOxigraphLaunchStrategy({
@@ -167,14 +171,20 @@ function createIpcWatchdogLaunchStrategy(
     watchdogPath,
     nodeExecutable: process.execPath,
   });
-  if (process.platform !== 'win32') return strategy;
-
-  // Windows cannot execute the shebang stand-in directly. Keep the production
-  // watchdog strategy and only adapt its supervised command to `node standin`.
   return {
     ...strategy,
-    nextSpawnSpec: (_binaryPath: string, binaryArgs: string[]) =>
-      strategy.nextSpawnSpec(process.execPath, [standin, ...binaryArgs]),
+    nextSpawnSpec: (binaryPath: string, binaryArgs: string[]) => {
+      // Exercise the current TypeScript source so a clean unit run cannot use
+      // a missing or stale dist artifact. Windows also needs Node to execute
+      // the shebang-based stand-in used by this portable lifecycle fixture.
+      const spec = process.platform === 'win32'
+        ? strategy.nextSpawnSpec(process.execPath, [standin, ...binaryArgs])
+        : strategy.nextSpawnSpec(binaryPath, binaryArgs);
+      return {
+        ...spec,
+        args: ['--import', tsxLoader, ...spec.args],
+      };
+    },
   };
 }
 
@@ -265,6 +275,7 @@ describe('buildOxigraphSpawnSpec', () => {
       nodeExecutable: '/opt/node',
       watchdogPath: '/opt/oxigraph-watchdog.js',
       parentIdentity: '42:1234',
+      stopGraceMs: 750,
     });
     strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
     strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
@@ -277,6 +288,7 @@ describe('buildOxigraphSpawnSpec', () => {
     expect(spec.environment).toEqual({
       XDG_RUNTIME_DIR: '/run/user/1000',
       DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      DKG_OXIGRAPH_WATCHDOG_STOP_GRACE_MS: '750',
     });
     expect(spec.args.slice(0, 8)).toEqual([
       '--user', '--scope', '--collect', '--quiet',
@@ -289,6 +301,7 @@ describe('buildOxigraphSpawnSpec', () => {
       '/opt/node', '/opt/oxigraph-watchdog.js', 'process-identity', '42', '42:1234',
       '/opt/oxigraph', 'serve', '--bind', '127.0.0.1:7878',
     ]);
+    expect(strategy.shutdownTimeoutMs(750)).toBe(1_000);
   });
 
   it('fails closed when finite scope limits cannot be enforced', () => {

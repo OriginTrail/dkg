@@ -19,6 +19,7 @@ function policyIo(
     reapWorkerProcessGroup: async () => emptyGroup,
     waitForTcpPortRelease: async () => true,
     warn: () => {},
+    now: Date.now,
     ...overrides,
   };
 }
@@ -47,6 +48,33 @@ describe('daemon worker cleanup policy', () => {
       }),
     )).resolves.toBe(true);
     expect(waitForTcpPortRelease).toHaveBeenCalledWith('127.0.0.1', 8787);
+  });
+
+  it('logs generation, exit diagnostics, duration, and escalation', async () => {
+    const warn = vi.fn();
+    let clock = 100;
+    await expect(cleanupDaemonWorker(
+      42,
+      { code: null, signal: 'SIGKILL' },
+      policyIo({
+        reapWorkerProcessGroup: async () => {
+          clock = 112;
+          return {
+            ...emptyGroup,
+            termSent: true,
+            killSent: true,
+          };
+        },
+        warn,
+        now: () => clock,
+      }),
+      { label: 'foreground worker', generation: 3 },
+    )).resolves.toBe(true);
+    expect(warn).toHaveBeenLastCalledWith(
+      '[supervisor] foreground worker cleanup completed ' +
+        '(generation=3, pid=42, code=null, signal=SIGKILL, durationMs=12, ' +
+        'sigterm=true, sigkill=true, groupEmpty=true).',
+    );
   });
 
   it('fails closed while worker process-group survivors remain', async () => {

@@ -264,14 +264,22 @@ async function main(): Promise<void> {
     stopGraceMs,
   });
   let forwardedSignal: NodeJS.Signals | null = null;
-  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
-    process.once(signal, () => {
+  const forwardedSignals = ['SIGTERM', 'SIGINT', 'SIGHUP'] as const;
+  const signalHandlers = forwardedSignals.map((signal) => {
+    const handler = () => {
       forwardedSignal = signal;
       handle.stop(signal);
-    });
-  }
+    };
+    process.on(signal, handler);
+    return [signal, handler] as const;
+  });
 
-  const result = await handle.result;
+  let result: OxigraphParentWatchdogResult;
+  try {
+    result = await handle.result;
+  } finally {
+    for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+  }
   if (result.oomKilled) {
     process.stderr.write(`${OXIGRAPH_WATCHDOG_OOM_MARKER}\n`);
     process.exitCode = 200;
