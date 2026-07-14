@@ -4,9 +4,21 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-## [10.0.6] - 2026-07-10
+### Fixed
 
-Sync-, storage-, and admission-path hardening on top of 10.0.5, plus the StorageACK priority-lane follow-ups and a set of CLI/RPC fixes. Eliminates the perpetually-dirty graph-set-index full scan that was saturating managed Oxigraph cores, bounds sync-responder memory and coalesces duplicate sync fan-out, makes network admission probing back off and use canonical peer ids, and completes the StorageACK priority-lane hardening (ACK candidate selection, async promote-queue read serialization, and OT-RFC-49 host-mode ciphertext strip-by-curation). **No smart-contract changes — no deployment required** (no Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.5).
+- **PCA agents can register PCA-backed Context Graphs:** the agent, CLI/API, and MCP surfaces now match the deployed contract by allowing either the PCA owner or a wallet registered to that exact PCA to register a curated Context Graph. Eligible registrations consume a quota-backed deposit waiver instead of requiring a separate liquid-TRAC deposit; exact-account authorization and Context Graph NFT ownership alignment remain fail-closed.
+
+## [10.0.6] - 2026-07-13
+
+Mainnet-readiness and high-load hardening on top of 10.0.5. Adds the OT-RFC-59 changelog-backed verified delta-sync lane, eliminates several store and reconciliation full-scan paths, bounds sync, StorageACK, outbox, managed-Oxigraph, and auto-update resource usage, and hardens publish recovery across transient quorum, RPC-throttle, funding, and receipt-timeout failures. Also completes the StorageACK priority-lane follow-ups, makes RDF handling safe for control characters and non-ASCII backends, and preserves the `oxigraph-worker` backend after its proposed retirement was reverted. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.5).
+
+### Added
+
+- **OT-RFC-59 changelog-backed verified delta sync** (#1601, #1602, #1603, #1604, #1605, #1608): storage now records an era-scoped write changelog, exposes reader capability and restore-safety guards, and serves verified delta pages over a dedicated sync protocol lane. The responder handler and enable path fall back safely when peers or stores do not support the new lane.
+- **Staggered automatic updates** (#1600): per-node rollout jitter spreads update restarts across the fleet instead of concentrating them at the start of an update window.
+- **RPC success-side attribution** (#1607): chain reads and transactions log the endpoint that served them, complementing the existing failover and exhaustion telemetry.
+- **Managed-Oxigraph cgroup diagnostics** (#1598): daemon logs distinguish an OOM kill from an ordinary child-process crash when the host exposes cgroup counters.
+- **Shared RDF utility package** (#1617, #1662): `@origintrail-official/dkg-rdf-utils` centralizes RDF literal/binding escaping used by core, MCP, and storage. It joins the public single-version npm release set at 10.0.6.
 
 ### Fixed
 
@@ -20,11 +32,29 @@ Sync-, storage-, and admission-path hardening on top of 10.0.5, plus the Storage
 - **Configured API host honored for status** (#1570): the status path respects the configured API host instead of assuming a default bind address.
 - **Managed Oxigraph timeout options honored** (#1552): managed-Oxigraph query timeout options are applied as configured.
 - **Git tag signature verification honored in polling** (#1556): the Git auto-update polling path verifies tag signatures rather than trusting the tag ref alone.
+- **Finalization and graph enumeration reads bounded** (#1589, #1597): finalization reads only the Knowledge Asset's graph slice, and named-graph enumeration uses the graph index instead of scanning the full store.
+- **Sync high-load failure modes bounded** (#1565, #1595): global sync backpressure is bounded and the responder no longer overflows the stack on large graphs; byte-budget fallbacks and telemetry are covered by dedicated regression tests (#1593, #1594).
+- **Public-CG subscribe and SWM view scaling fixed** (#1599): public subscriptions no longer fail with a 403, and SWM view queries avoid the scale-dependent blow-up tracked in #1596.
+- **Reconciliation and network hot paths memoized** (#1612, #1613, #1614, #1615): SWM snapshot roots, negative chain-reconcile scans, and resolved contract addresses are cached with mutation-safe invalidation, while relay-watchdog stream-aware deferral caps forced-redial thrash.
+- **Cross-backend RDF safety hardened** (#1616, #1617, #1662): Blazegraph writes and queries preserve non-ASCII data, RDF literals escape all C0 controls plus DEL, and storage binding serialization uses the same canonical escaping rules.
+- **Transient publish recovery completed** (#1618, #1620): publishers retry transient ACK-quorum failures and skip the doomed post-confirm `chain.verify` step on V10 sync publishes.
+- **Read-both graph unions de-duplicated** (#1619): query unions apply `DISTINCT` so dual-homed triples are returned once.
+- **Managed/external store pressure bounded** (#1621, #1654, #1655): managed Oxigraph runs in a finite memory scope, external-store work has an admission bound, and graph-index revalidation backs off instead of repeatedly competing with foreground traffic.
+- **Retry ownership and outbox draining corrected** (#1622, #1623, #1624, #1649, #1658): outbox work stays scheduled and bounded, custom outbox stores are preserved, StorageACK retries remain collector-owned, and request-owned ACK routing recovers without duplicate retry owners.
+- **Async-publish lifecycle honesty restored** (#1625, #1647): unclaimable jobs are rejected and publisher readiness remains accurate after startup recovery.
+- **Global updates made crash-safe** (#1630, #1648, #1660): torn global updates are detected and rolled back, with the Edge daemon restart entry point verified through one centralized policy.
+- **Named-KA shared-memory isolation closed** (#1631, #1639): named Knowledge Assets stay within their intended shared-memory scope across lifecycle and review-edge cases.
+- **ACK catalog hot paths reduced** (#1653, #1656): cached curation avoids repeated classification work and catalog replacement no longer performs count scans.
+- **Chain transaction failure handling completed** (#1627, #1628, #1629, #1657): unfundable publishes fail before ACK collection, full-pool throttling retries across the endpoint pool, and receipt deadlines are configurable and enforced consistently.
+- **Random Sampling admission aligned with sharding** (#1640): challenge participation is gated on the node's sharding admission state.
+- **Status quad counting made non-blocking** (#1645): status reporting no longer blocks operational endpoints on a full store count.
 
 ### Changed
 
 - **RPC-failover read-intent and stickiness ergonomics** (#1560, follow-up to #1544/#1548): a behavior-preserving refactor of the `packages/chain` transport — tip reads go through a named `readTip` wrapper, and `EndpointStickiness.attempts(canonical, intent)` bundles the per-loop order/record-success/record-failure triple so `(canonical, intent)` cannot drift across the four failover loops. No production-behavior change.
 - **Admission policy follow-ups** (#1582): bounded admission-probe retry history and active suppression are extracted behind `NetworkAdmissionService`, the mode branch is replaced with a private automatic-only suppression gate (shared in-flight coalescing preserved), and the `/api/connect` status/error-envelope policy is extracted into a pure route-local classifier. Behavior-preserving refactor.
+- **Runtime updater builds constrained to node packages** (#1661, #1663): update builds exclude the EVM module and apply an explicit UI memory bound, keeping runtime updates within production-node resource limits.
+- **`oxigraph-worker` remains supported** (#1539, #1637): its proposed retirement was reverted before release, so existing worker-backed nodes retain their configured backend and upgrade path.
 
 ### Deployment
 

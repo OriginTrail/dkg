@@ -292,6 +292,24 @@ describe('resolveWorkspaceAgentRecipients', () => {
     }
   });
 
+  it('ignores a malformed candidate when a verified active key also exists', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const valid = await insertAgentEncryptionKey(store, wallet);
+    await store.insert([{
+      subject: agentUri(wallet.address),
+      predicate: DKG_PUBLIC_ENCRYPTION_KEY,
+      object: '"not-a-valid-x25519-key"',
+      graph: 'did:dkg:attacker-controlled-copy',
+    }]);
+
+    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
+
+    expect(resolution.recipients).toHaveLength(1);
+    expect(resolution.recipients[0]?.recipientKeyId).toBe(valid.keyId);
+  });
+
   it('filters out keys with a verified wallet-signed revocation', async () => {
     const store = new OxigraphStore();
     const wallet = ethers.Wallet.createRandom();

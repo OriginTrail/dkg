@@ -12,6 +12,7 @@ interface SyncProgressSummary {
   failedPhases?: number;
   deniedPhases?: number;
   backoffWorthyFailures?: number;
+  deferredBackpressure?: number;
 }
 
 type SyncFromPeerResult = number | SyncProgressSummary;
@@ -58,7 +59,7 @@ interface SyncOnConnectContext {
   onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
 }
 
-export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing';
+export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing' | 'deferred-backpressure';
 
 export class SyncOnConnectPostSyncError extends Error {
   readonly originalError: unknown;
@@ -104,6 +105,11 @@ function hadDeniedPhase(result: SyncFromPeerResult): boolean {
 function hadFailedPhase(result: SyncFromPeerResult): boolean {
   if (typeof result === 'number') return false;
   return (result.failedPhases ?? 0) > 0;
+}
+
+function hadBackpressureDeferral(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return false;
+  return (result.deferredBackpressure ?? 0) > 0;
 }
 
 function cleanDetailedSync(result: SyncFromPeerResult): boolean {
@@ -158,6 +164,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let sawDeniedPhase = false;
   let sawFailedPhase = false;
   let sawBackoffWorthyFailure = false;
+  let sawBackpressureDeferral = false;
   let sawDurableMetadataOnlyDetailedSync = false;
   let cleanDurableDetailedRound = false;
   const recordSyncAccounting = (result: SyncFromPeerResult, phase: 'durable' | 'shared'): void => {
@@ -165,6 +172,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     sawDeniedPhase = sawDeniedPhase || hadDeniedPhase(result);
     sawFailedPhase = sawFailedPhase || hadFailedPhase(result);
     sawBackoffWorthyFailure = sawBackoffWorthyFailure || hadBackoffWorthyFailure(result);
+    sawBackpressureDeferral = sawBackpressureDeferral || hadBackpressureDeferral(result);
     if (phase === 'durable') {
       sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
       cleanDurableDetailedRound = cleanDurableDetailedRound || cleanDetailedSync(result);
@@ -172,6 +180,12 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   };
   const finishSyncAccounting = (): SyncOnConnectOutcome => {
     const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
+    if (sawBackpressureDeferral) {
+      if (madeProgress) {
+        context.onPeerSynced?.(remotePeer, { fresh: false, progress: true });
+      }
+      return 'deferred-backpressure';
+    }
     const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
     if (clearsPeerBackoff) {
       context.onPeerSynced?.(remotePeer, {
@@ -220,6 +234,10 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const synced = await syncFromPeer(remotePeer);
     recordSyncAccounting(synced, 'durable');
     logInfo(ctx, `Synced ${insertedTriples(synced)} data triples from peer ${shortPeer}`);
+    if (hadBackpressureDeferral(synced)) {
+      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after local admission deferral`);
+      return finishSyncAccounting();
+    }
     if (hadBackoffWorthyFailure(synced)) {
       logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after durable sync hit backoff-worthy pressure`);
       return finishSyncAccounting();
@@ -241,6 +259,10 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
       recordSyncAccounting(discoverSynced, 'durable');
       logInfo(ctx, `Synced ${insertedTriples(discoverSynced)} durable triples for newly discovered CG(s) from ${shortPeer}`);
+      if (hadBackpressureDeferral(discoverSynced)) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG admission deferral`);
+        return finishSyncAccounting();
+      }
       if (hadBackoffWorthyFailure(discoverSynced)) {
         logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG durable sync hit backoff-worthy pressure`);
         return finishSyncAccounting();
@@ -256,6 +278,9 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
       recordSyncAccounting(wsSynced, 'shared');
       logInfo(ctx, `Synced ${insertedTriples(wsSynced)} shared memory triples from peer ${shortPeer}`);
+      if (hadBackpressureDeferral(wsSynced)) {
+        logInfo(ctx, `Shared-memory sync from peer ${shortPeer} deferred by local admission pressure`);
+      }
     } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }

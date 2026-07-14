@@ -828,8 +828,8 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
-   * Mock owner-lookup for the daemon's curated-CG registration
-   * preflight (`local curator == ownerOf(pcaAccountId)`).
+   * Mock owner lookup for the daemon's curated-CG registration coherence
+   * preflight. Caller authorization (owner or exact-PCA agent) is separate.
    */
   async getPublishingConvictionAccountOwner(accountId: bigint): Promise<string> {
     const acct = this.convictionAccounts.get(accountId);

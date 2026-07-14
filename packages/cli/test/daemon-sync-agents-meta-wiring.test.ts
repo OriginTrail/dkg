@@ -161,4 +161,19 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     expect(createArg.syncGlobalLimit).toBe(1);
     expect(createArg.syncGlobalQueueLimit).toBe(0);
   });
+
+  it('passes snapshot limits and Context Graph priorities through unchanged', async () => {
+    const syncResponderSnapshotLimits = {
+      global: { rows: 500, bytesEstimate: 600 },
+      local: { rows: 100, bytesEstimate: 200 },
+    };
+    const syncContextGraphPriorities = { urgent: 50, bulk: -10 };
+    const createArg = await captureCreateArg({
+      syncResponderSnapshotLimits,
+      syncContextGraphPriorities,
+    });
+
+    expect(createArg.syncResponderSnapshotLimits).toEqual(syncResponderSnapshotLimits);
+    expect(createArg.syncContextGraphPriorities).toEqual(syncContextGraphPriorities);
+  });
 });

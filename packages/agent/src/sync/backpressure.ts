@@ -1,10 +1,17 @@
 import { getMetrics, type OperationContext } from '@origintrail-official/dkg-core';
+import type { SyncPriorityClass, SyncSchedulerLane } from './policy.js';
+import {
+  PriorityAdmissionQueue,
+  type PriorityAdmission,
+} from './priority-admission-queue.js';
 
 export interface SyncBackpressureSnapshot {
   inflight: number;
   queued: number;
   limit: number | null;
   queueLimit: number | null;
+  queuedByPriorityClass: Record<SyncPriorityClass, number>;
+  oldestQueuedAgeMs: number;
 }
 
 export interface SyncGlobalBackpressureConfig {
@@ -20,31 +27,42 @@ export type SyncGlobalBackpressurePolicy = Readonly<(
   | { limit: undefined; queueLimit: undefined }
 ) & { [syncGlobalBackpressurePolicyBrand]: true }>;
 
-type Release = () => void;
-
-interface QueueEntry {
+interface GlobalQueuePayload {
   limit: number;
-  resolve: (release: Release) => void;
+  label: string;
+  contextGraphId?: string;
 }
 
-interface SyncBackpressureAdmission {
-  status: 'running' | 'queued';
-  queuedBefore: number;
-  release: Promise<Release>;
-}
-
-const queue: QueueEntry[] = [];
 let inflight = 0;
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
+const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
+  canRun: (entry) => inflight < entry.payload.limit,
+  onStart: (entry) => {
+    inflight += 1;
+    lastLimit = entry.payload.limit;
+    getMetrics().syncGlobalInflight.record(inflight);
+    return () => {
+      inflight = Math.max(0, inflight - 1);
+      getMetrics().syncGlobalInflight.record(inflight);
+    };
+  },
+  onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
+});
 
 export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
 export const DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER = 2;
+export const DEFAULT_SYNC_PRIORITY_AGING_MS = 30_000;
+
+export type SyncBackpressureBusyReason = 'queue_full' | 'displaced';
 
 export class SyncBackpressureBusyError extends Error {
-  constructor(message: string) {
+  readonly reason: SyncBackpressureBusyReason;
+
+  constructor(message: string, reason: SyncBackpressureBusyReason = 'queue_full') {
     super(message);
     this.name = 'SyncBackpressureBusyError';
+    this.reason = reason;
   }
 }
 
@@ -62,66 +80,48 @@ export function getSyncBackpressureBusyError(
   return undefined;
 }
 
-function drain(): void {
-  for (;;) {
-    const next = queue[0];
-    if (!next || inflight >= next.limit) return;
-    queue.shift();
-    getMetrics().syncBackgroundQueueDepth.record(queue.length);
-    inflight += 1;
-    getMetrics().syncGlobalInflight.record(inflight);
-    lastLimit = next.limit;
-    next.resolve(releaseOnce);
-  }
-}
-
-function releaseOnce(): void {
-  inflight = Math.max(0, inflight - 1);
-  getMetrics().syncGlobalInflight.record(inflight);
-  drain();
-}
-
 function acquire(
   policy: SyncGlobalBackpressurePolicy,
-  label: string,
-): SyncBackpressureAdmission {
+  options: {
+    label: string;
+    contextGraphId?: string;
+    lane: SyncSchedulerLane;
+    priority: number;
+    priorityClass: SyncPriorityClass;
+    signal?: AbortSignal;
+    agingThresholdMs: number;
+    now: () => number;
+  },
+): PriorityAdmission<GlobalQueuePayload> {
   const { limit } = policy;
-  const queuedBefore = queue.length;
-  if (limit === undefined) {
-    lastLimit = null;
-    lastQueueLimit = null;
-    return {
-      status: 'running',
-      queuedBefore,
-      release: Promise.resolve(() => {}),
-    };
-  }
-
+  if (limit === undefined) throw new Error('disabled sync backpressure policy cannot acquire');
   const { queueLimit } = policy;
   lastLimit = limit;
-  lastQueueLimit = queueLimit ?? null;
-  if (inflight < limit && queuedBefore === 0) {
-    inflight += 1;
-    getMetrics().syncGlobalInflight.record(inflight);
-    return {
-      status: 'running',
-      queuedBefore,
-      release: Promise.resolve(releaseOnce),
-    };
-  }
-  if (queuedBefore >= queueLimit) {
-    throw new SyncBackpressureBusyError(
-      `Sync backpressure rejected ${label} `
+  lastQueueLimit = queueLimit;
+  const queuedBefore = queue.length;
+  return queue.acquire({
+    payload: {
+      limit,
+      label: options.label,
+      contextGraphId: options.contextGraphId,
+    },
+    ownerKey: 'global',
+    lane: options.lane,
+    priority: options.priority,
+    priorityClass: options.priorityClass,
+    signal: options.signal,
+    agingThresholdMs: options.agingThresholdMs,
+    now: options.now,
+    queueLimit,
+    createBusyError: () => new SyncBackpressureBusyError(
+      `Sync backpressure rejected ${options.label} `
         + `(global inflight=${inflight}/${limit}, queued=${queuedBefore}/${queueLimit})`,
-    );
-  }
-
-  const release = new Promise<Release>((resolve) => {
-    queue.push({ limit, resolve });
-    getMetrics().syncBackgroundQueueDepth.record(queue.length);
-    drain();
+    ),
+    createDisplacedError: (victim) => new SyncBackpressureBusyError(
+        `Sync backpressure displaced ${victim.payload.contextGraphId ?? 'queued work'} for higher-priority ${options.label}`,
+        'displaced',
+      ),
   });
-  return { status: 'queued', queuedBefore, release };
 }
 
 export function parseBooleanEnv(name: string): boolean | undefined {
@@ -199,12 +199,21 @@ export function resolveSyncGlobalBackpressure(
 
 export function getSyncBackpressureSnapshot(
   policy?: SyncGlobalBackpressurePolicy,
+  now = Date.now(),
 ): SyncBackpressureSnapshot {
+  const queuedByPriorityClass: Record<SyncPriorityClass, number> = {
+    elevated: 0,
+    default: 0,
+    deprioritized: 0,
+  };
+  for (const entry of queue.entries()) queuedByPriorityClass[entry.priorityClass] += 1;
   return {
     inflight,
     queued: queue.length,
     limit: policy ? policy.limit ?? null : lastLimit,
     queueLimit: policy ? policy.queueLimit ?? null : lastQueueLimit,
+    queuedByPriorityClass,
+    oldestQueuedAgeMs: queue.oldestAgeMs(now),
   };
 }
 
@@ -213,14 +222,44 @@ export async function withGlobalSyncBackpressure<T>(
     policy: SyncGlobalBackpressurePolicy;
     ctx: OperationContext;
     label: string;
+    contextGraphId?: string;
+    lane?: SyncSchedulerLane;
+    priority?: number;
+    priorityClass?: SyncPriorityClass;
+    signal?: AbortSignal;
+    /** Deterministic scheduler injection; not operator configuration. */
+    agingThresholdMs?: number;
+    now?: () => number;
     logInfo?: (ctx: OperationContext, message: string) => void;
   },
   work: () => Promise<T>,
 ): Promise<T> {
   const { limit, queueLimit } = options.policy;
-  let admission: SyncBackpressureAdmission;
+  if (limit === undefined) {
+    lastLimit = null;
+    lastQueueLimit = null;
+    if (options.signal?.aborted) {
+      throw options.signal.reason instanceof Error
+        ? options.signal.reason
+        : new Error(String(options.signal.reason ?? 'Sync admission aborted'));
+    }
+    return work();
+  }
+  let admission: PriorityAdmission<GlobalQueuePayload>;
+  const lane = options.lane ?? 'durable';
+  const priority = options.priority ?? 0;
+  const priorityClass = options.priorityClass ?? 'default';
   try {
-    admission = acquire(options.policy, options.label);
+    admission = acquire(options.policy, {
+      label: options.label,
+      contextGraphId: options.contextGraphId,
+      lane,
+      priority,
+      priorityClass,
+      signal: options.signal,
+      agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
+      now: options.now ?? Date.now,
+    });
   } catch (error) {
     if (error instanceof SyncBackpressureBusyError) {
       options.logInfo?.(options.ctx, error.message);
@@ -228,7 +267,7 @@ export async function withGlobalSyncBackpressure<T>(
     throw error;
   }
 
-  if (limit !== undefined && admission.status === 'queued') {
+  if (admission.status === 'queued') {
     options.logInfo?.(
       options.ctx,
       `Sync backpressure queued ${options.label} `
@@ -237,13 +276,11 @@ export async function withGlobalSyncBackpressure<T>(
   }
   const release = await admission.release;
   try {
-    if (limit !== undefined) {
-      options.logInfo?.(
-        options.ctx,
-        `Sync backpressure running ${options.label} `
-          + `(global inflight=${inflight}/${limit}, queued=${queue.length}/${queueLimit})`,
-      );
-    }
+    options.logInfo?.(
+      options.ctx,
+      `Sync backpressure running ${options.label} `
+        + `(global inflight=${inflight}/${limit}, queued=${queue.length}/${queueLimit})`,
+    );
     return await work();
   } finally {
     release();

@@ -361,10 +361,14 @@ deploy_contracts() {
 
 BLAZEGRAPH_AVAILABLE=false
 
+read_blazegraph_metadata() {
+  node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" \
+    "$REPO_ROOT/blazegraph-image.json"
+}
+
 start_blazegraph() {
-  # Use an EXTERNAL Blazegraph already serving on the port (e.g. a native arm64 JAR
-  # started out-of-band because the amd64 Docker image only runs under glacial qemu
-  # on Apple silicon). Skips Docker entirely; namespaces are the operator's job here.
+  # Use an EXTERNAL Blazegraph already serving on the port. Skips Docker entirely;
+  # namespaces are the operator's job here.
   if curl -sf --max-time 4 "http://127.0.0.1:${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX}/status" >/dev/null 2>&1; then
     log "Blazegraph already serving on :${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX} (external) — using it (skip Docker)"
     BLAZEGRAPH_AVAILABLE=true
@@ -384,10 +388,17 @@ start_blazegraph() {
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
   fi
 
+  local blazegraph_metadata blazegraph_image blazegraph_container_port
+  if ! blazegraph_metadata="$(read_blazegraph_metadata)"; then
+    log "ERROR: Could not read the pinned Blazegraph image metadata"
+    return 1
+  fi
+  IFS=$'\t' read -r blazegraph_image blazegraph_container_port <<< "$blazegraph_metadata"
+
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
-    -p "$BLAZEGRAPH_PORT:8080" \
-    lyrasis/blazegraph:2.1.5 > /dev/null 2>&1; then
+    -p "127.0.0.1:$BLAZEGRAPH_PORT:$blazegraph_container_port" \
+    "$blazegraph_image" > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
     return 0
   fi
@@ -614,6 +625,7 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
+  "localBootstrapContextGraphs": ["devnet-test", "devnet-isolation"],
   ${swm_sync_block}
   "publisher": {
     "enabled": true,
@@ -2105,6 +2117,10 @@ cmd_stop_node() {
   stop_devnet_node_processes "$node_num"
   log "Node $node_num stopped."
 }
+
+if [ "${DEVNET_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "${1:-}" in
   start)            cmd_start ;;

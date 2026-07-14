@@ -400,8 +400,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       try {
         await agent.start();
         (agent as any).subscribedContextGraphs.set('public-cg', {
-          name: 'public-cg', subscribed: true, synced: true,
+          name: 'public-cg', subscribed: true, synced: true, metaSynced: true,
         });
+        (agent as any).hasConfirmedMetaState = async () => true;
         const bytes = await (agent as any).buildSyncRequest('public-cg', 5, 100, false, 'peer-remote', 'meta');
         const text = new TextDecoder().decode(bytes);
         expect(text).toBe('public-cg|5|100|meta');
@@ -427,7 +428,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           name: 'discovered-public-cg',
           subscribed: false,
           synced: true,
+          metaSynced: true,
         });
+        (agent as any).hasConfirmedMetaState = async () => true;
 
         const bytes = await (agent as any).buildSyncRequest('discovered-public-cg', 0, 50, false, 'peer-remote');
         const text = new TextDecoder().decode(bytes);

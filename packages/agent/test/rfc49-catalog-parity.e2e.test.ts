@@ -53,6 +53,7 @@ import {
   autoPartition,
   computeFlatKCRootV10,
   computePrivateRootV10,
+  TripleStoreAsyncLiftPublisher,
 } from '../../publisher/src/index.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { ethers, Wallet } from 'ethers';
@@ -249,6 +250,66 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
       'the rebuilt root must not change when a post-publish stamp lands',
     ).toBe(onChainRootHex);
     expect(rebuiltAfter.leafCount).toBe(onChainLeafCount);
+  }, 180_000);
+
+  it('curated named-KA publish-async reaches the same remote catalog ACK path as sync (#1670)', async () => {
+    const CG = 'rfc49-parity-private-async';
+    await publisher.createContextGraph({
+      id: CG,
+      name: 'RFC49 Parity Private Async',
+      accessPolicy: 1,
+      callerAgentAddress: curator,
+    });
+    await publisher.registerContextGraph(CG, { callerAgentAddress: curator });
+
+    const name = 'shipment-async';
+    const root = 'urn:acme:shipment/SH-ASYNC';
+    await publisher.assertion.create(CG, name);
+    await publisher.assertion.write(CG, name, [
+      { subject: root, predicate: 'urn:acme:product', object: '"P-ASYNC"' },
+    ]);
+    await publisher.assertion.finalize(CG, name);
+    const promoted = await publisher.assertion.promote(CG, name);
+    expect(promoted.publishReady).toBe(true);
+
+    const intent = await publisher.resolveFinalizedAssertionVmPublishIntent(CG, name);
+    let queuedResult: any;
+    const queue = new TripleStoreAsyncLiftPublisher((publisher as any).store, {
+      publicSnapshotStore: (publisher as any).publicSnapshotStore,
+      knowledgeAssetVmPublishPreflight: ({ request }) =>
+        publisher.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) => {
+        queuedResult = await publisher.publishQueuedKnowledgeAssetVmPublish(request, publishOptions);
+        return queuedResult;
+      },
+    });
+    const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
+    const processed = await queue.processNext('rfc49-async-wallet');
+
+    expect(processed?.jobId).toBe(jobId);
+    if (processed?.status !== 'finalized') {
+      throw new Error(`Expected curated async publish to finalize: ${JSON.stringify((processed as any)?.failure)}`);
+    }
+    expect(queuedResult?.status).toBe('confirmed');
+    expect(queuedResult?.onChainResult).toBeDefined();
+
+    const kaId = BigInt(queuedResult.kaId);
+    const chain: any = (publisher as any).chain;
+    const onChainRoot = ethers.hexlify(await chain.getCatalogRoot(kaId));
+    const onChainLeafCount = await chain.getCatalogLeafCount(kaId);
+    expect(onChainRoot).not.toBe(ethers.ZeroHash);
+    expect(onChainLeafCount).toBeGreaterThan(0);
+
+    // ackCore is not a member of this private CG. Its catalog copy therefore
+    // proves that the queued path shipped the public floor inline instead of
+    // asking the core for private SWM and receiving NO_DATA_IN_SWM.
+    const cgId: bigint = await chain.getKAContextGraphId(kaId);
+    const rebuilt = computeCatalogRoot(await extractCatalogLeavesFromStore({
+      store: (ackCore as any).store,
+      contextGraphId: cgId,
+    }));
+    expect(ethers.hexlify(rebuilt.root)).toBe(onChainRoot);
+    expect(rebuilt.leafCount).toBe(onChainLeafCount);
   }, 180_000);
 
   it('curated UPDATE re-commits the catalog (root non-zero, == publish baseline) and a remote core re-hosts it', async () => {

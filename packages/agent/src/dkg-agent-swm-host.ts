@@ -232,7 +232,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -2417,7 +2417,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     // Nudge a reconcile now so the first hosted publish lands promptly; the
     // periodic sweep is the safety net.
-    if (this.reconcileCoalescer) void this.reconcileCoalescer.trigger(localCgId);
+    if (this.vmReconcileScheduler) void this.vmReconcileScheduler.triggerLive(localCgId);
   }
 
   trackCoreHostRecording(this: DKGAgent, start: () => Promise<void>): void {
@@ -2523,11 +2523,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
   /**
    * Trigger a coalesced reconcile sweep for every subscribed CG that has an
    * on-chain id. Used by the periodic timer + the startup prime. Per-CG work is
-   * single-flighted by {@link reconcileCoalescer} so overlapping ticks (or a
+   * single-flighted by {@link vmReconcileScheduler} so overlapping ticks (or a
    * burst of live nudges) collapse into one sweep per CG.
    */
   async runVmReconcileSweep(this: DKGAgent): Promise<void> {
-    if (!this.vmReconcileEnabled() || !this.reconcileCoalescer) return;
+    if (!this.vmReconcileEnabled() || !this.vmReconcileScheduler) return;
     for (const [localCgId, sub] of this.subscribedContextGraphs) {
       // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
       // (subscribed BEFORE its first publish, so unbound) before the skip-gate
@@ -2537,7 +2537,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       // Member subscriptions AND Phase D core-hosted public CGs get swept.
       if ((!sub.subscribed && !sub.coreHosted) || !sub.onChainId) continue;
-      void this.reconcileCoalescer.trigger(localCgId);
+      void this.vmReconcileScheduler.triggerPeriodic(localCgId);
       // RS heal: relocate any legacy-stranded KC into the scoped graphs the
       // prover reads (the sweep is the safety net for a missed live nudge).
       void this.healStrandedScopedKCs(localCgId, sub);
@@ -2622,7 +2622,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const bound = await this.selfPrimeSubscriptionOnChainId(lcg, sub, targetOnChain);
           if (bound) {
             this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> bound + reconcile pre-subscribed "${lcg}"`);
-            if (this.reconcileCoalescer) void this.reconcileCoalescer.trigger(lcg);
+            if (this.vmReconcileScheduler) void this.vmReconcileScheduler.triggerLive(lcg);
             // RS heal immediately so a live KARegistered doesn't wait ~60s for
             // the periodic sweep to relocate the stranded KC.
             void this.healStrandedScopedKCs(lcg, sub);
@@ -2638,7 +2638,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Core hosts — a hosted Core fills its own gaps too.
     if (!sub?.subscribed && !sub?.coreHosted) return null;
     this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> reconcile "${localCgId}"`);
-    if (this.reconcileCoalescer) void this.reconcileCoalescer.trigger(localCgId);
+    if (this.vmReconcileScheduler) void this.vmReconcileScheduler.triggerLive(localCgId);
     // RS heal immediately on the already-bound path too.
     void this.healStrandedScopedKCs(localCgId, sub);
     return localCgId;
@@ -2690,37 +2690,30 @@ export class SwmHostModeMethods extends DKGAgentBase {
       log: (msg) => this.log.info(createOperationContext('system'), msg),
     };
 
-    try {
-      const result = await reconcileContextGraph(deps, cursor, localCgId, onChainCgId);
-      if (result.reconciled > 0 || result.pending > 0) {
-        this.emitReplication({
-          contextGraphId: localCgId,
-          onChainCgId: sub.onChainId,
-          action: 'sweep',
-          head: result.head,
-          toWatermark: result.watermark,
-          reconciled: result.reconciled,
-          pending: result.pending,
-        });
-      }
-      // Phase D — a host-only (non-member) reconcile that actually promoted KAs
-      // is a Core filling its own gap. Distinct telemetry so operators can see
-      // the Core-to-Core fill path working (success-criteria metric).
-      if (result.reconciled > 0 && sub.coreHosted && !sub.subscribed) {
-        this.emitReplication({
-          contextGraphId: localCgId,
-          onChainCgId: sub.onChainId,
-          action: 'core-fill',
-          head: result.head,
-          toWatermark: result.watermark,
-          reconciled: result.reconciled,
-        });
-      }
-    } catch (err) {
-      this.log.warn(
-        createOperationContext('system'),
-        `VM reconcile for "${localCgId}" failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    const result = await reconcileContextGraph(deps, cursor, localCgId, onChainCgId);
+    if (result.reconciled > 0 || result.pending > 0) {
+      this.emitReplication({
+        contextGraphId: localCgId,
+        onChainCgId: sub.onChainId,
+        action: 'sweep',
+        head: result.head,
+        toWatermark: result.watermark,
+        reconciled: result.reconciled,
+        pending: result.pending,
+      });
+    }
+    // Phase D — a host-only (non-member) reconcile that actually promoted KAs
+    // is a Core filling its own gap. Distinct telemetry so operators can see
+    // the Core-to-Core fill path working (success-criteria metric).
+    if (result.reconciled > 0 && sub.coreHosted && !sub.subscribed) {
+      this.emitReplication({
+        contextGraphId: localCgId,
+        onChainCgId: sub.onChainId,
+        action: 'core-fill',
+        head: result.head,
+        toWatermark: result.watermark,
+        reconciled: result.reconciled,
+      });
     }
   }
 

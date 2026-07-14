@@ -146,4 +146,16 @@ describe('node-ops set-ask receipt deadline wiring', () => {
       '0xhash',
     );
   });
+
+  it('loads the inferred Gnosis overlay for a legacy config before sending set-ask', async () => {
+    mocks.loadConfig.mockResolvedValue({ chain: { chainId: 'gnosis:100' } });
+    const program = new Command();
+    program.exitOverride();
+    registerNodeOpsCommands(program);
+
+    await program.parseAsync(['set-ask', '2'], { from: 'user' });
+
+    expect(mocks.loadNetworkConfig).toHaveBeenCalledWith('mainnet-gnosis');
+    expect(mocks.sendCliRawTransactionWithFailover).toHaveBeenCalledTimes(1);
+  });
 });

@@ -152,37 +152,106 @@ export async function reconcileContextGraph(
 }
 
 /**
- * Per-key single-flight coalescer: a burst of triggers for the same key runs
- * the action ONCE, with a single trailing re-run if new triggers arrive while
- * a run is in flight (so events that land mid-sweep aren't lost). Used so N
- * KACG events for one CG cause one sweep (+ at most one trailing sweep), not N.
+ * Per-CG, source-aware single-flight scheduling policy for VM reconciliation.
+ *
+ * Live chain events are latency nudges, while the periodic sweep is the
+ * reliability path. After a failed VM pass, live nudges for that CG are held so
+ * they cannot hot-loop the same expensive store/RPC work. The next periodic
+ * sweep explicitly releases the hold and retries. Failure logging also lives at
+ * this scheduling boundary; the domain operation remains a normal rejecting
+ * async function. Each key has one prioritized queued source and an explicit
+ * live-failure hold, so invalid combinations of pending flags are impossible.
+ * This is the single owner of per-key coalescing semantics: a burst produces at
+ * most one trailing pass, with periodic work taking priority over live nudges.
  */
-export class ReconcileCoalescer {
-  private readonly inFlight = new Map<string, Promise<void>>();
-  private readonly again = new Set<string>();
+type VmReconcileTriggerSource = 'live' | 'periodic';
+type VmReconcileHold = 'ready' | 'live-blocked';
 
-  constructor(private readonly run: (key: string) => Promise<void>) {}
+interface VmReconcileScheduleState {
+  inFlight?: Promise<void>;
+  queued: VmReconcileTriggerSource | null;
+  hold: VmReconcileHold;
+}
 
-  trigger(key: string): Promise<void> {
-    const existing = this.inFlight.get(key);
-    if (existing) {
-      // A run is in flight — mark that one more pass is needed after it.
-      this.again.add(key);
-      return existing;
-    }
-    const promise = this.run(key)
-      .catch(() => { /* run is responsible for its own logging */ })
-      .finally(() => {
-        this.inFlight.delete(key);
-        if (this.again.delete(key)) void this.trigger(key);
-      });
-    this.inFlight.set(key, promise);
-    return promise;
+export class VmReconcileScheduler {
+  private readonly states = new Map<string, VmReconcileScheduleState>();
+
+  constructor(
+    private readonly run: (key: string) => Promise<void>,
+    private readonly onFailure: (key: string, error: unknown) => void,
+  ) {}
+
+  /** Low-latency chain-event nudge; suppressed after failure until a sweep. */
+  triggerLive(key: string): Promise<void> {
+    return this.schedule(key, 'live');
   }
 
-  /** True if a run for `key` is currently in flight. */
+  /** Reliability path; every periodic sweep gets one retry after a failure. */
+  triggerPeriodic(key: string): Promise<void> {
+    return this.schedule(key, 'periodic');
+  }
+
   isInFlight(key: string): boolean {
-    return this.inFlight.has(key);
+    return this.states.get(key)?.inFlight !== undefined;
+  }
+
+  private stateFor(key: string): VmReconcileScheduleState {
+    let state = this.states.get(key);
+    if (!state) {
+      state = {
+        queued: null,
+        hold: 'ready',
+      };
+      this.states.set(key, state);
+    }
+    return state;
+  }
+
+  private schedule(key: string, source: VmReconcileTriggerSource): Promise<void> {
+    const state = this.stateFor(key);
+    if (source === 'live' && state.hold === 'live-blocked') {
+      return Promise.resolve();
+    }
+    if (state.inFlight) {
+      // A periodic reliability pass always replaces a queued live nudge.
+      // Otherwise repeated triggers collapse into the existing queued source.
+      if (state.queued !== 'periodic') state.queued = source;
+      return state.inFlight;
+    }
+    if (source === 'periodic') state.hold = 'ready';
+    return this.start(key, state);
+  }
+
+  private start(
+    key: string,
+    state: VmReconcileScheduleState,
+  ): Promise<void> {
+    const promise = (async () => {
+      try {
+        await this.run(key);
+        state.hold = 'ready';
+      } catch (error) {
+        state.hold = 'live-blocked';
+        try {
+          this.onFailure(key, error);
+        } catch {
+          // Observability must never break scheduling or surface to callers.
+        }
+      }
+    })().finally(() => {
+      state.inFlight = undefined;
+      const queued = state.queued;
+      state.queued = null;
+      if (queued) {
+        void this.schedule(key, queued);
+        return;
+      }
+      // Keep only failed keys so a later live nudge remains suppressed. A
+      // periodic retry or successful run releases and removes the state.
+      if (state.hold === 'ready') this.states.delete(key);
+    });
+    state.inFlight = promise;
+    return promise;
   }
 }
 

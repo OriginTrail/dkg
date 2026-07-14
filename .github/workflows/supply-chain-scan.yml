@@ -649,10 +649,10 @@ jobs:
         # workflow and the version string. Dependabot does not cover this
         # path; bump deliberately via PR.
         env:
-          ACTIONLINT_VERSION: 1.7.6
-          # sha256 of actionlint_1.7.6_linux_amd64.tar.gz, lifted from
-          # https://github.com/rhysd/actionlint/releases/download/v1.7.6/actionlint_1.7.6_checksums.txt
-          ACTIONLINT_SHA256: 5d1a70d9de15fee5371e6f9e20cc29b284e814d6ee1b882f9749e91caf716eba
+          ACTIONLINT_VERSION: 1.7.12
+          # sha256 of actionlint_1.7.12_linux_amd64.tar.gz, lifted from
+          # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         run: |
           set -euo pipefail
           ASSET="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"

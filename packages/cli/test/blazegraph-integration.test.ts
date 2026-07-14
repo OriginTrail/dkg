@@ -13,8 +13,8 @@
  *   - SPARQL semantics for `DROP ALL` vs scoped DELETE (does Blazegraph
  *     actually leave non-V10 named graphs alone? does `DROP ALL`
  *     clean up the namespace metadata or just the data?).
- *   - Docker run/inspect contract drift (lyrasis/blazegraph:2.1.5 has
- *     been frozen for years, but Docker behavioural changes —
+ *   - Docker run/inspect contract drift (the pinned Blazegraph image can
+ *     change behaviour across Docker versions —
  *     log-driver defaults, port-binding shape — can still bite).
  *   - The identity tag round-trip against real SPARQL UPDATE parsing.
  *
@@ -33,28 +33,12 @@
  * The test self-cleans the container on teardown even when individual
  * cases fail, so re-running the suite is idempotent.
  *
- * Apple Silicon (arm64) caveat
- * -----------------------------
- * `lyrasis/blazegraph:2.1.5` is published as `linux/amd64` only — the
- * upstream Blazegraph project at github.com/blazegraph was archived in
- * March 2026 and no longer publishes new images. We pin this tag for
- * mainnet + devnet.sh parity.
- *
- * On Apple Silicon Macs the image runs under QEMU emulation (or
- * Rosetta on macOS 14.1+ with Docker Desktop ≥ 4.25). The JVM startup
- * under emulation can take much longer than the 30-second default,
- * and the QEMU path is known to crash Docker Desktop entirely under
- * sustained JVM warmup on some machines. To improve odds:
- *
- *   - Docker Desktop → Settings → General → "Use Rosetta for x86_64
- *     emulation" (enabled by default on macOS 14.1+).
- *   - Bumped `pollTimeoutMs` in `beforeAll` below from 30 s to 120 s.
- *
- * If your `beforeAll` fails with "Blazegraph did not become ready
- * within 120000ms" on an arm64 host, the test is correctly designed
- * but the JVM emulation is overloading your Docker Desktop. Re-run on
- * an amd64 box (CI / Linux server). The mocked unit-tests still cover
- * the contract.
+ * Architecture support
+ * --------------------
+ * The provisioner uses the same multi-architecture image deployed on
+ * mainnet, so amd64 and arm64 hosts both run Blazegraph natively. The
+ * integration timeout remains 120 seconds to cover a cold image pull
+ * and JVM warmup on either architecture.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -112,10 +96,9 @@ describe.skipIf(!ENABLED)('Blazegraph end-to-end integration', () => {
       // host don't collide indefinitely; integration runs sequentially
       // in practice.
       portRange: 12,
-      // 120 s instead of the 30 s provisioner default — JVM warmup
-      // under amd64-via-QEMU/Rosetta on Apple Silicon can take 60 s+.
-      // On native amd64 this is still essentially "as fast as the
-      // container becomes ready", since we poll every second.
+      // 120 s instead of the 30 s provisioner default — a cold image pull
+      // plus JVM warmup can take 60 s+ on smaller hosts. This remains "as fast
+      // as the container becomes ready", since we poll every second.
       pollTimeoutMs: 120_000,
       log: () => {},
     });

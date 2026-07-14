@@ -20,6 +20,7 @@ import {
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
+  resolveKnownNetworkConfigName,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
@@ -187,6 +188,7 @@ mcpCmd
     try {
       await mcpSetupAction(opts, {
         loadNetworkConfig: openclawSetupExports.loadNetworkConfig,
+        resolveKnownNetworkConfigName,
         ensureDkgNodeConfig: coreExports.ensureDkgNodeConfig,
         startDaemon: openclawSetupExports.startDaemon,
         // Lazy + best-effort (parity with openclaw/hermes): dkg-agent is

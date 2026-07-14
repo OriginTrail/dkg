@@ -96,6 +96,14 @@ interface FetchSyncPagesParams {
   protocolSync: string;
   checkpointStore: SyncCheckpointStore;
   /**
+   * Discard both the saved offset and the requester-side responder-session
+   * token before this fetch. A caller applying an authoritative snapshot uses
+   * this to guarantee that offset zero carries a NEW syncSessionId, which
+   * forces the responder to rebuild its cached row list instead of replaying
+   * an unfinished session's stale offset-zero view.
+   */
+  forceFreshSession?: boolean;
+  /**
    * R9/R10 — member SWM recovery marker. Forks BOTH the checkpoint namespace
    * (R10: distinct `|recovery` cursor + responder-session scope so it never
    * mutates the shared incremental-sync cursor) AND the request envelope (R9:
@@ -189,6 +197,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     debugSyncProgress,
     protocolSync,
     checkpointStore,
+    forceFreshSession,
     recovery,
     buildSyncRequest,
     sinceBatchId,
@@ -206,6 +215,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   throwIfAborted(signal);
   const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
+  if (forceFreshSession) {
+    checkpointStore.delete(checkpointKey);
+    unfinishedSyncResponderSessions.delete(checkpointKey);
+  }
   let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
