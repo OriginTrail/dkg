@@ -419,6 +419,16 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       }
     }
     const nquads: string[] = [];
+    // A durable/SWM snapshot can span thousands of page requests. Emitting the
+    // same successful timing record for every page turned routine catch-up into
+    // millions of SQLite dashboard rows on mainnet. Keep the policy at one lazy
+    // logging boundary so every phase gets one representative diagnostic per
+    // session without constructing strings for skipped pages. Slow total
+    // responses are still logged below regardless of offset.
+    const logFirstPageDetail = (message: () => string): void => {
+      if (offset !== 0) return;
+      logDebug(createOperationContext('sync'), message());
+    };
 
     return limiter.run(peerId, signal, async () => {
       throwIfAborted(signal);
@@ -430,7 +440,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (phase === 'catalog') {
         const rows = await raceAgainstAbort(readCatalogPage({ store, contextGraphId, offset, limit }), signal);
         const serialized = serializeResponderRows(rows);
-        logDebug(createOperationContext('sync'), `Sync responder catalog facet for "${contextGraphId}": rows=${rows.length}`);
+        logFirstPageDetail(() => `Sync responder catalog facet for "${contextGraphId}": rows=${rows.length}`);
         return new TextEncoder().encode(serialized ?? '');
       }
 
@@ -466,7 +476,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             return new TextEncoder().encode('');
           }
           nquads.push(serializeWorkspacePublicSnapshotQuads(page).trimEnd());
-          logDebug(createOperationContext('sync'), `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
+          logFirstPageDetail(() => `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
         } else if (phase === 'meta') {
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
@@ -496,7 +506,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           const serialized = serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
-          logDebug(createOperationContext('sync'), `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+          logFirstPageDetail(() => `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         } else {
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
@@ -526,7 +536,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           const serialized = serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
-          logDebug(createOperationContext('sync'), `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+          logFirstPageDetail(() => `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         }
 
         if (nquads.length === 0) return new TextEncoder().encode('');
@@ -575,7 +585,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           const serialized = serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
-          logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+          logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         }
       } else {
         const queryStartedAt = Date.now();
@@ -602,7 +612,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const serialized = serializeResponderRows(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
-        logDebug(createOperationContext('sync'), `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+        logFirstPageDetail(() => `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
       }
 
       const totalDurationMs = Date.now() - handlerStartedAt;

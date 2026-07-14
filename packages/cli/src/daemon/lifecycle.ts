@@ -146,6 +146,7 @@ import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
@@ -2599,6 +2600,15 @@ export async function runDaemonInner(
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
+  // A time window cannot bound a same-day log storm. The focused maintenance
+  // helper owns bounded catch-up batches, compaction retries, and timer cleanup;
+  // daemon lifecycle only starts and stops it.
+  const logVolumePruner = startDashboardLogVolumePruner({
+    dashDb,
+    log,
+    intervals: { steadyIntervalMs: PRUNE_INTERVAL_MS },
+  });
+
   // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent
   // ~$200 of RPC credits in a day with nothing measuring it). The whole
   // Wiring only (scheduling/format live in rpc-usage-log.ts, unit-tested).
@@ -3454,6 +3464,7 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        logVolumePruner.stop();
         // Clears the timer AND performs the final best-effort drain (BEFORE
         // telemetry stops), so a partial window still reaches Loki — keeps
         // log-derived request totals exact across process lifecycles.

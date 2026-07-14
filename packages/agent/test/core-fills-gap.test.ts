@@ -55,7 +55,10 @@ interface AgentInternals {
   runVmReconcileForCg(localCgId: string): Promise<void>;
   runVmReconcileSweep(): Promise<void>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
-  reconcileCoalescer: { trigger: (cg: string) => void } | null;
+  vmReconcileScheduler: {
+    triggerLive: (cg: string) => void;
+    triggerPeriodic: (cg: string) => void;
+  } | null;
   store: TripleStore;
   chain: MockChainAdapter & {
     getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
@@ -1635,13 +1638,18 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     internals.subscribedContextGraphs.set('100', { subscribed: false, coreHosted: true, onChainId: '100' });
     internals.subscribedContextGraphs.set('200', { subscribed: false, onChainId: '200' }); // neither subscribed nor hosted
 
-    const triggered: string[] = [];
-    internals.reconcileCoalescer = { trigger: (cg: string) => { triggered.push(cg); } };
+    const liveTriggered: string[] = [];
+    const periodicTriggered: string[] = [];
+    internals.vmReconcileScheduler = {
+      triggerLive: (cg: string) => { liveTriggered.push(cg); },
+      triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
+    };
 
     await internals.runVmReconcileSweep();
 
-    expect(triggered).toContain('100');     // hosted → swept
-    expect(triggered).not.toContain('200'); // neither → skipped
+    expect(periodicTriggered).toContain('100');     // hosted → swept
+    expect(periodicTriggered).not.toContain('200'); // neither → skipped
+    expect(liveTriggered).toEqual([]);
   });
 
   it('a host-only reconcile promotes the missed KA to VM and emits core-fill', async () => {
@@ -1685,5 +1693,23 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(coreFill).toBeDefined();
     expect(coreFill?.reconciled).toBe(1);
     expect(coreFill?.contextGraphId).toBe(localCgId);
+  });
+
+  it('surfaces a production chain failure from runVmReconcileForCg to its scheduler', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillFailure', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const failure = new Error('store deadline exceeded');
+
+    internals.subscribedContextGraphs.set('500', {
+      subscribed: true,
+      onChainId: '500',
+    });
+    chain.getContextGraphKCCount = async () => {
+      throw failure;
+    };
+
+    await expect(internals.runVmReconcileForCg('500')).rejects.toBe(failure);
   });
 });

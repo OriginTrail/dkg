@@ -369,6 +369,93 @@ describe('DashboardDB — retention', () => {
 
     db2.close();
   });
+
+  it('caps routine logs incrementally while preserving warning and error history', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-volume-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 3,
+      logVolumePruneBatchRows: 2,
+    });
+    try {
+      for (let i = 0; i < 7; i += 1) {
+        volumeDb.insertLog({
+          ts: 1_000 + i,
+          level: i % 2 === 0 ? 'debug' : 'info',
+          module: 'sync',
+          message: `routine-${i}`,
+        });
+      }
+      volumeDb.insertLog({ ts: 2_000, level: 'warn', module: 'sync', message: 'keep-warn' });
+      volumeDb.insertLog({ ts: 2_001, level: 'error', module: 'sync', message: 'keep-error' });
+
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
+      // The second batch exactly reaches the cap. The API conservatively asks
+      // for one final probe, avoiding a second large count on every batch.
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+
+      const rows = volumeDb.db.prepare(
+        `SELECT level, message FROM logs ORDER BY id ASC`,
+      ).all() as Array<{ level: string; message: string }>;
+      expect(rows.filter((row) => row.level === 'debug' || row.level === 'info'))
+        .toEqual([
+          { level: 'debug', message: 'routine-4' },
+          { level: 'info', message: 'routine-5' },
+          { level: 'debug', message: 'routine-6' },
+        ]);
+      expect(rows).toContainEqual({ level: 'warn', message: 'keep-warn' });
+      expect(rows).toContainEqual({ level: 'error', message: 'keep-error' });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns multi-megabyte free pages to the OS after the final volume batch', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-compact-'));
+    const dbPath = join(volumeDir, 'node-ui.db');
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 2,
+      logVolumePruneBatchRows: 10,
+    });
+    try {
+      const payload = 'x'.repeat(256 * 1024);
+      for (let i = 0; i < 30; i += 1) {
+        volumeDb.insertLog({
+          ts: 1_000 + i,
+          level: 'debug',
+          module: 'sync',
+          message: `${i}:${payload}`,
+        });
+      }
+      volumeDb.insertLog({ ts: 2_000, level: 'warn', module: 'sync', message: 'keep-warn' });
+      volumeDb.db.pragma('wal_checkpoint(TRUNCATE)');
+      const beforeBytes = statSync(dbPath).size;
+
+      let compacted = false;
+      for (let i = 0; i < 10; i += 1) {
+        const result = volumeDb.pruneLogVolumeBatch();
+        compacted ||= result.status === 'done-compacted';
+        if (result.status === 'done' || result.status === 'done-compacted') break;
+      }
+
+      const afterBytes = statSync(dbPath).size;
+      const levels = volumeDb.db.prepare(
+        `SELECT level, COUNT(*) AS count FROM logs GROUP BY level`,
+      ).all() as Array<{ level: string; count: number }>;
+      expect(compacted).toBe(true);
+      expect(afterBytes).toBeLessThan(beforeBytes / 2);
+      expect(levels).toContainEqual({ level: 'debug', count: 2 });
+      expect(levels).toContainEqual({ level: 'warn', count: 1 });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('DashboardDB — operation phases', () => {

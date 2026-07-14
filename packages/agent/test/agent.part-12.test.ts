@@ -104,33 +104,75 @@ describe('Genesis Knowledge', () => {
     });
 
 
-    it('rejects PCA curated registration when local curator is not the PCA owner', async () => {
+    it('accepts PCA curated registration when local curator/chain signer is an agent of that exact PCA', async () => {
       const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
-      const nonOwner = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+      const pcaAgent = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
       const pcaAccountId = 99n;
-      const chain = new PcaCuratedRegistrationChainAdapter(new Map([[pcaAccountId, pcaOwner]]));
+      const chain = new PcaCuratedRegistrationChainAdapter(
+        new Map([[pcaAccountId, pcaOwner]]),
+        pcaAgent,
+        new Map([[pcaAgent.toLowerCase(), pcaAccountId]]),
+      );
       const agent = await DKGAgent.create({
-        name: 'PcaRejectsNonOwnerBot',
+        name: 'PcaAcceptsRegisteredAgentBot',
         store: new OxigraphStore(),
         chainAdapter: chain,
         nodeRole: 'core',
       });
       await agent.start();
 
-      expect(nonOwner.toLowerCase()).not.toBe(pcaOwner.toLowerCase());
+      expect(pcaAgent.toLowerCase()).not.toBe(pcaOwner.toLowerCase());
       await agent.createContextGraph({
-        id: 'reject-pca-non-owner',
-        name: 'Reject PCA non-owner',
+        id: 'accept-pca-agent',
+        name: 'Accept PCA agent',
         accessPolicy: 1,
-        callerAgentAddress: nonOwner,
+        callerAgentAddress: pcaAgent,
       });
 
-      // pcaAccountId at register time (not create) per Codex PR #502
-      // round-3 contract change.
-      await expect(agent.registerContextGraph('reject-pca-non-owner', {
-        callerAgentAddress: nonOwner,
+      await expect(agent.registerContextGraph('accept-pca-agent', {
+        callerAgentAddress: pcaAgent,
         publishAuthorityAccountId: pcaAccountId,
-      })).rejects.toThrow(/PCA account 99|only the PCA owner/i);
+      })).resolves.toMatchObject({ onChainId: expect.any(String) });
+
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
+      expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
+        publishPolicy: 0,
+        publishAuthority: pcaOwner,
+        publishAuthorityAccountId: pcaAccountId,
+      });
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('rejects PCA curated registration when signer is unregistered or registered to another PCA', async () => {
+      const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+      const wrongPcaAgent = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+      const targetPcaAccountId = 99n;
+      const otherPcaAccountId = 100n;
+      const chain = new PcaCuratedRegistrationChainAdapter(
+        new Map([[targetPcaAccountId, pcaOwner]]),
+        wrongPcaAgent,
+        new Map([[wrongPcaAgent.toLowerCase(), otherPcaAccountId]]),
+      );
+      const agent = await DKGAgent.create({
+        name: 'PcaRejectsWrongAgentBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+
+      await agent.createContextGraph({
+        id: 'reject-pca-wrong-agent',
+        name: 'Reject wrong PCA agent',
+        accessPolicy: 1,
+        callerAgentAddress: wrongPcaAgent,
+      });
+
+      await expect(agent.registerContextGraph('reject-pca-wrong-agent', {
+        callerAgentAddress: wrongPcaAgent,
+        publishAuthorityAccountId: targetPcaAccountId,
+      })).rejects.toThrow(/not a registered agent of PCA account 99.*registered account: 100/i);
 
       expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
       await agent.stop().catch(() => {});
@@ -395,8 +437,7 @@ describe('Genesis Knowledge', () => {
     it('treats private:true as a curated signal that dominates accessPolicy=0 for PCA registration', async () => {
       const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
       const pcaAccountId = 77n;
-      // PCA owner controls the chain signer (Codex PR #502 round-4
-      // contract: chain signer == PCA owner required for PCA mode).
+      // Owner mode: the PCA owner also controls the chain signer.
       const chain = new PcaCuratedRegistrationChainAdapter(
         new Map([[pcaAccountId, pcaOwner]]),
         pcaOwner,

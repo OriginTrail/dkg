@@ -230,7 +230,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -533,9 +533,10 @@ export class OwnershipMethods extends DKGAgentBase {
    *   3. `signerAddress` property (mock adapter and parity tests).
    *   4. `getOperationalPrivateKey()` (legacy adapters).
    *
-   * Returning `undefined` triggers the round-5 "fail closed" branch
-   * in `registerContextGraph`: PCA registration is rejected because
-   * the invariant cannot be verified.
+   * Returning `undefined` triggers the fail-closed branch in
+   * `registerContextGraph`: PCA registration is rejected because neither
+   * owner nor exact-PCA agent authorization can be verified and the local
+   * curator cannot be aligned with the minted CG NFT owner.
    */
   async getRegistrationTxSignerAddress(this: DKGAgent): Promise<string | undefined> {
     const chain = this.chain;

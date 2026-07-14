@@ -189,11 +189,11 @@ contextGraphCmd
 
 contextGraphCmd
   .command('register <id>')
-  .description('Register an existing context graph on-chain (unlocks Verifiable Memory, requires TRAC)')
+  .description('Register an existing context graph on-chain (unlocks Verifiable Memory; requires gas and either a TRAC deposit or eligible PCA waiver)')
   .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
   .option('--access-policy <n>', 'Access policy: 0 = public/discoverable, 1 = private/curated', parseInt)
   .option('--publish-policy <n>', 'Publish policy: 0 = curated, 1 = open', parseInt)
-  .option('--pca-account-id <id>', 'Publishing Conviction Account id for PCA-curated registration')
+  .option('--pca-account-id <id>', 'Publishing Conviction Account id for curated registration by its owner or an exact-account registered agent')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
