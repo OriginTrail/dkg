@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { handleDragRoutes } from '../src/daemon/routes/drag.js';
+import { DRAG_RULE_PREDICATE, DRAG_RULE_STATUS } from '../src/daemon/drag-reasoner.js';
 import { encodeXPaymentHeader, type PaymentPayload } from '../src/daemon/payment.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
@@ -268,6 +269,90 @@ describe('POST /api/answer authorization and validation', () => {
       note: 'reasoning refused: verified fact set is incomplete (2 skipped, truncated=true)',
     });
     expect(agent.gatherVerifiedFacts).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, { cap: 40 });
+  });
+
+  // Managed reasoning rules: a rule-KA is status-gated and (optionally) author-governed.
+  const ruleFact = (subject: string, n3: string, kaId: string, author: string) => ({
+    triple: { subject, predicate: DRAG_RULE_PREDICATE, object: `"${n3}"` },
+    citation: { kaId, onChain: { author } },
+  });
+  const statusFact = (subject: string, status: string, kaId: string, author: string) => ({
+    triple: { subject, predicate: DRAG_RULE_STATUS, object: `"${status}"` },
+    citation: { kaId, onChain: { author } },
+  });
+  const RULE_N3 = '{ ?s ?p ?o } => { ?s ?p ?o } .';
+
+  function reasoningAgent(facts: unknown[]) {
+    return createAgent({
+      gatherVerifiedFacts: vi.fn(async () => ({
+        facts,
+        complete: true,
+        truncated: false,
+        graphsSkipped: 0,
+      })),
+    });
+  }
+
+  it('never fires a rule whose drag:ruleStatus is "disabled"', async () => {
+    const agent = reasoningAgent([
+      ruleFact('urn:rule:active', RULE_N3, 'ka-active', '0xaaa'),
+      ruleFact('urn:rule:disabled', RULE_N3, 'ka-disabled', '0xaaa'),
+      statusFact('urn:rule:disabled', 'disabled', 'ka-disabled', '0xaaa'),
+    ]);
+
+    const result = await postAnswer(
+      { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+      { agent, config: { drag: { reasoning: true } } },
+    );
+
+    expect(result.status).toBe(200);
+    const applied = (result.body.reasoning.rules ?? []) as Array<{ kaId: string }>;
+    expect(applied.map((c) => c.kaId)).toEqual(['ka-active']);
+  });
+
+  it('trusts only allow-listed rule authors when reasoningRuleAuthors is set (case-insensitive)', async () => {
+    const agent = reasoningAgent([
+      ruleFact('urn:rule:trusted', RULE_N3, 'ka-trusted', '0xAbCdef0000000000000000000000000000000001'),
+      ruleFact('urn:rule:planted', RULE_N3, 'ka-planted', '0x9999990000000000000000000000000000000002'),
+    ]);
+
+    const result = await postAnswer(
+      { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+      {
+        agent,
+        config: {
+          drag: {
+            reasoning: true,
+            reasoningRuleAuthors: ['0xABCDEF0000000000000000000000000000000001'],
+          },
+        },
+      },
+    );
+
+    expect(result.status).toBe(200);
+    const applied = (result.body.reasoning.rules ?? []) as Array<{ kaId: string }>;
+    expect(applied.map((c) => c.kaId)).toEqual(['ka-trusted']);
+  });
+
+  it('reports no rules when the governance allowlist excludes every discovered rule', async () => {
+    const agent = reasoningAgent([
+      ruleFact('urn:rule:planted', RULE_N3, 'ka-planted', '0x9999990000000000000000000000000000000002'),
+    ]);
+
+    const result = await postAnswer(
+      { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+      {
+        agent,
+        config: {
+          drag: { reasoning: true, reasoningRuleAuthors: ['0xabcdef0000000000000000000000000000000001'] },
+        },
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.reasoning.derived).toEqual([]);
+    expect(result.body.reasoning.note).toMatch(/no rules found/);
+    expect(result.body.reasoning.rules).toBeUndefined();
   });
 
   it('runs a request-bound, single-use 402 challenge through the route', async () => {
