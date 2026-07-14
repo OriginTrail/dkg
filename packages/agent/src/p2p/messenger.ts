@@ -10,6 +10,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolRouter,
+  type SendOptions,
 } from '@origintrail-official/dkg-core';
 import {
   OutboxDrainer,
@@ -183,16 +184,8 @@ export interface MessengerDeps {
   outboxDrain?: OutboxDrainerOptions;
 }
 
-export interface SendOpts {
-  timeoutMs?: number;
-  /**
-   * Whether the router may reuse these exact bytes for retry, pooling, or
-   * multi-path delivery. Authenticated callers with single-use nonces should
-   * select `single-use` and rebuild the payload above Messenger when retrying.
-   */
-  payloadReuse?: 'reusable' | 'single-use';
-  signal?: AbortSignal;
-}
+/** Router options exposed by Messenger's legacy pass-through send. */
+export type SendOpts = Pick<SendOptions, 'timeoutMs' | 'payloadReuse' | 'signal'>;
 
 export interface SendReliableOpts {
   /**
