@@ -61,7 +61,10 @@ interface SyncSendParams {
   requestFactory: () => Promise<Uint8Array>;
   /**
    * Per-attempt send hook. Receives a fresh `messageId` on every
-   * attempt — see jsdoc on `sendSyncRequest` for the rationale.
+   * attempt and a lower-layer attempt cap of `1` — see jsdoc on
+   * `sendSyncRequest` for the rationale. The lower transport must not replay
+   * these exact authenticated bytes; only this outer retry may try again after
+   * `requestFactory` has minted a fresh request ID.
    */
   send: (
     peerId: string,
@@ -69,7 +72,8 @@ interface SyncSendParams {
     data: Uint8Array,
     timeoutMs: number,
     messageId: string,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    maxTransportAttempts: 1,
   ) => Promise<Uint8Array>;
   /**
    * Optional per-attempt response validator. Throwing here keeps the attempt
@@ -101,6 +105,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           params.timeoutMs,
           messageId,
           params.signal,
+          1,
         );
       } catch (error) {
         markSyncTransportFailure(error);

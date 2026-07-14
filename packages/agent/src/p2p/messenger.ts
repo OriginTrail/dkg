@@ -185,6 +185,12 @@ export interface MessengerDeps {
 
 export interface SendOpts {
   timeoutMs?: number;
+  /**
+   * Maximum ProtocolRouter attempts for these exact bytes. Authenticated
+   * callers with single-use nonces should set `1` and own fresh-payload
+   * retries above Messenger.
+   */
+  maxAttempts?: number;
   signal?: AbortSignal;
 }
 

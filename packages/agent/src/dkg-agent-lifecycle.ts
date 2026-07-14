@@ -4300,12 +4300,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // RPC is synchronous-by-contract (the caller needs the page bytes
       // back NOW to advance pagination); `sendToPeer` returns the
       // response bytes directly, and sync's own `withRetry`
-      // (sync-transport.ts) handles retry + backoff. The per-attempt
-      // `messageId` minted by sync-transport.ts is now unused by this
-      // adapter — harmless, left in place to keep the transport surface
-      // stable (reverts rc.9 PR-E for sync only).
-      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId, sendSignal) =>
-        this.messenger.sendToPeer(peerId, protocolId, data, { timeoutMs: sendTimeoutMs, signal: sendSignal }),
+      // (sync-transport.ts) handles retry + backoff. Force one lower-layer
+      // attempt per signed envelope: ProtocolRouter's default retry loop would
+      // otherwise resend the same requestId after a slow response, and the
+      // responder's replay defence would correctly deny it before the outer
+      // sync retry could mint fresh bytes. The per-attempt `messageId` remains
+      // unused by this raw adapter.
+      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId, sendSignal, maxTransportAttempts) =>
+        this.messenger.sendToPeer(peerId, protocolId, data, {
+          timeoutMs: sendTimeoutMs,
+          maxAttempts: maxTransportAttempts,
+          signal: sendSignal,
+        }),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),

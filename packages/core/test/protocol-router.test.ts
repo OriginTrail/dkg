@@ -929,6 +929,30 @@ describe('ProtocolRouter', () => {
       expect(resolveCalls).toBe(3);
     });
 
+    it('honors maxAttempts=1 when a higher layer must rebuild single-use payloads', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('The operation was aborted due to timeout');
+        },
+      });
+
+      await expect(
+        router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/single-use/1.0.0',
+          new Uint8Array([1, 2, 3]),
+          { timeoutMs: 5_000, maxAttempts: 1 },
+        ),
+      ).rejects.toThrow(/timeout/);
+
+      expect(dialCalls).toBe(1);
+      expect(resolveCalls).toBe(1);
+    });
+
     it('stops retrying once a resolver-re-prime followed by dial succeeds', async () => {
       let resolveCalls = 0;
       let dialCalls = 0;
