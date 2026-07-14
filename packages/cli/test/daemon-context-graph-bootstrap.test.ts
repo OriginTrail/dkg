@@ -3,8 +3,10 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   bootstrapConfiguredContextGraphs,
-  registerProjectSyncedReadinessPersistence,
 } from '../src/daemon/lifecycle.js';
+import {
+  registerProjectSyncedReadinessPersistence,
+} from '../src/context-graph-readiness.js';
 
 type Subscription = {
   subscribed?: boolean;
@@ -271,6 +273,79 @@ describe('configured context graph daemon bootstrap', () => {
     );
   });
 
+  it('preserves PROJECT_SYNCED proof that lands during stale bootstrap classification', async () => {
+    const contextGraphId = '0x1234567890123456789012345678901234567890/startup-sync-race';
+    const fixture = createAgent({
+      [contextGraphId]: {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        pendingMeta: true,
+      },
+    });
+    let readiness: {
+      version: number;
+      durableVerified: boolean;
+      sharedMemoryVerified: boolean;
+      updatedAt: number;
+    } | null = null;
+    let projectSyncedHandler: ((data: unknown) => void) | undefined;
+    (fixture.agent as any).eventBus = {
+      on: vi.fn((event: string, handler: (data: unknown) => void) => {
+        if (event === DKGEvent.PROJECT_SYNCED) projectSyncedHandler = handler;
+      }),
+    };
+    vi.mocked(fixture.agent.hasConfirmedMetaState).mockResolvedValue(true);
+    const readinessStore = {
+      getContextGraphReadinessProvenance: () => readiness,
+      setContextGraphReadinessProvenance: vi.fn((id, next) => {
+        expect(id).toBe(contextGraphId);
+        readiness = { ...next, updatedAt: Date.now() };
+      }),
+    };
+    registerProjectSyncedReadinessPersistence({
+      agent: fixture.agent,
+      store: readinessStore,
+      log: vi.fn(),
+    });
+    fixture.subscribeToContextGraph.mockImplementation((id: string) => {
+      const current = fixture.subscriptions.get(id);
+      fixture.subscriptions.set(id, {
+        ...current,
+        subscribed: true,
+        synced: true,
+        metaSynced: true,
+        pendingMeta: false,
+      });
+      projectSyncedHandler?.({
+        contextGraphId: id,
+        dataSynced: 2,
+        sharedMemorySynced: 0,
+      });
+    });
+
+    await bootstrapConfiguredContextGraphs({
+      agent: fixture.agent,
+      configuredContextGraphIds: [contextGraphId],
+      networkDefaultContextGraphIds: [],
+      readinessStore,
+      log: vi.fn(),
+    });
+
+    await vi.waitFor(() => {
+      expect(readiness).toMatchObject({
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: false,
+      });
+    });
+    expect(fixture.markContextGraphSubscriptionState).not.toHaveBeenCalledWith(
+      contextGraphId,
+      expect.objectContaining({ metaSynced: false }),
+    );
+  });
+
   it('fails closed before checking a legacy unregistered configured shadow', async () => {
     const contextGraphId = '0x1234567890123456789012345678901234567890/legacy-shadow';
     const fixture = createAgent({
@@ -296,7 +371,9 @@ describe('configured context graph daemon bootstrap', () => {
       log: vi.fn(),
     });
 
-    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledTimes(1);
+    // The stale-snapshot classification and the locked pre-reset
+    // revalidation must both reject the legacy placeholder.
+    expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledTimes(2);
     expect(fixture.agent.hasConfirmedMetaState).toHaveBeenCalledWith(
       contextGraphId,
       { rejectUnregisteredPlaceholder: true },

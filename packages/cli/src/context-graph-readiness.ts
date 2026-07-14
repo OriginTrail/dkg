@@ -1,5 +1,5 @@
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type {
   ContextGraphReadinessProvenance,
   DashboardDB,
@@ -37,6 +37,27 @@ export interface ContextGraphReadinessPatch {
   sharedMemoryVerified: boolean;
 }
 
+export interface MissingMetadataReadinessPatches {
+  statePatch: ContextGraphSubscriptionStatePatch;
+  readinessPatch: ContextGraphReadinessPatch;
+}
+
+/** Canonical fail-closed state for a graph without authoritative metadata. */
+export function missingMetadataReadinessPatches(): MissingMetadataReadinessPatches {
+  return {
+    statePatch: {
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    },
+    readinessPatch: {
+      durableVerified: false,
+      sharedMemoryVerified: false,
+    },
+  };
+}
+
 export function classifyExistingContextGraphReadiness(input: {
   subscription: ContextGraphSubscriptionReadinessState;
   readiness: ContextGraphReadinessProvenance;
@@ -64,6 +85,7 @@ export function classifyExistingContextGraphReadiness(input: {
   if (alreadyReady) return { alreadyReady: true };
 
   if (!input.hasConfirmedMeta) {
+    const missingMetadata = missingMetadataReadinessPatches();
     const stateAlreadyFailClosed =
       input.subscription.synced === false &&
       input.subscription.sharedMemorySynced === false &&
@@ -73,20 +95,12 @@ export function classifyExistingContextGraphReadiness(input: {
       alreadyReady: false,
       statePatch: stateAlreadyFailClosed
         ? undefined
-        : {
-            synced: false,
-            sharedMemorySynced: false,
-            metaSynced: false,
-            pendingMeta: true,
-          },
+        : missingMetadata.statePatch,
       // Subscription flags and provenance are persisted independently. A
       // prior bootstrap may already have reset the flags while leaving v1
       // proof behind, so metadata absence must invalidate provenance even
       // when the visible state is already fail-closed.
-      readinessPatch: {
-        durableVerified: false,
-        sharedMemoryVerified: false,
-      },
+      readinessPatch: missingMetadata.readinessPatch,
     };
   }
 
@@ -224,19 +238,11 @@ export function classifyContextGraphCatchupReadiness(input: {
 
   if (catchupResultHasCleanResponse(result)) {
     if (!input.hasConfirmedMeta) {
+      const missingMetadata = missingMetadataReadinessPatches();
       return {
         jobStatus: 'unreachable',
         error: 'No peer delivered authoritative context-graph metadata — the curator may be offline, or responding peers do not host this project.',
-        statePatch: {
-          synced: false,
-          sharedMemorySynced: false,
-          metaSynced: false,
-          pendingMeta: true,
-        },
-        readinessPatch: {
-          durableVerified: false,
-          sharedMemoryVerified: false,
-        },
+        ...missingMetadata,
       };
     }
 
@@ -363,6 +369,65 @@ export function writeContextGraphReadiness(
   });
 }
 
+// Bootstrap invalidation and automatic PROJECT_SYNCED persistence can race
+// during daemon startup. Serialize both against the same agent/CG key so the
+// later operation always revalidates live metadata before it writes.
+const contextGraphReadinessMutationTails = new WeakMap<
+  DKGAgent,
+  Map<string, Promise<void>>
+>();
+
+async function withContextGraphReadinessMutationLock<T>(
+  agent: DKGAgent,
+  contextGraphId: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  let tails = contextGraphReadinessMutationTails.get(agent);
+  if (!tails) {
+    tails = new Map<string, Promise<void>>();
+    contextGraphReadinessMutationTails.set(agent, tails);
+  }
+  const previous = tails.get(contextGraphId) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(task);
+  const tail = run.then(() => undefined, () => undefined);
+  tails.set(contextGraphId, tail);
+  try {
+    return await run;
+  } finally {
+    if (tails.get(contextGraphId) === tail) tails.delete(contextGraphId);
+  }
+}
+
+/**
+ * Revalidate live metadata and invalidate subscription/provenance together.
+ * Returns false when authoritative metadata arrived before this reset acquired
+ * the readiness lock, in which case newer PROJECT_SYNCED proof is preserved.
+ */
+export async function resetContextGraphReadinessForMissingMetadata(input: {
+  agent: DKGAgent;
+  store: Partial<ContextGraphReadinessStore>;
+  contextGraphId: string;
+}): Promise<boolean> {
+  const contextGraphId = input.contextGraphId.trim();
+  if (!contextGraphId) return false;
+
+  return withContextGraphReadinessMutationLock(input.agent, contextGraphId, async () => {
+    const locallyCurated = typeof input.agent.isCuratorOf === 'function'
+      ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
+      : false;
+    const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
+      contextGraphId,
+      { rejectUnregisteredPlaceholder: !locallyCurated },
+    ).catch(() => false);
+    if (hasConfirmedMeta) return false;
+
+    const patches = missingMetadataReadinessPatches();
+    input.agent.markContextGraphSubscriptionState(contextGraphId, patches.statePatch);
+    writeContextGraphReadiness(input.store, contextGraphId, patches.readinessPatch);
+    return true;
+  });
+}
+
 /**
  * Persist readiness proven by the agent's automatic post-approval catch-up.
  * PROJECT_SYNCED is also used as a UI event, so fail closed unless it carries
@@ -385,22 +450,70 @@ export async function persistProjectSyncedReadiness(input: {
     typeof input.store.setContextGraphReadinessProvenance !== 'function'
   ) return false;
 
-  const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
-    contextGraphId,
-    { rejectUnregisteredPlaceholder: true },
-  )
-    .catch(() => false);
-  if (!hasConfirmedMeta) return false;
+  return withContextGraphReadinessMutationLock(input.agent, contextGraphId, async () => {
+    const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
+      contextGraphId,
+      { rejectUnregisteredPlaceholder: true },
+    ).catch(() => false);
+    if (!hasConfirmedMeta) return false;
 
-  const current = readContextGraphReadiness(input.store, contextGraphId);
-  const currentVersionVerified = current.version >= CONTEXT_GRAPH_READINESS_VERSION;
-  writeContextGraphReadiness(input.store, contextGraphId, {
-    durableVerified: durableCompleted ||
-      (currentVersionVerified && current.durableVerified),
-    sharedMemoryVerified: sharedMemoryCompleted ||
-      (currentVersionVerified && current.sharedMemoryVerified),
+    const current = readContextGraphReadiness(input.store, contextGraphId);
+    const currentVersionVerified = current.version >= CONTEXT_GRAPH_READINESS_VERSION;
+    writeContextGraphReadiness(input.store, contextGraphId, {
+      durableVerified: durableCompleted ||
+        (currentVersionVerified && current.durableVerified),
+      sharedMemoryVerified: sharedMemoryCompleted ||
+        (currentVersionVerified && current.sharedMemoryVerified),
+    });
+    return true;
   });
-  return true;
+}
+
+export interface ProjectSyncedReadinessPayload {
+  contextGraphId: string;
+  dataSynced: number;
+  sharedMemorySynced: number;
+}
+
+export function parseProjectSyncedReadinessPayload(
+  data: unknown,
+): ProjectSyncedReadinessPayload | null {
+  if (!data || typeof data !== 'object') return null;
+  const candidate = data as Partial<ProjectSyncedReadinessPayload>;
+  if (
+    typeof candidate.contextGraphId !== 'string' ||
+    typeof candidate.dataSynced !== 'number' ||
+    !Number.isFinite(candidate.dataSynced) ||
+    typeof candidate.sharedMemorySynced !== 'number' ||
+    !Number.isFinite(candidate.sharedMemorySynced)
+  ) {
+    return null;
+  }
+  return {
+    contextGraphId: candidate.contextGraphId,
+    dataSynced: candidate.dataSynced,
+    sharedMemorySynced: candidate.sharedMemorySynced,
+  };
+}
+
+export function registerProjectSyncedReadinessPersistence(input: {
+  agent: DKGAgent;
+  store: Partial<ContextGraphReadinessStore>;
+  log: (message: string) => void;
+}): void {
+  input.agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: unknown) => {
+    const payload = parseProjectSyncedReadinessPayload(data);
+    if (!payload) return;
+    void persistProjectSyncedReadiness({
+      agent: input.agent,
+      store: input.store,
+      ...payload,
+    }).catch((err) => {
+      input.log(
+        `[warn] Failed to persist PROJECT_SYNCED readiness: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  });
 }
 
 /**

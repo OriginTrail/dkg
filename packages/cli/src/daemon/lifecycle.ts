@@ -151,7 +151,8 @@ import { createInitialPublisherState, createPublicSnapshotStore, createPublisher
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
-  persistProjectSyncedReadiness,
+  registerProjectSyncedReadinessPersistence,
+  resetContextGraphReadinessForMissingMetadata,
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
@@ -1092,20 +1093,15 @@ export async function bootstrapConfiguredContextGraphs(input: {
       // marker and stale metaSynced=true. The explicit remote proof above
       // rejects that marker without depending on mutable subscription state;
       // only now do we persist the fail-closed bootstrap classification.
-      input.agent.markContextGraphSubscriptionState(contextGraphId, {
-        synced: false,
-        sharedMemorySynced: false,
-        metaSynced: false,
-        pendingMeta: true,
+      const reset = await resetContextGraphReadinessForMissingMetadata({
+        agent: input.agent,
+        store: input.readinessStore ?? {},
+        contextGraphId,
       });
-      // Provenance lives outside the subscription row and may still contain
-      // v1 true bits from an earlier successful catch-up. Clear it in the
-      // same bootstrap window so an automatic sync event or HTTP catch-up
-      // cannot reuse stale proof before route-level revalidation runs.
-      writeContextGraphReadiness(input.readinessStore ?? {}, contextGraphId, {
-        durableVerified: false,
-        sharedMemoryVerified: false,
-      });
+      // PROJECT_SYNCED persistence shares the same readiness lock and may
+      // have proved this graph while bootstrap was working from `existing`.
+      // Its live metadata revalidation wins over the stale snapshot.
+      if (!reset) hasAuthoritativeMetadata = true;
     }
 
     if (hasAuthoritativeMetadata) {
@@ -1114,24 +1110,6 @@ export async function bootstrapConfiguredContextGraphs(input: {
     }
     input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata pending)`);
   }
-}
-
-export function registerProjectSyncedReadinessPersistence(input: {
-  agent: DKGAgent;
-  store: Partial<ContextGraphReadinessStore>;
-  log: (message: string) => void;
-}): void {
-  input.agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
-    void persistProjectSyncedReadiness({
-      agent: input.agent,
-      store: input.store,
-      contextGraphId: typeof data?.contextGraphId === "string" ? data.contextGraphId : "",
-      dataSynced: typeof data?.dataSynced === "number" ? data.dataSynced : 0,
-      sharedMemorySynced: typeof data?.sharedMemorySynced === "number" ? data.sharedMemorySynced : 0,
-    }).catch((err) => {
-      input.log(`[warn] Failed to persist PROJECT_SYNCED readiness: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  });
 }
 
 export async function runDaemonInner(
