@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -470,6 +470,106 @@ describe('daemon lifecycle control-plane files', () => {
           process.kill(supervisor.pid!, 'SIGKILL');
         } catch {
           /* already gone */
+        }
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'Ctrl-Z stops the whole foreground job, and resuming brings it back',
+    async () => {
+      const managedPort = await freePort();
+      const fixture = await createSupervisorFixture({
+        prefix: 'dkg-foreground-tstp-',
+        name: 'supervisor-foreground-tstp-regression',
+        apiPort: 25005,
+        managedPort,
+      });
+      tempRoot = fixture.tempRoot;
+      const workerPidFile = fixture.file('worker-pid');
+      const listenerReady = fixture.file('listener-ready');
+      const listenerScript = await fixture.writeScript(
+        'listener.cjs',
+        managedStoreListenerLines(managedPort, listenerReady),
+      );
+
+      await fixture.writeWorker([
+        '#!/usr/bin/env node',
+        "const fs = require('node:fs');",
+        "const { spawn } = require('node:child_process');",
+        `const listener = ${JSON.stringify(listenerScript)};`,
+        `const pidFile = ${JSON.stringify(workerPidFile)};`,
+        "if (process.argv[2] !== 'daemon-foreground-worker') process.exit(2);",
+        "spawn(process.execPath, [listener], { stdio: 'ignore' });",
+        'fs.writeFileSync(pidFile, String(process.pid));',
+        'setInterval(() => {}, 1000);',
+        '',
+      ]);
+
+      const driver = await fixture.writeScript('foreground-driver.mts', [
+        `import { runForegroundSupervisor } from ${JSON.stringify(
+          join(__dirname, '..', 'src', 'cli-supervisor.ts'),
+        )};`,
+        'await runForegroundSupervisor(process.env);',
+        '',
+      ]);
+
+      const env = {
+        ...process.env,
+        HOME: tempRoot,
+        USERPROFILE: tempRoot,
+        TSX_TSCONFIG_PATH: fixture.tsconfigPath,
+        DKG_DISABLE_TELEMETRY: '1',
+        DKG_SUPERVISOR_LIVENESS_PROBE: 'off',
+      };
+      delete env.DKG_HOME;
+      delete env.DKG_NO_BLUE_GREEN;
+
+      const supervisor = spawn(
+        process.execPath,
+        ['--import', tsxLoader, driver],
+        { env, stdio: 'ignore', detached: true },
+      );
+
+      const stopped = (pid: number): boolean => {
+        try {
+          return execFileSync('ps', ['-o', 'stat=', '-p', String(pid)])
+            .toString().trim().startsWith('T');
+        } catch {
+          return false;
+        }
+      };
+
+      try {
+        await waitFor(() => existsSync(workerPidFile), 'the foreground worker to start');
+        const workerPid = Number(readFileSync(workerPidFile, 'utf8'));
+
+        // Ctrl-Z. The worker sits in its own session, whose process group is
+        // orphaned — a relayed SIGTSTP would be discarded by the kernel and the
+        // node would keep running behind the user's shell prompt.
+        process.kill(supervisor.pid!, 'SIGTSTP');
+        await waitFor(() => stopped(workerPid), 'the foreground worker to stop');
+
+        // `fg` — the job must come back, not stay frozen holding the store port.
+        process.kill(supervisor.pid!, 'SIGCONT');
+        await waitFor(() => !stopped(workerPid), 'the foreground worker to resume');
+        expect(processExists(workerPid)).toBe(true);
+      } finally {
+        try {
+          process.kill(supervisor.pid!, 'SIGCONT');
+          process.kill(supervisor.pid!, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+        for (const file of [workerPidFile, listenerReady]) {
+          if (!existsSync(file)) continue;
+          const pid = Number(readFileSync(file, 'utf8'));
+          try {
+            process.kill(pid, 'SIGCONT');
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            /* already gone */
+          }
         }
       }
     },
