@@ -56,6 +56,35 @@ function signalProcessGroup(
   }
 }
 
+/**
+ * Deliver a signal to a worker-owned POSIX process group.
+ *
+ * Returns false when the caller must fall back to signalling the child handle
+ * directly: Windows has no process groups, the PGID is unusable, or the group
+ * has already exited. Best-effort by design -- the post-exit reap barrier, not
+ * this call, is what actually guarantees the group is empty.
+ */
+export function signalWorkerProcessGroup(
+  processGroupId: number | undefined,
+  signal: NodeJS.Signals,
+  opts: { platform?: NodeJS.Platform; kill?: typeof process.kill } = {},
+): boolean {
+  const platform = opts.platform ?? process.platform;
+  if (
+    platform === 'win32' ||
+    !Number.isInteger(processGroupId) ||
+    (processGroupId ?? 0) <= 1
+  ) {
+    return false;
+  }
+  const kill = opts.kill ?? process.kill.bind(process);
+  try {
+    return signalProcessGroup(processGroupId!, signal, kill);
+  } catch {
+    return false;
+  }
+}
+
 async function waitForProcessGroupExit(
   processGroupId: number,
   timeoutMs: number,

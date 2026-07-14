@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -161,6 +161,115 @@ function processExists(pid: number): boolean {
   }
 }
 
+const delay = (ms: number) => new Promise<void>(resolveDelay => setTimeout(resolveDelay, ms));
+
+async function waitFor(
+  condition: () => boolean | Promise<boolean>,
+  what: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await delay(20);
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+async function portAcceptsConnections(port: number): Promise<boolean> {
+  return new Promise<boolean>(resolvePort => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+    const finish = (listening: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolvePort(listening);
+    };
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    socket.setTimeout(500, () => finish(true));
+  });
+}
+
+interface SupervisorFixture {
+  tempRoot: string;
+  selectedHome: string;
+  tsconfigPath: string;
+  /** Absolute path to a scratch file inside the fixture. */
+  file(name: string): string;
+  /** The fake daemon worker the supervisor spawns from the active release slot. */
+  writeWorker(lines: string[]): Promise<void>;
+  /** A helper script the worker can spawn as a descendant. */
+  writeScript(name: string, lines: string[]): Promise<string>;
+}
+
+/**
+ * Temp DKG home wired for a real supervisor process: workspace tsconfig,
+ * config.json, an active release slot, and a fake worker at the slot entrypoint.
+ *
+ * Each supervisor regression differs only in what its worker and descendants
+ * *do*, so that is all a test should have to spell out.
+ */
+async function createSupervisorFixture(opts: {
+  prefix: string;
+  name: string;
+  apiPort: number;
+  /** Configures the managed-Oxigraph backend on this port. */
+  managedPort?: number;
+}): Promise<SupervisorFixture> {
+  const tempRoot = await mkdtemp(join(tmpdir(), opts.prefix));
+  const selectedHome = join(tempRoot, '.dkg-dev');
+  const tsconfigPath = join(tempRoot, 'tsx-tsconfig.json');
+  const fakeWorker = join(
+    selectedHome, 'releases', 'a', 'packages', 'cli', 'dist', 'cli.js',
+  );
+
+  await mkdir(dirname(fakeWorker), { recursive: true });
+  await writeWorkspaceTsconfig(tsconfigPath);
+  await writeFile(
+    join(selectedHome, 'config.json'),
+    JSON.stringify({
+      name: opts.name,
+      apiPort: opts.apiPort,
+      listenPort: 0,
+      nodeRole: 'core',
+      ...(opts.managedPort === undefined
+        ? {}
+        : { store: { backend: 'oxigraph-server', options: { port: opts.managedPort } } }),
+    }),
+  );
+  await symlink('a', join(selectedHome, 'releases', 'current'));
+
+  return {
+    tempRoot,
+    selectedHome,
+    tsconfigPath,
+    file: (name: string) => join(tempRoot, name),
+    async writeWorker(lines: string[]) {
+      await writeFile(fakeWorker, lines.join('\n'));
+      await chmod(fakeWorker, 0o755);
+    },
+    async writeScript(name: string, lines: string[]) {
+      const scriptPath = join(tempRoot, name);
+      await writeFile(scriptPath, lines.join('\n'));
+      return scriptPath;
+    },
+  };
+}
+
+/** A TCP listener standing in for the managed Oxigraph a worker owns. */
+function managedStoreListenerLines(port: number, readyFile: string): string[] {
+  return [
+    "const fs = require('node:fs');",
+    "const net = require('node:net');",
+    'const server = net.createServer(() => {});',
+    `server.listen(${port}, '127.0.0.1', () => fs.writeFileSync(${JSON.stringify(readyFile)}, String(process.pid)));`,
+    'setInterval(() => {}, 1000);',
+    '',
+  ];
+}
+
 describe('daemon lifecycle control-plane files', () => {
   let tempRoot: string | undefined;
 
@@ -170,48 +279,32 @@ describe('daemon lifecycle control-plane files', () => {
   });
 
   it('passes the selected DKG home to the supervised daemon worker', async () => {
-    tempRoot = await mkdtemp(join(tmpdir(), 'dkg-supervised-home-'));
-    const selectedHome = join(tempRoot, '.dkg-dev');
+    const fixture = await createSupervisorFixture({
+      prefix: 'dkg-supervised-home-',
+      name: 'supervisor-home-regression',
+      apiPort: 25001,
+    });
+    tempRoot = fixture.tempRoot;
     const defaultHome = join(tempRoot, '.dkg');
-    const tsconfigPath = join(tempRoot, 'tsx-tsconfig.json');
-    const slotDir = join(selectedHome, 'releases', 'a');
-    const fakeWorker = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
 
-    await mkdir(dirname(fakeWorker), { recursive: true });
-    await mkdir(join(selectedHome, 'releases'), { recursive: true });
-    await writeWorkspaceTsconfig(tsconfigPath);
-    await writeFile(
-      join(selectedHome, 'config.json'),
-      JSON.stringify({
-        name: 'supervisor-home-regression',
-        apiPort: 25001,
-        listenPort: 0,
-        nodeRole: 'core',
-      }),
-    );
-    await symlink('a', join(selectedHome, 'releases', 'current'));
-    await writeFile(
-      fakeWorker,
-      [
-        '#!/usr/bin/env node',
-        "const fs = require('node:fs');",
-        "const os = require('node:os');",
-        "const path = require('node:path');",
-        "const home = process.env.DKG_HOME || path.join(os.homedir(), '.dkg');",
-        'fs.mkdirSync(home, { recursive: true });',
-        "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
-        "fs.writeFileSync(path.join(home, 'daemon.pid'), String(process.pid));",
-        "fs.writeFileSync(path.join(home, 'api.port'), '25001');",
-        'process.exit(0);',
-        '',
-      ].join('\n'),
-    );
-    await chmod(fakeWorker, 0o755);
+    await fixture.writeWorker([
+      '#!/usr/bin/env node',
+      "const fs = require('node:fs');",
+      "const os = require('node:os');",
+      "const path = require('node:path');",
+      "const home = process.env.DKG_HOME || path.join(os.homedir(), '.dkg');",
+      'fs.mkdirSync(home, { recursive: true });',
+      "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
+      "fs.writeFileSync(path.join(home, 'daemon.pid'), String(process.pid));",
+      "fs.writeFileSync(path.join(home, 'api.port'), '25001');",
+      'process.exit(0);',
+      '',
+    ]);
 
-    await runSupervisor(tempRoot, tsconfigPath);
+    await runSupervisor(tempRoot, fixture.tsconfigPath);
 
-    expect(readFileSync(join(selectedHome, 'api.port'), 'utf8')).toBe('25001');
-    expect(readFileSync(join(selectedHome, 'daemon.pid'), 'utf8')).toMatch(/^\d+$/);
+    expect(readFileSync(join(fixture.selectedHome, 'api.port'), 'utf8')).toBe('25001');
+    expect(readFileSync(join(fixture.selectedHome, 'daemon.pid'), 'utf8')).toMatch(/^\d+$/);
     expect(existsSync(join(defaultHome, 'api.port'))).toBe(false);
     expect(existsSync(join(defaultHome, 'daemon.pid'))).toBe(false);
   });
@@ -219,87 +312,60 @@ describe('daemon lifecycle control-plane files', () => {
   it.runIf(process.platform !== 'win32')(
     'reaps a SIGKILLed worker descendant and releases the managed-store port before respawn',
     async () => {
-      tempRoot = await mkdtemp(join(tmpdir(), 'dkg-supervised-reap-'));
-      const selectedHome = join(tempRoot, '.dkg-dev');
-      const tsconfigPath = join(tempRoot, 'tsx-tsconfig.json');
-      const slotDir = join(selectedHome, 'releases', 'a');
-      const fakeWorker = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
-      const listenerScript = join(tempRoot, 'listener.cjs');
-      const stateFile = join(tempRoot, 'first-worker-started');
-      const listenerReady = join(tempRoot, 'listener-ready');
-      const replacementBound = join(tempRoot, 'replacement-bound');
       const managedPort = await freePort();
+      const fixture = await createSupervisorFixture({
+        prefix: 'dkg-supervised-reap-',
+        name: 'supervisor-reap-regression',
+        apiPort: 25002,
+        managedPort,
+      });
+      tempRoot = fixture.tempRoot;
+      const stateFile = fixture.file('first-worker-started');
+      const listenerReady = fixture.file('listener-ready');
+      const replacementBound = fixture.file('replacement-bound');
+      const listenerScript = await fixture.writeScript(
+        'listener.cjs',
+        managedStoreListenerLines(managedPort, listenerReady),
+      );
 
-      await mkdir(dirname(fakeWorker), { recursive: true });
-      await mkdir(join(selectedHome, 'releases'), { recursive: true });
-      await writeWorkspaceTsconfig(tsconfigPath);
-      await writeFile(
-        join(selectedHome, 'config.json'),
-        JSON.stringify({
-          name: 'supervisor-reap-regression',
-          apiPort: 25002,
-          listenPort: 0,
-          nodeRole: 'core',
-          store: {
-            backend: 'oxigraph-server',
-            options: { port: managedPort },
-          },
-        }),
-      );
-      await symlink('a', join(selectedHome, 'releases', 'current'));
-      await writeFile(
-        listenerScript,
-        [
-          "const fs = require('node:fs');",
-          "const net = require('node:net');",
-          `const port = ${managedPort};`,
-          `const ready = ${JSON.stringify(listenerReady)};`,
-          "const server = net.createServer(() => {});",
-          "server.listen(port, '127.0.0.1', () => fs.writeFileSync(ready, String(process.pid)));",
-          'setInterval(() => {}, 1000);',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(
-        fakeWorker,
-        [
-          '#!/usr/bin/env node',
-          "const fs = require('node:fs');",
-          "const net = require('node:net');",
-          "const { spawn } = require('node:child_process');",
-          `const state = ${JSON.stringify(stateFile)};`,
-          `const ready = ${JSON.stringify(listenerReady)};`,
-          `const success = ${JSON.stringify(replacementBound)};`,
-          `const listener = ${JSON.stringify(listenerScript)};`,
-          `const port = ${managedPort};`,
-          "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
-          'if (!fs.existsSync(state)) {',
-          "  fs.writeFileSync(state, '1');",
-          "  spawn(process.execPath, [listener], { stdio: 'ignore' });",
-          '  const deadline = Date.now() + 5000;',
-          '  const timer = setInterval(() => {',
-          '    if (fs.existsSync(ready)) {',
-          '      clearInterval(timer);',
-          "      process.kill(process.pid, 'SIGKILL');",
-          '    } else if (Date.now() >= deadline) {',
-          '      clearInterval(timer);',
-          '      process.exit(3);',
-          '    }',
-          '  }, 10);',
-          '} else {',
-          "  const server = net.createServer(() => {});",
-          "  server.once('error', () => process.exit(4));",
-          "  server.listen(port, '127.0.0.1', () => {",
-          "    fs.writeFileSync(success, 'bound');",
-          '    server.close(() => process.exit(0));',
-          '  });',
-          '}',
-          '',
-        ].join('\n'),
-      );
-      await chmod(fakeWorker, 0o755);
+      // First worker: leaks a store listener, then SIGKILLs itself so it has no
+      // chance to clean up. Second worker: proves the port is free again.
+      await fixture.writeWorker([
+        '#!/usr/bin/env node',
+        "const fs = require('node:fs');",
+        "const net = require('node:net');",
+        "const { spawn } = require('node:child_process');",
+        `const state = ${JSON.stringify(stateFile)};`,
+        `const ready = ${JSON.stringify(listenerReady)};`,
+        `const success = ${JSON.stringify(replacementBound)};`,
+        `const listener = ${JSON.stringify(listenerScript)};`,
+        `const port = ${managedPort};`,
+        "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
+        'if (!fs.existsSync(state)) {',
+        "  fs.writeFileSync(state, '1');",
+        "  spawn(process.execPath, [listener], { stdio: 'ignore' });",
+        '  const deadline = Date.now() + 5000;',
+        '  const timer = setInterval(() => {',
+        '    if (fs.existsSync(ready)) {',
+        '      clearInterval(timer);',
+        "      process.kill(process.pid, 'SIGKILL');",
+        '    } else if (Date.now() >= deadline) {',
+        '      clearInterval(timer);',
+        '      process.exit(3);',
+        '    }',
+        '  }, 10);',
+        '} else {',
+        '  const server = net.createServer(() => {});',
+        "  server.once('error', () => process.exit(4));",
+        "  server.listen(port, '127.0.0.1', () => {",
+        "    fs.writeFileSync(success, 'bound');",
+        '    server.close(() => process.exit(0));',
+        '  });',
+        '}',
+        '',
+      ]);
 
-      await runSupervisor(tempRoot, tsconfigPath);
+      await runSupervisor(tempRoot, fixture.tsconfigPath);
 
       expect(readFileSync(replacementBound, 'utf8')).toBe('bound');
       const orphanPid = Number(readFileSync(listenerReady, 'utf8'));
@@ -308,84 +374,159 @@ describe('daemon lifecycle control-plane files', () => {
   );
 
   it.runIf(process.platform !== 'win32')(
-    'fails closed instead of respawning while an external managed-store listener survives',
+    'SIGHUP to the foreground supervisor reaps the worker and its managed store',
     async () => {
-      tempRoot = await mkdtemp(join(tmpdir(), 'dkg-supervised-fail-closed-'));
-      const selectedHome = join(tempRoot, '.dkg-dev');
-      const tsconfigPath = join(tempRoot, 'tsx-tsconfig.json');
-      const slotDir = join(selectedHome, 'releases', 'a');
-      const fakeWorker = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
-      const listenerScript = join(tempRoot, 'external-listener.cjs');
-      const stateFile = join(tempRoot, 'first-worker-started');
-      const listenerReady = join(tempRoot, 'external-listener-ready');
-      const replacementStarted = join(tempRoot, 'replacement-started');
       const managedPort = await freePort();
+      const fixture = await createSupervisorFixture({
+        prefix: 'dkg-foreground-hup-',
+        name: 'supervisor-foreground-hup-regression',
+        apiPort: 25004,
+        managedPort,
+      });
+      tempRoot = fixture.tempRoot;
+      const workerPidFile = fixture.file('worker-pid');
+      const listenerReady = fixture.file('listener-ready');
+      const listenerScript = await fixture.writeScript(
+        'listener.cjs',
+        managedStoreListenerLines(managedPort, listenerReady),
+      );
 
-      await mkdir(dirname(fakeWorker), { recursive: true });
-      await mkdir(join(selectedHome, 'releases'), { recursive: true });
-      await writeWorkspaceTsconfig(tsconfigPath);
-      await writeFile(
-        join(selectedHome, 'config.json'),
-        JSON.stringify({
-          name: 'supervisor-fail-closed-regression',
-          apiPort: 25003,
-          listenPort: 0,
-          nodeRole: 'core',
-          store: {
-            backend: 'oxigraph-server',
-            options: { port: managedPort },
-          },
-        }),
+      // The foreground worker owns a store listener and then idles forever: only
+      // a signal that actually reaches it can end this process tree.
+      await fixture.writeWorker([
+        '#!/usr/bin/env node',
+        "const fs = require('node:fs');",
+        "const { spawn } = require('node:child_process');",
+        `const listener = ${JSON.stringify(listenerScript)};`,
+        `const pidFile = ${JSON.stringify(workerPidFile)};`,
+        "if (process.argv[2] !== 'daemon-foreground-worker') process.exit(2);",
+        "spawn(process.execPath, [listener], { stdio: 'ignore' });",
+        'fs.writeFileSync(pidFile, String(process.pid));',
+        'setInterval(() => {}, 1000);',
+        '',
+      ]);
+
+      // `dkg start --foreground` runs the supervisor in the shell's foreground
+      // job. The worker is setsid()'d into its own session, so a terminal-close
+      // SIGHUP is delivered to the supervisor alone — the worker only dies if
+      // the supervisor relays it.
+      const driver = await fixture.writeScript('foreground-driver.mts', [
+        `import { runForegroundSupervisor } from ${JSON.stringify(
+          join(__dirname, '..', 'src', 'cli-supervisor.ts'),
+        )};`,
+        'await runForegroundSupervisor(process.env);',
+        '',
+      ]);
+
+      const env = {
+        ...process.env,
+        HOME: tempRoot,
+        USERPROFILE: tempRoot,
+        TSX_TSCONFIG_PATH: fixture.tsconfigPath,
+        DKG_DISABLE_TELEMETRY: '1',
+        DKG_SUPERVISOR_LIVENESS_PROBE: 'off',
+      };
+      delete env.DKG_HOME;
+      delete env.DKG_NO_BLUE_GREEN;
+
+      const supervisor = spawn(
+        process.execPath,
+        ['--import', tsxLoader, driver],
+        { env, stdio: 'ignore', detached: true },
       );
-      await symlink('a', join(selectedHome, 'releases', 'current'));
-      await writeFile(
-        listenerScript,
-        [
-          "const fs = require('node:fs');",
-          "const net = require('node:net');",
-          `const port = ${managedPort};`,
-          `const ready = ${JSON.stringify(listenerReady)};`,
-          "const server = net.createServer(() => {});",
-          "server.listen(port, '127.0.0.1', () => fs.writeFileSync(ready, String(process.pid)));",
-          'setInterval(() => {}, 1000);',
-          '',
-        ].join('\n'),
-      );
-      await writeFile(
-        fakeWorker,
-        [
-          '#!/usr/bin/env node',
-          "const fs = require('node:fs');",
-          "const { spawn } = require('node:child_process');",
-          `const state = ${JSON.stringify(stateFile)};`,
-          `const ready = ${JSON.stringify(listenerReady)};`,
-          `const replacement = ${JSON.stringify(replacementStarted)};`,
-          `const listener = ${JSON.stringify(listenerScript)};`,
-          "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
-          'if (fs.existsSync(state)) {',
-          "  fs.writeFileSync(replacement, 'unexpected');",
-          '  process.exit(0);',
-          '}',
-          "fs.writeFileSync(state, '1');",
-          "const external = spawn(process.execPath, [listener], { detached: true, stdio: 'ignore' });",
-          'external.unref();',
-          'const deadline = Date.now() + 5000;',
-          'const timer = setInterval(() => {',
-          '  if (fs.existsSync(ready)) {',
-          '    clearInterval(timer);',
-          '    process.exit(1);',
-          '  } else if (Date.now() >= deadline) {',
-          '    clearInterval(timer);',
-          '    process.exit(3);',
-          '  }',
-          '}, 10);',
-          '',
-        ].join('\n'),
-      );
-      await chmod(fakeWorker, 0o755);
+      const supervisorExit = new Promise<void>(resolveExit => {
+        supervisor.once('close', () => resolveExit());
+      });
 
       try {
-        const result = await runSupervisorProcess(tempRoot, tsconfigPath);
+        await waitFor(() => existsSync(listenerReady), 'the managed store to bind');
+        await waitFor(() => existsSync(workerPidFile), 'the foreground worker to start');
+        const workerPid = Number(readFileSync(workerPidFile, 'utf8'));
+        const listenerPid = Number(readFileSync(listenerReady, 'utf8'));
+        expect(await portAcceptsConnections(managedPort)).toBe(true);
+
+        process.kill(supervisor.pid!, 'SIGHUP');
+        await supervisorExit;
+
+        // Nothing may outlive the terminal: not the worker, not the store it
+        // owns, not the port binding that would block the next `dkg start`.
+        await waitFor(() => !processExists(workerPid), 'the foreground worker to exit');
+        await waitFor(() => !processExists(listenerPid), 'the managed store to exit');
+        await waitFor(
+          async () => !(await portAcceptsConnections(managedPort)),
+          'the managed-store port to be released',
+        );
+      } finally {
+        for (const file of [workerPidFile, listenerReady]) {
+          if (!existsSync(file)) continue;
+          const pid = Number(readFileSync(file, 'utf8'));
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            /* already gone */
+          }
+        }
+        try {
+          process.kill(supervisor.pid!, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'fails closed instead of respawning while an external managed-store listener survives',
+    async () => {
+      const managedPort = await freePort();
+      const fixture = await createSupervisorFixture({
+        prefix: 'dkg-supervised-fail-closed-',
+        name: 'supervisor-fail-closed-regression',
+        apiPort: 25003,
+        managedPort,
+      });
+      tempRoot = fixture.tempRoot;
+      const stateFile = fixture.file('first-worker-started');
+      const listenerReady = fixture.file('external-listener-ready');
+      const replacementStarted = fixture.file('replacement-started');
+      const listenerScript = await fixture.writeScript(
+        'external-listener.cjs',
+        managedStoreListenerLines(managedPort, listenerReady),
+      );
+
+      // The listener is detached, so reaping the worker's group cannot remove
+      // it: the port stays bound and the supervisor must refuse to respawn.
+      await fixture.writeWorker([
+        '#!/usr/bin/env node',
+        "const fs = require('node:fs');",
+        "const { spawn } = require('node:child_process');",
+        `const state = ${JSON.stringify(stateFile)};`,
+        `const ready = ${JSON.stringify(listenerReady)};`,
+        `const replacement = ${JSON.stringify(replacementStarted)};`,
+        `const listener = ${JSON.stringify(listenerScript)};`,
+        "if (process.argv[2] !== 'daemon-worker') process.exit(2);",
+        'if (fs.existsSync(state)) {',
+        "  fs.writeFileSync(replacement, 'unexpected');",
+        '  process.exit(0);',
+        '}',
+        "fs.writeFileSync(state, '1');",
+        "const external = spawn(process.execPath, [listener], { detached: true, stdio: 'ignore' });",
+        'external.unref();',
+        'const deadline = Date.now() + 5000;',
+        'const timer = setInterval(() => {',
+        '  if (fs.existsSync(ready)) {',
+        '    clearInterval(timer);',
+        '    process.exit(1);',
+        '  } else if (Date.now() >= deadline) {',
+        '    clearInterval(timer);',
+        '    process.exit(3);',
+        '  }',
+        '}, 10);',
+        '',
+      ]);
+
+      try {
+        const result = await runSupervisorProcess(tempRoot, fixture.tsconfigPath);
 
         expect(result.code).toBe(1);
         expect(result.stderr).toMatch(/still listening.*refusing to spawn a replacement/);

@@ -16,6 +16,7 @@ import {
   cleanupDaemonWorker,
   type WorkerExit,
 } from './daemon/worker-cleanup-policy.js';
+import { createForegroundSignalRelay } from './daemon/foreground-signal-relay.js';
 
 async function appendSupervisorLog(message: string): Promise<void> {
   await ensureDkgDir();
@@ -211,18 +212,15 @@ async function runDaemonSupervisor(): Promise<void> {
 async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env): Promise<void> {
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
-  let currentChild: ReturnType<typeof spawn> | null = null;
 
-  let signalled = false;
-  const onSignal = (sig: NodeJS.Signals) => {
-    signalled = true;
-    if (currentChild) currentChild.kill(sig);
-  };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  // The worker runs in its own POSIX session, so the tty stops delivering
+  // hangup and job-control signals to it. The relay carries them across that
+  // boundary; without it, closing the terminal would kill only the supervisor
+  // and orphan the worker plus the managed store it owns.
+  const relay = createForegroundSignalRelay({ onTerminate: () => {} });
 
   while (true) {
-    if (signalled) process.exit(0);
+    if (relay.signalled()) process.exit(0);
 
     await removeApiPort().catch((err: any) => {
       supervisorWarn(
@@ -231,7 +229,7 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
     });
 
     const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
-    currentChild = spawn(
+    const currentChild = spawn(
       daemonCommand.executable,
       daemonCommand.args,
       {
@@ -241,28 +239,31 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
       },
     );
     const workerPid = currentChild.pid;
+    // Adopting the worker also replays any signal that landed while none was
+    // current, so a Ctrl-C during the pre-spawn await cannot strand it.
+    relay.attach(currentChild);
 
     const stopWatcher = await maybeStartSupervisorLivenessWatcher(currentChild);
 
     const workerExit = await waitForWorkerExit(currentChild);
+    relay.detach();
     const finalizedExit = await finalizeWorkerExit(
       workerPid,
       workerExit,
       stopWatcher,
       'foreground worker',
     );
-    currentChild = null;
     if (!finalizedExit.cleanupSucceeded) {
       process.exit(1);
     }
     const { originalExitCode } = finalizedExit;
 
-    if (signalled) process.exit(originalExitCode ?? 0);
+    if (relay.signalled()) process.exit(originalExitCode ?? 0);
 
     if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
       crashRestartCount = 0;
       await sleep(250);
-      if (signalled) process.exit(0);
+      if (relay.signalled()) process.exit(0);
       continue;
     }
 
@@ -271,7 +272,7 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
     crashRestartCount += 1;
     if (crashRestartCount >= maxCrashRestarts) process.exit(originalExitCode ?? 1);
     await sleep(1000);
-    if (signalled) process.exit(0);
+    if (relay.signalled()) process.exit(0);
   }
 }
 
