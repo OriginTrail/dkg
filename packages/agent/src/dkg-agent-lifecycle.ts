@@ -2009,6 +2009,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               );
               return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
             }
+            await this.recordLocalJoinRequestDecision(
+              contextGraphId,
+              approvedAddr,
+              'approved',
+            );
             this.preferredSyncPeers.set(contextGraphId, peerId.toString());
             // Curator just confirmed `approvedAddr` is the principal —
             // record it BEFORE auto-subscribe / sync kick in, so the
@@ -2115,6 +2120,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
+          await this.recordLocalJoinRequestDecision(
+            contextGraphId,
+            rejectedAddr,
+            'rejected',
+          );
           this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
           this.upsertContextGraphMember({
             contextGraphId,

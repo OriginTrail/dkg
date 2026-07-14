@@ -1707,6 +1707,52 @@ export class JoinRequestMethods extends DKGAgentBase {
     return null;
   }
 
+  /**
+   * Persist the requester-side result of an authenticated curator decision.
+   *
+   * Curator moderation rows are intentionally redacted from private-CG meta
+   * sync, so the requester must not depend on those rows arriving over the
+   * wire. Store only the final status under the same join-request subject;
+   * sync responders redact that subject prefix, keeping this decision local.
+   */
+  async recordLocalJoinRequestDecision(
+    this: DKGAgent,
+    contextGraphId: string,
+    agentAddress: string,
+    status: 'approved' | 'rejected',
+  ): Promise<void> {
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const requestStatus = 'https://dkg.network/ontology#requestStatus';
+
+    if (typeof this.store.update === 'function') {
+      await this.store.update(`
+        DELETE { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
+        INSERT { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> "${status}" . } }
+        WHERE  { OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } } }
+      `, { touchedGraphs: [cgMetaGraph], source: `local-join-${status}-status` });
+    } else {
+      // Compatibility fallback for custom stores without SPARQL UPDATE.
+      // The curator remains authoritative if a crash lands between these two
+      // mutations, and an approval can be redelivered to repair local state.
+      await this.store.deleteByPattern({
+        graph: cgMetaGraph,
+        subject: requestUri,
+        predicate: requestStatus,
+      });
+      await this.store.insert([{
+        subject: requestUri,
+        predicate: requestStatus,
+        object: `"${status}"`,
+        graph: cgMetaGraph,
+      }]);
+    }
+
+    // Embedded stores debounce disk persistence. Do not ACK the curator until
+    // the local decision survives a requester restart.
+    await this.store.flush?.();
+  }
+
   /** True when the moderation entity exists even if its status write was interrupted. */
   async hasJoinRequestRecord(
     this: DKGAgent,
