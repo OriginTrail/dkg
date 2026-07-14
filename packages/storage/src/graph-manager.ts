@@ -469,12 +469,7 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
   optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
   legacyCreateAccept?: () => Promise<(quads: Quad[]) => Quad[] | null>,
 ): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
-  if (!('sources' in optionsOrSources) && !legacyCreateAccept) {
-    throw new TypeError('loadSharedMemorySliceWithKaBoundFallback requires createAccept');
-  }
-  const options: LoadSharedMemorySliceWithKaBoundFallbackOptions = 'sources' in optionsOrSources
-    ? optionsOrSources
-    : { sources: optionsOrSources, createAccept: legacyCreateAccept! };
+  const options = normalizeLoadSharedMemorySliceOptions(optionsOrSources, legacyCreateAccept);
   const { sources, createAccept, queryOptions = {} } = options;
   const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
     loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { queryOptions, querySource: source });
@@ -500,6 +495,17 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
     accepted = accept(quads);
   }
   return { quads, accepted };
+}
+
+function normalizeLoadSharedMemorySliceOptions(
+  optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
+  legacyCreateAccept: (() => Promise<(quads: Quad[]) => Quad[] | null>) | undefined,
+): LoadSharedMemorySliceWithKaBoundFallbackOptions {
+  if ('sources' in optionsOrSources) return optionsOrSources;
+  if (!legacyCreateAccept) {
+    throw new TypeError('loadSharedMemorySliceWithKaBoundFallback requires createAccept');
+  }
+  return { sources: optionsOrSources, createAccept: legacyCreateAccept };
 }
 
 function sharedMemorySelectionGraphPattern(

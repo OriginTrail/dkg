@@ -170,6 +170,94 @@ describe('StorePriorityScheduler', () => {
     });
   });
 
+  it('preserves queue admission settings in the deprecated positional constructor', async () => {
+    vi.useFakeTimers();
+    let releaseNormal1: (() => void) | undefined;
+    let releaseNormal2: (() => void) | undefined;
+    let releaseBackground: (() => void) | undefined;
+    const running: Array<Promise<unknown>> = [];
+    try {
+      const scheduler = new StorePriorityScheduler(
+        2,
+        0,
+        undefined,
+        1,
+        { ack: 3, normal: 2, background: 1 },
+        25,
+      );
+      expect(scheduler.snapshot).toMatchObject({
+        maxConcurrent: 2,
+        ackReservedSlots: 0,
+        backgroundReservedSlots: 1,
+        ackQueueLimit: 3,
+        normalQueueLimit: 2,
+        backgroundQueueLimit: 1,
+        queueWaitTimeoutMs: 25,
+      });
+
+      const events: string[] = [];
+      const normal1 = scheduler.run('normal', 'legacy.normal.1', async () => {
+        events.push('normal-1:start');
+        await new Promise<void>((resolve) => {
+          releaseNormal1 = resolve;
+        });
+        events.push('normal-1:end');
+      });
+      const normal2 = scheduler.run('normal', 'legacy.normal.2', async () => {
+        events.push('normal-2:start');
+        await new Promise<void>((resolve) => {
+          releaseNormal2 = resolve;
+        });
+      });
+      const background = scheduler.run('background', 'legacy.background', async () => {
+        events.push('background:start');
+        await new Promise<void>((resolve) => {
+          releaseBackground = resolve;
+        });
+      });
+      const timedOutNormal = scheduler.run('normal', 'legacy.normal.timeout', async () => {
+        events.push('timed-out-normal:start');
+      });
+      const timedOutNormalAssertion = expect(timedOutNormal).rejects.toMatchObject({
+        reason: 'queue_wait_timeout',
+        priority: 'normal',
+      });
+      running.push(normal1, normal2, background, timedOutNormal);
+
+      await expect(
+        scheduler.run('background', 'legacy.background.queue-full', async () => undefined),
+      ).rejects.toMatchObject({
+        reason: 'queue_full',
+        priority: 'background',
+      });
+
+      releaseNormal1();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(events).toEqual([
+        'normal-1:start',
+        'normal-2:start',
+        'normal-1:end',
+        'background:start',
+      ]);
+
+      await vi.advanceTimersByTimeAsync(25);
+      await timedOutNormalAssertion;
+      expect(events).not.toContain('timed-out-normal:start');
+
+      releaseBackground();
+      releaseNormal2();
+      await Promise.all([normal1, normal2, background]);
+    } finally {
+      releaseNormal1?.();
+      releaseNormal2?.();
+      await vi.advanceTimersByTimeAsync(0);
+      releaseBackground?.();
+      await vi.runAllTimersAsync();
+      await Promise.allSettled(running);
+      vi.useRealTimers();
+    }
+  });
+
   it('lets ACK work jump ahead of queued background work', async () => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
     const events: string[] = [];

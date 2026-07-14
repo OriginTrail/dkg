@@ -89,14 +89,24 @@ function captureQuerySources(store: OxigraphStore): string[] {
   return sources;
 }
 
-function captureQueryOptions(store: OxigraphStore): QueryOptions[] {
-  const options: QueryOptions[] = [];
-  const orig = store.query.bind(store);
+type CapturedReadOptions = {
+  queries: QueryOptions[];
+  graphDiscovery: QueryOptions[];
+};
+
+function captureReadOptions(store: OxigraphStore): CapturedReadOptions {
+  const captured: CapturedReadOptions = { queries: [], graphDiscovery: [] };
+  const origQuery = store.query.bind(store);
   store.query = (async (sparql: string, opts?: QueryOptions) => {
-    if (opts) options.push(opts);
-    return orig(sparql, opts);
+    if (opts) captured.queries.push(opts);
+    return origQuery(sparql, opts);
   }) as typeof store.query;
-  return options;
+  const origListGraphs = store.listGraphs.bind(store);
+  store.listGraphs = async (opts?: QueryOptions) => {
+    if (opts) captured.graphDiscovery.push(opts);
+    return origListGraphs(opts);
+  };
+  return captured;
 }
 
 /** A minimal chain whose KCCreated event verifies the given finalization. */
@@ -204,54 +214,42 @@ describe('deriveSwmKaGraphBound (T4)', () => {
   });
 
   it('wires a derived bound through to the SWM read (and no bound leaves it plain)', async () => {
-    const sliceQueriesFor = async (msg: FinalizationMessageMsg): Promise<QueryOptions[]> => {
+    const sliceReadsFor = async (msg: FinalizationMessageMsg): Promise<CapturedReadOptions> => {
       const store = new OxigraphStore();
-      const options = captureQueryOptions(store);
+      const captured = captureReadOptions(store);
       const handler = new FinalizationHandler(store, undefined);
       await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CG);
-      return options.filter((entry) => entry.source?.startsWith(SLICE));
+      return {
+        queries: captured.queries.filter((entry) => entry.source?.startsWith(SLICE)),
+        graphDiscovery: captured.graphDiscovery.filter((entry) => entry.source?.startsWith(SLICE)),
+      };
+    };
+    const expectBackgroundReads = (
+      captured: CapturedReadOptions,
+      expectedSources: string[],
+    ) => {
+      for (const options of [captured.graphDiscovery, captured.queries]) {
+        expect(options.map((entry) => entry.source)).toEqual(
+          expect.arrayContaining(expectedSources),
+        );
+        expect(options.every((entry) => entry.priority === 'background')).toBe(true);
+      }
     };
 
-    const bounded = await sliceQueriesFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
-    expect(bounded.map((entry) => entry.source)).toContain(SLICE_BOUNDED);
-    expect(bounded.every((entry) => entry.priority === 'background')).toBe(true);
+    const bounded = await sliceReadsFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
+    expectBackgroundReads(bounded, [SLICE_BOUNDED, SLICE_WIDENED]);
 
-    const unbounded = await sliceQueriesFor(makeMsg({ startKAId: 0, endKAId: 0 }));
-    expect(unbounded.map((entry) => entry.source)).not.toContain(SLICE_BOUNDED);
-    expect(unbounded.map((entry) => entry.source)).toContain(SLICE);
-    expect(unbounded.every((entry) => entry.priority === 'background')).toBe(true);
+    const unbounded = await sliceReadsFor(makeMsg({ startKAId: 0, endKAId: 0 }));
+    expectBackgroundReads(unbounded, [SLICE]);
+    expect([...unbounded.graphDiscovery, ...unbounded.queries].map((entry) => entry.source))
+      .not.toContain(SLICE_BOUNDED);
 
     // Kill-switch is applied at the boundary: a derivable bound is not used.
     process.env.DKG_DISABLE_SWM_KA_BOUND = '1';
-    const killed = await sliceQueriesFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
-    expect(killed.map((entry) => entry.source)).not.toContain(SLICE_BOUNDED);
-    expect(killed.map((entry) => entry.source)).toContain(SLICE);
-    expect(killed.every((entry) => entry.priority === 'background')).toBe(true);
-  });
-
-  it('runs the chain-reconcile unbounded backstop in the background lane', async () => {
-    const store = new OxigraphStore();
-    const root = 'urn:test:chain-reconcile-priority';
-    await store.insert([{
-      subject: root,
-      predicate: 'http://schema.org/name',
-      object: '"priority"',
-      graph: swmGraph(AUTHOR_A, 7),
-    }]);
-    const options = captureQueryOptions(store);
-    const handler = new FinalizationHandler(store, undefined);
-    const seam = handler as unknown as {
-      getSharedMemoryQuadsForRoots: (
-        contextGraphId: string,
-        rootEntities: string[],
-        subGraphName?: string,
-      ) => Promise<Quad[]>;
-    };
-
-    await expect(seam.getSharedMemoryQuadsForRoots(CG, [root])).resolves.toHaveLength(1);
-    const sliceQueries = options.filter((entry) => entry.source === SLICE);
-    expect(sliceQueries.length).toBeGreaterThan(0);
-    expect(sliceQueries.every((entry) => entry.priority === 'background')).toBe(true);
+    const killed = await sliceReadsFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
+    expectBackgroundReads(killed, [SLICE]);
+    expect([...killed.graphDiscovery, ...killed.queries].map((entry) => entry.source))
+      .not.toContain(SLICE_BOUNDED);
   });
 });
 

@@ -459,6 +459,152 @@ describe('GraphSetIndexStore', () => {
     }
   });
 
+  it('lets a normal seed bypass an in-flight background seed through the reserved scheduler lane', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2,
+      ackReservedSlots: 0,
+      normalReservedSlots: 1,
+      backgroundReservedSlots: 0,
+    });
+    const inner = new OxigraphStore();
+    const staleGraph = 'did:dkg:context-graph:background-normal-promotion';
+    const freshGraph = 'did:dkg:context-graph:normal-promoted-snapshot';
+    const scheduled = new ScheduledGraphListStore(inner, scheduler);
+    scheduled.listGraphsResults.background = [staleGraph];
+    scheduled.listGraphsResults.normal = [freshGraph];
+    let releaseBackground!: () => void;
+    let releaseNormal!: () => void;
+    scheduled.listGraphsGates.background = new Promise<void>((resolve) => {
+      releaseBackground = resolve;
+    });
+    scheduled.listGraphsGates.normal = new Promise<void>((resolve) => {
+      releaseNormal = resolve;
+    });
+    const store = new GraphSetIndexStore(scheduled);
+    const background = store.listGraphs({
+      priority: 'background',
+      source: 'agent.finalization.sharedMemorySlice',
+    });
+    let normal: Promise<string[]> | undefined;
+
+    try {
+      await Promise.resolve();
+      expect(scheduled.listGraphsCalls).toBe(1);
+      expect(scheduler.snapshot).toMatchObject({
+        normalInflight: 0,
+        normalQueued: 0,
+        backgroundInflight: 1,
+      });
+
+      normal = store.listGraphs({
+        priority: 'normal',
+        source: 'agent.query.sharedMemorySlice',
+      });
+      await Promise.resolve();
+
+      expect(scheduled.listGraphsCalls).toBe(2);
+      expect(scheduled.listGraphsOptions).toEqual([
+        {
+          priority: 'background',
+          source: 'agent.finalization.sharedMemorySlice',
+        },
+        {
+          priority: 'normal',
+          source: 'agent.query.sharedMemorySlice',
+        },
+      ]);
+      expect(scheduler.snapshot).toMatchObject({
+        normalInflight: 1,
+        normalQueued: 0,
+        backgroundInflight: 1,
+      });
+
+      // Normal completes through its reserved lane while background remains
+      // blocked; graph-index coalescing must not capture it first.
+      releaseNormal();
+      await expect(normal).resolves.toEqual([freshGraph]);
+      expect(scheduler.snapshot).toMatchObject({
+        normalInflight: 0,
+        backgroundInflight: 1,
+      });
+
+      releaseBackground();
+      await expect(background).resolves.toEqual([freshGraph]);
+      await expect(store.listGraphs()).resolves.toEqual([freshGraph]);
+      expect(scheduled.listGraphsCalls).toBe(2);
+    } finally {
+      releaseNormal();
+      releaseBackground();
+      await Promise.allSettled([background, ...(normal ? [normal] : [])]);
+    }
+  });
+
+  it('ignores an older failed background revalidation after a promoted refresh publishes', async () => {
+    let now = 1_000;
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2,
+      ackReservedSlots: 0,
+      normalReservedSlots: 1,
+      backgroundReservedSlots: 0,
+    });
+    const cachedGraph = 'did:dkg:context-graph:cached-before-promotion';
+    const freshGraph = 'did:dkg:context-graph:fresh-promoted-snapshot';
+    const nextGraph = 'did:dkg:context-graph:next-periodic-snapshot';
+    const scheduled = new ScheduledGraphListStore(new OxigraphStore(), scheduler);
+    scheduled.listGraphsResults.normal = [cachedGraph];
+    const store = new GraphSetIndexStore(scheduled, {
+      revalidateMs: 100,
+      revalidateFailureBackoffMs: 1_000,
+      now: () => now,
+    });
+
+    await expect(store.listGraphs()).resolves.toEqual([cachedGraph]);
+    expect(scheduled.listGraphsCalls).toBe(1);
+
+    now += 100;
+    let rejectBackground!: (error: Error) => void;
+    scheduled.listGraphsGates.background = new Promise<void>((_resolve, reject) => {
+      rejectBackground = reject;
+    });
+    const background = store.listGraphs({
+      priority: 'background',
+      source: 'agent.finalization.sharedMemorySlice',
+    });
+
+    try {
+      await Promise.resolve();
+      expect(scheduled.listGraphsCalls).toBe(2);
+      expect(scheduler.snapshot.backgroundInflight).toBe(1);
+
+      scheduled.listGraphsResults.normal = [freshGraph];
+      const normal = store.listGraphs({
+        priority: 'normal',
+        source: 'agent.query.sharedMemorySlice',
+      });
+      await expect(normal).resolves.toEqual([freshGraph]);
+      expect(scheduled.listGraphsCalls).toBe(3);
+      expect(scheduler.snapshot.backgroundInflight).toBe(1);
+
+      // The older failure is superseded by the normal publication: its waiter
+      // receives the fresh set instead of rejecting or applying failure backoff.
+      rejectBackground(new Error('older background revalidation failed'));
+      await expect(background).resolves.toEqual([freshGraph]);
+
+      // The promoted success scheduled the next normal revalidation for +100ms.
+      // If the older failure applied its 1s backoff, this read would not scan.
+      now += 100;
+      scheduled.listGraphsResults.normal = [freshGraph, nextGraph];
+      await expect(store.listGraphs({ priority: 'normal' })).resolves.toEqual([
+        freshGraph,
+        nextGraph,
+      ]);
+      expect(scheduled.listGraphsCalls).toBe(4);
+    } finally {
+      rejectBackground(new Error('test cleanup'));
+      await Promise.allSettled([background]);
+    }
+  });
+
   it('restarts an in-flight refresh when a local write lands during the scan', async () => {
     const inner = new OxigraphStore();
     await inner.insert([q('did:dkg:context-graph:before')]);
