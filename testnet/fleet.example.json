@@ -1,0 +1,37 @@
+{
+  "$comment": "OT-RFC-61 §3.3/§8 S6: real topology lives ONLY in fleet.json (gitignored). Cores appear in evidence solely by their alias.",
+  "schemaVersion": 1,
+  "network": "base:84532",
+  "cores": [
+    {
+      "alias": "core-1",
+      "host": "100.64.0.10",
+      "sshUser": "observer",
+      "sshIdentity": "~/.ssh/id_harness_readonly",
+      "systemdUnit": "dkg-node",
+      "apiPort": 9200,
+      "listenPort": 9090,
+      "storeFilesystem": "/",
+      "roles": ["core", "relay"]
+    },
+    {
+      "alias": "core-2",
+      "host": "100.64.0.11",
+      "sshUser": "observer",
+      "sshIdentity": "~/.ssh/id_harness_readonly",
+      "systemdUnit": "dkg-node",
+      "apiPort": 9200,
+      "listenPort": 9090,
+      "storeFilesystem": "/",
+      "roles": ["core"]
+    }
+  ],
+  "edges": {
+    "driver": { "dkgHome": "~/.dkg-tn-edge", "apiPort": 9210 },
+    "observer": { "dkgHome": "~/.dkg-tn-observer", "apiPort": 9211 },
+    "nonMember": null
+  },
+  "seeds": [],
+  "sshConcurrency": 2,
+  "sshConnectTimeoutSec": 8
+}

@@ -1,0 +1,4 @@
+fleet.json
+policy.json
+runs/
+*.local.json
