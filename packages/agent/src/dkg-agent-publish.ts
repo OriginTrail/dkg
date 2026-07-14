@@ -95,7 +95,6 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
-  partitionCatalogQuads,
   withSpan,
   getMetrics,
   assertQuadLiteralsMutf8Safe,
@@ -112,6 +111,8 @@ import {
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
+  appendMissingGeneratedPrivateCatalogFloor,
+  replaceCatalogPartitionWithGeneratedPrivateFloor,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
@@ -440,6 +441,43 @@ export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri
   // one); normalize it back to the default assertion graph before writing.
   return buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: assertionUri })
     .map((quad) => ({ ...quad, graph: '' }));
+}
+
+function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
+  contextGraphId: string;
+  snapshotQuads: readonly Quad[];
+  onChainContextGraphId?: string;
+  resolvedEncryptInlinePayload: PublishOptions['encryptInlinePayload'];
+  resolvedEncryptInlineChunked: PublishOptions['encryptInlineChunked'];
+  queuedEncryptInlinePayload: PublishOptions['encryptInlinePayload'];
+  queuedEncryptInlineChunked: PublishOptions['encryptInlineChunked'];
+}): Pick<
+  PublishOptions,
+  | 'quads'
+  | 'encryptInlinePayload'
+  | 'encryptInlineChunked'
+  | 'trustedNonManifestCatalogTriples'
+> {
+  const encryptionOptions = {
+    encryptInlinePayload:
+      input.resolvedEncryptInlinePayload ?? input.queuedEncryptInlinePayload,
+    encryptInlineChunked:
+      input.resolvedEncryptInlineChunked ?? input.queuedEncryptInlineChunked,
+  };
+  if (!input.onChainContextGraphId || !input.resolvedEncryptInlinePayload) {
+    return { quads: [...input.snapshotQuads], ...encryptionOptions };
+  }
+
+  const preparedCatalog = appendMissingGeneratedPrivateCatalogFloor(
+    input.contextGraphId,
+    input.snapshotQuads,
+  );
+  return {
+    quads: preparedCatalog.quads,
+    ...encryptionOptions,
+    trustedNonManifestCatalogTriples:
+      preparedCatalog.trustedNonManifestCatalogTriples,
+  };
 }
 
 /**
@@ -1672,10 +1710,10 @@ export class PublishMethods extends DKGAgentBase {
     // out, commit a non-zero `newCatalogRoot`, and satisfy the on-chain
     // `CuratedCGRequiresCatalogCommitment` gate — even for a metadata-only
     // update (Open Decision #2: every curated update re-commits the floor).
-    // The update analogue of `_ensureCuratedCatalogInSwm` (3606): build the
-    // floor via the SAME `buildPublicProjection({ ual: cgDid, accessPolicy:
-    // 'private' })` so the committed catalog is byte-identical across publish
-    // and update. STRIP-THEN-APPEND: drop any catalog quads the caller's
+    // The update analogue of `_ensureCuratedCatalogInSwm`: route through the
+    // SAME publisher-boundary preparation helper so the generated quads and
+    // exact trust allow-list are byte-identical across publish and update.
+    // STRIP-THEN-APPEND: drop any catalog quads the caller's
     // payload already carries (the from-SWM `publishFromFinalizedAssertion`
     // path at 3213 can re-load a previously-injected floor) so the floor is
     // never duplicated, then append exactly the fresh projection. The graph
@@ -1687,18 +1725,14 @@ export class PublishMethods extends DKGAgentBase {
     // path always has — so under a DEGRADED / stale policy probe a public update
     // fails closed (throws) consistently with publish, where the OLD update path
     // would have proceeded. Fail-closed, never a leak; see PR #1208 notes.
-    const shouldInjectCuratedCatalogFloor = isCuratedUpdate && updateOnChainId != null;
-    let updateQuads = quads;
-    if (shouldInjectCuratedCatalogFloor) {
-      const cgDid = contextGraphDataUri(contextGraphId);
-      const { otherQuads: nonCatalogQuads } = partitionCatalogQuads(quads, cgDid);
-      const catalogFloor = buildPublicProjection({
-        ual: cgDid,
-        accessPolicy: 'private',
-        graph: cgDid,
-      });
-      updateQuads = [...nonCatalogQuads, ...catalogFloor];
-    }
+    const preparedUpdateCatalog = isCuratedUpdate && updateOnChainId != null
+      ? replaceCatalogPartitionWithGeneratedPrivateFloor(
+          contextGraphId,
+          quads,
+          contextGraphDataUri(contextGraphId),
+        )
+      : undefined;
+    const updateQuads = preparedUpdateCatalog?.quads ?? quads;
 
     const publisher = opts?.publisherOverride ?? this.publisher;
     const result = await publisher.update(kaId, {
@@ -1711,9 +1745,8 @@ export class PublishMethods extends DKGAgentBase {
       onPhase,
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts?.precomputedUpdateAttestation,
-      trustedNonManifestCatalogTriples: shouldInjectCuratedCatalogFloor
-        ? generatedPrivateCatalogTripleKeys(contextGraphId)
-        : undefined,
+      trustedNonManifestCatalogTriples:
+        preparedUpdateCatalog?.trustedNonManifestCatalogTriples,
       v10UpdateACKProvider,
       // Curated → wire the single-blob AEAD hook so the producer's
       // `useEncryptedInlineUpdate` gate fires (catalog commit). Public →
@@ -3955,12 +3988,33 @@ export class PublishMethods extends DKGAgentBase {
         undefined,
         publishBindingOptions,
       );
-      const encryptInlinePayload = resolvedEncryptInlinePayload ?? publishOptions.encryptInlinePayload;
-      const encryptInlineChunked = resolvedEncryptInlineChunked ?? publishOptions.encryptInlineChunked;
+      // #1670 — finalized private assertions seal the deterministic public
+      // catalog floor, but assertionPromote deliberately keeps that synthetic
+      // root out of the per-user-root immutable share snapshot. The synchronous
+      // named-KA path reconstructs the floor in SWM before publishing; queued
+      // execution must do the same from deterministic inputs. Without it the
+      // publisher has no catalog commitment/staging bytes, so cores fall back to
+      // their (intentionally absent) curated SWM copy and decline NO_DATA_IN_SWM.
+      //
+      // The queued preparation boundary requires both a verified on-chain CG binding
+      // and a live curated-policy encryption result. That keeps local-only and
+      // public CGs untouched and prevents queued mapper placeholders from
+      // manufacturing trusted catalog triples. The shared preparation boundary performs exact-key
+      // de-duplication for legacy snapshots and returns the trust allow-list
+      // with the quads so queued/update/sync paths cannot drift independently.
+      const queuedPublishPreparation = prepareQueuedKnowledgeAssetVmPublishOptions({
+        contextGraphId: request.contextGraphId,
+        snapshotQuads,
+        onChainContextGraphId: queuedOnChainContextGraphId,
+        resolvedEncryptInlinePayload,
+        resolvedEncryptInlineChunked,
+        queuedEncryptInlinePayload: publishOptions.encryptInlinePayload,
+        queuedEncryptInlineChunked: publishOptions.encryptInlineChunked,
+      });
       result = await publisher.publish({
         ...publisherPublishOptions,
         contextGraphId: request.contextGraphId,
-        quads: snapshotQuads,
+        quads: queuedPublishPreparation.quads,
         privateQuads: snapshotPrivateQuads.length > 0 ? snapshotPrivateQuads : undefined,
         publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
         subGraphName: request.subGraphName,
@@ -3980,8 +4034,14 @@ export class PublishMethods extends DKGAgentBase {
           reservedKaId: recoveredReservedKaId ?? 0n,
         },
         onChainContextGraphId: queuedOnChainContextGraphId,
-        encryptInlinePayload,
-        encryptInlineChunked,
+        encryptInlinePayload: queuedPublishPreparation.encryptInlinePayload,
+        encryptInlineChunked: queuedPublishPreparation.encryptInlineChunked,
+        ...(queuedPublishPreparation.trustedNonManifestCatalogTriples
+          ? {
+              trustedNonManifestCatalogTriples:
+                queuedPublishPreparation.trustedNonManifestCatalogTriples,
+            }
+          : {}),
       });
 
       if (result.status === 'confirmed' && result.onChainResult) {
@@ -4791,9 +4851,9 @@ export class PublishMethods extends DKGAgentBase {
    *
    * Mirrors the finalize-path injection (`assertionFinalize`): the catalog
    * subject is `contextGraphDataUri(contextGraphId)` — the EXACT subject the
-   * publisher's `partitionCatalogQuads` matches — and the floor quads are built
-   * by the SAME `buildPublicProjection`, so the committed catalog is byte-identical
-   * across both paths.
+   * publisher's `partitionCatalogQuads` matches — and the floor quads come from
+   * the SAME preparation helper as queued publish and update, so the committed
+   * catalog and exact trust allow-list cannot drift across those paths.
    *
     * IDEMPOTENT: repeated insertion dedupes in the store/V10 Merkle path because
     * the floor is deterministic, so `catalogLeafCount` stays stable across
@@ -4817,11 +4877,11 @@ export class PublishMethods extends DKGAgentBase {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
     const catalogTargetGraph = canonicalSharedMemoryScopeWriteGraph(swmGraph, scope);
     const cgDid = contextGraphDataUri(contextGraphId);
-    const catalogQuads = buildPublicProjection({
-      ual: cgDid,
-      accessPolicy: 'private',
-      graph: catalogTargetGraph,
-    });
+    const { quads: catalogQuads } = appendMissingGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [],
+      catalogTargetGraph,
+    );
     await this.store.insert(catalogQuads);
     this.log.info(
       ctx,
