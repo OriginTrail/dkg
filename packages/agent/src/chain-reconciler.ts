@@ -163,6 +163,8 @@ export async function reconcileContextGraph(
  * live-failure hold, so invalid combinations of pending flags are impossible.
  * This is the single owner of per-key coalescing semantics: a burst produces at
  * most one trailing pass, with periodic work taking priority over live nudges.
+ * Trigger methods are deliberately fire-and-forget; callers that need an
+ * completion boundary must use waitForIdle() explicitly.
  */
 type VmReconcileTriggerSource = 'live' | 'periodic';
 type VmReconcileHold = 'ready' | 'live-blocked';
@@ -181,18 +183,27 @@ export class VmReconcileScheduler {
     private readonly onFailure: (key: string, error: unknown) => void,
   ) {}
 
-  /** Low-latency chain-event nudge; suppressed after failure until a sweep. */
-  triggerLive(key: string): Promise<void> {
-    return this.schedule(key, 'live');
+  /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
+  triggerLive(key: string): void {
+    this.enqueue(key, 'live');
   }
 
-  /** Reliability path; every periodic sweep gets one retry after a failure. */
-  triggerPeriodic(key: string): Promise<void> {
-    return this.schedule(key, 'periodic');
+  /** Enqueue the reliability path; every periodic sweep gets one failure retry. */
+  triggerPeriodic(key: string): void {
+    this.enqueue(key, 'periodic');
   }
 
   isInFlight(key: string): boolean {
     return this.states.get(key)?.inFlight !== undefined;
+  }
+
+  /** Wait for the active pass and every trailing pass already queued for this key. */
+  async waitForIdle(key: string): Promise<void> {
+    while (true) {
+      const inFlight = this.states.get(key)?.inFlight;
+      if (!inFlight) return;
+      await inFlight;
+    }
   }
 
   private stateFor(key: string): VmReconcileScheduleState {
@@ -207,25 +218,22 @@ export class VmReconcileScheduler {
     return state;
   }
 
-  private schedule(key: string, source: VmReconcileTriggerSource): Promise<void> {
+  private enqueue(key: string, source: VmReconcileTriggerSource): void {
     const state = this.stateFor(key);
     if (source === 'live' && state.hold === 'live-blocked') {
-      return Promise.resolve();
+      return;
     }
     if (state.inFlight) {
       // A periodic reliability pass always replaces a queued live nudge.
       // Otherwise repeated triggers collapse into the existing queued source.
       if (state.queued !== 'periodic') state.queued = source;
-      return state.inFlight;
+      return;
     }
     if (source === 'periodic') state.hold = 'ready';
-    return this.start(key, state);
+    this.start(key, state);
   }
 
-  private start(
-    key: string,
-    state: VmReconcileScheduleState,
-  ): Promise<void> {
+  private start(key: string, state: VmReconcileScheduleState): void {
     const promise = (async () => {
       try {
         await this.run(key);
@@ -243,7 +251,7 @@ export class VmReconcileScheduler {
       const queued = state.queued;
       state.queued = null;
       if (queued) {
-        void this.schedule(key, queued);
+        this.enqueue(key, queued);
         return;
       }
       // Keep only failed keys so a later live nudge remains suppressed. A
@@ -251,7 +259,6 @@ export class VmReconcileScheduler {
       if (state.hold === 'ready') this.states.delete(key);
     });
     state.inFlight = promise;
-    return promise;
   }
 }
 
