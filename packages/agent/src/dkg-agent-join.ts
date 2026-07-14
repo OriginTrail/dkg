@@ -92,6 +92,9 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  OPEN_ENROLLMENT_MAX_MEMBERS,
+  OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR,
+  isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -101,6 +104,7 @@ import {
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
   resolveLiftWorkspaceSlice,
@@ -335,6 +339,8 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type ContextGraphJoinPolicyMode,
+  type ContextGraphJoinPolicyRecord,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -379,6 +385,44 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { PreparedContextGraphAgentInviteMutation } from './dkg-agent-context-graph.js';
+import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-admission-lock.js';
+import {
+  ContextGraphJoinAdmission,
+  contextGraphJoinRequestDigest,
+  type ContextGraphJoinAdmissionHost,
+  type IncomingJoinRequestDecision,
+} from './context-graph-join-admission.js';
+import { pruneTerminalJoinRequestRecords } from './join-request-retention.js';
+
+const JOIN_REQUEST_INGRESS_WINDOW_MS = 60_000;
+const JOIN_REQUEST_INGRESS_PER_PEER = 20;
+const JOIN_REQUEST_INGRESS_PER_AGENT = 6;
+const JOIN_REQUEST_INGRESS_PER_CONTEXT_GRAPH = 100;
+const JOIN_REQUEST_INGRESS_MAX_QUEUE_DEPTH = 64;
+
+export interface ContextGraphJoinPolicyStatus {
+  contextGraphId: string;
+  mode: ContextGraphJoinPolicyMode;
+  source: 'default' | 'persisted';
+  ownerDid: string;
+  ownerAgentAddress: string;
+  maxMembers?: number;
+  maxApprovalsPerHour?: number;
+  memberCount: number;
+  approvalsLastHour?: number;
+  nodeApprovalsLastHour?: number;
+  updatedAt?: number;
+}
+
+export type { IncomingJoinRequestDecision } from './context-graph-join-admission.js';
+
+function joinAdmissionRepairKey(
+  contextGraphId: string,
+  delegation: SignedAgentDelegation,
+): string {
+  return `${contextGraphId}::${contextGraphJoinRequestDigest(delegation)}`;
+}
 
 export type RequesterJoinRequestStatus = 'pending' | 'approved' | 'rejected';
 
@@ -488,6 +532,582 @@ async function withCuratorJoinRequestStoreLock<T>(
 }
 
 export class JoinRequestMethods extends DKGAgentBase {
+  async flushJoinApprovalDurably(this: DKGAgent): Promise<void> {
+    // Local/debounced stores expose flush; remote transactional adapters make
+    // their awaited mutation durable directly and intentionally omit it.
+    await this.store.flush?.();
+  }
+
+  hasRetryableContextGraphJoinAdmission(
+    this: DKGAgent,
+    contextGraphId: string,
+    delegation: SignedAgentDelegation,
+  ): boolean {
+    return this.getRetryableContextGraphJoinAdmission(contextGraphId, delegation) !== null;
+  }
+
+  getRetryableContextGraphJoinAdmission(
+    this: DKGAgent,
+    contextGraphId: string,
+    delegation: SignedAgentDelegation,
+  ): { policyEpoch: number | undefined } | null {
+    const key = joinAdmissionRepairKey(contextGraphId, delegation);
+    const repair = this.contextGraphJoinAdmissionRepairDigests.get(key);
+    if (!repair) return null;
+    if (repair.expiresAt <= Date.now()) {
+      this.contextGraphJoinAdmissionRepairDigests.delete(key);
+      return null;
+    }
+    return { policyEpoch: repair.policyEpoch };
+  }
+
+  markRetryableContextGraphJoinAdmission(
+    this: DKGAgent,
+    contextGraphId: string,
+    delegation: SignedAgentDelegation,
+    policyEpoch?: number,
+  ): void {
+    const now = Date.now();
+    if (this.contextGraphJoinAdmissionRepairDigests.size > 10_000) {
+      for (const [key, repair] of this.contextGraphJoinAdmissionRepairDigests) {
+        if (repair.expiresAt <= now) this.contextGraphJoinAdmissionRepairDigests.delete(key);
+      }
+    }
+    const key = joinAdmissionRepairKey(contextGraphId, delegation);
+    const existingPolicyEpoch = this.contextGraphJoinAdmissionRepairDigests.get(key)?.policyEpoch;
+    const effectivePolicyEpoch = policyEpoch ?? existingPolicyEpoch;
+    this.contextGraphJoinAdmissionRepairDigests.set(
+      key,
+      {
+        expiresAt: now + JOIN_REQUEST_INGRESS_WINDOW_MS,
+        ...(effectivePolicyEpoch === undefined
+          ? {}
+          : { policyEpoch: effectivePolicyEpoch }),
+      },
+    );
+  }
+
+  clearRetryableContextGraphJoinAdmission(
+    this: DKGAgent,
+    contextGraphId: string,
+    delegation: SignedAgentDelegation,
+  ): void {
+    this.contextGraphJoinAdmissionRepairDigests.delete(
+      joinAdmissionRepairKey(contextGraphId, delegation),
+    );
+  }
+
+  /** Atomically check and charge one stage of the join-ingress rate limits. */
+  chargeContextGraphJoinIngressBuckets(
+    this: DKGAgent,
+    entries: Array<{ kind: string; value: string; limit: number; label: string }>,
+  ): void {
+    const now = Date.now();
+    const cutoff = now - JOIN_REQUEST_INGRESS_WINDOW_MS;
+    if (
+      now - this.contextGraphJoinIngressLastCleanupAt >= JOIN_REQUEST_INGRESS_WINDOW_MS
+      || this.contextGraphJoinIngressBuckets.size > 10_000
+    ) {
+      for (const [key, timestamps] of this.contextGraphJoinIngressBuckets) {
+        const active = timestamps.filter((timestamp) => timestamp > cutoff);
+        if (active.length === 0) this.contextGraphJoinIngressBuckets.delete(key);
+        else this.contextGraphJoinIngressBuckets.set(key, active);
+      }
+      this.contextGraphJoinIngressLastCleanupAt = now;
+    }
+
+    const boundedKey = (kind: string, value: string) =>
+      `${kind}:${createHash('sha256').update(value).digest('hex')}`;
+    const checks: Array<[string, number, string]> = entries.map((entry) => [
+      boundedKey(entry.kind, entry.value),
+      entry.limit,
+      entry.label,
+    ]);
+    for (const [key, limit, label] of checks) {
+      const active = (this.contextGraphJoinIngressBuckets.get(key) ?? [])
+        .filter((timestamp) => timestamp > cutoff);
+      if (active.length >= limit) {
+        throw new Error(`Join-request ${label} rate limit exceeded; retry later.`);
+      }
+    }
+
+    for (const [key] of checks) {
+      const active = (this.contextGraphJoinIngressBuckets.get(key) ?? [])
+        .filter((timestamp) => timestamp > cutoff);
+      active.push(now);
+      this.contextGraphJoinIngressBuckets.set(key, active);
+    }
+  }
+
+  /**
+   * Bound the transport-authenticated peer and queue depth before any
+   * attacker-controlled CG lookup or signature work. Payload identities are
+   * deliberately not charged until the delegation has been verified.
+   */
+  reserveContextGraphJoinIngress(
+    this: DKGAgent,
+    contextGraphId: string,
+    carrierPeerId: string,
+  ): () => void {
+    const depth = this.contextGraphJoinIngressDepth.get(contextGraphId) ?? 0;
+    if (depth >= JOIN_REQUEST_INGRESS_MAX_QUEUE_DEPTH) {
+      throw new Error(`Join-request queue for "${contextGraphId}" is busy; retry later.`);
+    }
+    this.chargeContextGraphJoinIngressBuckets([{
+      kind: 'peer',
+      value: carrierPeerId,
+      limit: JOIN_REQUEST_INGRESS_PER_PEER,
+      label: 'peer',
+    }]);
+    this.contextGraphJoinIngressDepth.set(contextGraphId, depth + 1);
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.contextGraphJoinIngressDepth.get(contextGraphId) ?? 1;
+      if (current <= 1) this.contextGraphJoinIngressDepth.delete(contextGraphId);
+      else this.contextGraphJoinIngressDepth.set(contextGraphId, current - 1);
+    };
+  }
+
+  /** Charge payload-derived limits only after the signature binds both fields. */
+  chargeVerifiedContextGraphJoinIngress(
+    this: DKGAgent,
+    contextGraphId: string,
+    agentAddress: string,
+  ): void {
+    this.chargeContextGraphJoinIngressBuckets([
+      {
+        kind: 'cg',
+        value: contextGraphId,
+        limit: JOIN_REQUEST_INGRESS_PER_CONTEXT_GRAPH,
+        label: 'context graph',
+      },
+      {
+        kind: 'agent',
+        value: agentAddress.toLowerCase(),
+        limit: JOIN_REQUEST_INGRESS_PER_AGENT,
+        label: 'agent',
+      },
+    ]);
+  }
+
+  /** Serialize policy changes and admission decisions for one CG. */
+  async withContextGraphJoinAdmissionLock<T>(
+    this: DKGAgent,
+    contextGraphId: string,
+    operation: (token: ContextGraphJoinAdmissionLockToken) => Promise<T>,
+  ): Promise<T> {
+    return this.contextGraphJoinAdmissionLockManager.withLock(contextGraphId, operation);
+  }
+
+  resolveLocalJoinPolicyOwnerAddress(this: DKGAgent, ownerDid: string): string | null {
+    const ownerNorm = normalizeAgentDid(ownerDid);
+    return [...this.localAgents.keys()].find(
+      (address) => ownerNorm === normalizeAgentDid(`did:dkg:agent:${address}`),
+    ) ?? null;
+  }
+
+  async assertJoinPolicyTarget(
+    this: DKGAgent,
+    contextGraphId: string,
+    callerAgentAddress: string | undefined,
+    requirePrivate: boolean,
+  ): Promise<{ ownerDid: string; ownerAgentAddress: string; memberCount: number }> {
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
+      throw new Error('Open enrollment cannot be configured for a system context graph.');
+    }
+    await this.assertContextGraphOwner(contextGraphId, callerAgentAddress, 'manage join policy');
+    const ownerDid = await this.getContextGraphOwner(contextGraphId);
+    if (!ownerDid) {
+      throw new Error(`Context graph "${contextGraphId}" has no registered owner.`);
+    }
+    const ownerAgentAddress = this.resolveLocalJoinPolicyOwnerAddress(ownerDid);
+    if (!ownerAgentAddress) {
+      throw new Error(
+        `Open enrollment requires an agent-owned context graph whose exact owner is registered on this node. Owner=${ownerDid}`,
+      );
+    }
+    if (requirePrivate) {
+      const accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
+      if (accessPolicy !== 'private') {
+        throw new Error(
+          `Open enrollment is only available for context graphs with an explicit private access policy; "${contextGraphId}" is ${accessPolicy ?? 'unconfirmed'}.`,
+        );
+      }
+    }
+    // This is a total private-recipient cap, not merely an allowlist-row cap:
+    // participant agents receive ciphertext keys and private read authority too.
+    // Use the fresh authoritative union (allowed + participant - revoked).
+    const activeMembers = await this.getMemberRecoveryGate(contextGraphId) ?? [];
+    return {
+      ownerDid,
+      ownerAgentAddress,
+      memberCount: new Set(activeMembers.map((address) => address.toLowerCase())).size,
+    };
+  }
+
+  async getContextGraphJoinPolicy(
+    this: DKGAgent,
+    contextGraphId: string,
+    callerAgentAddress?: string,
+  ): Promise<ContextGraphJoinPolicyStatus> {
+    const target = await this.assertJoinPolicyTarget(contextGraphId, callerAgentAddress, false);
+    const stored = this.config.contextGraphJoinPolicyStore
+      ? await this.config.contextGraphJoinPolicyStore.load(contextGraphId)
+      : null;
+    if (!stored) {
+      return {
+        contextGraphId,
+        mode: 'manual',
+        source: 'default',
+        ownerDid: target.ownerDid,
+        ownerAgentAddress: target.ownerAgentAddress,
+        memberCount: target.memberCount,
+      };
+    }
+    const ownerMatches = normalizeAgentDid(stored.ownerDid) === normalizeAgentDid(target.ownerDid);
+    const safeMode: ContextGraphJoinPolicyMode = isBoundedOpenEnrollmentPolicy(stored, contextGraphId) && ownerMatches
+      ? 'open'
+      : 'manual';
+    const usage = await this.config.contextGraphJoinPolicyStore!
+      .getAutomaticApprovalUsage(contextGraphId, Date.now());
+    return {
+      contextGraphId,
+      mode: safeMode,
+      source: 'persisted',
+      ownerDid: target.ownerDid,
+      ownerAgentAddress: target.ownerAgentAddress,
+      ...(safeMode === 'open' && stored.maxMembers ? { maxMembers: stored.maxMembers } : {}),
+      ...(safeMode === 'open' && stored.maxApprovalsPerHour
+        ? { maxApprovalsPerHour: stored.maxApprovalsPerHour }
+        : {}),
+      memberCount: target.memberCount,
+      approvalsLastHour: usage.contextGraphApprovalsLastHour,
+      nodeApprovalsLastHour: usage.nodeApprovalsLastHour,
+      updatedAt: stored.updatedAt,
+    };
+  }
+
+  async setContextGraphJoinPolicy(
+    this: DKGAgent,
+    contextGraphId: string,
+    input: {
+      mode: ContextGraphJoinPolicyMode;
+      maxMembers?: number;
+      maxApprovalsPerHour?: number;
+      acknowledgeOpenEnrollment?: boolean;
+    },
+    callerAgentAddress?: string,
+  ): Promise<ContextGraphJoinPolicyStatus> {
+    if (input.mode !== 'manual' && input.mode !== 'open') {
+      throw new Error('Join policy mode must be "manual" or "open".');
+    }
+    const policyStore = this.config.contextGraphJoinPolicyStore;
+    if (!policyStore) {
+      throw new Error('Durable context graph join-policy storage is not configured.');
+    }
+
+    const isDisable = input.mode === 'manual';
+    if (isDisable) {
+      // Do not publish a cancellation signal until the caller is proven to be
+      // the current exact owner. The target is checked again under the lock,
+      // but this preflight prevents a non-owner local token from transiently
+      // forcing legitimate automatic admissions back to pending.
+      await this.assertJoinPolicyTarget(contextGraphId, callerAgentAddress, false);
+      this.contextGraphJoinPolicyDisableIntentCounts.set(
+        contextGraphId,
+        (this.contextGraphJoinPolicyDisableIntentCounts.get(contextGraphId) ?? 0) + 1,
+      );
+    }
+    try {
+      return await this.withContextGraphJoinAdmissionLock(contextGraphId, async () => {
+      const target = await this.assertJoinPolicyTarget(
+        contextGraphId,
+        callerAgentAddress,
+        input.mode === 'open',
+      );
+      if (input.mode === 'open' && input.acknowledgeOpenEnrollment !== true) {
+        throw new Error('Open enrollment requires explicit acknowledgement. Re-run with --yes.');
+      }
+      if (input.mode === 'open') {
+        if (!Number.isInteger(input.maxMembers) || input.maxMembers! <= 0 || input.maxMembers! > OPEN_ENROLLMENT_MAX_MEMBERS) {
+          throw new Error(`maxMembers must be an integer between 1 and ${OPEN_ENROLLMENT_MAX_MEMBERS}.`);
+        }
+        if (!Number.isInteger(input.maxApprovalsPerHour) || input.maxApprovalsPerHour! <= 0 || input.maxApprovalsPerHour! > OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR) {
+          throw new Error(
+            `maxApprovalsPerHour must be an integer between 1 and ${OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR}.`,
+          );
+        }
+        if (input.maxMembers! < target.memberCount) {
+          throw new Error(
+            `maxMembers cannot be lower than the current active private-member count (${target.memberCount}).`,
+          );
+        }
+      }
+
+      // `updatedAt` doubles as a monotonic policy epoch. Millisecond wall-clock
+      // alone can collide across rapid disable/re-enable transitions, so advance
+      // past the previous record even when both writes occur in the same tick.
+      const previousRecord = await policyStore.load(contextGraphId);
+      const now = Math.max(Date.now(), (previousRecord?.updatedAt ?? 0) + 1);
+      const record: ContextGraphJoinPolicyRecord = {
+        version: 1,
+        contextGraphId,
+        mode: input.mode,
+        ownerDid: target.ownerDid,
+        ...(input.mode === 'open'
+          ? {
+              maxMembers: input.maxMembers!,
+              maxApprovalsPerHour: input.maxApprovalsPerHour!,
+            }
+          : {}),
+        updatedAt: now,
+      };
+      try {
+        await policyStore.saveWithAudit(record, {
+          timestamp: now,
+          contextGraphId,
+          eventType: 'join_policy_changed',
+          actor: `did:dkg:agent:${callerAgentAddress ?? target.ownerAgentAddress}`,
+          outcome: input.mode,
+          policyVersion: record.version,
+          details: input.mode === 'open'
+            ? {
+                maxMembers: record.maxMembers,
+                maxApprovalsPerHour: record.maxApprovalsPerHour,
+              }
+            : undefined,
+        });
+      } catch (error) {
+        throw new Error(
+          `Join policy transition was not persisted: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return {
+        contextGraphId,
+        mode: record.mode,
+        source: 'persisted',
+        ownerDid: target.ownerDid,
+        ownerAgentAddress: target.ownerAgentAddress,
+        ...(record.maxMembers ? { maxMembers: record.maxMembers } : {}),
+        ...(record.maxApprovalsPerHour ? { maxApprovalsPerHour: record.maxApprovalsPerHour } : {}),
+        memberCount: target.memberCount,
+        updatedAt: record.updatedAt,
+      };
+      });
+    } finally {
+      if (isDisable) {
+        const remaining = (this.contextGraphJoinPolicyDisableIntentCounts.get(contextGraphId) ?? 1) - 1;
+        if (remaining <= 0) this.contextGraphJoinPolicyDisableIntentCounts.delete(contextGraphId);
+        else this.contextGraphJoinPolicyDisableIntentCounts.set(contextGraphId, remaining);
+      }
+    }
+  }
+
+  /**
+   * An idempotent retry from an already-admitted member may refresh its
+   * transport credential, but it must not roll that credential backwards or
+   * swap the signed peer/key at the same issuance timestamp.
+   */
+  async assertAlreadyMemberDelegationRefresh(
+    this: DKGAgent,
+    contextGraphId: string,
+    delegation: SignedAgentDelegation,
+    carrierPeerId: string,
+  ): Promise<void> {
+    const signedPeerId = delegation.delegateePeerId;
+    if (!signedPeerId || signedPeerId !== carrierPeerId) {
+      throw new Error(
+        'Already-member delegation refresh carrier mismatch: ' +
+        `signed delegateePeerId=${signedPeerId || '<missing>'}, carrier=${carrierPeerId}`,
+      );
+    }
+    if (!Number.isSafeInteger(delegation.issuedAtMs) || delegation.issuedAtMs < 0) {
+      throw new Error('Already-member delegation refresh has an invalid issuedAtMs');
+    }
+    const incomingExpiresAtMs = delegation.expiresAtMs ?? 0;
+    if (!Number.isSafeInteger(incomingExpiresAtMs) || incomingExpiresAtMs < 0) {
+      throw new Error('Already-member delegation refresh has an invalid expiresAtMs');
+    }
+
+    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const delegationUri = assertSafeIri(
+      `did:dkg:agent-delegation:${contextGraphId}:${delegation.agentAddress.toLowerCase()}`,
+    );
+    const result = await this.store.query(
+      `SELECT ?issuedAt ?expiresAt ?peer ?opKey WHERE {
+        GRAPH <${metaGraph}> {
+          <${delegationUri}> <${DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT}> ?issuedAt .
+          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
+          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer }
+          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?opKey }
+        }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return;
+
+    const row = result.bindings[0] as Record<string, string>;
+    const currentIssuedAtMs = Number(stripLiteral(row['issuedAt'] ?? ''));
+    const currentExpiresAtMs = row['expiresAt'] == null
+      ? 0
+      : Number(stripLiteral(row['expiresAt']));
+    if (
+      !Number.isSafeInteger(currentIssuedAtMs) || currentIssuedAtMs < 0 ||
+      !Number.isSafeInteger(currentExpiresAtMs) || currentExpiresAtMs < 0
+    ) {
+      throw new Error('Stored already-member delegation has an invalid validity timestamp');
+    }
+    if (delegation.issuedAtMs < currentIssuedAtMs) {
+      throw new Error(
+        `Stale already-member delegation refresh: issuedAtMs ${delegation.issuedAtMs} ` +
+        `is older than active credential ${currentIssuedAtMs}`,
+      );
+    }
+    if (delegation.issuedAtMs > currentIssuedAtMs) return;
+
+    const currentPeerId = row['peer'] == null ? '' : stripLiteral(row['peer']);
+    const currentOpKey = row['opKey'] == null ? '' : stripLiteral(row['opKey']).toLowerCase();
+    const incomingOpKey = delegation.delegateeOpKey?.toLowerCase() ?? '';
+    if (
+      signedPeerId !== currentPeerId ||
+      incomingOpKey !== currentOpKey ||
+      incomingExpiresAtMs !== currentExpiresAtMs
+    ) {
+      throw new Error(
+        `Conflicting already-member delegation refresh at issuedAtMs ${delegation.issuedAtMs}`,
+      );
+    }
+  }
+
+  /**
+   * Delegate the bounded ingress, classification, policy, repair, and commit
+   * phases to the focused admission service.
+   */
+  async processIncomingJoinRequest(
+    this: DKGAgent,
+    contextGraphId: string,
+    delegation: SignedAgentDelegation,
+    agentName: string | undefined,
+    carrierPeerId: string,
+    options: { ingressReserved?: boolean } = {},
+  ): Promise<IncomingJoinRequestDecision> {
+    return this.createContextGraphJoinAdmission().process({
+      contextGraphId,
+      delegation,
+      requestGeneration: this.getJoinRequestGeneration(delegation),
+      agentName,
+      carrierPeerId,
+      ingressReserved: options.ingressReserved === true,
+    });
+  }
+
+  /** Bind agent capabilities to the admission service's explicit host boundary. */
+  private createContextGraphJoinAdmission(this: DKGAgent): ContextGraphJoinAdmission {
+    const host: ContextGraphJoinAdmissionHost = {
+      policyStore: this.config.contextGraphJoinPolicyStore,
+      verifyJoinRequest: (contextGraphId, delegation) => {
+        this.verifyJoinRequest(contextGraphId, delegation);
+      },
+      getRetryableAdmission: (contextGraphId, delegation) =>
+        this.getRetryableContextGraphJoinAdmission(contextGraphId, delegation),
+      markRetryableAdmission: (contextGraphId, delegation, policyEpoch) => {
+        this.markRetryableContextGraphJoinAdmission(contextGraphId, delegation, policyEpoch);
+      },
+      clearRetryableAdmission: (contextGraphId, delegation) => {
+        this.clearRetryableContextGraphJoinAdmission(contextGraphId, delegation);
+      },
+      reserveIngress: (contextGraphId, carrierPeerId) =>
+        this.reserveContextGraphJoinIngress(contextGraphId, carrierPeerId),
+      chargeVerifiedIngress: (contextGraphId, agentAddress) => {
+        this.chargeVerifiedContextGraphJoinIngress(contextGraphId, agentAddress);
+      },
+      withAdmissionLock: (contextGraphId, operation) =>
+        this.withContextGraphJoinAdmissionLock(contextGraphId, operation),
+      isPolicyDisableRequested: (contextGraphId) =>
+        (this.contextGraphJoinPolicyDisableIntentCounts.get(contextGraphId) ?? 0) > 0,
+      getContextGraphMeta: (contextGraphId) => this.getCgMeta(contextGraphId),
+      getActiveMembers: (contextGraphId) => this.getMemberRecoveryGate(contextGraphId),
+      getContextGraphOwner: (contextGraphId) => this.getContextGraphOwner(contextGraphId),
+      resolveLocalOwnerAddress: (ownerDid) => this.resolveLocalJoinPolicyOwnerAddress(ownerDid),
+      assertAlreadyMemberDelegationRefresh: (contextGraphId, delegation, carrierPeerId) =>
+        this.assertAlreadyMemberDelegationRefresh(contextGraphId, delegation, carrierPeerId),
+      prepareMemberRefresh: ({
+        admissionLockToken,
+        contextGraphId,
+        delegation,
+        ownerAgentAddress,
+      }) => this.prepareInviteAgentToContextGraph(
+        admissionLockToken,
+        contextGraphId,
+        delegation.agentAddress,
+        ownerAgentAddress,
+        delegation,
+      ),
+      commitPreparedMemberRefresh: ({ admissionLockToken, contextGraphId, prepared }) =>
+        this.commitPreparedInviteAgentToContextGraph(
+          admissionLockToken,
+          contextGraphId,
+          prepared,
+        ),
+      getJoinRequestStatus: (contextGraphId, agentAddress) =>
+        this.getJoinRequestStatus(contextGraphId, agentAddress),
+      hasJoinRequestRecord: (contextGraphId, agentAddress) =>
+        this.hasJoinRequestRecord(contextGraphId, agentAddress),
+      markJoinRequestApproved: (contextGraphId, agentAddress) =>
+        this.markJoinRequestApproved(contextGraphId, agentAddress),
+      flushJoinApprovalDurably: () => this.flushJoinApprovalDurably(),
+      notifyJoinApproval: (contextGraphId, agentAddress, requestGeneration) => {
+        this.notifyJoinApproval(contextGraphId, agentAddress, requestGeneration).catch(() => {});
+      },
+      countPendingJoinRequests: (contextGraphId) => this.countPendingJoinRequests(contextGraphId),
+      storePendingJoinRequest: (contextGraphId, delegation, agentName) =>
+        this.storePendingJoinRequest(
+          contextGraphId,
+          delegation,
+          agentName,
+          { emitNotification: false },
+        ),
+      emitPendingJoinRequest: ({ contextGraphId, agentAddress, agentName }) => {
+        this.eventBus.emit(DKGEvent.JOIN_REQUEST_RECEIVED, {
+          contextGraphId,
+          agentAddress,
+          agentName,
+        });
+      },
+      assertJoinPolicyTarget: (contextGraphId, ownerAgentAddress, requirePrivate) =>
+        this.assertJoinPolicyTarget(contextGraphId, ownerAgentAddress, requirePrivate),
+      assertActiveEncryptionKey: async (agentAddress) => {
+        await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
+      },
+      prepareJoinRequestApproval: ({
+        admissionLockToken,
+        contextGraphId,
+        agentAddress,
+        ownerAgentAddress,
+      }) => this.prepareJoinRequestApproval(
+        admissionLockToken,
+        contextGraphId,
+        agentAddress,
+        ownerAgentAddress,
+      ),
+      commitPreparedJoinRequestApproval: ({
+        admissionLockToken,
+        contextGraphId,
+        agentAddress,
+        prepared,
+      }) => this.commitPreparedJoinRequestApproval(
+        admissionLockToken,
+        contextGraphId,
+        agentAddress,
+        prepared,
+        false,
+      ),
+    };
+    return new ContextGraphJoinAdmission(host);
+  }
+
   getJoinRequestGeneration(
     this: DKGAgent,
     delegation: SignedAgentDelegation,
@@ -979,14 +1599,23 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     delegation: SignedAgentDelegation,
     agentName?: string,
-    requestGeneration: string = deriveJoinRequestGeneration(delegation),
+    requestGenerationOrOptions: string | { emitNotification?: boolean } =
+      deriveJoinRequestGeneration(delegation),
+    options: { emitNotification?: boolean } = {},
   ): Promise<boolean> {
+    const requestGeneration = typeof requestGenerationOrOptions === 'string'
+      ? requestGenerationOrOptions
+      : deriveJoinRequestGeneration(delegation);
+    const effectiveOptions = typeof requestGenerationOrOptions === 'string'
+      ? options
+      : requestGenerationOrOptions;
     const key = requesterJoinStateKey(contextGraphId, delegation.agentAddress);
     return withCuratorJoinRequestStoreLock(this, key, () => this.storePendingJoinRequestOnce(
       contextGraphId,
       delegation,
       agentName,
       requestGeneration,
+      effectiveOptions,
     ));
   }
 
@@ -995,6 +1624,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     requestGeneration: string,
+    options: { emitNotification?: boolean },
   ): Promise<boolean> {
     const derivedGeneration = deriveJoinRequestGeneration(delegation);
     if (
@@ -1105,11 +1735,13 @@ export class JoinRequestMethods extends DKGAgentBase {
     // re-posts the request locally) silently stored without surfacing in
     // notifications. Centralising the emit here means every successful
     // store — regardless of inbound path — produces a notification.
-    this.eventBus.emit(DKGEvent.JOIN_REQUEST_RECEIVED, {
-      contextGraphId,
-      agentAddress: delegation.agentAddress,
-      agentName,
-    });
+    if (options.emitNotification !== false) {
+      this.eventBus.emit(DKGEvent.JOIN_REQUEST_RECEIVED, {
+        contextGraphId,
+        agentAddress: delegation.agentAddress,
+        agentName,
+      });
+    }
     return true;
   }
 
@@ -1237,66 +1869,209 @@ export class JoinRequestMethods extends DKGAgentBase {
     })).filter((r) => r.status === 'pending');
   }
 
+  /** Internal bounded-queue accounting; does not expose moderation records. */
+  async countPendingJoinRequests(this: DKGAgent, contextGraphId: string): Promise<number> {
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const DKG = 'https://dkg.network/ontology#';
+    const result = await this.store.query(
+      `SELECT (COUNT(?req) AS ?count) WHERE {
+        GRAPH <${cgMetaGraph}> {
+          ?req a <${DKG}JoinRequest> ;
+               <${DKG}requestStatus> "pending" .
+        }
+      }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return 0;
+    const raw = result.bindings[0]['count'];
+    const match = typeof raw === 'string' ? raw.match(/\d+/) : null;
+    return match ? Number(match[0]) : 0;
+  }
+
   /**
    * Approve a pending join request: verify the signature, add the agent
    * to the allowlist, and mark the request as approved.
    */
   async approveJoinRequest(this: DKGAgent, contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
-    const DKG = 'https://dkg.network/ontology#';
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    let requestGeneration = '';
+    return this.withContextGraphJoinAdmissionLock(contextGraphId, (admissionLockToken) =>
+      withCuratorJoinRequestStoreLock(this, key, () =>
+        this.commitJoinRequestApproval(
+          admissionLockToken,
+          contextGraphId,
+          agentAddress,
+          callerAgentAddress,
+        )));
+  }
 
-    // Storage, approval, and rejection share one per-request transition lock.
-    // Without it a newer submission can land between the delegation and
-    // generation reads, causing the new row to be approved with old credentials.
-    await withCuratorJoinRequestStoreLock(this, key, async () => {
-      const delegation = await this.loadPendingJoinDelegation(contextGraphId, agentAddress);
-      if (!delegation) {
-        throw new Error(`No pending join request found from ${agentAddress}`);
-      }
-      requestGeneration = await this.getStoredJoinRequestGeneration(
-        contextGraphId,
-        agentAddress,
-        'pending',
-      ) ?? '';
-      if (!requestGeneration) {
-        throw new Error(
-          `Pending join request from ${agentAddress} has no valid request generation; ask the joiner to re-submit`,
-        );
-      }
-      if (requestGeneration.toLowerCase() !== deriveJoinRequestGeneration(delegation)) {
-        throw new Error(`Pending join request generation does not match its signed delegation`);
-      }
-      // Re-verify the signed delegation against the CURRENT clock — approval
-      // is an authorisation event, so its expiry must still be in force.
-      verifyAgentDelegation(delegation, {
-        expectedScope: joinDelegationScope(this.chain.deploymentId, contextGraphId),
-      });
+  /** Internal approval body; caller must hold the per-CG admission lock. */
+  async commitJoinRequestApproval(
+    this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+    notifyRequester = true,
+  ): Promise<void> {
+    const prepared = await this.prepareJoinRequestApproval(
+      admissionLockToken,
+      contextGraphId,
+      agentAddress,
+      callerAgentAddress,
+    );
+    await this.commitPreparedJoinRequestApproval(
+      admissionLockToken,
+      contextGraphId,
+      agentAddress,
+      prepared,
+      notifyRequester,
+    );
+  }
 
-      await this.inviteAgentToContextGraph(contextGraphId, agentAddress, callerAgentAddress, delegation);
-
-      await this.store.deleteByPattern({
-        graph: cgMetaGraph,
-        subject: requestUri,
-        predicate: `${DKG}requestStatus`,
-      });
-      await this.store.insert([{
-        subject: requestUri,
-        predicate: `${DKG}requestStatus`,
-        object: `"approved"`,
-        graph: cgMetaGraph,
-      }]);
+  /** Complete every approval preflight without changing membership state. */
+  async prepareJoinRequestApproval(
+    this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+  ): Promise<PreparedContextGraphAgentInviteMutation> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
+    await this.assertContextGraphOwner(contextGraphId, callerAgentAddress, 'manage join requests');
+    const delegation = await this.loadPendingJoinDelegation(contextGraphId, agentAddress);
+    if (!delegation) {
+      throw new Error(`No pending join request found from ${agentAddress}`);
+    }
+    const requestGeneration = await this.getStoredJoinRequestGeneration(
+      contextGraphId,
+      agentAddress,
+      'pending',
+    );
+    if (
+      !requestGeneration
+      || requestGeneration.toLowerCase() !== deriveJoinRequestGeneration(delegation)
+    ) {
+      throw new Error('Pending join request generation does not match its signed delegation');
+    }
+    // Re-verify the signed delegation against the CURRENT clock —
+    // approval is an authorisation event so the delegation's
+    // expiry must still be in force. If the curator took longer than
+    // the joiner's `expiresAtMs` to review, the joiner has to re-sign
+    // (their UI will surface the now-expired pending request and
+    // prompt them); silently promoting an expired delegation into the
+    // sync allowlist would defeat the whole point of binding an expiry
+    // into the signed payload. The standard `JOIN_DELEGATION_VALIDITY_MS`
+    // is 1 year so this is a non-issue in practice.
+    verifyAgentDelegation(delegation, {
+      expectedScope: joinDelegationScope(this.chain.deploymentId, contextGraphId),
     });
+
+    const meta = await this.getCgMeta(contextGraphId);
+    if (meta.revokedAgents.some(
+      (address) => address.toLowerCase() === agentAddress.toLowerCase(),
+    )) {
+      throw new Error(
+        `Agent ${agentAddress} is revoked from "${contextGraphId}". Clear the revocation separately before approving a new join request.`,
+      );
+    }
+
+    // Every production adapter implements SPARQL UPDATE. Refuse to cross the
+    // membership boundary on a custom adapter that cannot atomically replace
+    // the moderation status.
+    if (typeof this.store.update !== 'function') {
+      throw new Error(
+        'Join approval requires atomic SPARQL UPDATE support from the configured triple store.',
+      );
+    }
+
+    return this.prepareInviteAgentToContextGraph(
+      admissionLockToken,
+      contextGraphId,
+      agentAddress,
+      callerAgentAddress,
+      delegation,
+    );
+  }
+
+  /** Cross the prepared membership boundary, then durably finish moderation. */
+  async commitPreparedJoinRequestApproval(
+    this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    prepared: PreparedContextGraphAgentInviteMutation,
+    notifyRequester = true,
+  ): Promise<void> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
+    await this.commitPreparedInviteAgentToContextGraph(
+      admissionLockToken,
+      contextGraphId,
+      prepared,
+    );
+    await this.markJoinRequestApproved(contextGraphId, agentAddress);
+    // `insert()` only schedules TripleStore's debounced persistence. Flush the
+    // allowlist, delegation, and moderation status as one success boundary so a
+    // power loss immediately after the HTTP/P2P ACK cannot erase membership.
+    await this.flushJoinApprovalDurably();
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Approved join request from ${agentAddress} for "${contextGraphId}"`);
 
     // Notify the requester via P2P so they can auto-subscribe
-    this.notifyJoinApproval(contextGraphId, agentAddress, requestGeneration).catch((err) => {
-      this.log.warn(ctx, `Failed to notify ${agentAddress} of approval: ${err instanceof Error ? err.message : err}`);
-    });
+    if (notifyRequester) {
+      this.notifyJoinApproval(contextGraphId, agentAddress).catch((err) => {
+        this.log.warn(ctx, `Failed to notify ${agentAddress} of approval: ${err instanceof Error ? err.message : err}`);
+      });
+    }
+  }
+
+  /** Complete the moderation side of an approval; safe to repeat after retry. */
+  async markJoinRequestApproved(this: DKGAgent, contextGraphId: string, agentAddress: string): Promise<void> {
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const requestStatus = 'https://dkg.network/ontology#requestStatus';
+    const decisionTimestamp = 'https://dkg.network/ontology#decisionTimestamp';
+    const decidedAt = Date.now();
+    if (typeof this.store.update !== 'function') {
+      throw new Error(
+        'Join approval requires atomic SPARQL UPDATE support from the configured triple store.',
+      );
+    }
+    // Status and retention ordering must cross the terminal boundary together.
+    await this.store.update(`
+      DELETE { GRAPH <${cgMetaGraph}> {
+        <${requestUri}> <${requestStatus}> ?oldStatus .
+        <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp .
+      } }
+      INSERT { GRAPH <${cgMetaGraph}> {
+        <${requestUri}> <${requestStatus}> "approved" .
+        <${requestUri}> <${decisionTimestamp}> "${decidedAt}" .
+      } }
+      WHERE  {
+        OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
+        OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
+      }
+    `, { touchedGraphs: [cgMetaGraph], source: 'join-approval-status' });
+    await this.pruneTerminalJoinRequestHistory(contextGraphId);
+  }
+
+  /** Keep curator/requester moderation state bounded without risking the decision path. */
+  async pruneTerminalJoinRequestHistory(this: DKGAgent, contextGraphId: string): Promise<void> {
+    try {
+      const pruned = await pruneTerminalJoinRequestRecords(this.store, contextGraphId);
+      if (pruned > 0) {
+        this.log.info(
+          createOperationContext('system'),
+          `Pruned ${pruned} terminal join-request record(s) for "${contextGraphId}"`,
+        );
+      }
+    } catch (error) {
+      // Retention is resource hygiene, not part of the authorization commit.
+      // Keep the terminal decision durable and retry pruning on the next one.
+      this.log.warn(
+        createOperationContext('system'),
+        `Could not prune terminal join-request records for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**
@@ -1485,6 +2260,98 @@ export class JoinRequestMethods extends DKGAgentBase {
   }
 
   /**
+   * Persist the requester-side result of an authenticated curator decision.
+   *
+   * Curator moderation rows are intentionally redacted from private-CG meta
+   * sync, so the requester must not depend on those rows arriving over the
+   * wire. Store only the final status under the same join-request subject;
+   * sync responders redact that subject prefix, keeping this decision local.
+   */
+  async recordLocalJoinRequestDecision(
+    this: DKGAgent,
+    contextGraphId: string,
+    agentAddress: string,
+    status: 'approved' | 'rejected',
+  ): Promise<void> {
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const requestStatus = 'https://dkg.network/ontology#requestStatus';
+    const decisionTimestamp = 'https://dkg.network/ontology#decisionTimestamp';
+    const decidedAt = Date.now();
+
+    if (typeof this.store.update === 'function') {
+      await this.store.update(`
+        DELETE { GRAPH <${cgMetaGraph}> {
+          <${requestUri}> <${requestStatus}> ?oldStatus .
+          <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp .
+        } }
+        INSERT { GRAPH <${cgMetaGraph}> {
+          <${requestUri}> <${requestStatus}> "${status}" .
+          <${requestUri}> <${decisionTimestamp}> "${decidedAt}" .
+        } }
+        WHERE  {
+          OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
+          OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
+        }
+      `, { touchedGraphs: [cgMetaGraph], source: `local-join-${status}-status` });
+    } else {
+      // Compatibility fallback for custom stores without SPARQL UPDATE.
+      // The curator remains authoritative if a crash lands between these two
+      // mutations, and an approval can be redelivered to repair local state.
+      await this.store.deleteByPattern({
+        graph: cgMetaGraph,
+        subject: requestUri,
+        predicate: requestStatus,
+      });
+      await this.store.deleteByPattern({
+        graph: cgMetaGraph,
+        subject: requestUri,
+        predicate: decisionTimestamp,
+      });
+      await this.store.insert([
+        {
+          subject: requestUri,
+          predicate: requestStatus,
+          object: `"${status}"`,
+          graph: cgMetaGraph,
+        },
+        {
+          subject: requestUri,
+          predicate: decisionTimestamp,
+          object: `"${decidedAt}"`,
+          graph: cgMetaGraph,
+        },
+      ]);
+    }
+
+    await this.pruneTerminalJoinRequestHistory(contextGraphId);
+    // Embedded stores debounce disk persistence. Do not ACK the curator until
+    // the local decision survives a requester restart.
+    await this.store.flush?.();
+  }
+
+  /** True when the moderation entity exists even if its status write was interrupted. */
+  async hasJoinRequestRecord(
+    this: DKGAgent,
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<boolean> {
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const DKG = 'https://dkg.network/ontology#';
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const result = await this.store.query(
+      `SELECT ?type WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${requestUri}> <${RDF_TYPE}> ?type .
+          FILTER(?type = <${DKG}JoinRequest>)
+        }
+      } LIMIT 1`,
+    );
+    return result.type === 'bindings' && result.bindings.length > 0;
+  }
+
+  /**
    * Snapshot of pending approval retries. Surfaced via the daemon for
    * operator-facing diagnostics ("how many approvals are stuck on
    * transport, and how long since the first failure?").
@@ -1608,6 +2475,26 @@ export class JoinRequestMethods extends DKGAgentBase {
    * Reject a pending join request.
    */
   async rejectJoinRequest(this: DKGAgent, contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
+    const key = requesterJoinStateKey(contextGraphId, agentAddress);
+    return this.withContextGraphJoinAdmissionLock(contextGraphId, (admissionLockToken) =>
+      withCuratorJoinRequestStoreLock(this, key, () =>
+        this.commitJoinRequestRejection(
+          admissionLockToken,
+          contextGraphId,
+          agentAddress,
+          callerAgentAddress,
+        )));
+  }
+
+  /** Internal rejection body; caller must hold the per-CG admission lock. */
+  async commitJoinRequestRejection(
+    this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+  ): Promise<void> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
     // SECURITY (G1): reject is a curator-only ACL decision. Previously this
     // method had NO owner check while `approveJoinRequest` was gated (via
     // `inviteAgentToContextGraph` → `assertCallerIsOwner`), so any local-token
@@ -1621,44 +2508,51 @@ export class JoinRequestMethods extends DKGAgentBase {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
     const DKG = 'https://dkg.network/ontology#';
-    const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    let requestGeneration = '';
-    await withCuratorJoinRequestStoreLock(this, key, async () => {
-      const delegation = await this.loadPendingJoinDelegation(contextGraphId, agentAddress);
-      if (!delegation) {
-        throw new Error(`No pending join request found from ${agentAddress}`);
+    const delegation = await this.loadPendingJoinDelegation(contextGraphId, agentAddress);
+    if (!delegation) {
+      throw new Error(`No pending join request found from ${agentAddress}`);
+    }
+    const requestGeneration = await this.getStoredJoinRequestGeneration(
+      contextGraphId,
+      agentAddress,
+      'pending',
+    );
+    if (
+      !requestGeneration
+      || requestGeneration.toLowerCase() !== deriveJoinRequestGeneration(delegation)
+    ) {
+      throw new Error('Pending join request generation does not match its signed delegation');
+    }
+    const requestStatus = `${DKG}requestStatus`;
+    const decisionTimestamp = `${DKG}decisionTimestamp`;
+    const decidedAt = Date.now();
+    if (typeof this.store.update !== 'function') {
+      throw new Error(
+        'Join rejection requires atomic SPARQL UPDATE support from the configured triple store.',
+      );
+    }
+    await this.store.update(`
+      DELETE { GRAPH <${cgMetaGraph}> {
+        <${requestUri}> <${requestStatus}> ?oldStatus .
+        <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp .
+      } }
+      INSERT { GRAPH <${cgMetaGraph}> {
+        <${requestUri}> <${requestStatus}> "rejected" .
+        <${requestUri}> <${decisionTimestamp}> "${decidedAt}" .
+      } }
+      WHERE  {
+        OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
+        OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
       }
-      requestGeneration = await this.getStoredJoinRequestGeneration(
-        contextGraphId,
-        agentAddress,
-        'pending',
-      ) ?? '';
-      if (
-        !requestGeneration ||
-        requestGeneration.toLowerCase() !== deriveJoinRequestGeneration(delegation)
-      ) {
-        throw new Error(`Pending join request generation does not match its signed delegation`);
-      }
-
-      await this.store.deleteByPattern({
-        graph: cgMetaGraph,
-        subject: requestUri,
-        predicate: `${DKG}requestStatus`,
-      });
-      await this.store.insert([{
-        subject: requestUri,
-        predicate: `${DKG}requestStatus`,
-        object: `"rejected"`,
-        graph: cgMetaGraph,
-      }]);
-      this.upsertContextGraphMember({
-        contextGraphId,
-        principalType: 'agent',
-        principalId: agentAddress,
-        role: 'requester',
-        status: 'removed',
-        source: 'join-rejected',
-      });
+    `, { touchedGraphs: [cgMetaGraph], source: 'join-rejected' });
+    await this.pruneTerminalJoinRequestHistory(contextGraphId);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'agent',
+      principalId: agentAddress,
+      role: 'requester',
+      status: 'removed',
+      source: 'join-rejected',
     });
 
     const ctx = createOperationContext('system');
@@ -1857,21 +2751,11 @@ export class JoinRequestMethods extends DKGAgentBase {
   /**
    * Forward a signed join request to the curator via P2P.
    *
-   * Two-tier delivery:
-   *   1. Targeted send to `curatorPeerId` first (if the V10 invite carried
-   *      one — the common case). On success returns immediately, avoiding
-   *      a fan-out to dozens of unrelated peers.
-   *   2. Fallback broadcast in PARALLEL to every other connected peer via
-   *      `Promise.allSettled`. This bounds total wall-clock time to one
-   *      per-peer timeout (~5s) regardless of peer count, and lets the
-   *      request still find its curator when the targeted dial fails or
-   *      no curator peer id is known (legacy invites).
-   *
-   * The earlier sequential-await loop scaled as O(connected-peers ×
-   * per-peer-timeout). On a real testnet node connected to 30+ peers the
-   * worst-case wait was ~2.5 minutes per click; observed 2-3 min in the
-   * field. Targeted-first collapses the common case to one round-trip,
-   * and parallel broadcast caps the fallback at the timeout.
+   * Delivery is only to the explicit `curatorPeerId` carried in the V10
+   * invite. A signed join credential contains the private CG identifier and
+   * agent metadata; broadcasting it to unrelated peers after a targeted
+   * transport failure is both useless (non-curators do not relay it) and a
+   * privacy leak. The reliable messenger owns retries to the exact curator.
    *
    * The explicit curator is persisted with the requester generation before
    * transport begins, closing both the immediate-decision race and the
@@ -1885,7 +2769,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean }> {
+  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
     const key = requesterJoinStateKey(contextGraphId, delegation.agentAddress);
     return withRequesterJoinForwardLock(this, key, () => this.forwardJoinRequestOnce(
       contextGraphId,
@@ -1900,7 +2784,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean }> {
+  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
     if (!curatorPeerId) {
       // Required: V10 invites carry the curator's libp2p peer-id
       // (`<cgId>\n<peerId>`). Without it we can't authenticate the
@@ -1958,18 +2842,21 @@ export class JoinRequestMethods extends DKGAgentBase {
       set.add(remotePeerId);
     };
 
-    // Track whether the targeted send to `curatorPeerId` SUCCEEDED.
-    // Two reasons matter for the broadcast fallback:
-    //  - if it succeeded, curator is excluded from broadcast targets
-    //    (no point re-sending), and we record it as the trusted
-    //    decision sender.
-    //  - if it failed (timeout, transient connection drop, response
-    //    other than `ok`), curator is INCLUDED in the broadcast so a
-    //    second chance over a fresh stream still finds them. The
-    //    earlier behaviour skipped curator unconditionally — a single
-    //    transient error then meant the request never reached them.
-    let curatorTargetedSuccess = false;
+    const forgetAcceptedBy = (remotePeerId: string): void => {
+      const set = this.joinRequestAcceptedBy.get(acceptedKey);
+      if (!set) return;
+      set.delete(remotePeerId);
+      if (set.size === 0) this.joinRequestAcceptedBy.delete(acceptedKey);
+    };
+
+    // Open enrollment may approve and notify before the request-response
+    // round-trip has returned. Trust the explicit invite-supplied curator
+    // before sending so that immediate `join-approved` cannot lose a race
+    // against the old post-response cache write. This is not a trust
+    // expansion: the requester already selected this exact peer from the
+    // curator's invite and sends the signed delegation only to it first.
     if (curatorPeerId !== this.peerId) {
+      recordAcceptedBy(curatorPeerId);
       try {
         // rc.9 PR-10: substrate send. queued surfaces as a throw
         // (matches the legacy sendToPeer ergonomics so the existing
@@ -1992,22 +2879,27 @@ export class JoinRequestMethods extends DKGAgentBase {
         const responseBytes = sendResult.response;
         const response = JSON.parse(new TextDecoder().decode(responseBytes));
         if (response.ok) {
-          // Only the explicit invite-supplied curator is recorded as a
-          // trusted decision sender — see `isTrustedJoinDecisionSender`
-          // for why we won't trust arbitrary broadcast acceptors.
-          recordAcceptedBy(curatorPeerId);
-          curatorTargetedSuccess = true;
+          // Only the explicit invite-supplied curator is a trusted decision
+          // sender — it was pre-recorded above to cover immediate approval.
           const alreadyMember = !!response.alreadyMember;
+          const autoApproved = !!response.autoApproved;
           this.log.info(
             ctx,
-            `Forwarded join request for "${contextGraphId}" from ${agentAddress}: 1 curator(s) received (direct${alreadyMember ? ', already-member' : ''})`,
+            `Forwarded join request for "${contextGraphId}" from ${agentAddress}: 1 curator(s) received ` +
+              `(direct${alreadyMember ? ', already-member' : ''}${autoApproved ? ', auto-approved' : ''})`,
           );
           acceptedForDelivery = true;
-          return { delivered: 1, errors, ...(alreadyMember ? { alreadyMember: true } : {}) };
+          return {
+            delivered: 1,
+            errors,
+            ...(alreadyMember ? { alreadyMember: true } : {}),
+            ...(autoApproved ? { autoApproved: true } : {}),
+          };
         }
         // Curator was reachable but rejected the request. Log + record
         // the reason so the joiner can see WHY (e.g. "unknown CG"
         // implies the cgId in the invite text is wrong).
+        forgetAcceptedBy(curatorPeerId);
         const rejectReason = response.error ?? 'unknown';
         this.log.warn(
           ctx,
@@ -2028,88 +2920,20 @@ export class JoinRequestMethods extends DKGAgentBase {
         // delivery). Return the rejection now.
         return { delivered: 0, errors };
       } catch (dialErr) {
-        // Targeted dial failed — fall through to broadcast WITH curator
-        // re-included as a target.
+        forgetAcceptedBy(curatorPeerId);
         const msg = dialErr instanceof Error ? dialErr.message : String(dialErr);
         this.log.warn(
           ctx,
           `Targeted join-request dial to curator ${curatorPeerId.slice(-8)} failed: ${msg}`,
         );
         errors.push(`${curatorPeerId.slice(-8)}: dial failed (${msg})`);
+        return { delivered: 0, errors };
       }
     }
-
-    // Reaching here means either (a) `curatorPeerId` was unset (legacy
-    // multiaddr invite — broadcast is the only delivery option), or (b)
-    // the targeted curator dial threw a transport error and broadcast
-    // re-includes curatorPeerId in the cohort as a second chance over a
-    // fresh stream. Non-curator peers that receive PROTOCOL_JOIN_REQUEST
-    // for a CG they don't curate respond `{ ok: false, error: 'not
-    // curator' }` and don't relay (see handler at dkg-agent.ts:1788),
-    // so a broader "drop V10 broadcast entirely" cleanup is tracked as
-    // a follow-up rather than landed here.
-    const peers = this.node.libp2p.getPeers();
-    const broadcastTargets = peers
-      .map((p) => p.toString())
-      .filter((id) => id !== this.peerId && (!curatorTargetedSuccess || id !== curatorPeerId));
-    const results = await Promise.allSettled(
-      broadcastTargets.map(async (remotePeerId) => {
-        // rc.9 PR-10: substrate send. Broadcast queued = treat as
-        // failure for this peer (the cohort is parallel — losing one
-        // peer is fine, the others may succeed).
-        const sendResult = await this.messenger.sendReliable(
-          remotePeerId,
-          PROTOCOL_JOIN_REQUEST,
-          payloadBytes,
-          { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS },
-        );
-        if (!sendResult.delivered) {
-          if (remotePeerId === curatorPeerId) {
-            acceptedForDelivery = true;
-            recordAcceptedBy(remotePeerId);
-          }
-          throw new Error(`substrate queued (transport): ${sendResult.error}`);
-        }
-        const response = JSON.parse(new TextDecoder().decode(sendResult.response));
-        return { remotePeerId, response };
-      }),
-    );
-    let delivered = 0;
-    let alreadyMember = false;
-    for (const r of results) {
-      if (r.status !== 'fulfilled') continue;
-      const { remotePeerId, response } = r.value;
-      if (response.ok) {
-        // SECURITY: do NOT cache broadcast acceptors as trusted
-        // decision senders. Any peer can ack `{ ok: true }` (e.g.
-        // because they speak the protocol) — caching them here would
-        // let a non-curator peer subsequently forge a join-approved
-        // notification and have it accepted (see
-        // `isTrustedJoinDecisionSender`). Trust is granted only to
-        // the explicit `curatorPeerId` from the invite (above) or
-        // to the recorded curator triple in `_meta` (the fallback
-        // inside `isTrustedJoinDecisionSender`).
-        //
-        // The matched curator inside the broadcast cohort can still
-        // deliver the decision: the joiner will accept it via the
-        // `_meta` curator-triple path once that triple lands locally
-        // (curator metadata is gossiped along with the CG itself).
-        if (remotePeerId === curatorPeerId) {
-          delivered++;
-          recordAcceptedBy(remotePeerId);
-          if (response.alreadyMember) alreadyMember = true;
-        }
-      } else if (response.error !== 'unknown CG') {
-        errors.push(`${remotePeerId.slice(-8)}: ${response.error}`);
-      }
-    }
-
-    this.log.info(
-      ctx,
-      `Forwarded join request for "${contextGraphId}" from ${agentAddress}: ${delivered} curator(s) received (broadcast over ${broadcastTargets.length} peer(s)${alreadyMember ? ', already-member' : ''})`,
-    );
-    acceptedForDelivery = acceptedForDelivery || delivered > 0;
-    return { delivered, errors, ...(alreadyMember ? { alreadyMember: true } : {}) };
+    return {
+      delivered: 0,
+      errors: ['Curator peer id resolves to this node; submit the join request locally.'],
+    };
     } finally {
       if (!acceptedForDelivery) {
         await this.restoreRequesterJoinStateAfterFailedForward(

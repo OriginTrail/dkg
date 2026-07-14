@@ -213,6 +213,10 @@ import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
+import {
+  normalizeSyncContextGraphPriorities,
+  validateSyncResponderSnapshotLimitsConfig,
+} from './sync/policy.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
@@ -338,6 +342,12 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type ContextGraphJoinPolicyMode,
+  type ContextGraphJoinPolicyRecord,
+  type ContextGraphJoinPolicyAuditEventType,
+  type ContextGraphJoinPolicyAuditEvent,
+  type ContextGraphJoinPolicyRateReservation,
+  type ContextGraphJoinPolicyStore,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -434,6 +444,12 @@ export type {
   ContextGraphMemberStatus,
   ContextGraphMembershipRecord,
   ContextGraphMembershipStore,
+  ContextGraphJoinPolicyMode,
+  ContextGraphJoinPolicyRecord,
+  ContextGraphJoinPolicyAuditEventType,
+  ContextGraphJoinPolicyAuditEvent,
+  ContextGraphJoinPolicyRateReservation,
+  ContextGraphJoinPolicyStore,
   DurableSyncDiagnostics,
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
@@ -669,7 +685,13 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    const config = normalizeStorageAckConfig(inputConfig);
+    validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
+    const config = normalizeStorageAckConfig({
+      ...inputConfig,
+      syncContextGraphPriorities: normalizeSyncContextGraphPriorities(
+        inputConfig.syncContextGraphPriorities,
+      ),
+    });
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {

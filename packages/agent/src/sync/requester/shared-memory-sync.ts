@@ -26,6 +26,8 @@ export interface SharedMemorySyncSummary {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure: number;
 }
 
 interface SharedMemorySyncContext {
@@ -111,6 +113,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     failedPeers: 0,
     failedPhases: 0,
     backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
   };
 
   const recordPhaseOutcome = (

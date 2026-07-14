@@ -151,7 +151,8 @@ import { createInitialPublisherState, createPublicSnapshotStore, createPublisher
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
-  persistProjectSyncedReadiness,
+  registerProjectSyncedReadinessPersistence,
+  resetContextGraphReadinessForMissingMetadata,
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
@@ -1092,12 +1093,15 @@ export async function bootstrapConfiguredContextGraphs(input: {
       // marker and stale metaSynced=true. The explicit remote proof above
       // rejects that marker without depending on mutable subscription state;
       // only now do we persist the fail-closed bootstrap classification.
-      input.agent.markContextGraphSubscriptionState(contextGraphId, {
-        synced: false,
-        sharedMemorySynced: false,
-        metaSynced: false,
-        pendingMeta: true,
+      const reset = await resetContextGraphReadinessForMissingMetadata({
+        agent: input.agent,
+        store: input.readinessStore ?? {},
+        contextGraphId,
       });
+      // PROJECT_SYNCED persistence shares the same readiness lock and may
+      // have proved this graph while bootstrap was working from `existing`.
+      // Its live metadata revalidation wins over the stale snapshot.
+      if (!reset) hasAuthoritativeMetadata = true;
     }
 
     if (hasAuthoritativeMetadata) {
@@ -1724,6 +1728,8 @@ export async function runDaemonInner(
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,
     syncGlobalQueueLimit: config.syncGlobalQueueLimit,
+    syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
+    syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
@@ -1844,6 +1850,28 @@ export async function runDaemonInner(
       delete: async (contextGraphId, principalType, principalId) => {
         dashDb.deleteContextGraphMember(contextGraphId, principalType, principalId);
       },
+    },
+    contextGraphJoinPolicyStore: {
+      load: async (contextGraphId) => dashDb.getContextGraphJoinPolicy(contextGraphId),
+      save: async (record) => {
+        dashDb.setContextGraphJoinPolicy(record);
+      },
+      appendAudit: async (event) => {
+        dashDb.appendContextGraphJoinPolicyAudit(event);
+      },
+      saveWithAudit: async (record, event) => {
+        dashDb.setContextGraphJoinPolicyWithAudit(record, event);
+      },
+      getAutomaticApprovalUsage: async (contextGraphId, timestamp) =>
+        dashDb.getContextGraphAutomaticApprovalUsage(contextGraphId, timestamp),
+      reserveAutomaticApproval: async (input) =>
+        dashDb.reserveContextGraphAutomaticApproval(input),
+      markAutomaticApprovalRepairPending: async (input) =>
+        dashDb.markContextGraphAutomaticApprovalRepairPending(input),
+      getAutomaticApprovalRepair: async (contextGraphId, requestDigest) =>
+        dashDb.getContextGraphAutomaticApprovalRepair(contextGraphId, requestDigest),
+      commitAutomaticApproval: async (input) =>
+        dashDb.commitContextGraphAutomaticApproval(input),
     },
     messengerStores: {
       idempotencyStore: messengerIdempotencyStore,
@@ -1980,16 +2008,10 @@ export async function runDaemonInner(
   // Register before network startup. A queued join approval can arrive as
   // soon as the messenger is live, before the later UI/SSE listeners are
   // installed, and its automatic catch-up proof must survive restart.
-  agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
-    void persistProjectSyncedReadiness({
-      agent,
-      store: dashDb,
-      contextGraphId: typeof data?.contextGraphId === "string" ? data.contextGraphId : "",
-      dataSynced: typeof data?.dataSynced === "number" ? data.dataSynced : 0,
-      sharedMemorySynced: typeof data?.sharedMemorySynced === "number" ? data.sharedMemorySynced : 0,
-    }).catch((err) => {
-      log(`[warn] Failed to persist PROJECT_SYNCED readiness: ${err instanceof Error ? err.message : String(err)}`);
-    });
+  registerProjectSyncedReadinessPersistence({
+    agent,
+    store: dashDb,
+    log,
   });
 
   await agent.start();

@@ -224,12 +224,16 @@ import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import {
+  runOrderedContextGraphSyncs,
+  type ContextGraphSyncWork,
+} from './sync/requester/ordered-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import {
   registerSyncHandler,
-  resolveSyncResponderSnapshotBudgetOptions,
+  resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
@@ -242,6 +246,13 @@ import {
   resolveSyncGlobalBackpressure,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
+import {
+  contextGraphPriority,
+  countSyncPriorityClasses,
+  orderContextGraphIdsByPriority,
+  syncPriorityClass,
+  type SyncSchedulerLane,
+} from './sync/policy.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -716,10 +727,12 @@ function emptyDurableSyncResult(): DurableSyncResult {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
+    backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
   };
 }
 
-/** Field-wise sum of two DurableSyncResults (OT-RFC-59 changelog lane + legacy lane). */
+/** Merge same-peer durable results across Context Graphs and requester lanes. */
 function mergeDurableSyncResults(a: DurableSyncResult, b: DurableSyncResult): DurableSyncResult {
   return {
     insertedTriples: a.insertedTriples + b.insertedTriples,
@@ -736,10 +749,13 @@ function mergeDurableSyncResults(a: DurableSyncResult, b: DurableSyncResult): Du
     metaOnlyResponses: a.metaOnlyResponses + b.metaOnlyResponses,
     dataRejectedMissingMeta: a.dataRejectedMissingMeta + b.dataRejectedMissingMeta,
     rejectedKcs: a.rejectedKcs + b.rejectedKcs,
-    failedPeers: a.failedPeers + b.failedPeers,
+    // This is peer cardinality, not a per-CG failure count. Both inputs belong
+    // to the same remote peer, so several failed CGs still mean one peer.
+    failedPeers: Math.max(a.failedPeers, b.failedPeers),
     failedPhases: a.failedPhases + b.failedPhases,
     deniedPhases: a.deniedPhases + b.deniedPhases,
     backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
+    deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
   };
 }
 
@@ -760,6 +776,34 @@ function emptySharedMemorySyncResult(): SharedMemorySyncResult {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
+    backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
+  };
+}
+
+function mergeSharedMemorySyncResults(
+  a: SharedMemorySyncResult,
+  b: SharedMemorySyncResult,
+): SharedMemorySyncResult {
+  return {
+    insertedTriples: a.insertedTriples + b.insertedTriples,
+    fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
+    fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
+    insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
+    insertedDataTriples: a.insertedDataTriples + b.insertedDataTriples,
+    bytesReceived: a.bytesReceived + b.bytesReceived,
+    resumedPhases: a.resumedPhases + b.resumedPhases,
+    timedOutPhases: a.timedOutPhases + b.timedOutPhases,
+    completedPhases: a.completedPhases + b.completedPhases,
+    checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
+    emptyResponses: a.emptyResponses + b.emptyResponses,
+    droppedDataTriples: a.droppedDataTriples + b.droppedDataTriples,
+    // This accumulator is also scoped to one remote peer across several CGs.
+    failedPeers: Math.max(a.failedPeers, b.failedPeers),
+    failedPhases: a.failedPhases + b.failedPhases,
+    deniedPhases: a.deniedPhases + b.deniedPhases,
+    backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
+    deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
   };
 }
 
@@ -774,6 +818,30 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  async runContextGraphSyncWithBackpressure<T>(this: DKGAgent,
+    ctx: OperationContext,
+    contextGraphId: string,
+    lane: SyncSchedulerLane,
+    label: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const priority = contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
+    return withGlobalSyncBackpressure(
+      {
+        policy: resolveSyncGlobalBackpressure(this.config),
+        ctx,
+        label,
+        contextGraphId,
+        lane,
+        priority,
+        priorityClass: syncPriorityClass(priority),
+        signal: this.node.stopSignal ?? undefined,
+        logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      },
+      work,
+    );
+  }
+
   async start(this: DKGAgent): Promise<void> {
     if (this.started) return;
     this.coreHostRecordingGeneration += 1;
@@ -1482,7 +1550,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   `syncGlobalInflight=${syncPressure.inflight} ` +
                   `syncGlobalQueued=${syncPressure.queued} ` +
                   `syncGlobalLimit=${syncPressure.limit ?? 'unbounded'} ` +
-                  `syncGlobalQueueLimit=${syncPressure.queueLimit ?? 'unbounded'}`;
+                  `syncGlobalQueueLimit=${syncPressure.queueLimit ?? 'unbounded'} ` +
+                  `syncQueuedElevated=${syncPressure.queuedByPriorityClass.elevated} ` +
+                  `syncQueuedDefault=${syncPressure.queuedByPriorityClass.default} ` +
+                  `syncQueuedDeprioritized=${syncPressure.queuedByPriorityClass.deprioritized} ` +
+                  `syncOldestQueuedAgeMs=${syncPressure.oldestQueuedAgeMs}`;
                 this.log.warn(
                   attemptCtx,
                   `V10 StorageACK declined: code=${details.code} ` +
@@ -1965,6 +2037,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // parseSyncRequest expects — and the adapter re-exposes the string
     // peerId contract registerSyncHandler relies on. (Reverts rc.9 PR-E
     // for sync only; other substrate protocols keep their dedup.)
+    const snapshotPolicy = resolveSyncResponderSnapshotPolicy(
+      this.config.syncResponderSnapshotLimits,
+      process.env,
+      (message) => this.log.warn(ctx, message),
+    );
+    const syncGlobalPolicy = resolveSyncGlobalBackpressure(this.config);
+    const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
+    this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
+      snapshotGlobalRows: snapshotPolicy.budget.maxRows,
+      snapshotGlobalBytesEstimate: snapshotPolicy.budget.maxBytesEstimate,
+      snapshotLocalRows: snapshotPolicy.budget.maxSnapshotRows,
+      snapshotLocalBytesEstimate: snapshotPolicy.budget.maxSnapshotBytesEstimate,
+      syncGlobalInflightLimit: syncGlobalPolicy.limit ?? 0,
+      syncGlobalQueueLimit: syncGlobalPolicy.queueLimit ?? 0,
+      configuredPriorities: configuredPriorityCounts,
+      snapshotLocalClamped: snapshotPolicy.localRowsClamped || snapshotPolicy.localBytesEstimateClamped,
+    })}`);
     registerSyncHandler({
       register: (protocol, handler) =>
         this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
@@ -1986,7 +2075,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
-      snapshotBudget: resolveSyncResponderSnapshotBudgetOptions(process.env),
+      snapshotBudget: snapshotPolicy.budget,
+      contextGraphPriorities: this.config.syncContextGraphPriorities,
     });
 
     // OT-RFC-59 changelog delta lane. Registered ONLY when the changelog is
@@ -2013,6 +2103,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
       let trustedDecisionInProgress = false;
       try {
+        if (data.byteLength > 64 * 1024) {
+          return new TextEncoder().encode(JSON.stringify({
+            ok: false,
+            error: 'join-request payload exceeds 64 KiB',
+          }));
+        }
         const payload = JSON.parse(new TextDecoder().decode(data));
 
         // Handle "join-approved" notifications from curator → requester.
@@ -2032,6 +2128,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // would skip the trusted-sender check, subscribe this node,
           // and emit JOIN_APPROVED unconditionally. Mirror the
           // rejection handler: if either field is missing, drop.
+          if (!contextGraphId || !approvedAddr || typeof requestGeneration !== 'string') {
+            return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+          }
           if (contextGraphId && approvedAddr && typeof requestGeneration === 'string') {
             const isLocalAgent = [...this.localAgents.keys()].some(
               (addr) => addr.toLowerCase() === approvedAddr.toLowerCase(),
@@ -2276,143 +2375,131 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'missing fields' }));
         }
-        // Only store if this node is the curator (creator) of the CG
-        const owner = await this.getContextGraphOwner(contextGraphId);
-        if (!owner) {
-          this.log.warn(
-            requestCtx,
-            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": rejected — unknown CG`,
-          );
-          return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'unknown CG' }));
-        }
-        // Compare on normalised DIDs (see `normalizeAgentDid`): EVM
-        // address suffixes are lowered (case-insensitive on-wire), peer-ID
-        // suffixes pass through (case-sensitive base58). The cgId-derived
-        // owner DID (`deriveCuratorDidFromCgId`) preserves whatever case
-        // the cgId shipped with, while the locally-stored agent address
-        // is typically `ethers.getAddress`'d to checksummed form — both
-        // collapse to the same string here.
-        const ownerNorm = normalizeAgentDid(owner);
-        const selfDid = `did:dkg:agent:${this.peerId}`;
-        const selfAgentDid = this.defaultAgentAddress
-          ? normalizeAgentDid(`did:dkg:agent:${this.defaultAgentAddress}`)
-          : null;
-        const ownerLocalAgentAddress = [...this.localAgents.keys()].find(
-          (addr) => ownerNorm === normalizeAgentDid(`did:dkg:agent:${addr}`),
-        );
-        const isCurator = ownerNorm === selfDid ||
-          (selfAgentDid !== null && ownerNorm === selfAgentDid) ||
-          ownerLocalAgentAddress !== undefined;
-        if (!isCurator) {
-          this.log.warn(
-            requestCtx,
-            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": rejected — not curator (owner=${owner})`,
-          );
-          return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'not curator' }));
-        }
-        this.log.info(
-          requestCtx,
-          `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": accepted, verifying delegation for ${delegation.agentAddress}`,
-        );
-        this.verifyJoinRequest(contextGraphId, delegation);
-        const derivedRequestGeneration = this.getJoinRequestGeneration(delegation);
-        if (
-          requestGeneration !== undefined &&
-          (
-            typeof requestGeneration !== 'string' ||
-            requestGeneration.toLowerCase() !== derivedRequestGeneration
-          )
-        ) {
-          return new TextEncoder().encode(JSON.stringify({
-            ok: false,
-            error: 'request generation does not match signed delegation',
-          }));
-        }
-        if (
-          delegation.delegateePeerId &&
-          delegation.delegateePeerId !== peerId.toString()
-        ) {
-          return new TextEncoder().encode(JSON.stringify({
-            ok: false,
-            error: `join request carrier mismatch: signed delegatee peer ${delegation.delegateePeerId} ` +
-              `does not match transport peer ${peerId.toString()}`,
-          }));
-        }
-
-        // Already-member short-circuit: if the requester is already in
-        // the allowlist (e.g. they were added directly via add-agent,
-        // or are re-pasting an old invite), skip the pending-request
-        // dance and immediately fire `join-approved` so their UI flips
-        // to success without curator action. Safe to disclose because
-        // `verifyJoinRequest` already proved the requester owns the
-        // private key for `agentAddress` — only the legitimate owner
-        // learns "you're already a member".
-        const allowed = await this.getContextGraphAllowedAgents(contextGraphId);
-        const addrLower = delegation.agentAddress.toLowerCase();
-        const alreadyMember = allowed.some((a) => a.toLowerCase() === addrLower);
-        if (alreadyMember) {
-          // This path overwrites the active (CG, agent) delegation, so bind
-          // the refresh to the actual transport peer and reject rollback or
-          // same-timestamp substitution before mutating curator state. Keep
-          // the read/check/write in a per-delegation queue so two concurrent
-          // refreshes cannot race an older credential over a newer one.
-          const refreshKey = `${contextGraphId}::${addrLower}`;
-          await runAlreadyMemberDelegationRefresh(this, refreshKey, async () => {
-            await this.assertAlreadyMemberDelegationRefresh(
+        // Reserve the transport-authenticated peer and queue slot before any
+        // attacker-controlled CG lookup or signature work. Payload-derived CG
+        // and agent buckets are charged only after verification in the shared
+        // processing lane.
+        const releaseIngress = this.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)
+          ? () => {}
+          : this.reserveContextGraphJoinIngress(
               contextGraphId,
-              delegation,
               peerId.toString(),
             );
-            // The allowlist proves membership of the AGENT, but sync is carried
-            // by the requester's current peer/op key. Persist this newly-signed
-            // delegation before notifying the requester; otherwise an agent
-            // added directly (or one that moved nodes/rotated keys) is told it is
-            // approved while the curator still rejects its authenticated sync.
-            await this.inviteAgentToContextGraph(
-              contextGraphId,
-              delegation.agentAddress,
-              ownerLocalAgentAddress,
-              delegation,
+        try {
+          // Only store if this node is the curator (creator) of the CG
+          const owner = await this.getContextGraphOwner(contextGraphId);
+          if (!owner) {
+            this.log.warn(
+              requestCtx,
+              `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": rejected — unknown CG`,
             );
-          });
+            return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'unknown CG' }));
+          }
+          // Compare on normalised DIDs (see `normalizeAgentDid`): EVM
+          // address suffixes are lowered (case-insensitive on-wire), peer-ID
+          // suffixes pass through (case-sensitive base58).
+          const ownerNorm = normalizeAgentDid(owner);
+          const selfDid = `did:dkg:agent:${this.peerId}`;
+          const selfAgentDid = this.defaultAgentAddress
+            ? normalizeAgentDid(`did:dkg:agent:${this.defaultAgentAddress}`)
+            : null;
+          const ownerLocalAgentAddress = [...this.localAgents.keys()].find(
+            (addr) => ownerNorm === normalizeAgentDid(`did:dkg:agent:${addr}`),
+          );
+          const isCurator = ownerNorm === selfDid ||
+            (selfAgentDid !== null && ownerNorm === selfAgentDid) ||
+            ownerLocalAgentAddress !== undefined;
+          if (!isCurator) {
+            this.log.warn(
+              requestCtx,
+              `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": rejected — not curator (owner=${owner})`,
+            );
+            return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'not curator' }));
+          }
+          this.log.info(
+            requestCtx,
+            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": accepted for admission processing for ${delegation.agentAddress}`,
+          );
+          const derivedRequestGeneration = this.getJoinRequestGeneration(delegation);
+          if (
+            requestGeneration !== undefined
+            && (
+              typeof requestGeneration !== 'string'
+              || requestGeneration.toLowerCase() !== derivedRequestGeneration
+            )
+          ) {
+            return new TextEncoder().encode(JSON.stringify({
+              ok: false,
+              error: 'request generation does not match signed delegation',
+            }));
+          }
+          if (
+            delegation.delegateePeerId
+            && delegation.delegateePeerId !== peerId.toString()
+          ) {
+            return new TextEncoder().encode(JSON.stringify({
+              ok: false,
+              error: `join request carrier mismatch: signed delegatee peer ${delegation.delegateePeerId} `
+                + `does not match transport peer ${peerId.toString()}`,
+            }));
+          }
+
+          const addrLower = delegation.agentAddress.toLowerCase();
+          // Install the return-path before processing because automatic
+          // approval may notify immediately. Restore the previous path when
+          // processing rejects so invalid/over-cap unique addresses cannot
+          // grow this map without bound.
           const originKey = this.joinRequestTrackingKey(
             contextGraphId,
             addrLower,
             derivedRequestGeneration,
           );
+          const previousOriginPeer = this.joinRequestOriginPeers.get(originKey);
           this.joinRequestOriginPeers.set(originKey, peerId.toString());
-          this.log.info(
-            requestCtx,
-            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": already-member delegation refreshed for ${delegation.agentAddress}`,
-          );
-          this.notifyJoinApproval(
-            contextGraphId,
-            delegation.agentAddress,
-            derivedRequestGeneration,
-          ).catch(() => {});
-          return new TextEncoder().encode(JSON.stringify({ ok: true, alreadyMember: true }));
+          let decision: Awaited<ReturnType<DKGAgent['processIncomingJoinRequest']>>;
+          try {
+            decision = await this.processIncomingJoinRequest(
+              contextGraphId,
+              delegation,
+              agentName,
+              peerId.toString(),
+              { ingressReserved: true },
+            );
+          } catch (error) {
+            if (this.joinRequestOriginPeers.get(originKey) === peerId.toString()) {
+              if (previousOriginPeer === undefined) this.joinRequestOriginPeers.delete(originKey);
+              else this.joinRequestOriginPeers.set(originKey, previousOriginPeer);
+            }
+            throw error;
+          }
+          return new TextEncoder().encode(JSON.stringify({
+            ok: true,
+            status: decision.status,
+            // Origin/main requesters only understand `alreadyMember` and may
+            // drop the immediate approval notification before the response
+            // establishes curator trust. Alias every completed approval so a
+            // rolling-upgrade requester still transitions synchronously.
+            ...(decision.alreadyMember || decision.status === 'approved'
+              ? { alreadyMember: true }
+              : {}),
+            ...(decision.autoApproved ? { autoApproved: true } : {}),
+          }));
+        } finally {
+          releaseIngress();
         }
-
-        // Remember which peer actually delivered this request so we can
-        // send approval/rejection back to the same peer later, even if
-        // the agent registry hasn't indexed them yet.
-        await this.storePendingJoinRequest(
-          contextGraphId,
-          delegation,
-          agentName,
-          derivedRequestGeneration,
-        );
-        const originKey = this.joinRequestTrackingKey(
-          contextGraphId,
-          addrLower,
-          derivedRequestGeneration,
-        );
-        this.joinRequestOriginPeers.set(originKey, peerId.toString());
-        // Note: `storePendingJoinRequest` itself now emits JOIN_REQUEST_RECEIVED.
-        // No duplicate emit here.
-        return new TextEncoder().encode(JSON.stringify({ ok: true }));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        if (err instanceof Error && err.name === 'RetryableJoinAdmissionError') {
+          // Do not turn a post-membership partial failure into an application
+          // ACK. Let the reliable messenger observe a transport failure so it
+          // keeps the envelope in its durable outbox; the idempotent member
+          // branch repairs status/audit on the retry.
+          this.log.warn(
+            createOperationContext('system'),
+            `PROTOCOL_JOIN_REQUEST admission incomplete; retrying via messenger outbox: ${msg}`,
+          );
+          throw err;
+        }
         // Mirror the per-rejection-path warns above. The most common
         // throw-site is `verifyJoinRequest` (signature/scope/expiry
         // failure); without this log the curator silently NACKs and the
@@ -2429,6 +2516,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         if (trustedDecisionInProgress) throw err;
         return new TextEncoder().encode(JSON.stringify({ ok: false, error: msg }));
       }
+    }, {
+      // ReliableEnvelope overhead sits outside the 64 KiB application body.
+      // Reject oversized frames in ProtocolRouter before buffering/decoding.
+      maxWireBytes: 80 * 1024,
     });
 
     // Subscribe to both system context graph GossipSub topics
@@ -3076,6 +3167,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const outcome = await this.trySyncFromPeer(remotePeer, () => {
         syncAccountingClearedBackoff = true;
       });
+      if (outcome === 'deferred-backpressure') {
+        this.log.info(
+          createOperationContext('sync'),
+          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure`,
+        );
+        return outcome;
+      }
       if (
         outcome !== 'skipped-no-sync' &&
         outcome !== 'already-syncing' &&
@@ -3787,6 +3885,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const lane = await this.runChangelogLane(ctx, remotePeerId, contextGraphIds, onAccessDenied);
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
+        if ((changelogResult.deferredBackpressure ?? 0) > 0) return changelogResult;
       } catch (err) {
         this.log.warn(ctx, `Changelog sync lane failed for ${remotePeerId.slice(-8)}; using legacy sync: ${String(err)}`);
         legacyContextGraphIds = contextGraphIds;
@@ -3819,40 +3918,53 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const runSync = () => withGlobalSyncBackpressure(
-      {
-        policy: resolveSyncGlobalBackpressure(this.config),
-        ctx,
-        label: `durable:${remotePeerId.slice(-8)}`,
-        logInfo: (opCtx, message) => this.log.info(opCtx, message),
-      },
-      () => runDurableSync({
-        ctx,
-        remotePeerId,
-        contextGraphIds,
-        onPhase,
-        onAccessDenied,
-        syncAgentsMeta,
-        createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
-        fetchSyncPages: this.fetchSyncPages.bind(this),
-        sinceBatchIdFor,
-        stopOnBackoffWorthyFailure,
-        processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-        storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
-          priority: 'background',
-          source: 'agent.durableSync.storeInsert',
-        }),
-        deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-        setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-        logInfo: (opCtx, message) => this.log.info(opCtx, message),
-        logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-        logDebug: (opCtx, message) => this.log.debug(opCtx, message),
-      }),
+    const orderedContextGraphIds = orderContextGraphIdsByPriority(
+      contextGraphIds,
+      this.config.syncContextGraphPriorities,
     );
+    const runSync = () => runOrderedContextGraphSyncs({
+      work: orderedContextGraphIds.map((contextGraphId) => ({
+        contextGraphId,
+        lane: 'durable' as const,
+        operationId: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
+        run: (remainingContextGraphs) => LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+          this,
+          ctx,
+          remotePeerId,
+          contextGraphId,
+          remainingContextGraphs,
+          onPhase,
+          onAccessDenied,
+          sinceBatchIdFor,
+          stopOnBackoffWorthyFailure,
+        ),
+      })),
+      priorities: this.config.syncContextGraphPriorities,
+      emptyResult: emptyDurableSyncResult,
+      runWithAdmission: (item, work) => this.runContextGraphSyncWithBackpressure(
+        ctx,
+        item.contextGraphId,
+        item.lane,
+        item.operationId,
+        work,
+      ),
+      merge: mergeDurableSyncResults,
+      markDeferred: (summary) => ({
+        ...summary,
+        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+      }),
+      shouldStop: (part) => Boolean(
+        stopOnBackoffWorthyFailure && (part.backoffWorthyFailures ?? 0) > 0,
+      ),
+      onDeferred: (item, error) => this.log.info(
+        ctx,
+        `Deferring durable sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
+      ),
+    });
 
     const singleFlightKey = durableSyncSingleFlightKey({
       remotePeerId,
-      contextGraphIds,
+      contextGraphIds: orderedContextGraphIds,
       stopOnBackoffWorthyFailure,
       syncAgentsMeta,
       hasPhaseCallback: Boolean(onPhase),
@@ -3860,6 +3972,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
     });
     return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
+  }
+
+  /** Execute one legacy durable Context Graph after its caller owns admission. */
+  async runLegacyDurableSyncForContextGraph(this: DKGAgent,
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphId: string,
+    remainingContextGraphs: number,
+    onPhase?: PhaseCallback,
+    onAccessDenied?: (contextGraphId: string) => void,
+    sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
+    stopOnBackoffWorthyFailure?: boolean,
+  ): Promise<DurableSyncResult> {
+    const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
+    return runDurableSync({
+      ctx,
+      remotePeerId,
+      contextGraphIds: [contextGraphId],
+      onPhase,
+      onAccessDenied,
+      syncAgentsMeta,
+      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
+      fetchSyncPages: this.fetchSyncPages.bind(this),
+      sinceBatchIdFor,
+      stopOnBackoffWorthyFailure,
+      processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
+      storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
+        priority: 'background',
+        source: 'agent.durableSync.storeInsert',
+      }),
+      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+      logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+    });
   }
 
   /**
@@ -3879,19 +4027,52 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
       return { result: emptyDurableSyncResult(), remainingLegacyCgs: contextGraphIds };
     }
-    let result = emptyDurableSyncResult();
     const legacyCgs: string[] = [];
-    for (const cg of contextGraphIds) {
-      if (await this.isPrivateContextGraph(cg)) { legacyCgs.push(cg); continue; }
-      try {
-        const cgResult = await this.runChangelogSyncForCg(ctx, remotePeerId, cg);
-        result = mergeDurableSyncResults(result, cgResult);
-        if (cgResult.deniedPhases > 0) onAccessDenied?.(cg);
-      } catch (err) {
-        this.log.warn(ctx, `Changelog sync failed for CG ${cg} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(err)}`);
-        legacyCgs.push(cg);
+    const work = [];
+    for (const contextGraphId of contextGraphIds) {
+      if (await this.isPrivateContextGraph(contextGraphId)) {
+        legacyCgs.push(contextGraphId);
+        continue;
       }
+      work.push({
+        contextGraphId,
+        lane: 'changelog' as const,
+        operationId: `changelog:${contextGraphId}:${remotePeerId.slice(-8)}`,
+        run: async (): Promise<DurableSyncResult> => {
+          try {
+            const result = await this.runChangelogSyncForCg(ctx, remotePeerId, contextGraphId);
+            if (result.deniedPhases > 0) onAccessDenied?.(contextGraphId);
+            return result;
+          } catch (error) {
+            if (getSyncBackpressureBusyError(error)) throw error;
+            this.log.warn(ctx, `Changelog sync failed for CG ${contextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
+            legacyCgs.push(contextGraphId);
+            return emptyDurableSyncResult();
+          }
+        },
+      });
     }
+    const result = await runOrderedContextGraphSyncs({
+      work,
+      priorities: this.config.syncContextGraphPriorities,
+      emptyResult: emptyDurableSyncResult,
+      runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
+        ctx,
+        item.contextGraphId,
+        item.lane,
+        item.operationId,
+        run,
+      ),
+      merge: mergeDurableSyncResults,
+      markDeferred: (summary) => ({
+        ...summary,
+        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+      }),
+      onDeferred: (item, error) => this.log.info(
+        ctx,
+        `Deferring changelog sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
+      ),
+    });
     return { result, remainingLegacyCgs: legacyCgs };
   }
 
@@ -3940,7 +4121,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // branch). Fold its result in, and report completeness so the driver only advances
       // the cursor to headSeq when the resync verifiably fetched everything below it.
       runResync: async () => {
-        const r = await this.runLegacyDurableSync(ctx, remotePeerId, [contextGraphId]);
+        const r = await this.runLegacyDurableSyncForContextGraph(
+          ctx,
+          remotePeerId,
+          contextGraphId,
+          1,
+          undefined,
+          undefined,
+          undefined,
+        );
         result = mergeDurableSyncResults(result, r);
         const complete = r.timedOutPhases === 0 && r.failedPhases === 0
           && r.failedPeers === 0 && r.dataRejectedMissingMeta === 0;
@@ -4261,7 +4450,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const plan = planned && sameStringArray(planned.eligibleContextGraphIds, contextGraphIds)
       ? planned
       : await this.planSharedMemorySyncContextGraphs(remotePeerId, contextGraphIds, ctx);
-    const { publicContextGraphIds, privateRecoverFromCurator } = plan;
+    const publicContextGraphIds = orderContextGraphIdsByPriority(
+      plan.publicContextGraphIds,
+      this.config.syncContextGraphPriorities,
+    );
+    const privateRecoverFromCurator = orderContextGraphIdsByPriority(
+      plan.privateRecoverFromCurator,
+      this.config.syncContextGraphPriorities,
+    );
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
     const singleFlightKey = sharedMemorySyncSingleFlightKey({
       remotePeerId,
@@ -4282,18 +4478,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return admission;
       };
 
-      const summary: SharedMemorySyncResult = publicContextGraphIds.length === 0
-        ? {
-            insertedTriples: 0, fetchedMetaTriples: 0, fetchedDataTriples: 0,
-            insertedMetaTriples: 0, insertedDataTriples: 0, bytesReceived: 0,
-            resumedPhases: 0, timedOutPhases: 0, completedPhases: 0, checkpointAdvances: 0,
-            emptyResponses: 0, droppedDataTriples: 0, failedPeers: 0, failedPhases: 0, deniedPhases: 0,
-          }
-        : await runSharedMemorySync({
+      const syncPublicContextGraph = (contextGraphId: string, remainingContextGraphs: number) => runSharedMemorySync({
               ctx,
               remotePeerId,
-              contextGraphIds: publicContextGraphIds,
-              createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
+              contextGraphIds: [contextGraphId],
+              createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
               fetchSyncPages: this.fetchSyncPages.bind(this),
               processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
                 this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
@@ -4339,62 +4528,85 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               logDebug: (opCtx, message) => this.log.debug(opCtx, message),
             });
 
-      // PRIVATE CGs: REPLACE-recover the current state from the curator (= remotePeerId,
-      // gated above to be the curator and not self). Reuses the all-or-nothing recovery.
-      for (const contextGraphId of privateRecoverFromCurator) {
-        try {
-          const r = await recoverPrivateContextGraph(contextGraphId);
-          summary.insertedDataTriples += r.insertedDataQuads;
-          summary.insertedMetaTriples += r.insertedMetaQuads;
-          summary.insertedTriples += r.insertedDataQuads + r.insertedMetaQuads;
-          summary.droppedDataTriples += r.droppedDataTriples;
-          // `recoverContextGraphSwmFromPeer` signals a partial / deadline-bounded
-          // fetch with `completed === false` WITHOUT throwing (all-or-nothing
-          // REPLACE mutates nothing on a partial). The on-connect accounting and
-          // the catch-up runner key success off the phase counters, so an
-          // incomplete recovery that left `failedPhases`/`completedPhases` at 0
-          // would be reported clean — stamping `lastSuccessfulSyncAt` and
-          // suppressing the next retry while the member stays stale. Count an
-          // incomplete recovery as a failed phase (forces a prompt retry); count a
-          // complete one as a completed phase so an idempotent 0-insert REPLACE
-          // still registers as progress.
-          if (r.completed) {
-            summary.completedPhases += 1;
-          } else {
-            summary.failedPhases += 1;
-            summary.backoffWorthyFailures = (summary.backoffWorthyFailures ?? 0) + 1;
-            if (stopOnBackoffWorthyFailure) {
-              this.log.info(ctx, `Stopping SWM curator-recovery fanout for ${remotePeerId} after "${contextGraphId}" (incomplete recovery)`);
-              break;
-            }
-          }
-        } catch (err) {
-          this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-          summary.failedPeers += 1;
-          summary.backoffWorthyFailures = (summary.backoffWorthyFailures ?? 0) + 1;
-          if (stopOnBackoffWorthyFailure) {
-            this.log.info(ctx, `Stopping SWM curator-recovery fanout for ${remotePeerId} after "${contextGraphId}" (backoff-worthy failure)`);
-            break;
-          }
+      const publicSet = new Set(publicContextGraphIds);
+      const privateRecoverySet = new Set(privateRecoverFromCurator);
+      const work: ContextGraphSyncWork<SharedMemorySyncResult>[] = [];
+      for (const contextGraphId of plan.eligibleContextGraphIds) {
+        if (publicSet.has(contextGraphId)) {
+          work.push({
+            contextGraphId,
+            lane: 'shared_memory',
+            operationId: `shared-memory:${contextGraphId}:${remotePeerId.slice(-8)}`,
+            run: (remainingContextGraphs: number) => syncPublicContextGraph(
+              contextGraphId,
+              remainingContextGraphs,
+            ),
+          });
+          continue;
         }
+        if (!privateRecoverySet.has(contextGraphId)) continue;
+        work.push({
+          contextGraphId,
+          lane: 'swm_recovery',
+          operationId: `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
+          run: async (): Promise<SharedMemorySyncResult> => {
+            try {
+              const recovered = await recoverPrivateContextGraph(contextGraphId);
+              const result = emptySharedMemorySyncResult();
+              result.insertedDataTriples = recovered.insertedDataQuads;
+              result.insertedMetaTriples = recovered.insertedMetaQuads;
+              result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
+              result.droppedDataTriples = recovered.droppedDataTriples;
+              // A deadline-bounded recovery returns `completed=false` without
+              // mutating the store. Keep that retry signal inside this work item
+              // so every requester lane shares the same orchestration loop.
+              if (recovered.completed) {
+                result.completedPhases = 1;
+              } else {
+                result.failedPhases = 1;
+                result.backoffWorthyFailures = 1;
+              }
+              return result;
+            } catch (error) {
+              if (getSyncBackpressureBusyError(error)) throw error;
+              this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${error instanceof Error ? error.message : String(error)}`);
+              return {
+                ...emptySharedMemorySyncResult(),
+                failedPeers: 1,
+                backoffWorthyFailures: 1,
+              };
+            }
+          },
+        });
       }
 
-      return summary;
+      return runOrderedContextGraphSyncs({
+        work,
+        priorities: this.config.syncContextGraphPriorities,
+        emptyResult: emptySharedMemorySyncResult,
+        runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
+          ctx,
+          item.contextGraphId,
+          item.lane,
+          item.operationId,
+          run,
+        ),
+        merge: mergeSharedMemorySyncResults,
+        markDeferred: (summary) => ({
+          ...summary,
+          deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+        }),
+        shouldStop: (part) => Boolean(
+          stopOnBackoffWorthyFailure && (part.backoffWorthyFailures ?? 0) > 0,
+        ),
+        onDeferred: (item, error) => this.log.info(
+          ctx,
+          `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
+        ),
+      });
     };
 
-    return runSyncSingleFlight(
-      this,
-      singleFlightKey,
-      () => withGlobalSyncBackpressure(
-        {
-          policy: resolveSyncGlobalBackpressure(this.config),
-          ctx,
-          label: `shared-memory:${remotePeerId.slice(-8)}`,
-          logInfo: (opCtx, message) => this.log.info(opCtx, message),
-        },
-        runSync,
-      ),
-    );
+    return runSyncSingleFlight(this, singleFlightKey, runSync);
   }
 
   /**
@@ -4414,13 +4626,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping SWM recovery from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return emptySwmRecoveryResult();
     }
-    return withGlobalSyncBackpressure(
-      {
-        policy: resolveSyncGlobalBackpressure(this.config),
-        ctx,
-        label: `swm-recovery:${remotePeerId.slice(-8)}`,
-        logInfo: (opCtx, message) => this.log.info(opCtx, message),
-      },
+    return this.runContextGraphSyncWithBackpressure(
+      ctx,
+      contextGraphId,
+      'swm_recovery',
+      `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
       () => runRecoverContextGraphSwmFromPeer(
         {
           store: this.store,
@@ -4486,6 +4696,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
      * or a clean non-metadata-only empty completion.
      */
     peersSucceeded: number;
+    /** Context Graph admissions deferred by local scheduler pressure. */
+    deferredBackpressure: number;
     dataSynced: number;
     sharedMemorySynced: number;
     /**
@@ -4663,6 +4875,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peersTried: number;
     peersResponded: number;
     peersSucceeded: number;
+    deferredBackpressure: number;
     dataSynced: number;
     sharedMemorySynced: number;
     denied: boolean;
@@ -4673,6 +4886,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let syncCapablePeers = 0;
     let peersTried = 0;
     let peersResponded = 0;
+    let deferredBackpressure = 0;
     let dataSynced = 0;
     let sharedMemorySynced = 0;
     let noProtocolPeers = 0;
@@ -4694,6 +4908,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         rejectedKcs: 0,
         failedPeers: 0,
         failedPhases: 0,
+        deferredBackpressure: 0,
       },
       sharedMemory: {
         fetchedMetaTriples: 0,
@@ -4709,6 +4924,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         droppedDataTriples: 0,
         failedPeers: 0,
         failedPhases: 0,
+        deferredBackpressure: 0,
       },
     };
 
@@ -4823,6 +5039,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const sharedFailed = r.shared ? r.shared.failedPeers > 0 : false;
       const durablePhaseFailed = (r.durable.failedPhases ?? 0) > 0;
       const sharedPhaseFailed = r.shared ? (r.shared.failedPhases ?? 0) > 0 : false;
+      const durableDeferred = (r.durable.deferredBackpressure ?? 0) > 0;
+      const sharedDeferred = r.shared ? (r.shared.deferredBackpressure ?? 0) > 0 : false;
+      const peerDeferred = durableDeferred || sharedDeferred;
       const peerDeniedRound = (r.durable.deniedPhases ?? 0) > 0
         || (r.shared ? (r.shared.deniedPhases ?? 0) > 0 : false);
       const durableProgress = r.durable.insertedDataTriples > 0
@@ -4840,16 +5059,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         || (r.shared ? r.shared.insertedMetaTriples > 0 : false)
       );
       const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
+      // A deferred plane only counts as a response when the peer actually
+      // delivered something before local admission pressure stopped the batch.
+      const durableResponded = !durableFailed && (!durableDeferred || (
+        r.durable.bytesReceived > 0
+        || r.durable.completedPhases > 0
+        || r.durable.emptyResponses > 0
+        || r.durable.insertedMetaTriples > 0
+        || r.durable.insertedDataTriples > 0
+      ));
+      const sharedResponded = Boolean(r.shared && !sharedFailed && (!sharedDeferred || (
+        r.shared.bytesReceived > 0
+        || r.shared.completedPhases > 0
+        || r.shared.emptyResponses > 0
+        || r.shared.insertedMetaTriples > 0
+        || r.shared.insertedDataTriples > 0
+      )));
       // Readiness is a per-plane, per-peer proof. Keep aggregate failures in
       // diagnostics, but do not let a stale/denied peer erase the completed
       // snapshot delivered by another peer. Requiring the inserts and clean
       // completion to belong to the same result also preserves the protection
       // against promoting a partially inserted, subsequently timed-out round.
+      // A plane deferred by local admission pressure did not complete, so it
+      // cannot stand as readiness evidence either.
       const durableCompletedCleanly = r.durable.insertedDataTriples > 0
         && r.durable.completedPhases > 0
         && r.durable.timedOutPhases === 0
         && (r.durable.failedPhases ?? 0) === 0
         && r.durable.failedPeers === 0
+        && !durableDeferred
         && (r.durable.deniedPhases ?? 0) === 0;
       const sharedMemoryCompletedCleanly = r.shared != null
         && r.shared.insertedDataTriples > 0
@@ -4857,6 +5095,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         && r.shared.timedOutPhases === 0
         && (r.shared.failedPhases ?? 0) === 0
         && r.shared.failedPeers === 0
+        && !sharedDeferred
         && (r.shared.deniedPhases ?? 0) === 0;
       if (durableCompletedCleanly) {
         cleanDurableDataSynced += r.durable.insertedDataTriples;
@@ -4864,7 +5103,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
       }
-      if (!durableFailed || (r.shared && !sharedFailed)) {
+      if (durableResponded || sharedResponded) {
         peersResponded++;
       }
       if (
@@ -4873,6 +5112,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         !durablePhaseFailed &&
         !sharedPhaseFailed &&
         !peerDeniedRound &&
+        // Mirrors `catchupPeerSucceeded` in the CLI runner exactly, so the
+        // inline and worker-backed catch-up paths classify a peer identically.
+        !peerDeferred &&
         !peerTimedOut &&
         (peerMadeProgress || !peerMetadataOnly)
       ) {
@@ -4894,6 +5136,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.rejectedKcs += r.durable.rejectedKcs;
       diagnostics.durable.failedPeers += r.durable.failedPeers;
       diagnostics.durable.failedPhases += r.durable.failedPhases ?? 0;
+      diagnostics.durable.deferredBackpressure = (diagnostics.durable.deferredBackpressure ?? 0)
+        + (r.durable.deferredBackpressure ?? 0);
+      deferredBackpressure += r.durable.deferredBackpressure ?? 0;
       let peerDenied = (r.durable.deniedPhases ?? 0) > 0;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
@@ -4910,6 +5155,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         diagnostics.sharedMemory.droppedDataTriples += r.shared.droppedDataTriples;
         diagnostics.sharedMemory.failedPeers += r.shared.failedPeers;
         diagnostics.sharedMemory.failedPhases += r.shared.failedPhases ?? 0;
+        diagnostics.sharedMemory.deferredBackpressure = (diagnostics.sharedMemory.deferredBackpressure ?? 0)
+          + (r.shared.deferredBackpressure ?? 0);
+        deferredBackpressure += r.shared.deferredBackpressure ?? 0;
         peerDenied = peerDenied || (r.shared.deniedPhases ?? 0) > 0;
       }
       if (peerDenied) accessDeniedPeers++;
@@ -4918,7 +5166,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     this.log.info(
       ctx,
-      `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced} denied=${accessDeniedPeers}`,
+      `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced} denied=${accessDeniedPeers} deferred=${deferredBackpressure}`,
     );
 
     await this.refreshMetaSyncedFlags([contextGraphId]);
@@ -4927,6 +5175,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // snapshot completed. A timeout/failure can arrive after inserting an
     // early page; promoting readiness from that count poisons the persisted
     // subscription flags and suppresses the next restart/bootstrap attempt.
+    // The per-peer clean-completion proof above already excludes planes that
+    // were deferred by local admission pressure, so a deferred peer cannot
+    // promote readiness — and cannot erase a clean snapshot another peer did
+    // deliver.
     const durableCompletedCleanly = cleanDurableDataSynced > 0;
     const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
@@ -4952,6 +5204,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peersTried,
       peersResponded,
       peersSucceeded,
+      deferredBackpressure,
       dataSynced,
       sharedMemorySynced,
       denied: accessDeniedPeers > 0,

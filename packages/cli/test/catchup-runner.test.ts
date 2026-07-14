@@ -164,4 +164,27 @@ describe('catchup runner progress accounting', () => {
       checkpointAdvances: 0,
     }, false)).toBe(false);
   });
+
+  it('classifies local scheduler deferral separately from a remote response or success', () => {
+    const deferredBeforeFetch = {
+      failedPeers: 0,
+      failedPhases: 0,
+      deferredBackpressure: 1,
+      bytesReceived: 0,
+      completedPhases: 0,
+      emptyResponses: 0,
+      insertedTriples: 0,
+    };
+    expect(catchupPeerResponded(deferredBeforeFetch, null)).toBe(false);
+    expect(catchupPeerSucceeded(deferredBeforeFetch, null, false)).toBe(false);
+
+    const partialThenDeferred = {
+      ...deferredBeforeFetch,
+      bytesReceived: 10,
+      insertedTriples: 1,
+      insertedDataTriples: 1,
+    };
+    expect(catchupPeerResponded(partialThenDeferred, null)).toBe(true);
+    expect(catchupPeerSucceeded(partialThenDeferred, null, false)).toBe(false);
+  });
 });

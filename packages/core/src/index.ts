@@ -2,6 +2,7 @@ export * from './types.js';
 export * from './constants.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
+export * from './context-graph-join-policy.js';
 export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
@@ -113,6 +114,7 @@ export {
   ProtocolRouter,
   QuietRetryableHandlerError,
   type AdmissionCheckOptions,
+  type ProtocolRegistrationOptions,
   type ProtocolRouterOptions,
   type SendOptions,
   DEFAULT_MAX_READ_BYTES,

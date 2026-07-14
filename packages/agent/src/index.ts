@@ -81,6 +81,18 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
+export {
+  contextGraphPriority,
+  countSyncPriorityClasses,
+  normalizeSyncContextGraphPriorities,
+  orderContextGraphIdsByPriority,
+  syncPriorityClass,
+  validateSyncResponderSnapshotLimitsConfig,
+  type SyncContextGraphPriorityConfig,
+  type SyncPriorityClass,
+  type SyncResponderSnapshotLimitsConfig,
+  type SyncSchedulerLane,
+} from './sync/policy.js';
 export type { PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 export {
   verifyBatch,
@@ -140,6 +152,12 @@ export {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type ContextGraphJoinPolicyMode,
+  type ContextGraphJoinPolicyRecord,
+  type ContextGraphJoinPolicyAuditEventType,
+  type ContextGraphJoinPolicyAuditEvent,
+  type ContextGraphJoinPolicyRateReservation,
+  type ContextGraphJoinPolicyStore,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,

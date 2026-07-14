@@ -33,6 +33,7 @@ const DKG_BATCH_ID = `${DKG}batchId`;
 const SCHEMA_NAME = 'http://schema.org/name';
 const PROV_GENERATED = 'http://www.w3.org/ns/prov#generated';
 const PROV_USED = 'http://www.w3.org/ns/prov#used';
+const DKG_JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS = 30_000;
 
 function syncResponderStoreOptions(signal: AbortSignal | undefined, source: string): QueryOptions {
@@ -521,8 +522,16 @@ export async function readChangelogDeltaPage(params: {
       records.push({ seq, graph, op: 'drop' });
       continue;
     }
+    // Changelog upserts serialize the whole admitted graph. Keep curator-only
+    // moderation rows out of that snapshot at the store boundary so a long
+    // join-request history is neither materialized nor sent to members.
     const quads = serializeResponderRows(
-      await readRowsAcrossGraphs(params.store, [graph], params.signal),
+      await readRowsAcrossGraphsExcludingSubjectPrefix(
+        params.store,
+        [graph],
+        DKG_JOIN_REQUEST_SUBJECT_PREFIX,
+        params.signal,
+      ),
     );
     // Always include at least one record; otherwise stop before exceeding the
     // budget (a single graph over budget is emitted alone, never split).
@@ -968,6 +977,28 @@ async function readRowsAcrossGraphs(
     .sort(compareRows);
 }
 
+async function readRowsAcrossGraphsExcludingSubjectPrefix(
+  store: TripleStore,
+  graphs: readonly string[],
+  excludedSubjectPrefix: string,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const values = graphValues(graphs);
+  if (!values) return [];
+  const res = await store.query(`
+    SELECT ?g ?s ?p ?o WHERE {
+      VALUES ?g { ${values} }
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), ${sparqlString(excludedSubjectPrefix)}))
+    }
+  `, syncResponderStoreOptions(signal, 'sync.responder.readRowsAcrossGraphsExcludingSubjectPrefix'));
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g)
+    .sort(compareRows);
+}
+
 async function readRowsPageAcrossGraphs(
   store: TripleStore,
   graphs: readonly string[],
@@ -1199,6 +1230,7 @@ function buildDurableMetaRowsQuery(
     SELECT ?g ?s ?p ?o WHERE {
       VALUES ?g { <${assertSafeIri(metaGraph)}> }
       GRAPH ?g { ?s ?p ?o }
+      FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), ${sparqlString(DKG_JOIN_REQUEST_SUBJECT_PREFIX)}))
       FILTER(
         ?s = <${assertSafeIri(cgEntity)}>
         || ${activeDelegationSubjectExpression}

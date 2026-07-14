@@ -59,6 +59,7 @@ function durableResult() {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
+    deferredBackpressure: 0,
   };
 }
 
@@ -79,6 +80,7 @@ function sharedResult() {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
+    deferredBackpressure: 0,
   };
 }
 
@@ -179,6 +181,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersTried).toBe(peerIds.length);
     expect(result.peersResponded).toBe(peerIds.length);
     expect(result.peersSucceeded).toBe(peerIds.length);
+    expect(result.deferredBackpressure).toBe(0);
     expect(result.dataSynced).toBe(peerIds.length);
     expect(result.sharedMemorySynced).toBe(peerIds.length);
     expect(result.denied).toBe(false);
@@ -227,6 +230,43 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.sharedMemorySynced).toBe(0);
     expect(result.diagnostics?.noProtocolPeers).toBe(1);
     expect(result.diagnostics?.durable.failedPeers).toBe(1);
+  });
+
+  it('surfaces partial progress followed by local deferral without finalizing the catch-up', async () => {
+    const finalizeCalls: unknown[][] = [];
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-deferred', includeSharedMemory: true }, async (method) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds: ['peer-1'], connectedPeers: 1 };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          return durableResult();
+        case 'syncSharedMemory':
+          return {
+            ...sharedResult(),
+            insertedTriples: 0,
+            fetchedDataTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            completedPhases: 0,
+            deferredBackpressure: 1,
+          };
+        case 'finalizeCatchup':
+          finalizeCalls.push([]);
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(result.peersResponded).toBe(1);
+    expect(result.peersSucceeded).toBe(0);
+    expect(result.deferredBackpressure).toBe(1);
+    expect(result.dataSynced).toBe(1);
+    expect(result.sharedMemorySynced).toBe(0);
+    expect(result.diagnostics?.sharedMemory.deferredBackpressure).toBe(1);
+    expect(finalizeCalls).toEqual([]);
   });
 
   it('propagates durable and shared-memory denied phases from the real worker result', async () => {

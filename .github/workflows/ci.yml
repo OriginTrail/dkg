@@ -95,7 +95,6 @@ jobs:
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MERGE_SHA: ${{ github.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -108,17 +107,18 @@ jobs:
           : > "${CHANGES_FILE}"
 
           if [[ "${EVENT_NAME}" == "pull_request" ]]; then
-            if [[ -z "${BASE_SHA}" || -z "${MERGE_SHA}" ]]; then
-              echo "::error::Missing pull-request base/merge SHA"
+            if [[ -z "${MERGE_SHA}" ]]; then
+              echo "::error::Missing pull-request merge SHA"
               exit 1
             fi
-            if ! git -C candidate cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-              git -C candidate fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            fi
             git -C candidate cat-file -e "${MERGE_SHA}^{commit}"
-            # Compare the latest base with GitHub's synthetic merge candidate.
-            # Comparing base directly to a behind PR head would misclassify
-            # unrelated changes that landed on base as part of this PR.
+            # Diff the synthetic merge candidate against its FIRST PARENT: the
+            # base-branch tip GitHub merged against when it built the candidate
+            # (fetch-depth 2 above always includes it). The event payload's
+            # pull_request.base.sha is a STALE snapshot — after any unrelated
+            # merge to base it drags those files into this diff and misroutes
+            # the PR to full CI (observed on PR #1690 right after #1687 landed).
+            BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"
             git -C candidate diff --name-status -z \
               "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
           fi

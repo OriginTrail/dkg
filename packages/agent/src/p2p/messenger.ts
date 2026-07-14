@@ -300,6 +300,16 @@ export type OutboxResponseHandler = (
   context: OutboxResponseContext,
 ) => Promise<void> | void;
 
+/** Per-protocol inbound limits for reliable messenger registrations. */
+export interface MessengerRegisterOptions {
+  /**
+   * Maximum encoded `ReliableEnvelope` bytes accepted from the wire.
+   * This limit is enforced by `ProtocolRouter` before envelope decoding.
+   */
+  maxWireBytes?: number;
+}
+
+
 /**
  * The Universal Messenger substrate.
  *
@@ -860,12 +870,18 @@ export class Messenger {
    * Throws `MessengerNotConfiguredError` if `idempotencyStore` was
    * omitted at construction.
    */
-  register(protocolId: string, handler: ReliableHandler): void {
+  register(
+    protocolId: string,
+    handler: ReliableHandler,
+    options?: MessengerRegisterOptions,
+  ): void {
     this.requireSubstrate('register');
     const idem = this.idempotencyStore!;
     this.handlers.set(protocolId, handler);
 
-    this.router.register(protocolId, async (data, peerIdObj) => {
+    const reliableHandler = async (data: Uint8Array, peerIdObj: {
+      toString(): string;
+    }): Promise<Uint8Array> => {
       const peerKey = peerIdObj.toString();
 
       let envelope: { messageId: string; payload: Uint8Array };
@@ -913,7 +929,15 @@ export class Messenger {
       } finally {
         this.inboundInFlight.delete(inFlightKey);
       }
-    });
+    };
+
+    if (options?.maxWireBytes === undefined) {
+      this.router.register(protocolId, reliableHandler);
+    } else {
+      this.router.register(protocolId, reliableHandler, {
+        maxReadBytes: options.maxWireBytes,
+      });
+    }
   }
 
   /**
