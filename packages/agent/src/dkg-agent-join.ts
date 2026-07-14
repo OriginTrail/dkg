@@ -996,6 +996,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     return this.createContextGraphJoinAdmission().process({
       contextGraphId,
       delegation,
+      requestGeneration: this.getJoinRequestGeneration(delegation),
       agentName,
       carrierPeerId,
       ingressReserved: options.ingressReserved === true,
@@ -1057,8 +1058,8 @@ export class JoinRequestMethods extends DKGAgentBase {
       markJoinRequestApproved: (contextGraphId, agentAddress) =>
         this.markJoinRequestApproved(contextGraphId, agentAddress),
       flushJoinApprovalDurably: () => this.flushJoinApprovalDurably(),
-      notifyJoinApproval: (contextGraphId, agentAddress) => {
-        this.notifyJoinApproval(contextGraphId, agentAddress).catch(() => {});
+      notifyJoinApproval: (contextGraphId, agentAddress, requestGeneration) => {
+        this.notifyJoinApproval(contextGraphId, agentAddress, requestGeneration).catch(() => {});
       },
       countPendingJoinRequests: (contextGraphId) => this.countPendingJoinRequests(contextGraphId),
       storePendingJoinRequest: (contextGraphId, delegation, agentName) =>

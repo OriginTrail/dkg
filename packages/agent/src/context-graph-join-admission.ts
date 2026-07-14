@@ -36,6 +36,7 @@ export interface IncomingJoinRequestDecision {
 export interface IncomingJoinRequestInput {
   contextGraphId: string;
   delegation: SignedAgentDelegation;
+  requestGeneration: string;
   agentName: string | undefined;
   carrierPeerId: string;
   ingressReserved?: boolean;
@@ -107,7 +108,11 @@ export interface ContextGraphJoinAdmissionHost {
   hasJoinRequestRecord(contextGraphId: string, agentAddress: string): Promise<boolean>;
   markJoinRequestApproved(contextGraphId: string, agentAddress: string): Promise<void>;
   flushJoinApprovalDurably(): Promise<void>;
-  notifyJoinApproval(contextGraphId: string, agentAddress: string): void;
+  notifyJoinApproval(
+    contextGraphId: string,
+    agentAddress: string,
+    requestGeneration: string,
+  ): void;
   countPendingJoinRequests(contextGraphId: string): Promise<number>;
   storePendingJoinRequest(
     contextGraphId: string,
@@ -266,6 +271,7 @@ export class ContextGraphJoinAdmission {
     const {
       contextGraphId,
       delegation,
+      requestGeneration,
       carrierPeerId,
       requestDigest,
       durableRepair,
@@ -315,7 +321,11 @@ export class ContextGraphJoinAdmission {
       if (!committed) {
         throw new Error('Automatic approval repair reservation is missing.');
       }
-      this.host.notifyJoinApproval(contextGraphId, delegation.agentAddress);
+      this.host.notifyJoinApproval(
+        contextGraphId,
+        delegation.agentAddress,
+        requestGeneration,
+      );
       this.host.clearRetryableAdmission(contextGraphId, delegation);
       return {
         status: 'approved',
@@ -361,6 +371,7 @@ export class ContextGraphJoinAdmission {
       delegation,
       carrierPeerId,
       requestDigest,
+      requestGeneration,
       admissionLockToken,
       repairPolicyEpoch,
     } = request;
@@ -422,7 +433,11 @@ export class ContextGraphJoinAdmission {
             details: { recoveredFromMemberRetry: true },
           })
         : false;
-      this.host.notifyJoinApproval(contextGraphId, delegation.agentAddress);
+      this.host.notifyJoinApproval(
+        contextGraphId,
+        delegation.agentAddress,
+        requestGeneration,
+      );
       this.host.clearRetryableAdmission(contextGraphId, delegation);
       return {
         status: 'approved',
@@ -683,7 +698,11 @@ export class ContextGraphJoinAdmission {
       if (!committedAuditRecorded) {
         throw new Error('Automatic approval reservation is missing from the durable audit store.');
       }
-      this.host.notifyJoinApproval(contextGraphId, delegation.agentAddress);
+      this.host.notifyJoinApproval(
+        contextGraphId,
+        delegation.agentAddress,
+        request.requestGeneration,
+      );
       this.host.clearRetryableAdmission(contextGraphId, delegation);
       return { status: 'approved', autoApproved: true };
     } catch (error) {

@@ -522,8 +522,16 @@ export async function readChangelogDeltaPage(params: {
       records.push({ seq, graph, op: 'drop' });
       continue;
     }
+    // Changelog upserts serialize the whole admitted graph. Keep curator-only
+    // moderation rows out of that snapshot at the store boundary so a long
+    // join-request history is neither materialized nor sent to members.
     const quads = serializeResponderRows(
-      await readRowsAcrossGraphs(params.store, [graph], params.signal),
+      await readRowsAcrossGraphsExcludingSubjectPrefix(
+        params.store,
+        [graph],
+        DKG_JOIN_REQUEST_SUBJECT_PREFIX,
+        params.signal,
+      ),
     );
     // Always include at least one record; otherwise stop before exceeding the
     // budget (a single graph over budget is emitted alone, never split).
@@ -962,6 +970,28 @@ async function readRowsAcrossGraphs(
       GRAPH ?g { ?s ?p ?o }
     }
   `, syncResponderStoreOptions(signal, 'sync.responder.readRowsAcrossGraphs'));
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g)
+    .sort(compareRows);
+}
+
+async function readRowsAcrossGraphsExcludingSubjectPrefix(
+  store: TripleStore,
+  graphs: readonly string[],
+  excludedSubjectPrefix: string,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const values = graphValues(graphs);
+  if (!values) return [];
+  const res = await store.query(`
+    SELECT ?g ?s ?p ?o WHERE {
+      VALUES ?g { ${values} }
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), ${sparqlString(excludedSubjectPrefix)}))
+    }
+  `, syncResponderStoreOptions(signal, 'sync.responder.readRowsAcrossGraphsExcludingSubjectPrefix'));
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))

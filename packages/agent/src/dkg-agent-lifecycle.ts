@@ -2352,9 +2352,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }
           this.log.info(
             requestCtx,
-            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": accepted, verifying delegation for ${delegation.agentAddress}`,
+            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": accepted for admission processing for ${delegation.agentAddress}`,
           );
-          this.verifyJoinRequest(contextGraphId, delegation);
           const derivedRequestGeneration = this.getJoinRequestGeneration(delegation);
           if (
             requestGeneration !== undefined

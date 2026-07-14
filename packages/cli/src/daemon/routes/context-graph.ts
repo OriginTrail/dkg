@@ -971,8 +971,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           error: 'Missing signed delegation. Expected `delegation` field with agentAddress, signature, scope, issuedAtMs and at least one of delegateePeerId / delegateeOpKey.',
         });
       }
-      agent.verifyJoinRequest(contextGraphId, delegation);
-
       const isCurator = await agent.isCuratorOf(contextGraphId);
       if (isCurator) {
         const decision = await agent.processIncomingJoinRequest(

@@ -773,12 +773,17 @@ describe('context graph open enrollment policy', () => {
     expect(agent.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)).toBe(false);
     const dateNow = vi.spyOn(Date, 'now').mockReturnValue((delegation.expiresAtMs ?? 0) + 1);
     try {
-      await expect(agent.processIncomingJoinRequest(
-        contextGraphId,
-        delegation,
-        joiner.name,
+      const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+        encoder.encode(JSON.stringify({
+          contextGraphId,
+          delegation,
+          agentName: joiner.name,
+          requestGeneration: agent.getJoinRequestGeneration(delegation),
+        })),
         agent.peerId,
-      )).resolves.toMatchObject({
+      )));
+      expect(response).toMatchObject({
+        ok: true,
         status: 'approved',
         autoApproved: true,
         alreadyMember: true,
