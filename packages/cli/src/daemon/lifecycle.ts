@@ -1098,6 +1098,14 @@ export async function bootstrapConfiguredContextGraphs(input: {
         metaSynced: false,
         pendingMeta: true,
       });
+      // Provenance lives outside the subscription row and may still contain
+      // v1 true bits from an earlier successful catch-up. Clear it in the
+      // same bootstrap window so an automatic sync event or HTTP catch-up
+      // cannot reuse stale proof before route-level revalidation runs.
+      writeContextGraphReadiness(input.readinessStore ?? {}, contextGraphId, {
+        durableVerified: false,
+        sharedMemoryVerified: false,
+      });
     }
 
     if (hasAuthoritativeMetadata) {
@@ -1106,6 +1114,24 @@ export async function bootstrapConfiguredContextGraphs(input: {
     }
     input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata pending)`);
   }
+}
+
+export function registerProjectSyncedReadinessPersistence(input: {
+  agent: DKGAgent;
+  store: Partial<ContextGraphReadinessStore>;
+  log: (message: string) => void;
+}): void {
+  input.agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
+    void persistProjectSyncedReadiness({
+      agent: input.agent,
+      store: input.store,
+      contextGraphId: typeof data?.contextGraphId === "string" ? data.contextGraphId : "",
+      dataSynced: typeof data?.dataSynced === "number" ? data.dataSynced : 0,
+      sharedMemorySynced: typeof data?.sharedMemorySynced === "number" ? data.sharedMemorySynced : 0,
+    }).catch((err) => {
+      input.log(`[warn] Failed to persist PROJECT_SYNCED readiness: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  });
 }
 
 export async function runDaemonInner(
@@ -1980,16 +2006,10 @@ export async function runDaemonInner(
   // Register before network startup. A queued join approval can arrive as
   // soon as the messenger is live, before the later UI/SSE listeners are
   // installed, and its automatic catch-up proof must survive restart.
-  agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
-    void persistProjectSyncedReadiness({
-      agent,
-      store: dashDb,
-      contextGraphId: typeof data?.contextGraphId === "string" ? data.contextGraphId : "",
-      dataSynced: typeof data?.dataSynced === "number" ? data.dataSynced : 0,
-      sharedMemorySynced: typeof data?.sharedMemorySynced === "number" ? data.sharedMemorySynced : 0,
-    }).catch((err) => {
-      log(`[warn] Failed to persist PROJECT_SYNCED readiness: ${err instanceof Error ? err.message : String(err)}`);
-    });
+  registerProjectSyncedReadinessPersistence({
+    agent,
+    store: dashDb,
+    log,
   });
 
   await agent.start();

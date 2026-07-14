@@ -63,28 +63,32 @@ export function classifyExistingContextGraphReadiness(input: {
 
   if (alreadyReady) return { alreadyReady: true };
 
-  if (
-    !input.hasConfirmedMeta &&
-    (input.subscription.metaSynced ||
-      input.subscription.synced ||
-      input.subscription.sharedMemorySynced)
-  ) {
+  if (!input.hasConfirmedMeta) {
+    const stateAlreadyFailClosed =
+      input.subscription.synced === false &&
+      input.subscription.sharedMemorySynced === false &&
+      input.subscription.metaSynced === false &&
+      input.subscription.pendingMeta === true;
     return {
       alreadyReady: false,
-      statePatch: {
-        synced: false,
-        sharedMemorySynced: false,
-        metaSynced: false,
-        pendingMeta: true,
-      },
+      statePatch: stateAlreadyFailClosed
+        ? undefined
+        : {
+            synced: false,
+            sharedMemorySynced: false,
+            metaSynced: false,
+            pendingMeta: true,
+          },
+      // Subscription flags and provenance are persisted independently. A
+      // prior bootstrap may already have reset the flags while leaving v1
+      // proof behind, so metadata absence must invalidate provenance even
+      // when the visible state is already fail-closed.
       readinessPatch: {
         durableVerified: false,
         sharedMemoryVerified: false,
       },
     };
   }
-
-  if (!input.hasConfirmedMeta) return { alreadyReady: false };
 
   const durableVerified =
     currentReadinessProvenance && input.readiness.durableVerified;
