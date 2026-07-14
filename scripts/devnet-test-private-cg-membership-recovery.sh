@@ -16,19 +16,32 @@
 #   * recovery (or the persistent v10.0.6 wedge) is measured across a node-6
 #     restart.
 #
-# The harness assumes a PRESTARTED default six-node devnet:
+# The harness defaults to a PRESTARTED six-node devnet:
 #
 #   ./scripts/devnet.sh start 6
 #   HARNESS_EXPECT=broken ./scripts/devnet-test-private-cg-membership-recovery.sh
 #   HARNESS_EXPECT=fixed ADMISSION_MODE=manual ./scripts/devnet-test-private-cg-membership-recovery.sh
 #   HARNESS_EXPECT=fixed ADMISSION_MODE=auto   ./scripts/devnet-test-private-cg-membership-recovery.sh
 #
+# It can run the same fixed/auto scenario against four explicitly supplied
+# testnet nodes. This mode stops one core at a time and therefore requires an
+# explicit acknowledgement plus the exact deployed commit as a safety gate:
+#
+#   HARNESS_TARGET=testnet HARNESS_EXPECT=fixed ADMISSION_MODE=auto \
+#     TESTNET_NODE_1_SSH=operator@host1 TESTNET_NODE_2_SSH=operator@host2 \
+#     TESTNET_NODE_3_SSH=operator@host3 TESTNET_NODE_4_SSH=operator@host4 \
+#     TESTNET_EXPECT_COMMIT=<deployed-git-sha> \
+#     TESTNET_ALLOW_CORE_RESTARTS=I_UNDERSTAND \
+#     ./scripts/devnet-test-private-cg-membership-recovery.sh
+# Set TESTNET_PREFLIGHT_ONLY=1 and omit the restart acknowledgement to run
+# every deployment/health check without creating a CG or stopping a node.
+#
 # ADMISSION_MODE defaults to manual. Auto mode requires the open-enrollment
 # implementation and is intended for current/fixed builds.
 #
 # `broken` passes only after observing the exact false-ready state:
 # synced=1, shared_memory_synced=1, meta_synced!=1, no local CG data, and at
-# clean empty responses from all four unrelated core peers. Post-approval recovery
+# clean empty responses from every configured unrelated core peer. Post-approval recovery
 # is still exercised and recorded, but is not required: the invariant breach is
 # already the regression witness.
 #
@@ -46,10 +59,27 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$REPO_ROOT/scripts"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
-CURATOR_NODE="${CURATOR_NODE:-5}"
-JOINER_NODE="${JOINER_NODE:-6}"
-NUM_NODES="${NUM_NODES:-6}"
-EXPECTED_UNRELATED_RESPONDERS=4
+HARNESS_TARGET="${HARNESS_TARGET:-devnet}"
+case "$HARNESS_TARGET" in
+  devnet)
+    CURATOR_NODE="${CURATOR_NODE:-5}"
+    JOINER_NODE="${JOINER_NODE:-6}"
+    NUM_NODES="${NUM_NODES:-6}"
+    UNRELATED_NODES="1 2 3 4"
+    EXPECTED_UNRELATED_RESPONDERS=4
+    ;;
+  testnet)
+    CURATOR_NODE="${CURATOR_NODE:-1}"
+    JOINER_NODE="${JOINER_NODE:-2}"
+    NUM_NODES="${NUM_NODES:-4}"
+    UNRELATED_NODES="3 4"
+    EXPECTED_UNRELATED_RESPONDERS=2
+    ;;
+  *)
+    echo "HARNESS_TARGET must be devnet or testnet (got: $HARNESS_TARGET)" >&2
+    exit 2
+    ;;
+esac
 SUB_GRAPH_NAME="${SUB_GRAPH_NAME:-ai-tools}"
 ROOT_TRIPLES="${ROOT_TRIPLES:-3}"
 SUB_GRAPH_TRIPLES="${SUB_GRAPH_TRIPLES:-5}"
@@ -67,6 +97,16 @@ BROKEN_POST_RESTART_OBSERVE_S="${BROKEN_POST_RESTART_OBSERVE_S:-20}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-2}"
 API_TIMEOUT_S="${API_TIMEOUT_S:-30}"
 DEVNET_SH="$SCRIPT_DIR/devnet.sh"
+TESTNET_NODE_1_SSH="${TESTNET_NODE_1_SSH:-}"
+TESTNET_NODE_2_SSH="${TESTNET_NODE_2_SSH:-}"
+TESTNET_NODE_3_SSH="${TESTNET_NODE_3_SSH:-}"
+TESTNET_NODE_4_SSH="${TESTNET_NODE_4_SSH:-}"
+TESTNET_EXPECT_COMMIT="${TESTNET_EXPECT_COMMIT:-}"
+TESTNET_ALLOW_CORE_RESTARTS="${TESTNET_ALLOW_CORE_RESTARTS:-}"
+TESTNET_PREFLIGHT_ONLY="${TESTNET_PREFLIGHT_ONLY:-0}"
+TESTNET_MAX_ACCEPT_QUEUE="${TESTNET_MAX_ACCEPT_QUEUE:-128}"
+TESTNET_SERVICE="${TESTNET_SERVICE:-dkg-v9-node}"
+TESTNET_SSH_CONNECT_TIMEOUT="${TESTNET_SSH_CONNECT_TIMEOUT:-90}"
 
 case "$HARNESS_EXPECT" in
   broken|fixed) ;;
@@ -94,21 +134,62 @@ fi
 for numeric in \
   "$CURATOR_NODE" "$JOINER_NODE" "$NUM_NODES" "$ROOT_TRIPLES" \
   "$SUB_GRAPH_TRIPLES" "$CATCHUP_TIMEOUT_S" "$JOIN_DELIVERY_TIMEOUT_S" \
-  "$RECOVERY_TIMEOUT_S" "$POST_RESTART_TIMEOUT_S"; do
+  "$RECOVERY_TIMEOUT_S" "$POST_RESTART_TIMEOUT_S" \
+  "$TESTNET_MAX_ACCEPT_QUEUE" "$TESTNET_SSH_CONNECT_TIMEOUT"; do
   [[ "$numeric" =~ ^[0-9]+$ ]] || {
     echo "All node/count/timeout settings must be non-negative integers (got: $numeric)" >&2
     exit 2
   }
 done
 
-if [ "$NUM_NODES" -ne 6 ] || [ "$CURATOR_NODE" -ne 5 ] || [ "$JOINER_NODE" -ne 6 ]; then
-  echo "This regression requires the default six-node topology: cores 1-4, curator edge 5, joiner edge 6." >&2
-  exit 2
+if [ "$HARNESS_TARGET" = "devnet" ]; then
+  if [ "$NUM_NODES" -ne 6 ] || [ "$CURATOR_NODE" -ne 5 ] || [ "$JOINER_NODE" -ne 6 ]; then
+    echo "Devnet mode requires the default topology: cores 1-4, curator edge 5, joiner edge 6." >&2
+    exit 2
+  fi
+else
+  if [ "$NUM_NODES" -ne 4 ] || [ "$CURATOR_NODE" -ne 1 ] || [ "$JOINER_NODE" -ne 2 ]; then
+    echo "Testnet mode requires four cores: curator node 1, joiner node 2, unrelated nodes 3-4." >&2
+    exit 2
+  fi
+  [ "$HARNESS_EXPECT" = "fixed" ] || {
+    echo "Testnet mode is a release gate and only supports HARNESS_EXPECT=fixed." >&2
+    exit 2
+  }
+  [ "$TESTNET_PREFLIGHT_ONLY" = "0" ] || [ "$TESTNET_PREFLIGHT_ONLY" = "1" ] || {
+    echo "TESTNET_PREFLIGHT_ONLY must be 0 or 1." >&2
+    exit 2
+  }
+  [ -n "$TESTNET_EXPECT_COMMIT" ] || {
+    echo "TESTNET_EXPECT_COMMIT is required in testnet mode." >&2
+    exit 2
+  }
+  [[ "$TESTNET_EXPECT_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]] || {
+    echo "TESTNET_EXPECT_COMMIT must be a 7-40 character Git SHA." >&2
+    exit 2
+  }
+  [[ "$TESTNET_SERVICE" =~ ^[a-zA-Z0-9_.@-]+$ ]] || {
+    echo "TESTNET_SERVICE contains unsupported characters." >&2
+    exit 2
+  }
+  if [ "$TESTNET_PREFLIGHT_ONLY" != "1" ] && [ "$TESTNET_ALLOW_CORE_RESTARTS" != "I_UNDERSTAND" ]; then
+    echo "Full testnet mode stops one core at a time. Set TESTNET_ALLOW_CORE_RESTARTS=I_UNDERSTAND." >&2
+    exit 2
+  fi
 fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-RUN_DIR="$HARNESS_ARTIFACT_DIR/private-cg-membership-recovery-$RUN_ID-$HARNESS_EXPECT-$ADMISSION_MODE"
+RUN_DIR="$HARNESS_ARTIFACT_DIR/private-cg-membership-recovery-$RUN_ID-$HARNESS_TARGET-$HARNESS_EXPECT-$ADMISSION_MODE"
 mkdir -p "$RUN_DIR"
+TESTNET_JOURNAL_SINCE="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+if [ "$HARNESS_TARGET" = "testnet" ]; then
+  mkdir -p "$RUN_DIR/tmp"
+  DEVNET_DIR="$RUN_DIR/tmp"
+  export DEVNET_PUBLISH_STATE_FILE="$RUN_DIR/publish-state.json"
+  # One KA per fixture keeps the live-network gate fast while preserving the
+  # same root/sub-graph triple counts and synchronization behavior.
+  export DEVNET_PUBLISH_PRESERVE_BATCH=1
+fi
 exec > >(tee -a "$RUN_DIR/harness.log") 2>&1
 
 # shellcheck source=devnet-publish-helpers.sh
@@ -140,6 +221,95 @@ fail() {
   FAIL_REASON="$*"
   echo "[private-cg-recovery] FAIL: $*" >&2
   exit 1
+}
+
+TESTNET_SSH_OPTIONS=(
+  -o BatchMode=yes
+  -o "ConnectTimeout=$TESTNET_SSH_CONNECT_TIMEOUT"
+  -o ControlMaster=auto
+  -o ControlPersist=600
+  -o "ControlPath=/tmp/dkg-private-cg-${UID:-0}-$$-%C"
+)
+
+testnet_node_ssh() {
+  case "$1" in
+    1) printf '%s' "$TESTNET_NODE_1_SSH" ;;
+    2) printf '%s' "$TESTNET_NODE_2_SSH" ;;
+    3) printf '%s' "$TESTNET_NODE_3_SSH" ;;
+    4) printf '%s' "$TESTNET_NODE_4_SSH" ;;
+    *) return 1 ;;
+  esac
+}
+
+base64_one_line() {
+  base64 | tr -d '\r\n'
+}
+
+commit_matches() {
+  local actual expected
+  actual="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  expected="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  [ -n "$actual" ] && [ -n "$expected" ] \
+    && { [[ "$actual" == "$expected"* ]] || [[ "$expected" == "$actual"* ]]; }
+}
+
+testnet_probe_node() {
+  local node="$1" host
+  host="$(testnet_node_ssh "$node")"
+  ssh "${TESTNET_SSH_OPTIONS[@]}" "$host" /bin/bash -s -- "$TESTNET_SERVICE" <<'REMOTE'
+set -u
+service="$1"
+service_active="$(systemctl is-active "$service" 2>/dev/null || true)"
+current_commit="$(tr -d '\r\n' < "$HOME/.dkg/.current-commit" 2>/dev/null || true)"
+active_git="$(git -C "$HOME/.dkg/releases/current" rev-parse HEAD 2>/dev/null || true)"
+active_slot="$(readlink -f "$HOME/.dkg/releases/current" 2>/dev/null | sed 's#.*/##')"
+accept_queue="$(ss -lnt 2>/dev/null | awk '$4 ~ /:9090$/ {print $2; exit}')"
+build_running=false
+for pid in $(pgrep -f 'pnpm install|build-runtime-packages|vite.*build|tsup.*cli-default|typescript/bin/tsc' 2>/dev/null || true); do
+  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+  case "$cwd" in
+    "$HOME/.dkg/releases/"*) build_running=true; break ;;
+  esac
+done
+restart_allowed=false
+sudo -n -l /usr/bin/systemctl restart "$service" >/dev/null 2>&1 \
+  && restart_allowed=true
+SERVICE_ACTIVE="$service_active" CURRENT_COMMIT="$current_commit" ACTIVE_GIT="$active_git" \
+ACTIVE_SLOT="$active_slot" ACCEPT_QUEUE="$accept_queue" BUILD_RUNNING="$build_running" \
+RESTART_ALLOWED="$restart_allowed" node -e '
+  process.stdout.write(JSON.stringify({
+    serviceActive: process.env.SERVICE_ACTIVE,
+    currentCommit: process.env.CURRENT_COMMIT || null,
+    activeGit: process.env.ACTIVE_GIT || null,
+    activeSlot: process.env.ACTIVE_SLOT || null,
+    acceptQueue: process.env.ACCEPT_QUEUE === "" ? null : Number(process.env.ACCEPT_QUEUE),
+    buildRunning: process.env.BUILD_RUNNING === "true",
+    restartAllowed: process.env.RESTART_ALLOWED === "true",
+  }));
+'
+REMOTE
+}
+
+stop_node() {
+  local node="$1" host
+  if [ "$HARNESS_TARGET" = "devnet" ]; then
+    "$DEVNET_SH" stop-node "$node"
+    return
+  fi
+  host="$(testnet_node_ssh "$node")"
+  ssh "${TESTNET_SSH_OPTIONS[@]}" "$host" \
+    sudo -n /usr/bin/systemctl stop "$TESTNET_SERVICE"
+}
+
+restart_node() {
+  local node="$1" host
+  if [ "$HARNESS_TARGET" = "devnet" ]; then
+    "$DEVNET_SH" restart-node "$node"
+    return
+  fi
+  host="$(testnet_node_ssh "$node")"
+  ssh "${TESTNET_SSH_OPTIONS[@]}" "$host" \
+    sudo -n /usr/bin/systemctl restart "$TESTNET_SERVICE"
 }
 
 node_dir()   { echo "$DEVNET_DIR/node$1"; }
@@ -273,12 +443,42 @@ save_artifact() {
 
 api_call() {
   local node="$1" method="$2" path="$3" data="${4:-}"
+  local request_timeout="${API_TIMEOUT_OVERRIDE:-$API_TIMEOUT_S}"
+  if [ "$HARNESS_TARGET" = "testnet" ]; then
+    local host path_b64 data_b64
+    host="$(testnet_node_ssh "$node")"
+    path_b64="$(printf '%s' "$path" | base64_one_line)"
+    data_b64="-"
+    [ -n "$data" ] && data_b64="$(printf '%s' "$data" | base64_one_line)"
+    ssh "${TESTNET_SSH_OPTIONS[@]}" "$host" /bin/bash -s -- \
+      "$method" "$path_b64" "$data_b64" "$request_timeout" <<'REMOTE'
+set -euo pipefail
+method="$1"
+path="$(printf '%s' "$2" | base64 -d)"
+data=""
+[ "$3" = "-" ] || data="$(printf '%s' "$3" | base64 -d)"
+timeout="$4"
+token="$(grep -v '^#' "$HOME/.dkg/auth.token" 2>/dev/null | head -n1 | tr -d '\r\n')"
+port="$(tr -d '\r\n' < "$HOME/.dkg/api.port" 2>/dev/null || printf '9200')"
+host="$(tailscale ip -4 | head -n1)"
+[ -n "$token" ] && [ -n "$host" ]
+args=(
+  -sS --max-time "$timeout" -X "$method"
+  -H "Authorization: Bearer $token"
+  -H 'Content-Type: application/json'
+)
+[ -n "$data" ] && args+=(-d "$data")
+args+=("http://${host}:${port}${path}")
+curl "${args[@]}"
+REMOTE
+    return
+  fi
   local token port
   token="$(node_token "$node")"
   port="$(node_port "$node")"
   [ -n "$token" ] || return 1
   local -a args=(
-    -sS --max-time "$API_TIMEOUT_S" -X "$method"
+    -sS --max-time "$request_timeout" -X "$method"
     -H "Authorization: Bearer $token"
     -H 'Content-Type: application/json'
   )
@@ -289,7 +489,7 @@ api_call() {
 
 node_ready() {
   local node="$1" body
-  body="$(api_call "$node" GET /api/status 2>/dev/null || true)"
+  body="$(API_TIMEOUT_OVERRIDE=5 api_call "$node" GET /api/status 2>/dev/null || true)"
   [ -n "$(json_get "$body" peerId)" ]
 }
 
@@ -307,13 +507,29 @@ wait_node_down() {
   local node="$1" timeout="${2:-45}" start
   start="$(date +%s)"
   while [ $(( $(date +%s) - start )) -lt "$timeout" ]; do
-    if ! node_ready "$node"; then return 0; fi
+    if [ "$HARNESS_TARGET" = "testnet" ]; then
+      local host state
+      host="$(testnet_node_ssh "$node")"
+      state="$(ssh "${TESTNET_SSH_OPTIONS[@]}" "$host" /bin/bash -s -- "$TESTNET_SERVICE" 2>/dev/null <<'REMOTE' || true
+systemctl is-active "$1"
+REMOTE
+)"
+      [ "$state" != "active" ] && return 0
+    elif ! node_ready "$node"; then
+      return 0
+    fi
     sleep 1
   done
   return 1
 }
 
 node_role() {
+  if [ "$HARNESS_TARGET" = "testnet" ]; then
+    local status
+    status="$(api_call "$1" GET /api/status 2>/dev/null || true)"
+    json_get "$status" nodeRole
+    return
+  fi
   local config
   config="$(node_dir "$1")/config.json"
   node -e '
@@ -325,6 +541,39 @@ node_role() {
 
 db_subscription_row() {
   local node="$1" db
+  if [ "$HARNESS_TARGET" = "testnet" ]; then
+    local host cg_b64
+    host="$(testnet_node_ssh "$node")"
+    cg_b64="$(printf '%s' "$CG_ID" | base64_one_line)"
+    ssh "${TESTNET_SSH_OPTIONS[@]}" "$host" /bin/bash -s -- "$cg_b64" <<'REMOTE'
+set -euo pipefail
+cg="$(printf '%s' "$1" | base64 -d)"
+db="$HOME/.dkg/node-ui.db"
+[ -f "$db" ] || { printf 'null'; exit 0; }
+cd "$HOME/.dkg/releases/current/packages/cli"
+DB_PATH="$db" DB_CG_ID="$cg" node --input-type=commonjs <<'NODE'
+const Database = require('better-sqlite3');
+
+try {
+  const db = new Database(process.env.DB_PATH, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  const row = db.prepare(`
+    SELECT context_graph_id, subscribed, synced, shared_memory_synced,
+           meta_synced, on_chain_id, sync_scoped, updated_at
+      FROM context_graph_subscriptions
+     WHERE context_graph_id = ?
+  `).get(process.env.DB_CG_ID);
+  db.close();
+  process.stdout.write(JSON.stringify(row || null));
+} catch {
+  process.stdout.write('null');
+}
+NODE
+REMOTE
+    return
+  fi
   db="$(node_db "$node")"
   [ -f "$db" ] || { printf 'null'; return 0; }
   # Open the live WAL database read-only (not immutable) so SQLite still sees
@@ -614,8 +863,23 @@ snapshot_phase() {
 
 collect_filtered_logs() {
   [ -n "$CG_ID" ] || return 0
-  local node log_path
+  local node log_path host cg_b64 since_b64
   for node in $(seq 1 "$NUM_NODES"); do
+    if [ "$HARNESS_TARGET" = "testnet" ]; then
+      host="$(testnet_node_ssh "$node")"
+      cg_b64="$(printf '%s' "$CG_ID" | base64_one_line)"
+      since_b64="$(printf '%s' "$TESTNET_JOURNAL_SINCE" | base64_one_line)"
+      ssh "${TESTNET_SSH_OPTIONS[@]}" "$host" /bin/bash -s -- \
+        "$TESTNET_SERVICE" "$cg_b64" "$since_b64" <<'REMOTE' 2>/dev/null \
+        | sanitize_stream > "$RUN_DIR/node${node}-cg-filtered.log" || true
+service="$1"
+cg="$(printf '%s' "$2" | base64 -d)"
+since="$(printf '%s' "$3" | base64 -d)"
+journalctl -u "$service" --since "$since" --no-pager 2>/dev/null \
+  | grep -F -- "$cg" | tail -n 500 || true
+REMOTE
+      continue
+    fi
     log_path="$(node_log "$node")"
     [ -f "$log_path" ] || continue
     grep -F "$CG_ID" "$log_path" 2>/dev/null | tail -n 500 | sanitize_stream \
@@ -625,7 +889,9 @@ collect_filtered_logs() {
 
 write_summary() {
   local exit_code="$1"
-  EXPECT="$HARNESS_EXPECT" ADMISSION="$ADMISSION_MODE" EXIT_CODE="$exit_code" RUN_ID_ENV="$RUN_ID" \
+  TARGET="$HARNESS_TARGET" EXPECT="$HARNESS_EXPECT" ADMISSION="$ADMISSION_MODE" \
+    PREFLIGHT_ONLY="$TESTNET_PREFLIGHT_ONLY" EXPECTED_COMMIT="$TESTNET_EXPECT_COMMIT" \
+    EXIT_CODE="$exit_code" RUN_ID_ENV="$RUN_ID" \
     CG="$CG_ID" CURATOR="$CURATOR_NODE" JOINER="$JOINER_NODE" \
     AUTO_OBSERVED="$AUTO_APPROVAL_OBSERVED" AUTO_MEMBERS="$AUTO_MAX_MEMBERS" \
     AUTO_HOURLY="$AUTO_MAX_APPROVALS_PER_HOUR" \
@@ -633,8 +899,11 @@ write_summary() {
     RECOVERED_AFTER="$BROKEN_RECOVERED_AFTER_RESTART" node -e '
       process.stdout.write(JSON.stringify({
         runId: process.env.RUN_ID_ENV,
+        target: process.env.TARGET,
         expectation: process.env.EXPECT,
         admissionMode: process.env.ADMISSION,
+        preflightOnly: process.env.PREFLIGHT_ONLY === "1",
+        expectedCommit: process.env.EXPECTED_COMMIT || null,
         exitCode: Number(process.env.EXIT_CODE),
         contextGraphId: process.env.CG || null,
         curatorNode: Number(process.env.CURATOR),
@@ -662,16 +931,22 @@ cleanup() {
 
   if [ "$JOINER_STOPPED" -eq 1 ]; then
     warn "cleanup: restarting node $JOINER_NODE"
-    "$DEVNET_SH" restart-node "$JOINER_NODE" >/dev/null 2>&1
+    restart_node "$JOINER_NODE" >/dev/null 2>&1
     wait_node_ready "$JOINER_NODE" 90 || warn "cleanup: node $JOINER_NODE did not become ready"
   fi
   if [ "$CURATOR_STOPPED" -eq 1 ]; then
     warn "cleanup: restarting node $CURATOR_NODE"
-    "$DEVNET_SH" restart-node "$CURATOR_NODE" >/dev/null 2>&1
+    restart_node "$CURATOR_NODE" >/dev/null 2>&1
     wait_node_ready "$CURATOR_NODE" 90 || warn "cleanup: node $CURATOR_NODE did not become ready"
   fi
 
   write_summary "$exit_code"
+  if [ "$HARNESS_TARGET" = "testnet" ]; then
+    for node in $(seq 1 "$NUM_NODES"); do
+      host="$(testnet_node_ssh "$node")"
+      ssh "${TESTNET_SSH_OPTIONS[@]}" -O exit "$host" >/dev/null 2>&1 || true
+    done
+  fi
   log "artifacts: $RUN_DIR"
   exit "$exit_code"
 }
@@ -679,24 +954,80 @@ trap cleanup EXIT
 
 cd "$REPO_ROOT"
 
-act "Preflight: exact six-node devnet topology"
-for command in curl node; do
+act "Preflight: $HARNESS_TARGET topology and release health"
+for command in curl node base64; do
   command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
-[ -x "$DEVNET_SH" ] || fail "missing executable: $DEVNET_SH"
+if [ "$HARNESS_TARGET" = "devnet" ]; then
+  [ -x "$DEVNET_SH" ] || fail "missing executable: $DEVNET_SH"
+else
+  command -v ssh >/dev/null 2>&1 || fail "required command not found: ssh"
+fi
 
+SEEN_TESTNET_PEERS=" "
 for node in $(seq 1 "$NUM_NODES"); do
-  [ -f "$(node_dir "$node")/auth.token" ] || fail "node $node auth token is missing under $DEVNET_DIR"
-  [ -f "$(node_db "$node")" ] || fail "node $node database is missing: $(node_db "$node")"
-  wait_node_ready "$node" 10 || fail "node $node is not ready; start a six-node devnet first"
+  if [ "$HARNESS_TARGET" = "devnet" ]; then
+    [ -f "$(node_dir "$node")/auth.token" ] || fail "node $node auth token is missing under $DEVNET_DIR"
+    [ -f "$(node_db "$node")" ] || fail "node $node database is missing: $(node_db "$node")"
+  else
+    host="$(testnet_node_ssh "$node")"
+    [ -n "$host" ] || fail "TESTNET_NODE_${node}_SSH is required"
+    [[ "$host" != -* ]] || fail "TESTNET_NODE_${node}_SSH must not begin with '-'"
+  fi
+  wait_node_ready "$node" 15 || fail "node $node is not API-ready"
   role="$(node_role "$node")"
-  expected_role=edge
-  [ "$node" -le 4 ] && expected_role=core
+  expected_role=core
+  if [ "$HARNESS_TARGET" = "devnet" ] && [ "$node" -gt 4 ]; then
+    expected_role=edge
+  fi
   [ "$role" = "$expected_role" ] \
     || fail "node $node role is '$role', expected '$expected_role' for the deterministic topology"
   status="$(api_call "$node" GET /api/status)"
   save_artifact "preflight-node${node}-status.json" "$status"
-  log "node $node ready (role=$role, peer=$(json_get "$status" peerId))"
+  peer="$(json_get "$status" peerId)"
+  [ -n "$peer" ] || fail "node $node status omitted peerId"
+  if [ "$HARNESS_TARGET" = "testnet" ]; then
+    [ "$(json_get "$status" networkConfig)" = "testnet" ] \
+      || fail "node $node is not configured for testnet: $status"
+    [ "$(json_get "$status" hasIdentity)" = "true" ] \
+      || fail "node $node has no on-chain identity"
+    status_commit="$(json_get "$status" commit)"
+    commit_matches "$status_commit" "$TESTNET_EXPECT_COMMIT" \
+      || fail "node $node API serves commit '${status_commit:-unknown}', expected $TESTNET_EXPECT_COMMIT"
+    [ "$(json_get "$status" updateAvailable)" != "true" ] \
+      || fail "node $node still reports an update available"
+    latest_commit="$(json_get "$status" latestCommit)"
+    if [ -n "$latest_commit" ] && [ "$latest_commit" != "null" ]; then
+      commit_matches "$latest_commit" "$TESTNET_EXPECT_COMMIT" \
+        || fail "node $node update channel points at $latest_commit, expected $TESTNET_EXPECT_COMMIT"
+    fi
+    probe="$(testnet_probe_node "$node")" || fail "could not probe testnet node $node over SSH"
+    save_artifact "preflight-node${node}-host.json" "$probe"
+    [ "$(json_get "$probe" serviceActive)" = "active" ] \
+      || fail "node $node service is not active: $probe"
+    [ "$(json_get "$probe" buildRunning)" = "false" ] \
+      || fail "node $node is still building an auto-update: $probe"
+    [ "$(json_get "$probe" restartAllowed)" = "true" ] \
+      || fail "node $node SSH user lacks passwordless restart permission for $TESTNET_SERVICE"
+    current_commit="$(json_get "$probe" currentCommit)"
+    active_git="$(json_get "$probe" activeGit)"
+    commit_matches "$current_commit" "$TESTNET_EXPECT_COMMIT" \
+      || fail "node $node .current-commit is '${current_commit:-unknown}', expected $TESTNET_EXPECT_COMMIT"
+    commit_matches "$active_git" "$TESTNET_EXPECT_COMMIT" \
+      || fail "node $node active release is '${active_git:-unknown}', expected $TESTNET_EXPECT_COMMIT"
+    accept_queue="$(json_get "$probe" acceptQueue)"
+    [[ "$accept_queue" =~ ^[0-9]+$ ]] \
+      || fail "node $node peer accept queue is unreadable: $probe"
+    [ "$accept_queue" -le "$TESTNET_MAX_ACCEPT_QUEUE" ] \
+      || fail "node $node peer accept queue is $accept_queue, above safe threshold $TESTNET_MAX_ACCEPT_QUEUE"
+    case "$SEEN_TESTNET_PEERS" in
+      *" $peer "*) fail "testnet nodes are not distinct; peer $peer appears more than once" ;;
+    esac
+    SEEN_TESTNET_PEERS="$SEEN_TESTNET_PEERS$peer "
+    log "node $node ready (role=$role, commit=${status_commit:0:8}, queue=$accept_queue, peer=$peer)"
+  else
+    log "node $node ready (role=$role, peer=$peer)"
+  fi
 done
 
 PACKAGE_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || true)"
@@ -704,12 +1035,19 @@ PACKAGE_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || tr
   echo "gitCommit=$(git rev-parse HEAD 2>/dev/null || true)"
   echo "gitDescribe=$(git describe --tags --always --dirty 2>/dev/null || true)"
   echo "packageVersion=$PACKAGE_VERSION"
+  echo "harnessTarget=$HARNESS_TARGET"
+  echo "testnetExpectedCommit=$TESTNET_EXPECT_COMMIT"
   echo "devnetDir=$DEVNET_DIR"
   echo "apiPortBase=$API_PORT_BASE"
   echo "admissionMode=$ADMISSION_MODE"
   echo "autoMaxMembers=$AUTO_MAX_MEMBERS"
   echo "autoMaxApprovalsPerHour=$AUTO_MAX_APPROVALS_PER_HOUR"
 } > "$RUN_DIR/runtime.txt"
+
+if [ "$HARNESS_TARGET" = "testnet" ] && [ "$TESTNET_PREFLIGHT_ONLY" = "1" ]; then
+  log "PASS (testnet preflight only): all four nodes are healthy on $TESTNET_EXPECT_COMMIT; no state was changed."
+  exit 0
+fi
 
 CURATOR_IDENTITY="$(api_call "$CURATOR_NODE" GET /api/agent/identity)"
 JOINER_IDENTITY="$(api_call "$JOINER_NODE" GET /api/agent/identity)"
@@ -795,8 +1133,8 @@ CURATOR_SUB="$(subgraph_count "$CURATOR_NODE")"
   || fail "curator sub-graph SWM count is '$CURATOR_SUB', expected $SUB_GRAPH_TRIPLES"
 log "curator fixture verified: root=$CURATOR_ROOT subgraph=$CURATOR_SUB"
 
-act "Prove nodes 1-4 and fresh joiner 6 do not already hold the private CG"
-for node in 1 2 3 4 "$JOINER_NODE"; do
+act "Prove unrelated nodes ($UNRELATED_NODES) and joiner $JOINER_NODE do not already hold the private CG"
+for node in $UNRELATED_NODES "$JOINER_NODE"; do
   exists="$(context_graph_exists "$node")"
   root="$(root_count "$node")"
   sub="$(subgraph_count "$node")"
@@ -811,7 +1149,7 @@ done
 
 act "Stop curator node $CURATOR_NODE"
 CURATOR_STOPPED=1
-"$DEVNET_SH" stop-node "$CURATOR_NODE"
+stop_node "$CURATOR_NODE"
 wait_node_down "$CURATOR_NODE" 45 \
   || fail "curator node $CURATOR_NODE did not become unreachable"
 log "curator is offline; unrelated core peers remain online"
@@ -839,8 +1177,19 @@ SHARED_MEMORY_EMPTY_PEERS="$(json_get "$CATCHUP_RESPONSE" result.cleanPlaneCompl
   || fail "catch-up received replies from only ${PEERS_RESPONDED:-0}/$EXPECTED_UNRELATED_RESPONDERS unrelated peers: $CATCHUP_RESPONSE"
 [ -n "$DURABLE_EMPTY_PEERS" ] && [ "$DURABLE_EMPTY_PEERS" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null \
   || fail "durable catch-up completed empty with only ${DURABLE_EMPTY_PEERS:-0}/$EXPECTED_UNRELATED_RESPONDERS unrelated peers: $CATCHUP_RESPONSE"
-[ -n "$SHARED_MEMORY_EMPTY_PEERS" ] && [ "$SHARED_MEMORY_EMPTY_PEERS" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null \
-  || fail "shared-memory catch-up completed empty with only ${SHARED_MEMORY_EMPTY_PEERS:-0}/$EXPECTED_UNRELATED_RESPONDERS unrelated peers: $CATCHUP_RESPONSE"
+if [ "$HARNESS_EXPECT" = "broken" ]; then
+  [ -n "$SHARED_MEMORY_EMPTY_PEERS" ] && [ "$SHARED_MEMORY_EMPTY_PEERS" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null \
+    || fail "shared-memory catch-up completed empty with only ${SHARED_MEMORY_EMPTY_PEERS:-0}/$EXPECTED_UNRELATED_RESPONDERS unrelated peers: $CATCHUP_RESPONSE"
+else
+  # A fixed node may fail closed as soon as durable sync proves that no peer
+  # has authoritative metadata. In that stricter path shared-memory sync has
+  # no authorized graph plan to execute, so zero shared-memory responses is
+  # expected. Older fixed builds may still complete the plane against all four
+  # unrelated peers; reject only a partial plane completion.
+  [ "$SHARED_MEMORY_EMPTY_PEERS" = "0" ] \
+    || { [ -n "$SHARED_MEMORY_EMPTY_PEERS" ] && [ "$SHARED_MEMORY_EMPTY_PEERS" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null; } \
+    || fail "shared-memory catch-up partially completed with ${SHARED_MEMORY_EMPTY_PEERS:-0}/$EXPECTED_UNRELATED_RESPONDERS unrelated peers: $CATCHUP_RESPONSE"
+fi
 [ -n "$SYNC_CAPABLE_PEERS" ] && [ "$SYNC_CAPABLE_PEERS" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null \
   || fail "catch-up reached only ${SYNC_CAPABLE_PEERS:-0}/$EXPECTED_UNRELATED_RESPONDERS sync-capable unrelated peers: $CATCHUP_RESPONSE"
 [ "$INSERTED_TRIPLES" = "0" ] \
@@ -877,7 +1226,7 @@ fi
 snapshot_phase pre-admission
 
 act "Restart curator and deliver a signed admission request"
-"$DEVNET_SH" restart-node "$CURATOR_NODE"
+restart_node "$CURATOR_NODE"
 wait_node_ready "$CURATOR_NODE" 90 \
   || fail "curator node $CURATOR_NODE did not become ready after restart"
 CURATOR_STOPPED=0
@@ -936,7 +1285,14 @@ while [ $(( $(date +%s) - REQUEST_START )) -lt "$JOIN_DELIVERY_TIMEOUT_S" ]; do
   REQUEST_RESPONSE="$(api_call "$JOINER_NODE" POST "/api/context-graph/$CG_ENCODED/request-join" "$REQUEST_BODY" 2>/dev/null || true)"
   REQUEST_STATUS="$(json_get "$REQUEST_RESPONSE" status)"
   case "$REQUEST_STATUS" in
-    pending|approved|already-member) break ;;
+    approved|already-member) break ;;
+    pending)
+      # Manual admission is expected to stop at pending. Open enrollment can
+      # transiently return pending after a curator restart until the joiner's
+      # active encryption key has propagated again, so keep retrying the same
+      # signed request within the bounded delivery window.
+      [ "$ADMISSION_MODE" = "manual" ] && break
+      ;;
   esac
   sleep 3
 done
@@ -1012,7 +1368,7 @@ snapshot_phase post-approval
 
 act "Restart joiner node $JOINER_NODE and recheck durable state"
 JOINER_STOPPED=1
-"$DEVNET_SH" restart-node "$JOINER_NODE"
+restart_node "$JOINER_NODE"
 wait_node_ready "$JOINER_NODE" 90 \
   || fail "joiner node $JOINER_NODE did not become ready after restart"
 JOINER_STOPPED=0
