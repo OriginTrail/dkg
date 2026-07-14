@@ -51,6 +51,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   let peersTried = 0;
   let peersResponded = 0;
   let peersSucceeded = 0;
+  let deferredBackpressure = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
   let deniedPeers = 0;
@@ -74,6 +75,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       rejectedKcs: 0,
       failedPeers: 0,
       failedPhases: 0,
+      deferredBackpressure: 0,
     },
     sharedMemory: {
       fetchedMetaTriples: 0,
@@ -89,6 +91,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       droppedDataTriples: 0,
       failedPeers: 0,
       failedPhases: 0,
+      deferredBackpressure: 0,
     },
   };
 
@@ -145,6 +148,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     failedPeers: 1,
     failedPhases: 0,
     deniedPhases: 0,
+    deferredBackpressure: 0,
   });
   const emptyShared = () => ({
     insertedTriples: 0,
@@ -162,6 +166,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     failedPeers: 1,
     failedPhases: 0,
     deniedPhases: 0,
+    deferredBackpressure: 0,
   });
   // Bounded fan-out (sync-storm mitigation C-1): at most
   // CATCHUP_MAX_CONCURRENT_PEER_SYNCS full per-peer sync rounds in flight.
@@ -197,6 +202,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.rejectedKcs += durable.rejectedKcs;
     diagnostics.durable.failedPeers += durable.failedPeers;
     diagnostics.durable.failedPhases += durable.failedPhases ?? 0;
+    diagnostics.durable.deferredBackpressure += durable.deferredBackpressure ?? 0;
+    deferredBackpressure += durable.deferredBackpressure ?? 0;
     peerDenied = peerDenied || durable.deniedPhases > 0;
 
     if (shared) {
@@ -214,6 +221,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
       diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
+      diagnostics.sharedMemory.deferredBackpressure += shared.deferredBackpressure ?? 0;
+      deferredBackpressure += shared.deferredBackpressure ?? 0;
       peerDenied = peerDenied || shared.deniedPhases > 0;
     }
 
@@ -236,7 +245,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   }
 
   diagnostics.noProtocolPeers = noProtocolPeers;
-  await invoke('finalizeCatchup', request.contextGraphId, dataSynced, sharedMemorySynced);
+  if (deferredBackpressure === 0) {
+    await invoke('finalizeCatchup', request.contextGraphId, dataSynced, sharedMemorySynced);
+  }
 
   return {
     connectedPeers: prepared.connectedPeers,
@@ -246,6 +257,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersTried,
     peersResponded,
     peersSucceeded,
+    deferredBackpressure,
     dataSynced,
     sharedMemorySynced,
     denied: deniedPeers > 0,

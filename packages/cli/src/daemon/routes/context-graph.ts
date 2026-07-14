@@ -1637,6 +1637,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
         }
 
+        if (job.status === "done" && result.deferredBackpressure > 0) {
+          job.status = "deferred";
+          job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
+        }
+
         if (job.status === "done") {
           if (cleanResponse) {
             const hasContent = await agent.contextGraphHasLocalContent(contextGraphId).catch(() => false);

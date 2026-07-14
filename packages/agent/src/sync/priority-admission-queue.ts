@@ -25,6 +25,9 @@ interface InternalEntry<Payload> extends PriorityAdmissionEntry<Payload> {
   timer?: ReturnType<typeof setTimeout>;
   onAbort?: () => void;
   settled: boolean;
+  reserveForHandoff: boolean;
+  queueLimit: number;
+  ownerQueueLimit?: number;
 }
 
 export interface PriorityAdmission<Payload> {
@@ -33,6 +36,8 @@ export interface PriorityAdmission<Payload> {
   sequence: number;
   release: Promise<PriorityAdmissionRelease>;
   entry: PriorityAdmissionEntry<Payload>;
+  /** Atomically consume this running admission's reserved queue capacity. */
+  handoff?: (options: PriorityAdmissionHandoffOptions<Payload>) => PriorityAdmission<Payload>;
 }
 
 export interface PriorityAdmissionQueueHooks<Payload> {
@@ -50,13 +55,23 @@ export interface PriorityAdmissionAcquireOptions<Payload> extends PriorityAdmiss
   timeoutMs?: number;
   agingThresholdMs: number;
   now?: () => number;
-  /** Reuse an arrival sequence when a running stage hands off to a queued stage. */
-  sequence?: number;
-  /** A running-to-queued handoff may append before releasing its current slot. */
-  allowQueueOverflow?: boolean;
+  /** Reserve one bounded queue slot if this running stage may hand off. */
+  reserveForHandoff?: boolean;
   createBusyError: (reason: 'global_queue_full' | 'owner_queue_full') => Error;
   createDisplacedError: (entry: PriorityAdmissionEntry<Payload>) => Error;
   createTimeoutError?: () => Error;
+}
+
+export type PriorityAdmissionHandoffOptions<Payload> = Omit<
+  PriorityAdmissionAcquireOptions<Payload>,
+  'ownerKey' | 'queueLimit' | 'ownerQueueLimit' | 'reserveForHandoff'
+>;
+
+interface HandoffReservation {
+  sequence: number;
+  ownerKey: string;
+  queueLimit: number;
+  ownerQueueLimit?: number;
 }
 
 function abortError(reason: unknown): Error {
@@ -72,6 +87,7 @@ function abortError(reason: unknown): Error {
  */
 export class PriorityAdmissionQueue<Payload> {
   private readonly queue: InternalEntry<Payload>[] = [];
+  private readonly handoffReservations = new Map<number, HandoffReservation>();
   private nextSequence = 0;
 
   constructor(private readonly hooks: PriorityAdmissionQueueHooks<Payload>) {}
@@ -88,17 +104,32 @@ export class PriorityAdmissionQueue<Payload> {
     return this.queue.reduce((count, entry) => count + (entry.ownerKey === ownerKey ? 1 : 0), 0);
   }
 
+  private countReservedOwner(ownerKey: string): number {
+    let count = 0;
+    for (const reservation of this.handoffReservations.values()) {
+      if (reservation.ownerKey === ownerKey) count += 1;
+    }
+    return count;
+  }
+
   oldestAgeMs(now = Date.now()): number {
     if (this.queue.length === 0) return 0;
     return Math.max(0, now - Math.min(...this.queue.map((entry) => entry.enqueuedAt)));
   }
 
   acquire(options: PriorityAdmissionAcquireOptions<Payload>): PriorityAdmission<Payload> {
+    return this.acquireInternal(options);
+  }
+
+  private acquireInternal(
+    options: PriorityAdmissionAcquireOptions<Payload>,
+    handoffReservation?: HandoffReservation,
+  ): PriorityAdmission<Payload> {
     if (options.signal?.aborted) throw abortError(options.signal.reason);
     const now = options.now ?? Date.now;
-    const ownerKey = options.ownerKey ?? '';
+    const ownerKey = handoffReservation?.ownerKey ?? options.ownerKey ?? '';
     const queuedBefore = this.queue.length;
-    const sequence = options.sequence ?? this.nextSequence++;
+    const sequence = handoffReservation?.sequence ?? this.nextSequence++;
     const base: PriorityAdmissionEntry<Payload> = {
       payload: options.payload,
       ownerKey,
@@ -111,28 +142,50 @@ export class PriorityAdmissionQueue<Payload> {
       agingThresholdMs: options.agingThresholdMs,
     };
 
-    if (this.hooks.canRun(base) && queuedBefore === 0) {
+    const reservedGlobal = this.handoffReservations.size;
+    const reservedOwner = this.countReservedOwner(ownerKey);
+    const reservationGlobalFull = Boolean(
+      options.reserveForHandoff
+      && queuedBefore + reservedGlobal >= options.queueLimit,
+    );
+    const reservationOwnerFull = Boolean(
+      options.reserveForHandoff
+      && options.ownerQueueLimit !== undefined
+      && this.countOwner(ownerKey) + reservedOwner >= options.ownerQueueLimit,
+    );
+
+    if (
+      !handoffReservation
+      && this.hooks.canRun(base)
+      && queuedBefore === 0
+      && !reservationGlobalFull
+      && !reservationOwnerFull
+    ) {
       this.recordDecision(base, 'started');
-      return {
+      const admission: PriorityAdmission<Payload> = {
         status: 'running',
         queuedBefore,
         sequence,
         entry: base,
-        release: Promise.resolve(this.start(base)),
+        release: Promise.resolve(this.start(base, options)),
       };
+      if (options.reserveForHandoff) {
+        admission.handoff = (handoffOptions) => this.handoff(base, handoffOptions);
+      }
+      return admission;
     }
 
-    const globalFull = queuedBefore >= options.queueLimit;
+    const globalFull = queuedBefore + reservedGlobal >= options.queueLimit;
     const ownerFull = options.ownerQueueLimit !== undefined
-      && this.countOwner(ownerKey) >= options.ownerQueueLimit;
-    if (globalFull || ownerFull) {
+      && this.countOwner(ownerKey) + reservedOwner >= options.ownerQueueLimit;
+    if (!handoffReservation && (globalFull || ownerFull)) {
       const victim = this.queue
         .filter((entry) => (
           entry.priority < options.priority
           && (!ownerFull || entry.ownerKey === ownerKey)
         ))
         .sort((a, b) => a.priority - b.priority || b.sequence - a.sequence)[0];
-      if (!victim && !options.allowQueueOverflow) {
+      if (!victim) {
         this.recordDecision(base, 'rejected');
         throw options.createBusyError(globalFull ? 'global_queue_full' : 'owner_queue_full');
       }
@@ -143,6 +196,10 @@ export class PriorityAdmissionQueue<Payload> {
       }
     }
 
+    if (handoffReservation) {
+      this.handoffReservations.delete(handoffReservation.sequence);
+    }
+
     let internal!: InternalEntry<Payload>;
     const release = new Promise<PriorityAdmissionRelease>((resolve, reject) => {
       internal = {
@@ -151,6 +208,9 @@ export class PriorityAdmissionQueue<Payload> {
         reject,
         signal: options.signal,
         settled: false,
+        reserveForHandoff: options.reserveForHandoff ?? false,
+        queueLimit: options.queueLimit,
+        ownerQueueLimit: options.ownerQueueLimit,
       };
       if (options.timeoutMs !== undefined) {
         internal.timer = setTimeout(() => {
@@ -174,7 +234,17 @@ export class PriorityAdmissionQueue<Payload> {
       }
       this.pump();
     });
-    return { status: 'queued', queuedBefore, sequence, entry: base, release };
+    const admission: PriorityAdmission<Payload> = {
+      status: 'queued',
+      queuedBefore,
+      sequence,
+      entry: base,
+      release,
+    };
+    if (options.reserveForHandoff) {
+      admission.handoff = (handoffOptions) => this.handoff(base, handoffOptions);
+    }
+    return admission;
   }
 
   pump(): void {
@@ -190,7 +260,7 @@ export class PriorityAdmissionQueue<Payload> {
       getMetrics().syncSchedulerQueueWaitMs.record(waitMs, this.metricAttributes(entry));
       this.recordDecision(entry, 'started');
       if (selected.aged) this.recordDecision(entry, 'aged');
-      entry.resolve(this.start(entry));
+      entry.resolve(this.start(entry, entry));
     }
   }
 
@@ -210,15 +280,45 @@ export class PriorityAdmissionQueue<Payload> {
     return highest ? { index: highest.index, aged: false } : undefined;
   }
 
-  private start(entry: PriorityAdmissionEntry<Payload>): PriorityAdmissionRelease {
+  private start(
+    entry: PriorityAdmissionEntry<Payload>,
+    options: Pick<PriorityAdmissionAcquireOptions<Payload>, 'reserveForHandoff' | 'queueLimit' | 'ownerQueueLimit'>,
+  ): PriorityAdmissionRelease {
+    if (options.reserveForHandoff) {
+      this.handoffReservations.set(entry.sequence, {
+        sequence: entry.sequence,
+        ownerKey: entry.ownerKey,
+        queueLimit: options.queueLimit,
+        ownerQueueLimit: options.ownerQueueLimit,
+      });
+    }
     const release = this.hooks.onStart(entry);
     let released = false;
     return () => {
       if (released) return;
       released = true;
+      this.handoffReservations.delete(entry.sequence);
       release();
       this.pump();
     };
+  }
+
+  private handoff(
+    entry: PriorityAdmissionEntry<Payload>,
+    options: PriorityAdmissionHandoffOptions<Payload>,
+  ): PriorityAdmission<Payload> {
+    if (options.signal?.aborted) throw abortError(options.signal.reason);
+    const reservation = this.handoffReservations.get(entry.sequence);
+    if (!reservation || reservation.ownerKey !== entry.ownerKey) {
+      throw new Error('Priority admission handoff requires an active reservation');
+    }
+    return this.acquireInternal({
+      ...options,
+      ownerKey: reservation.ownerKey,
+      queueLimit: reservation.queueLimit,
+      ownerQueueLimit: reservation.ownerQueueLimit,
+      reserveForHandoff: false,
+    }, reservation);
   }
 
   private remove(entry: InternalEntry<Payload>): boolean {

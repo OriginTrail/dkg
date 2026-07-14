@@ -1340,6 +1340,7 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1362,6 +1363,7 @@ export class ApiClient {
             rejectedKcs: number;
             failedPeers: number;
             failedPhases: number;
+            deferredBackpressure: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1377,6 +1379,7 @@ export class ApiClient {
             droppedDataTriples: number;
             failedPeers: number;
             failedPhases: number;
+            deferredBackpressure: number;
           };
         };
       }
@@ -1401,6 +1404,7 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1423,6 +1427,7 @@ export class ApiClient {
             rejectedKcs: number;
             failedPeers: number;
             failedPhases: number;
+            deferredBackpressure: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1438,6 +1443,7 @@ export class ApiClient {
             droppedDataTriples: number;
             failedPeers: number;
             failedPhases: number;
+            deferredBackpressure: number;
           };
         };
       }
@@ -1454,7 +1460,7 @@ export class ApiClient {
     jobId: string;
     contextGraphId: string;
     includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'denied' | 'failed' | 'unreachable';
+    status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
     queuedAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -1466,6 +1472,7 @@ export class ApiClient {
       peersTried: number;
       peersResponded: number;
       peersSucceeded: number;
+      deferredBackpressure: number;
       dataSynced: number;
       sharedMemorySynced: number;
       denied: boolean;
@@ -1488,6 +1495,7 @@ export class ApiClient {
           rejectedKcs: number;
           failedPeers: number;
           failedPhases: number;
+          deferredBackpressure: number;
         };
         sharedMemory: {
           fetchedMetaTriples: number;
@@ -1503,6 +1511,7 @@ export class ApiClient {
           droppedDataTriples: number;
           failedPeers: number;
           failedPhases: number;
+          deferredBackpressure: number;
         };
       };
     };

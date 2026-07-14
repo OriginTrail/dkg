@@ -263,25 +263,19 @@ function createSyncResponderLimiter() {
     },
   });
 
-  const acquire = (
+  const schedulingOptions = (
     peerId: string,
     scheduling: SyncResponderScheduling,
     signal?: AbortSignal,
-    transition?: { sequence: number },
-  ): PriorityAdmission<SyncResponderQueuePayload> => queue.acquire({
+  ) => ({
     payload: { peerId, contextGraphId: scheduling.contextGraphId },
-    ownerKey: peerId,
     lane: scheduling.lane,
     priority: scheduling.priority,
     priorityClass: scheduling.priorityClass,
     signal,
-    queueLimit: SYNC_RESPONDER_QUEUE_LIMIT,
-    ownerQueueLimit: SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT,
     timeoutMs: SYNC_RESPONDER_MAX_QUEUE_WAIT_MS,
     agingThresholdMs: SYNC_RESPONDER_MAX_QUEUE_WAIT_MS / 2,
-    sequence: transition?.sequence,
-    allowQueueOverflow: transition !== undefined,
-    createBusyError: (reason) => new SyncResponderBusyError(
+    createBusyError: (reason: 'global_queue_full' | 'owner_queue_full') => new SyncResponderBusyError(
       reason === 'global_queue_full'
         ? 'sync responder queue full'
         : 'sync responder peer queue full',
@@ -292,6 +286,19 @@ function createSyncResponderLimiter() {
     createTimeoutError: () => new SyncResponderBusyError(
       'sync responder queue wait exceeded',
     ),
+  });
+
+  const acquire = (
+    peerId: string,
+    scheduling: SyncResponderScheduling,
+    signal?: AbortSignal,
+    reserveForHandoff = false,
+  ): PriorityAdmission<SyncResponderQueuePayload> => queue.acquire({
+    ...schedulingOptions(peerId, scheduling, signal),
+    ownerKey: peerId,
+    queueLimit: SYNC_RESPONDER_QUEUE_LIMIT,
+    ownerQueueLimit: SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT,
+    reserveForHandoff,
   });
 
   return {
@@ -321,7 +328,7 @@ function createSyncResponderLimiter() {
         work: () => Promise<U>;
       } | undefined,
     ): Promise<T | U> {
-      const firstAdmission = acquire(peerId, firstScheduling, signal);
+      const firstAdmission = acquire(peerId, firstScheduling, signal, true);
       const releaseFirst = await firstAdmission.release;
       let value: T;
       try {
@@ -340,14 +347,14 @@ function createSyncResponderLimiter() {
 
       let secondAdmission: PriorityAdmission<SyncResponderQueuePayload>;
       try {
-        // Reuse the request's original arrival sequence so equal-priority work
-        // cannot lose FIFO position merely because authorization required a
-        // running-to-queued handoff.
-        secondAdmission = acquire(
-          peerId,
-          next.scheduling,
-          signal,
-          { sequence: firstAdmission.sequence },
+        // The first stage reserved one bounded global + per-peer queue slot.
+        // Consuming it here preserves the original arrival sequence without
+        // temporarily or persistently exceeding either queue cap.
+        if (!firstAdmission.handoff) {
+          throw new Error('sync responder handoff reservation missing');
+        }
+        secondAdmission = firstAdmission.handoff(
+          schedulingOptions(peerId, next.scheduling, signal),
         );
       } catch (error) {
         releaseFirst();

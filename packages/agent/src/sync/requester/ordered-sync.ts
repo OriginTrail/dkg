@@ -1,13 +1,46 @@
 import { getSyncBackpressureBusyError } from '../backpressure.js';
+import {
+  contextGraphPriority,
+  type SyncContextGraphPriorityConfig,
+  type SyncSchedulerLane,
+} from '../policy.js';
+
+export interface ContextGraphSyncWork<Result> {
+  contextGraphId: string;
+  lane: SyncSchedulerLane;
+  operationId: string;
+  run: (remainingContextGraphs: number) => Promise<Result>;
+}
 
 export interface OrderedContextGraphSyncOptions<Result> {
-  contextGraphIds: readonly string[];
+  work: readonly ContextGraphSyncWork<Result>[];
+  priorities?: Readonly<SyncContextGraphPriorityConfig>;
   emptyResult: () => Result;
-  runWithAdmission: <T>(contextGraphId: string, work: () => Promise<T>) => Promise<T>;
-  runOne: (contextGraphId: string, remainingContextGraphs: number) => Promise<Result>;
+  runWithAdmission: <T>(item: ContextGraphSyncWork<Result>, work: () => Promise<T>) => Promise<T>;
   merge: (summary: Result, part: Result) => Result;
   markDeferred: (summary: Result) => Result;
   shouldStop?: (part: Result) => boolean;
+  onDeferred?: (item: ContextGraphSyncWork<Result>, error: Error) => void;
+}
+
+function orderWork<Result>(
+  work: readonly ContextGraphSyncWork<Result>[],
+  priorities: Readonly<SyncContextGraphPriorityConfig> | undefined,
+): ContextGraphSyncWork<Result>[] {
+  const seen = new Set<string>();
+  return work
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => {
+      if (seen.has(item.contextGraphId)) return false;
+      seen.add(item.contextGraphId);
+      return true;
+    })
+    .sort((a, b) => (
+      contextGraphPriority(priorities, b.item.contextGraphId)
+      - contextGraphPriority(priorities, a.item.contextGraphId)
+      || a.index - b.index
+    ))
+    .map(({ item }) => item);
 }
 
 /**
@@ -19,18 +52,21 @@ export async function runOrderedContextGraphSyncs<Result>(
   options: OrderedContextGraphSyncOptions<Result>,
 ): Promise<Result> {
   let summary = options.emptyResult();
-  for (const [index, contextGraphId] of options.contextGraphIds.entries()) {
-    const remaining = options.contextGraphIds.length - index;
+  const orderedWork = orderWork(options.work, options.priorities);
+  for (const [index, item] of orderedWork.entries()) {
+    const remaining = orderedWork.length - index;
     try {
       const part = await options.runWithAdmission(
-        contextGraphId,
-        () => options.runOne(contextGraphId, remaining),
+        item,
+        () => item.run(remaining),
       );
       summary = options.merge(summary, part);
       if (options.shouldStop?.(part)) break;
     } catch (error) {
-      if (!getSyncBackpressureBusyError(error)) throw error;
+      const backpressureError = getSyncBackpressureBusyError(error);
+      if (!backpressureError) throw error;
       summary = options.markDeferred(summary);
+      options.onDeferred?.(item, backpressureError);
       break;
     }
   }

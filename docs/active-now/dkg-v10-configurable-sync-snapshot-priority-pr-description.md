@@ -226,6 +226,13 @@ never the clean-success timestamp.
 Existing stop-on-backoff behavior is preserved for actual peer or transport
 pressure.
 
+The orchestration is centralized in one heterogeneous work-item runner. Each
+item carries its CG, scheduler lane, operation label, and execution closure;
+the helper owns stable priority ordering, admission, result merging, local
+deferral, and stop policy. Durable, changelog, public shared-memory, and
+private-recovery lanes therefore cannot drift into subtly different queue
+semantics.
+
 ### Requester lanes covered
 
 The same local priority policy is applied at the real admission boundaries:
@@ -323,12 +330,13 @@ of an elevated CG to gain admission. Requests that do not transition into an
 authorized CG-specific stage remain neutral.
 
 The transition is atomic from the scheduler's perspective. The authorized
-stage is queued before the neutral running slot is released, allowing it to
-compete with all queued work without exceeding the existing running limit.
-The hand-off reuses the request's original arrival sequence, so equal-priority
-work does not lose FIFO position merely because authorization introduced a
-second admission stage. Stage results are a discriminated union rather than a
-byte-array sentinel.
+stage consumes queue capacity reserved by the neutral stage before the neutral
+running slot is released. The reservation counts against both global and
+per-peer queue caps, so the handoff cannot temporarily or persistently grow the
+queue beyond its configured bounds. It reuses the request's original arrival
+sequence, so equal-priority work does not lose FIFO position merely because
+authorization introduced a second admission stage. Stage results are a
+discriminated union rather than a byte-array sentinel.
 
 Existing responder protection remains:
 
@@ -349,6 +357,31 @@ remove entries and release accounting.
 
 Responder capacity failures continue to map into the existing quiet retryable
 transport path.
+
+### Catch-up deferral semantics
+
+Local scheduler pressure is carried end-to-end through both catch-up runners:
+
+```text
+agent per-CG result
+  -> inline or worker aggregation
+  -> CatchupJobResult.deferredBackpressure
+  -> daemon job status "deferred"
+  -> CLI status output
+```
+
+A zero-work local deferral is not a remote response and never increments
+`peersResponded` or `peersSucceeded`. If a peer served partial data before a
+later phase was deferred, it still counts as having responded but not as having
+completed successfully. The daemon exposes this as a retryable `deferred`
+terminal job state, skips catch-up finalization, and does not mark durable or
+shared-memory subscription completion. This prevents local queue saturation
+from being misreported as curator failure or clean synchronization.
+
+Per-peer aggregation also treats `failedPeers` as cardinality rather than a
+per-CG counter. Several failed CG operations against the same remote peer
+therefore contribute one failed peer while phase failures and backoff-worthy
+failures retain their additive counts.
 
 ### StorageACK isolation is preserved
 
@@ -459,12 +492,15 @@ The implementation preserves these boundaries:
 - responder priority is applied only after authorization;
 - empty/all-zero responder priority policy retains one continuous admission;
 - all queues remain bounded;
+- authorization handoff reservations count against global and per-peer caps;
 - equal priorities remain stable FIFO;
 - aging bounds starvation;
 - aborts, timeouts, and displacement remove queued entries and listeners
   exactly once;
 - nested changelog resync reuses its existing CG admission;
 - local admission deferral preserves prior results and never penalizes a peer;
+- local admission deferral is never reported as remote success or failure;
+- same-peer `failedPeers` accounting is cardinality-based across CGs;
 - sync store writes remain background priority;
 - StorageACK priority handling is unchanged;
 - priority policy is local and never accepted from the network;
@@ -539,15 +575,26 @@ The added and extended tests cover:
 - original single-stage responder admission for omitted/all-zero priorities;
 - responder priority only after successful authorization;
 - unauthorized elevated-CG claims receiving no priority;
+- unauthorized priority claims queued behind three saturated responder slots;
 - FIFO sequence preservation across authorization handoff;
+- bounded two-owner handoff reservations at global and per-peer queue caps;
 - displacement cleanup without later timeout double-settlement;
 - preservation of global and per-peer responder limits;
+- all-zero and partial-progress catch-up deferral classification;
+- worker catch-up deferral propagation and finalization suppression;
+- daemon `deferred` status without shared-memory completion stamping;
+- same-peer failed cardinality across several failed CG recoveries;
 - CLI configuration parsing and daemon-to-agent forwarding.
 
 Verification performed in the implementation worktree:
 
 ```text
-agent unit suite:                                    56 files / 648 tests passed
+agent unit suite:                                    56 files / 650 tests passed
+review-fix requester/responder suite:                  3 files / 39 tests passed
+review-fix inline catch-up integration:                1 file / 22 tests passed
+review-fix worker catch-up accounting:                 2 files / 9 tests passed
+review-fix CLI catch-up/config wiring:                 2 files / 11 tests passed
+review-fix live-daemon deferred status:                1 test passed
 CLI config + daemon wiring tests:                     2 files / 119 tests passed
 devnet manifest gate:                                 2 files / 8 tests passed
 devnet folded public/private StorageACK flow:         1 test passed

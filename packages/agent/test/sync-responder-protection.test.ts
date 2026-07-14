@@ -217,7 +217,19 @@ describe('sync responder protection', () => {
 
   it('does not give an unauthorized elevated-CG claim priority before authorization', async () => {
     const authOrder: string[] = [];
-    const cap = captureHandler(baseStore(), {
+    const queryOrder: string[] = [];
+    const queryGates = new Map<string, ReturnType<typeof deferred<QueryResult>>>();
+    const graphIds = ['block-a', 'block-b', 'block-c', 'default', 'elevated'];
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => graphIds.map((id) => `did:dkg:context-graph:${id}`),
+      query: async (sparql: string) => {
+        const contextGraphId = graphIds.find((id) => sparql.includes(`context-graph:${id}`)) ?? 'unknown';
+        queryOrder.push(contextGraphId);
+        const gate = deferred<QueryResult>();
+        queryGates.set(contextGraphId, gate);
+        return gate.promise;
+      },
+    }), {
       contextGraphPriorities: { elevated: 1_000 },
       authorizeSyncRequest: async (request) => {
         authOrder.push(request.contextGraphId);
@@ -225,11 +237,45 @@ describe('sync responder protection', () => {
       },
     });
 
-    const defaultRequest = cap.invoke({ ...makeEnvelope(), contextGraphId: 'default' }, REMOTE_A);
-    const elevatedClaim = cap.invoke({ ...makeEnvelope(), contextGraphId: 'elevated' }, REMOTE_A);
-    const [, denied] = await Promise.all([defaultRequest, elevatedClaim]);
-    expect(authOrder).toEqual(['default', 'elevated']);
+    const invoke = (contextGraphId: string, peerId: string) => cap.invoke({
+      ...makeEnvelope(),
+      contextGraphId,
+    }, peerId);
+    const blockers = [
+      invoke('block-a', REMOTE_A),
+      invoke('block-b', REMOTE_B),
+      invoke('block-c', REMOTE_C),
+    ];
+    for (let i = 0; i < 100 && queryGates.size < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryGates.size).toBe(3);
+
+    const defaultRequest = invoke('default', REMOTE_D);
+    const elevatedClaim = invoke('elevated', '12D3KooWResponderCapPeerE');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authOrder).toEqual(['block-a', 'block-b', 'block-c']);
+
+    queryGates.get('block-a')?.resolve({ type: 'bindings', bindings: [] });
+    for (let i = 0; i < 100 && !queryOrder.includes('default'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(authOrder).toContain('default');
+    expect(authOrder).not.toContain('elevated');
+    expect(queryOrder).toContain('default');
+
+    queryGates.get('block-b')?.resolve({ type: 'bindings', bindings: [] });
+    for (let i = 0; i < 100 && !authOrder.includes('elevated'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const denied = await elevatedClaim;
+    expect(authOrder.slice(-2)).toEqual(['default', 'elevated']);
+    expect(queryOrder).not.toContain('elevated');
     expect(new TextDecoder().decode(denied)).toBe('sync-denied');
+
+    queryGates.get('block-c')?.resolve({ type: 'bindings', bindings: [] });
+    queryGates.get('default')?.resolve({ type: 'bindings', bindings: [] });
+    await Promise.all([...blockers, defaultRequest]);
   });
 
   it('caps durable page computation at three globally and one per peer', async () => {

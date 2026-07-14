@@ -24,24 +24,31 @@ describe('sync global backpressure', () => {
         return () => { running -= 1; };
       },
     });
-    const options = (payload: string, sequence?: number, allowQueueOverflow = false) => ({
+    const options = (payload: string, reserveForHandoff = false) => ({
       payload,
       ownerKey: payload,
       lane: 'responder' as const,
       priority: 1,
       priorityClass: 'elevated' as const,
-      queueLimit: 1,
+      queueLimit: 2,
       agingThresholdMs: 30_000,
-      sequence,
-      allowQueueOverflow,
+      reserveForHandoff,
       createBusyError: () => new Error('full'),
       createDisplacedError: () => new Error('displaced'),
     });
 
-    const first = queue.acquire(options('first'));
+    const first = queue.acquire(options('first', true));
     const releaseFirst = await first.release;
     const later = queue.acquire(options('later'));
-    const handoff = queue.acquire(options('handoff', first.sequence, true));
+    const handoff = first.handoff!({
+      payload: 'handoff',
+      lane: 'responder',
+      priority: 1,
+      priorityClass: 'elevated',
+      agingThresholdMs: 30_000,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+    });
 
     releaseFirst();
     const releaseHandoff = await handoff.release;
@@ -50,6 +57,62 @@ describe('sync global backpressure', () => {
     const releaseLater = await later.release;
     expect(starts).toEqual(['first', 'handoff', 'later']);
     releaseLater();
+  });
+
+  it('keeps handoff reservations within global and per-owner caps without stranding another owner', async () => {
+    let running = 0;
+    const starts: string[] = [];
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => running < 1,
+      onStart: (entry) => {
+        running += 1;
+        starts.push(entry.payload);
+        return () => { running -= 1; };
+      },
+    });
+    const options = (payload: string, ownerKey: string, priority = 0, reserveForHandoff = false) => ({
+      payload,
+      ownerKey,
+      lane: 'responder' as const,
+      priority,
+      priorityClass: (priority > 0 ? 'elevated' : 'default') as 'elevated' | 'default',
+      queueLimit: 5,
+      ownerQueueLimit: 4,
+      agingThresholdMs: 30_000,
+      reserveForHandoff,
+      createBusyError: (reason: string) => new Error(reason),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    const first = queue.acquire(options('a-running', 'peer-a', 0, true));
+    const releaseFirst = await first.release;
+    const a2 = queue.acquire(options('a-2', 'peer-a'));
+    const a3 = queue.acquire(options('a-3', 'peer-a'));
+    const a4 = queue.acquire(options('a-4', 'peer-a'));
+    expect(() => queue.acquire(options('a-5', 'peer-a'))).toThrow('owner_queue_full');
+    const b = queue.acquire(options('b-elevated', 'peer-b', 10));
+    const handoff = first.handoff!({
+      payload: 'a-handoff',
+      lane: 'responder',
+      priority: 0,
+      priorityClass: 'default',
+      agingThresholdMs: 30_000,
+      createBusyError: (reason) => new Error(reason),
+      createDisplacedError: () => new Error('displaced'),
+    });
+    expect(queue.length).toBe(5);
+
+    releaseFirst();
+    const releaseB = await b.release;
+    expect(starts).toEqual(['a-running', 'b-elevated']);
+    releaseB();
+    const releaseHandoff = await handoff.release;
+    expect(starts).toEqual(['a-running', 'b-elevated', 'a-handoff']);
+    releaseHandoff();
+    for (const queued of [a2, a3, a4]) {
+      const release = await queued.release;
+      release();
+    }
   });
 
   it('cleans a displaced entry once so its timeout cannot corrupt later admissions', async () => {
