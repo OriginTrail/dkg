@@ -1132,10 +1132,36 @@ export class DKGAgent extends DKGAgentBase {
 
   /**
    * Scan the local ONTOLOGY graph and curated/private _meta graphs for context
-   * graph definitions and auto-subscribe to any that aren't yet in the
-   * subscription registry. Called after syncFromPeer to catch context graphs
-   * discovered via ONTOLOGY sync or authenticated _meta sync.
+   * graph definitions and catalogue any that aren't yet known locally. Called
+   * after syncFromPeer to catch context graphs discovered via ONTOLOGY sync or
+   * authenticated _meta sync. Discovery is intentionally not membership:
+   * callers must use an explicit subscribe/create/join path to activate gossip
+   * and sync for a user Context Graph.
    */
+  recordDiscoveredContextGraph(contextGraphId: string, metadata: ContextGraphSub): ContextGraphSub {
+    const existing = this.subscribedContextGraphs.get(contextGraphId);
+    // Passive discovery may enrich catalogue metadata on an existing entry,
+    // but must never downgrade positive sync state or deactivate an active
+    // member/core-host record. It also never owns durable subscription state.
+    return this.setContextGraphSubscription(contextGraphId, {
+      ...existing,
+      ...metadata,
+      name: metadata.name ?? existing?.name,
+      subscribed: existing?.subscribed === true,
+      synced: existing?.synced === true || metadata.synced === true,
+      sharedMemorySynced: existing?.sharedMemorySynced === true || metadata.sharedMemorySynced === true,
+      metaSynced: existing?.metaSynced === true || metadata.metaSynced === true,
+      onChainId: metadata.onChainId ?? existing?.onChainId,
+      onChainHash: metadata.onChainHash ?? existing?.onChainHash,
+      // Host-mode activation and reconciliation state have their own explicit
+      // core-only path; discovery can preserve them but never create them.
+      lastReconciledOrdinal: existing?.lastReconciledOrdinal,
+      coreHosted: existing?.coreHosted,
+      participantAgents: metadata.participantAgents ?? existing?.participantAgents,
+      pendingMeta: existing?.pendingMeta,
+    }, { persist: false });
+  }
+
   async discoverContextGraphsFromStore(): Promise<number> {
     const ctx = createOperationContext('system');
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -1224,17 +1250,9 @@ export class DKGAgent extends DKGAgentBase {
       //   (UI "Join" / `subscribeToContextGraph`) is the opt-in.
       //
       // - Curated / private CG (access policy "private" or has an
-      //   allowlist): auto-subscribe so `trySyncFromPeer`'s
-      //   "newly discovered CGs" catchup pass (see dkg-agent.ts
-      //   ~#1009) actually fetches the KC data on the same connect
-      //   cycle. Without this, a freshly invited node would see
-      //   the CG registered locally but never pull any KCs —
-      //   regressed the e2e-privacy "B discovers and syncs a
-      //   private CG in a single connect cycle via trySyncFromPeer"
-      //   test. `authorizeSyncRequest` still enforces the allowlist
-      //   on the responder side, so auto-subscribing here cannot
-      //   leak private data to non-participants; it only means
-      //   "attempt the catchup now instead of deferring it".
+      //   allowlist): also catalogue only. A valid join-approved flow has its
+      //   own explicit activation + immediate catch-up path; passive store
+      //   discovery must not substitute for local join intent.
       //   NOTE: we use `isPrivateContextGraph` (which reads the
       //   ontology OR the _meta graph for `dkg:accessPolicy
       //   "private"`, and also treats any CG with a `DKG_ALLOWED_
@@ -1245,44 +1263,29 @@ export class DKGAgent extends DKGAgentBase {
       const isCurated = await this.isPrivateContextGraph(id);
 
       if (isCurated) {
-        // Seed the subscription entry BEFORE calling subscribeToContextGraph
-        // so the `...existing` spread in `subscribeToContextGraph` preserves
-        // the discovered human-readable `name` (otherwise the UI/listing
-        // APIs fall back to the raw CG id).
-        //
         // `synced: false` is the truthful state at discovery — we have
-        // the definition triple but no CG content yet. The catchup
-        // runner flips it to true once data has actually been pulled
-        // (see `markContextGraphSubscriptionState` at
-        // routes/context-graph.ts:1301).
-        //
-        // Intentionally leave `metaSynced` FALSE here for the same
-        // reason: the gossip handler's "deny until _meta is synced"
-        // guard must stay armed until the authenticated allowlist
-        // (`_meta` graph) has actually arrived. The follow-up
-        // `refreshMetaSyncedFlags(newlyDiscovered)` call from
-        // `trySyncFromPeer` will flip it once the allowlist has been
-        // fetched via the authenticated sync path.
-        this.setContextGraphSubscription(id, {
-          name,
-          subscribed: false,
-          synced: false,
-          metaSynced: false,
-          onChainId: undefined,
-        }, { persist: false });
-        this.subscribeToContextGraph(id);
-        this.log.info(ctx, `Discovered invited context graph "${name}" (${id}) — auto-subscribed (private/allowlisted)`);
-      } else {
-        // Same truthful-flag rationale as the curated branch above:
-        // `synced` reflects "have CG data locally", not "have heard the
-        // definition triple from gossip."
-        this.setContextGraphSubscription(id, {
+        // the definition/allowlist metadata but no CG content. A definition
+        // found in the CG's _meta graph has confirmed metadata locally;
+        // ontology-only private declarations remain gated until explicit sync.
+        this.recordDiscoveredContextGraph(id, {
           name,
           subscribed: false,
           synced: false,
           metaSynced: source === 'meta',
           onChainId: undefined,
-        }, { persist: false });
+        });
+        this.log.info(ctx, `Discovered private/allowlisted context graph "${name}" (${id}) — catalogued (not subscribed)`);
+      } else {
+        // Same truthful-flag rationale as the curated branch above:
+        // `synced` reflects "have CG data locally", not "have heard the
+        // definition triple from gossip."
+        this.recordDiscoveredContextGraph(id, {
+          name,
+          subscribed: false,
+          synced: false,
+          metaSynced: source === 'meta',
+          onChainId: undefined,
+        });
         this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — added as discoverable only`);
       }
       discovered++;
@@ -1300,7 +1303,7 @@ export class DKGAgent extends DKGAgentBase {
 
   /**
    * Query the on-chain registry for all registered context graphs and
-   * auto-subscribe to any not yet in the subscription registry.
+   * catalogue any not yet known locally without activating membership.
    *
    * Defaults to a full scan so SDK callers can rebuild missing local state.
    * Background daemon loops may opt into incremental scans to reuse the
@@ -1389,7 +1392,7 @@ export class DKGAgent extends DKGAgentBase {
 
         // Curated CGs (accessPolicy=1) must not silently land in non-participants' lists.
         // We can't query the V10 ContextGraphs participant set from a NameRegistry event alone,
-        // so apply the strict default: only auto-subscribe when this node's wallet matches
+        // so apply the strict default: only catalogue when this node's wallet matches
         // `creator` (the address that called claimName). Real participants will have the CG
         // surfaced through manual subscribe / catch-up triggered by their curator.
         if (Number(p.accessPolicy) === 1) {
@@ -1397,7 +1400,7 @@ export class DKGAgent extends DKGAgentBase {
             && typeof p.creator === 'string'
             && p.creator.toLowerCase() === this.defaultAgentAddress.toLowerCase();
           if (!isCurator) {
-            this.log.info(ctx, `Skipping auto-subscribe to curated chain entry "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — not curator`);
+            this.log.info(ctx, `Skipping private chain entry "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — not curator`);
             knownOnChainIds.add(p.contextGraphId);
             continue;
           }
@@ -1411,7 +1414,7 @@ export class DKGAgent extends DKGAgentBase {
         // Single-valued binding guard (RS heal): on-chain id is immutable; clear
         // any prior value so the cgId resolver / heal never read a multi-valued
         // (LIMIT-1-nondeterministic) binding.
-        // Keep this durable write before subscription/gossip mutation: cursor
+        // Keep this durable write before in-memory catalogue mutation: cursor
         // pages are acked after this function returns, and an in-memory onChainId
         // alone must not make a retry skip the RDF binding.
         await this.store.deleteByPattern({
@@ -1426,16 +1429,15 @@ export class DKGAgent extends DKGAgentBase {
           graph: ontoGraph,
         }]);
 
-        this.setContextGraphSubscription(p.name, {
+        this.recordDiscoveredContextGraph(p.name, {
           name: p.name,
-          subscribed: true,
+          subscribed: false,
           synced: false,
           metaSynced: false,
           onChainId: p.contextGraphId,
         });
-        this.subscribeToContextGraph(p.name, { trackSyncScope: false });
         this.contextGraphMetaProjection.markDirty(p.name);
-        this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
+        this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — catalogued (not subscribed)`);
         knownOnChainIds.add(p.contextGraphId);
         discovered++;
       }

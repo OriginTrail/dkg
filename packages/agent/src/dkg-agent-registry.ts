@@ -456,13 +456,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // The `subscribed === true` filter is what Codex review on PR #431
     // (round 3) flagged. `discoverContextGraphsFromStore()` seeds entries
     // for OPEN CGs we merely learned about with `subscribed: false` (we
-    // don't auto-subscribe public CGs — explicit user opt-in only). Without
+    // don't auto-subscribe discovered CGs — explicit local intent only). Without
     // this filter, those discovery-only entries would be advertised in
     // `contextGraphsServed`, so other peers would route join attempts to a
     // node that doesn't actually host the CG. The curated/private discovery
-    // path immediately calls `subscribeToContextGraph()` (which flips
-    // `subscribed: true`) before adding to the gossip mesh, so this filter
-    // does not regress invited-curated discovery.
+    // path is discovery-only too. Curated membership is activated by the
+    // authenticated join-approved flow, not by passively observing metadata.
     //
     // System CGs (`agents`, `ontology`) are excluded — they are universal
     // and don't need to be re-advertised in every profile.
