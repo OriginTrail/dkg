@@ -55,6 +55,7 @@ async function finalizeWorkerExit(
   workerExit: WorkerExit,
   stopWatcher: () => void,
   label: string,
+  generation: number,
 ): Promise<FinalizedWorkerExit> {
   stopWatcher();
   const rawExitCode = workerExit.code;
@@ -63,6 +64,7 @@ async function finalizeWorkerExit(
     workerPid,
     workerExit,
     { warn: supervisorWarn },
+    { label, generation },
   );
   if (!cleanupSucceeded) {
     return { cleanupSucceeded, rawExitCode, forced, originalExitCode };
@@ -152,6 +154,7 @@ async function runDaemonSupervisor(): Promise<void> {
   process.env.DKG_HOME = selectedDkgHomeForEnv(process.env);
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
+  let workerGeneration = 0;
 
   while (true) {
     await removeApiPort().catch((err: any) => {
@@ -160,6 +163,7 @@ async function runDaemonSupervisor(): Promise<void> {
       );
     });
     const daemonCommand = resolveDaemonNodeCommand('daemon-worker');
+    workerGeneration += 1;
     const child = spawn(
       daemonCommand.executable,
       daemonCommand.args,
@@ -188,6 +192,7 @@ async function runDaemonSupervisor(): Promise<void> {
       workerExit,
       stopWatcher,
       'worker',
+      workerGeneration,
     );
     if (!finalizedExit.cleanupSucceeded) {
       process.exitCode = 1;
@@ -212,6 +217,7 @@ async function runDaemonSupervisor(): Promise<void> {
 async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env): Promise<void> {
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
+  let workerGeneration = 0;
 
   // The worker runs in its own POSIX session, so the tty stops delivering
   // hangup and job-control signals to it. The relay carries them across that
@@ -229,6 +235,7 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
     });
 
     const daemonCommand = resolveDaemonNodeCommand('daemon-foreground-worker');
+    workerGeneration += 1;
     const currentChild = spawn(
       daemonCommand.executable,
       daemonCommand.args,
@@ -252,6 +259,7 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
       workerExit,
       stopWatcher,
       'foreground worker',
+      workerGeneration,
     );
     if (!finalizedExit.cleanupSucceeded) {
       process.exit(1);

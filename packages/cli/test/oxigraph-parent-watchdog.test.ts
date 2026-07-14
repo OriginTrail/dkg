@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   conventionalSignalExitCode,
   parseOxigraphParentWatchdogArgs,
@@ -112,6 +114,67 @@ describe('Oxigraph parent watchdog', () => {
     expect(result.parentLost).toBe(false);
     expect(result.signal).toBe('SIGKILL');
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'keeps forwarding repeated signals until a TERM-ignoring child is reaped',
+    async () => {
+      const watchdogPath = fileURLToPath(new URL(
+        '../src/daemon/oxigraph-parent-watchdog.ts',
+        import.meta.url,
+      ));
+      const tsxLoader = fileURLToPath(new URL(
+        '../../../node_modules/tsx/dist/loader.mjs',
+        import.meta.url,
+      ));
+      const watchdog = spawn(
+        process.execPath,
+        [
+          '--import', tsxLoader,
+          watchdogPath,
+          'ipc', String(process.pid),
+          process.execPath, '-e',
+          "process.on('SIGTERM', () => {}); process.stdout.write(String(process.pid) + '\\n'); setInterval(() => {}, 1000)",
+        ],
+        {
+          env: { ...process.env, DKG_OXIGRAPH_WATCHDOG_STOP_GRACE_MS: '100' },
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        },
+      );
+      let supervisedPid: number | undefined;
+      try {
+        supervisedPid = await new Promise<number>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('watchdog child PID timeout')), 3_000);
+          watchdog.stdout!.once('data', (chunk) => {
+            clearTimeout(timer);
+            resolve(Number(String(chunk).trim()));
+          });
+          watchdog.once('error', reject);
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        watchdog.kill('SIGTERM');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        watchdog.kill('SIGTERM');
+
+        const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('watchdog exit timeout')), 3_000);
+            watchdog.once('exit', (code, signal) => {
+              clearTimeout(timer);
+              resolve({ code, signal });
+            });
+          },
+        );
+        expect(exit).toEqual({ code: 0, signal: null });
+        expect(() => process.kill(supervisedPid!, 0)).toThrow();
+      } finally {
+        if (watchdog.exitCode === null && watchdog.signalCode === null) watchdog.kill('SIGKILL');
+        if (supervisedPid) {
+          try { process.kill(supervisedPid, 'SIGKILL'); } catch { /* already gone */ }
+        }
+      }
+    },
+  );
 
   it('reports an externally SIGTERM-killed child as a non-zero wrapper exit', async () => {
     const handle = startOxigraphParentWatchdog({

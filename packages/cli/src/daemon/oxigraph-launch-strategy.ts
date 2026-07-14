@@ -22,6 +22,11 @@ export interface OxigraphLaunchStrategyIo {
   spawnSync: typeof spawnSync;
 }
 
+// The watchdog owns graceful-to-force escalation for the Oxigraph child. The
+// outer supervisor must not kill that watchdog at the exact same deadline or
+// it can win the timer race and leave the child behind.
+const PARENT_WATCHDOG_FORCE_MARGIN_MS = 250;
+
 export type ListenOwnerResolver = (
   child: ChildProcess,
   port: number,
@@ -157,7 +162,8 @@ export function createOxigraphLaunchStrategy(opts: {
         shutdown: (child, phase) => phase === 'graceful'
           ? disconnectParentIpc(child)
           : forceKillWindowsProcessTree(child.pid ?? -1, io.spawnSync) || signalChild(child, 'SIGKILL'),
-        shutdownTimeoutMs: (configuredGraceMs) => configuredGraceMs + 250,
+        shutdownTimeoutMs: (configuredGraceMs) =>
+          configuredGraceMs + PARENT_WATCHDOG_FORCE_MARGIN_MS,
         logSummary: () =>
           'Starting Oxigraph behind an IPC parent watchdog (Windows kill-on-parent-exit fallback).',
       };
@@ -213,6 +219,7 @@ export function createOxigraphLaunchStrategy(opts: {
         environment: {
           XDG_RUNTIME_DIR: runtimeDir,
           DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDir}/bus`,
+          DKG_OXIGRAPH_WATCHDOG_STOP_GRACE_MS: String(opts.stopGraceMs ?? 5_000),
         },
       };
     },
@@ -224,7 +231,8 @@ export function createOxigraphLaunchStrategy(opts: {
       return watchdogOomChildren.has(input.child) || cgroupEvidenceIncremented(input);
     },
     shutdown: (child, phase) => signalChild(child, phase === 'graceful' ? 'SIGTERM' : 'SIGKILL'),
-    shutdownTimeoutMs: (configuredGraceMs) => configuredGraceMs,
+    shutdownTimeoutMs: (configuredGraceMs) =>
+      configuredGraceMs + PARENT_WATCHDOG_FORCE_MARGIN_MS,
     logSummary: () =>
       `Starting Oxigraph in an isolated systemd user scope ` +
       `(MemoryHigh=${limits.highMiB ?? 'unset'}MiB, MemoryMax=${limits.maxMiB}MiB).`,
