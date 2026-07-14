@@ -1,6 +1,37 @@
 import { randomUUID } from 'node:crypto';
 import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { markSyncTransportFailure } from '../sync/error-tags.js';
+import type { Messenger } from './messenger.js';
+
+/**
+ * Per-attempt sync sender. Production instances must be created with
+ * {@link createSingleUseSyncSender} so the router never reuses authenticated
+ * envelope bytes before this transport can rebuild them for an outer retry.
+ */
+export type SingleUseSyncSender = (
+  peerId: string,
+  protocolId: string,
+  data: Uint8Array,
+  timeoutMs: number,
+  messageId: string,
+  signal?: AbortSignal,
+) => Promise<Uint8Array>;
+
+/**
+ * Own the sync payload-reuse invariant at the sync transport boundary.
+ * `messageId` remains part of the callback contract for test/telemetry
+ * stability, but raw sync delivery does not use the reliable-message frame.
+ */
+export function createSingleUseSyncSender(
+  messenger: Pick<Messenger, 'sendToPeer'>,
+): SingleUseSyncSender {
+  return (peerId, protocolId, data, timeoutMs, _messageId, signal) =>
+    messenger.sendToPeer(peerId, protocolId, data, {
+      timeoutMs,
+      payloadReuse: 'single-use',
+      signal,
+    });
+}
 
 /**
  * Sync-page transport. Wraps `withRetry` around a per-attempt
@@ -60,19 +91,12 @@ interface SyncSendParams {
    */
   requestFactory: () => Promise<Uint8Array>;
   /**
-   * Per-attempt send hook. Receives a fresh `messageId` on every attempt — see
-   * jsdoc on `sendSyncRequest` for the rationale. Production owns the
-   * single-use payload policy at the Messenger adapter boundary; this helper
-   * owns only rebuilding the authenticated request between outer retries.
+   * Per-attempt single-use send hook. Receives a fresh `messageId` on every
+   * attempt — see jsdoc on `sendSyncRequest` for the rationale. Production
+   * callers construct it with `createSingleUseSyncSender`; this helper owns
+   * rebuilding the authenticated request between outer retries.
    */
-  send: (
-    peerId: string,
-    protocolId: string,
-    data: Uint8Array,
-    timeoutMs: number,
-    messageId: string,
-    signal?: AbortSignal,
-  ) => Promise<Uint8Array>;
+  send: SingleUseSyncSender;
   /**
    * Optional per-attempt response validator. Throwing here keeps the attempt
    * inside `withRetry`, which lets sync-level retry sentinels share the same
