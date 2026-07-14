@@ -163,6 +163,27 @@ function processExists(pid: number): boolean {
 
 const delay = (ms: number) => new Promise<void>(resolveDelay => setTimeout(resolveDelay, ms));
 
+/**
+ * Kill a process and wait for it to actually be gone.
+ *
+ * The wait is the point: a signalled process is still alive, and still able to
+ * touch its temp home, until the kernel reaps it. Returning early lets the
+ * `afterEach` rm race a dying process and fail with ENOTEMPTY.
+ */
+async function killAndWait(pid: number | undefined): Promise<void> {
+  if (!pid || !processExists(pid)) return;
+  try {
+    // SIGCONT first: these tests can leave a process SIGSTOPped, and resuming it
+    // lets it run its exit path rather than lingering as a stopped shell.
+    process.kill(pid, 'SIGCONT');
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    /* already gone */
+  }
+  const deadline = Date.now() + 5_000;
+  while (processExists(pid) && Date.now() < deadline) await delay(20);
+}
+
 async function waitFor(
   condition: () => boolean | Promise<boolean>,
   what: string,
@@ -280,7 +301,20 @@ describe('daemon lifecycle control-plane files', () => {
   let tempRoot: string | undefined;
 
   afterEach(async () => {
-    if (tempRoot) await rm(tempRoot, { recursive: true, force: true });
+    // These tests own real process trees. Even after a test waits for them to
+    // exit, the runner can lose a race with a straggler still touching the temp
+    // home, which surfaces as ENOTEMPTY. Retry rather than fail a green test.
+    if (tempRoot) {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rm(tempRoot, { recursive: true, force: true });
+          break;
+        } catch (error) {
+          if (attempt >= 10) throw error;
+          await delay(100);
+        }
+      }
+    }
     tempRoot = undefined;
   });
 
@@ -467,18 +501,9 @@ describe('daemon lifecycle control-plane files', () => {
       } finally {
         for (const file of [workerPidFile, listenerReady]) {
           if (!existsSync(file)) continue;
-          const pid = Number(readFileSync(file, 'utf8'));
-          try {
-            process.kill(pid, 'SIGKILL');
-          } catch {
-            /* already gone */
-          }
+          await killAndWait(Number(readFileSync(file, 'utf8')));
         }
-        try {
-          process.kill(supervisor.pid!, 'SIGKILL');
-        } catch {
-          /* already gone */
-        }
+        await killAndWait(supervisor.pid);
       }
     },
   );
@@ -552,6 +577,10 @@ describe('daemon lifecycle control-plane files', () => {
 
       try {
         await waitFor(() => existsSync(workerPidFile), 'the foreground worker to start');
+        // Wait for the store too, not just the worker: a listener still booting
+        // when this test ends is a listener the cleanup below cannot find, and
+        // it will outlive the test and write into the temp home as it is removed.
+        await waitFor(() => existsSync(listenerReady), 'the managed store to bind');
         const workerPid = Number(readFileSync(workerPidFile, 'utf8'));
 
         // Ctrl-Z. The worker sits in its own session, whose process group is
@@ -565,21 +594,12 @@ describe('daemon lifecycle control-plane files', () => {
         await waitFor(() => !stopped(workerPid), 'the foreground worker to resume');
         expect(processExists(workerPid)).toBe(true);
       } finally {
-        try {
-          process.kill(supervisor.pid!, 'SIGCONT');
-          process.kill(supervisor.pid!, 'SIGKILL');
-        } catch {
-          /* already gone */
-        }
+        // Wait for every process to actually die: the temp home is removed the
+        // moment this test returns, and a dying process still owns files in it.
+        await killAndWait(supervisor.pid);
         for (const file of [workerPidFile, listenerReady]) {
           if (!existsSync(file)) continue;
-          const pid = Number(readFileSync(file, 'utf8'));
-          try {
-            process.kill(pid, 'SIGCONT');
-            process.kill(pid, 'SIGKILL');
-          } catch {
-            /* already gone */
-          }
+          await killAndWait(Number(readFileSync(file, 'utf8')));
         }
       }
     },
