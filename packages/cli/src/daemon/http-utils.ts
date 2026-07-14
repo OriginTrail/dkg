@@ -737,9 +737,21 @@ function exactProbeCanFastAccept(
   probe: ContextGraphWritePreflightProbe,
   requireLocalWritable: boolean,
   callerAgentAddress: string | null,
+  allowLocalExactFallback: boolean,
 ): boolean {
   if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) return false;
-  if (!callerAgentAddress) return probe.accessPolicy === "public";
+  if (!callerAgentAddress) {
+    // Node-admin / trusted-local routes already opt into the exact-local
+    // fallback below after listContextGraphs. When the exact probe has all of
+    // the same positive evidence up front, accept a known PRIVATE graph here
+    // instead of enumerating every context graph first. This does not broaden
+    // access: scoped agent callers never set allowLocalExactFallback, and an
+    // unavailable/unknown store cannot satisfy exactProbeIsLocallyWritable.
+    return (
+      probe.accessPolicy === "public" ||
+      (allowLocalExactFallback && probe.accessPolicy === "private")
+    );
+  }
   return probe.callerAuthorized === true;
 }
 
@@ -903,17 +915,28 @@ async function evaluateExactWritePreflight(
     callerAgentAddress: string | null;
     requireLocalWritable: boolean;
     isBareCandidateId: boolean;
+    allowLocalExactFallback: boolean;
   },
 ): Promise<ExactPreflightDecision> {
   if (!agent.probeContextGraphWritePreflight) return { kind: "continueToList" };
-  const { callerAgentAddress, requireLocalWritable, isBareCandidateId } = opts;
+  const {
+    callerAgentAddress,
+    requireLocalWritable,
+    isBareCandidateId,
+    allowLocalExactFallback,
+  } = opts;
   try {
     const probe = await agent.probeContextGraphWritePreflight(candidateId, {
       callerAgentAddress,
     });
     // Fast-accept wins even under a degraded store (it never rests on UNKNOWN
     // store fields), so check it before any deny/unavailable interpretation.
-    if (exactProbeCanFastAccept(probe, requireLocalWritable, callerAgentAddress)) {
+    if (exactProbeCanFastAccept(
+      probe,
+      requireLocalWritable,
+      callerAgentAddress,
+      allowLocalExactFallback,
+    )) {
       return { kind: "accept" };
     }
     if (probe.storeUnavailable === true) {
@@ -977,6 +1000,12 @@ export async function resolveRequiredWriteContextGraphId(
   opts: {
     callerAgentAddress?: string | null;
     requireLocalWritable?: boolean;
+    /**
+     * Trusted local / node-admin routes may accept an exact, store-backed
+     * private graph without first enumerating all visible context graphs.
+     * Scoped agent routes must leave this false so their per-caller private
+     * authorization remains authoritative.
+     */
     allowLocalExactFallback?: boolean;
     /**
      * Test-only seam: override the store-outage rescue eth_call timeout so the
@@ -1010,6 +1039,7 @@ export async function resolveRequiredWriteContextGraphId(
     callerAgentAddress,
     requireLocalWritable,
     isBareCandidateId,
+    allowLocalExactFallback: opts.allowLocalExactFallback === true,
   });
   if (exactDecision.kind === "accept") return candidateId;
   if (exactDecision.kind === "rejectUnknown") {
