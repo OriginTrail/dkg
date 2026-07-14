@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MemoryLayer } from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, MemoryLayer } from '@origintrail-official/dkg-core';
 import {
   DKG_NS,
   linesFromNquads,
@@ -53,14 +53,27 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     const meta = `${cgEntity}/_meta`;
     const WM = `"${MemoryLayer.WorkingMemory}"`; // "WM"
     const VM = `"${MemoryLayer.VerifiableMemory}"`; // "VM"
+    const activeDelegation = `did:dkg:agent-delegation:${cgId}:0xactive`;
+    const orphanedDelegation = `did:dkg:agent-delegation:${cgId}:0xorphaned`;
+    const revokedDelegation = `did:dkg:agent-delegation:${cgId}:0xrevoked`;
 
     const quads: Quad[] = [
       // A: the CG entity subject
       { graph: meta, subject: cgEntity, predicate: 'http://schema.org/name', object: '"cg-root"' },
+      // A2: only an allowed, non-revoked agent's delegation is durable meta.
+      { graph: meta, subject: cgEntity, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: '"0xAcTiVe"' },
+      { graph: meta, subject: activeDelegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: '"0xactive"' },
+      { graph: meta, subject: activeDelegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: '"peer-active"' },
+      { graph: meta, subject: orphanedDelegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: '"0xorphaned"' },
+      { graph: meta, subject: orphanedDelegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: '"peer-orphaned"' },
+      { graph: meta, subject: cgEntity, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: '"0xrevoked"' },
+      { graph: meta, subject: cgEntity, predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT, object: '"0xReVoKeD"' },
+      { graph: meta, subject: revokedDelegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: '"0xrevoked"' },
+      { graph: meta, subject: revokedDelegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: '"peer-revoked"' },
       // B: a registered sub-graph subject (registration rows are keyed on it)
       ...subGraphRegistrationQuads(cgId, 'sub1'),
-      // C: activity records are shared; D: join-request moderation records are
-      // curator-only, even if malformed to match another admitted branch.
+      // C: activity is durable member metadata. Pending join requests are
+      // curator-only moderation records and must not be replicated.
       { graph: meta, subject: 'did:dkg:activity:act1', predicate: `${DKG_NS}note`, object: '"act"' },
       { graph: meta, subject: 'did:dkg:join-request:jr1', predicate: `${DKG_NS}note`, object: '"jr"' },
       { graph: meta, subject: 'did:dkg:join-request:jr1', predicate: `${DKG_NS}memoryLayer`, object: VM },
@@ -99,12 +112,6 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
 
     const canonicalStore = new OxigraphStore();
     await canonicalStore.insert(quads);
-    const canonicalQueries: string[] = [];
-    const canonicalQuery = canonicalStore.query.bind(canonicalStore);
-    canonicalStore.query = async (sparql, options) => {
-      canonicalQueries.push(sparql);
-      return canonicalQuery(sparql, options);
-    };
     const paged = new OxigraphStore();
     await paged.insert(quads);
 
@@ -130,17 +137,16 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(pagedResult).toEqual(canonical);
     // …and it actually paged in the store (bounded ORDER BY/OFFSET/LIMIT).
     boundedQuery.assertObserved();
-    expect(canonicalQueries.some((sparql) =>
-      sparql.includes(`VALUES ?g { <${meta}> }`) &&
-      sparql.includes('FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), "did:dkg:join-request:"))'),
-    )).toBe(true);
 
     // Sanity: the fixture really exercised the branches we think it did.
     const has = (subject: string) => [...canonical].some((line) => line.startsWith(`<${subject}>`));
     expect(has(cgEntity)).toBe(true); // A
+    expect(has(activeDelegation)).toBe(true); // A2 active delegation
+    expect(has(orphanedDelegation)).toBe(false);
+    expect(has(revokedDelegation)).toBe(false);
     expect(has(`${cgEntity}/sub1`)).toBe(true); // B
     expect(has('did:dkg:activity:act1')).toBe(true); // C
-    expect(has('did:dkg:join-request:jr1')).toBe(false); // D
+    expect(has('did:dkg:join-request:jr1')).toBe(false);
     expect(has('urn:lc:vm')).toBe(true); // E
     expect(has('urn:lc:dual')).toBe(true); // E dual
     expect(has('urn:ag:1')).toBe(true); // F

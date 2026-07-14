@@ -566,6 +566,13 @@ export interface DkgConfig {
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
+  /**
+   * Explicitly trusted context graphs that daemon startup may create locally
+   * instead of treating as remote subscription targets. Intended for local
+   * development/bootstrap environments; production networks should normally
+   * express their built-ins through network.defaultContextGraphs.
+   */
+  localBootstrapContextGraphs?: string[];
   /** Local daemon logging controls. */
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */

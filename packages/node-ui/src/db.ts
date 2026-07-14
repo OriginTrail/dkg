@@ -1496,7 +1496,64 @@ export class DashboardDB {
   }
 
   deleteContextGraphSubscription(contextGraphId: string): void {
-    this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
+    const remove = this.db.transaction(() => {
+      this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
+      this.stmt('deleteContextGraphReadinessProvenance', 'DELETE FROM settings WHERE key = ?')
+        .run(this.contextGraphReadinessProvenanceKey(contextGraphId));
+    });
+    remove();
+  }
+
+  /**
+   * CLI-owned, durable provenance for context-graph readiness flags.
+   *
+   * Subscription rows predate per-plane proof and can therefore contain the
+   * v10.0.6 false-ready shape (`synced=1`, `shared_memory_synced=1`) after an
+   * unrelated peer returned an empty response.  Keep the proof out of the
+   * agent-owned subscription upsert so older/custom agent stores remain
+   * source-compatible and routine subscription persistence cannot overwrite a
+   * proof established by the daemon's catch-up classifier.
+   */
+  getContextGraphReadinessProvenance(contextGraphId: string): ContextGraphReadinessProvenance | null {
+    const row = this.stmt(
+      'getContextGraphReadinessProvenance',
+      'SELECT value FROM settings WHERE key = ?',
+    ).get(this.contextGraphReadinessProvenanceKey(contextGraphId)) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as Partial<ContextGraphReadinessProvenance>;
+      if (!Number.isInteger(parsed.version) || (parsed.version ?? 0) < 1) return null;
+      return {
+        version: parsed.version!,
+        durableVerified: parsed.durableVerified === true,
+        sharedMemoryVerified: parsed.sharedMemoryVerified === true,
+        updatedAt: typeof parsed.updatedAt === 'number' && Number.isFinite(parsed.updatedAt)
+          ? parsed.updatedAt
+          : 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  setContextGraphReadinessProvenance(
+    contextGraphId: string,
+    provenance: Omit<ContextGraphReadinessProvenance, 'updatedAt'> & { updatedAt?: number },
+  ): void {
+    const record: ContextGraphReadinessProvenance = {
+      version: provenance.version,
+      durableVerified: provenance.durableVerified,
+      sharedMemoryVerified: provenance.sharedMemoryVerified,
+      updatedAt: provenance.updatedAt ?? Date.now(),
+    };
+    this.stmt(
+      'setContextGraphReadinessProvenance',
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+    ).run(this.contextGraphReadinessProvenanceKey(contextGraphId), JSON.stringify(record));
+  }
+
+  private contextGraphReadinessProvenanceKey(contextGraphId: string): string {
+    return `contextGraphReadiness:${contextGraphId}`;
   }
 
   // --- Private context-graph join policy + audit ---
@@ -3917,6 +3974,13 @@ export interface ContextGraphSubscriptionRow {
   core_hosted: number | null;
   sync_scoped: number;
   updated_at: number;
+}
+
+export interface ContextGraphReadinessProvenance {
+  version: number;
+  durableVerified: boolean;
+  sharedMemoryVerified: boolean;
+  updatedAt: number;
 }
 
 // --- Phase F: chain-driven VM reconciliation telemetry rows ---
