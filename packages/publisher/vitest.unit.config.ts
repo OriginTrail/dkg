@@ -7,6 +7,7 @@ export default defineConfig({
       'test/trust-metadata.test.ts',
       'test/dkg-publisher-compat.test.ts',
       'test/shared-memory-publish-boundary.test.ts',
+      'test/shared-memory-cleanup-batching.test.ts',
       'test/storage-ack-roster-and-verify-mofn-extra.test.ts',
       'test/verification-metadata.test.ts',
       'test/verify-collector.test.ts',

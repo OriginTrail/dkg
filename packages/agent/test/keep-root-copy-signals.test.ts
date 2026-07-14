@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphSetIndexStore,
+  OxigraphStore,
+  UnsupportedTripleStoreCapabilityError,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { KEEP_ROOT_COPY_PREDICATE } from '../src/finalization-handler.js';
 import { persistKeepRootCopySignals } from '../src/dkg-agent-publish.js';
 
@@ -55,21 +60,41 @@ describe('persistKeepRootCopySignals', () => {
     expect(updateCalls).toBe(0);
   });
 
-  it('keeps the awaited per-root fallback for stores without SPARQL UPDATE', async () => {
-    const store = new OxigraphStore();
+  it('keeps the awaited per-root fallback for a decorator reporting update unsupported', async () => {
+    const base = new OxigraphStore();
     const graph = contextGraphWorkspaceMetaGraphUri('keep-root-fallback');
     const deleteCalls: string[] = [];
     const insertCalls: string[] = [];
-    const originalDelete = store.deleteByPattern.bind(store);
-    const originalInsert = store.insert.bind(store);
-    store.update = undefined;
-    store.deleteByPattern = async (pattern, options) => {
-      deleteCalls.push(pattern.subject ?? '');
-      return originalDelete(pattern, options);
-    };
-    store.insert = async (quads, options) => {
-      insertCalls.push(...quads.map((quad) => quad.subject));
-      return originalInsert(quads, options);
+    const innerWithoutUpdate = new Proxy(base as unknown as TripleStore, {
+      get(target, property, receiver) {
+        if (property === 'update') return undefined;
+        if (property === 'deleteByPattern') {
+          return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
+            deleteCalls.push(args[0].subject ?? '');
+            return target.deleteByPattern(...args);
+          };
+        }
+        if (property === 'insert') {
+          return async (...args: Parameters<TripleStore['insert']>) => {
+            insertCalls.push(...args[0].map((quad) => quad.subject));
+            return target.insert(...args);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const store = new GraphSetIndexStore(innerWithoutUpdate);
+    let typedUnsupportedSignals = 0;
+    const originalUpdate = store.update.bind(store);
+    store.update = async (...args) => {
+      try {
+        await originalUpdate(...args);
+      } catch (error) {
+        expect(error).toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
+        typedUnsupportedSignals += 1;
+        throw error;
+      }
     };
 
     await persistKeepRootCopySignals(
@@ -79,7 +104,36 @@ describe('persistKeepRootCopySignals', () => {
       false,
     );
 
+    expect(typedUnsupportedSignals).toBe(1);
     expect(deleteCalls).toEqual(['urn:test:fallback:one', 'urn:test:fallback:two']);
     expect(insertCalls).toEqual(['urn:test:fallback:one', 'urn:test:fallback:two']);
+  });
+
+  it('propagates genuine update errors instead of masking them with fallback writes', async () => {
+    const base = new OxigraphStore();
+    const updateFailure = new Error('update backend unavailable');
+    let fallbackCalls = 0;
+    const failingInner = new Proxy(base as unknown as TripleStore, {
+      get(target, property, receiver) {
+        if (property === 'update') return async () => { throw updateFailure; };
+        if (property === 'deleteByPattern' || property === 'insert') {
+          return async () => {
+            fallbackCalls += 1;
+            throw new Error('fallback must not run');
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(persistKeepRootCopySignals(
+      new GraphSetIndexStore(failingInner),
+      contextGraphWorkspaceMetaGraphUri('keep-root-genuine-error'),
+      ['urn:test:genuine-error'],
+      true,
+    )).rejects.toBe(updateFailure);
+
+    expect(fallbackCalls).toBe(0);
   });
 });

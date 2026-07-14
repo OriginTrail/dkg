@@ -101,7 +101,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, canonicalSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, canonicalSharedMemoryScopeWriteGraph, tryUpdateWithTouchedGraphs, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -451,9 +451,10 @@ export async function persistKeepRootCopySignals(
   const roots = [...new Set(rootEntities.filter(isSafeIri))];
   if (roots.length === 0) return;
 
-  if (typeof store.update === 'function') {
-    const rootValues = roots.map((root) => `<${root}>`).join(' ');
-    await store.update(`DELETE {
+  const rootValues = roots.map((root) => `<${root}>`).join(' ');
+  const updateApplied = await tryUpdateWithTouchedGraphs(
+    store,
+    `DELETE {
       GRAPH <${graph}> { ?root <${KEEP_ROOT_COPY_PREDICATE}> ?previous }
     }
     INSERT {
@@ -464,12 +465,13 @@ export async function persistKeepRootCopySignals(
       OPTIONAL {
         GRAPH <${graph}> { ?root <${KEEP_ROOT_COPY_PREDICATE}> ?previous }
       }
-    }`, {
+    }`,
+    [graph],
+    {
       source: 'publish.persistKeepRootCopySignals',
-      touchedGraphs: [graph],
-    });
-    return;
-  }
+    },
+  );
+  if (updateApplied) return;
 
   // Custom TripleStore implementations may not expose SPARQL UPDATE. Keep the
   // pre-existing awaited behavior as a compatibility fallback.
