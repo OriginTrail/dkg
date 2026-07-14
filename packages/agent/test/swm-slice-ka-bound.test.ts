@@ -293,8 +293,14 @@ describe('bounded SWM read is merkle-equivalent to the unbounded read (T5b)', ()
     // fallback-owning primitive, never the raw unsafe loader.
     const { quads: bounded } = await loadSharedMemorySliceWithKaBoundFallback(
       store, bucket, { rootEntities: [root] }, bound,
-      { bounded: 'test.bounded', widened: 'test.widened', unbounded: 'test.unbounded' },
-      async () => (qs) => qs,
+      {
+        sources: {
+          bounded: 'test.bounded',
+          widened: 'test.widened',
+          unbounded: 'test.unbounded',
+        },
+        createAccept: async () => (qs) => qs,
+      },
     );
     const unbounded = await loadSelectedSharedMemoryQuads(store, bucket, { rootEntities: [root] });
 

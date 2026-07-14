@@ -615,9 +615,15 @@ export class FinalizationHandler {
       this.finalizationSwmBucketUri(contextGraphId, subGraphName),
       { rootEntities: safeRoots },
       kaGraphBound,
-      { bounded: SWM_SLICE_SOURCE_BOUNDED, widened: SWM_SLICE_SOURCE_WIDENED, unbounded: SWM_SLICE_SOURCE },
-      createAccept,
-      { priority: 'background' },
+      {
+        sources: {
+          bounded: SWM_SLICE_SOURCE_BOUNDED,
+          widened: SWM_SLICE_SOURCE_WIDENED,
+          unbounded: SWM_SLICE_SOURCE,
+        },
+        createAccept,
+        queryOptions: { priority: 'background' },
+      },
     );
     return { quads, matched: accepted };
   }

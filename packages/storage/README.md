@@ -89,6 +89,11 @@ already have reached the store.
 | `DKG_STORE_QUEUE_WAIT_TIMEOUT_MS` | `10000` | Maximum pre-dispatch wait before a retryable busy rejection. |
 | `DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS` | `30000` | Blazegraph end-to-end operation deadline, including scheduler wait, HTTP, response decoding, and mapping. |
 
+Normal and background reserves are normalized against the available non-ACK
+capacity. At least one background slot remains available, and the background
+progress floor is capped to its admission ceiling so conflicting custom values
+cannot leave usable capacity idle.
+
 Blazegraph's deadline can also be set per store, which takes precedence over
 the environment default:
 
