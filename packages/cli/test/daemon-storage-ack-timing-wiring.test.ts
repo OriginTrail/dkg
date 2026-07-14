@@ -186,6 +186,27 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
   });
 
+  it('merges configured and network-default context graphs into the automatic sync scope', async () => {
+    mocks.loadNetworkConfig.mockResolvedValue({
+      networkName: 'DKG V10 Gnosis Mainnet',
+      genesisId: 'gnosis-mainnet',
+      genesisVersion: 1,
+      relays: ['/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+      defaultNodeRole: 'core',
+      defaultContextGraphs: ['network-default-cg', 'shared-default-cg'],
+    });
+
+    const createArg = await captureCreateArg({
+      contextGraphs: ['configured-cg', 'shared-default-cg'],
+    });
+
+    expect(createArg.syncContextGraphs).toEqual([
+      'configured-cg',
+      'shared-default-cg',
+      'network-default-cg',
+    ]);
+  });
+
   it('passes configured StorageACK timing into DKGAgent.create', async () => {
     const createArg = await captureCreateArg({
       storageAck: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },

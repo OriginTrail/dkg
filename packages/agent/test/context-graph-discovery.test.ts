@@ -2224,7 +2224,17 @@ describe('discoverContextGraphsFromChain', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('discovers on-chain contextGraphs with cleartext name and auto-subscribes', async () => {
+  it('catalogues revealed on-chain context graphs without subscribing or persisting them', async () => {
+    const persisted = new Map<string, any>();
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (record) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (contextGraphId) => {
+        persisted.delete(contextGraphId);
+      },
+    };
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
@@ -2237,7 +2247,10 @@ describe('discoverContextGraphsFromChain', () => {
       },
     ] satisfies ContextGraphOnChain[]);
 
-    const result = await createTestAgent({ chainAdapter: chain });
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+    });
     agent = result.agent;
     await agent.start();
 
@@ -2247,12 +2260,25 @@ describe('discoverContextGraphsFromChain', () => {
     const subs = agent.getSubscribedContextGraphs();
     const entry = subs.get('test-revealed');
     expect(entry).toBeDefined();
-    expect(entry!.subscribed).toBe(true);
+    expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(false);
     expect(entry!.onChainId).toBe('0xdeadbeef00000000000000000000000000000000000000000000000000000001');
+    expect((agent as any).config.syncContextGraphs ?? []).not.toContain('test-revealed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(persisted.has('test-revealed')).toBe(false);
+
+    agent.subscribeToContextGraph('test-revealed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.getSubscribedContextGraphs().get('test-revealed')?.subscribed).toBe(true);
+    expect((agent as any).config.syncContextGraphs ?? []).toContain('test-revealed');
+    expect(persisted.get('test-revealed')).toMatchObject({
+      id: 'test-revealed',
+      subscribed: true,
+      syncScoped: true,
+    });
   }, 15000);
 
-  it('skips auto-subscribe to revealed curated chain entries when not curator', async () => {
+  it('skips revealed curated chain entries when not curator', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
@@ -2447,8 +2473,8 @@ describe('discoverContextGraphsFromChain', () => {
       { incremental: true, pageBudget: 5 },
       { seedIncrementalWatermark: true },
     ]);
-    expect(agent.getSubscribedContextGraphs().has('legacy-list-incremental')).toBe(true);
-    expect(agent.getSubscribedContextGraphs().has('legacy-list-seed')).toBe(true);
+    expect(agent.getSubscribedContextGraphs().get('legacy-list-incremental')?.subscribed).toBe(false);
+    expect(agent.getSubscribedContextGraphs().get('legacy-list-seed')?.subscribed).toBe(false);
   }, 15000);
 
   it('applies cursor scan pages once and acknowledges after local discovery work', async () => {
@@ -2495,6 +2521,7 @@ describe('discoverContextGraphsFromChain', () => {
     expect(ackedCounts).toEqual([1, 2]);
     const entry = agent.getSubscribedContextGraphs().get('paged-revealed');
     expect(entry).toBeDefined();
+    expect(entry!.subscribed).toBe(false);
     expect(entry!.onChainId).toBe(contextGraphId);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = contextGraphDataGraphUri('paged-revealed');
@@ -2760,6 +2787,7 @@ describe('discoverContextGraphsFromStore', () => {
     await store.insert([
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: contextGraphMetaGraphUri(curatedId) },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Curated Meta Only"', graph: contextGraphMetaGraphUri(curatedId) },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: contextGraphMetaGraphUri(curatedId) },
     ]);
 
     const discovered = await agent.discoverContextGraphsFromStore();
@@ -2769,11 +2797,12 @@ describe('discoverContextGraphsFromStore', () => {
     expect(entry).toBeDefined();
     expect(entry!.name).toBe('Curated Meta Only');
     expect(entry!.subscribed).toBe(false);
-    // `synced=false` — discovery from the _meta store gives us the
-    // definition triple but not actual CG data. `metaSynced=true` is
-    // the right flag for "we have the curated _meta allowlist."
+    expect((agent as any).config.syncContextGraphs ?? []).not.toContain(curatedId);
+    // Discovery itself does not certify authenticated metadata. The existing
+    // refreshMetaSyncedFlags path is the single authority that promotes this
+    // after confirming the local _meta state.
     expect(entry!.synced).toBe(false);
-    expect(entry!.metaSynced).toBe(true);
+    expect(entry!.metaSynced).toBe(false);
   }, 15000);
 });
 
@@ -2857,7 +2886,7 @@ describe('hash-vs-name duplication regression', () => {
     const matches = contextGraphs.filter(p => p.id === localName || p.id === expectedHash);
     expect(matches.length).toBe(1);
     expect(matches[0].id).toBe(localName);
-    expect(matches[0].subscribed).toBe(true);
+    expect(matches[0].subscribed).toBe(false);
     // Chain + ontology discovery only deliver definition metadata —
     // no actual CG data has been pulled from a peer, so `synced`
     // stays false until the catchup runner flips it.
