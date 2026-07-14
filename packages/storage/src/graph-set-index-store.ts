@@ -1,6 +1,14 @@
 import { performance } from 'node:perf_hooks';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
-import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore, UpdateOptions } from './triple-store.js';
+import type {
+  Quad,
+  QueryOptions,
+  QueryResult,
+  StorePressureSnapshot,
+  StoreWorkPriority,
+  TripleStore,
+  UpdateOptions,
+} from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
@@ -21,6 +29,15 @@ export type GraphSetMutationSource =
 type TouchedGraphMutationSource = 'delete' | 'deleteByPattern' | 'deleteBySubjectPrefix' | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
+
+interface GraphSetRefreshFlight {
+  priority: StoreWorkPriority;
+  task: Promise<Set<string>>;
+}
+
+interface GraphSetRefreshScanState {
+  lastSequence: number;
+}
 
 export type GraphSetMutationEvent =
   | {
@@ -85,7 +102,9 @@ export class GraphSetIndexStore implements TripleStore {
   private nextRevalidateAt = 0;
   private revalidateFailureCount = 0;
   private mutationGeneration = 0;
-  private refreshInFlight: Promise<Set<string>> | null = null;
+  private readonly refreshesInFlight = new Map<StoreWorkPriority, GraphSetRefreshFlight>();
+  private refreshScanSequence = 0;
+  private latestPublishedRefreshScan = 0;
   /**
    * Pending full rebuild requested by a mutation whose exact graph effects can't
    * be applied incrementally. The stored source preserves the observer contract
@@ -296,32 +315,69 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   private async refreshIndex(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
-    if (this.refreshInFlight) return this.refreshInFlight;
-    let task = this.refreshIndexLoop(source, options);
+    // A lower-priority cold seed/revalidation must not capture a later normal or
+    // ACK reader. The higher-priority caller starts its own scan so the external
+    // scheduler can use the capacity reserved for that lane; equal/lower callers
+    // still coalesce onto the best in-flight scan. Dirty rebuilds remain forced
+    // to background, regardless of the waiting reader's requested priority.
+    const priority = refreshPriority(source, options);
+    const coalesced = this.coalescableRefresh(priority);
+    if (coalesced) return coalesced.task;
+
+    const scanState: GraphSetRefreshScanState = { lastSequence: 0 };
+    let task = this.refreshIndexLoop(source, options, scanState);
     if (source === 'revalidate') {
       task = task.catch((error: unknown) => {
+        // Cancellation, cold seeds, and mutation-dirty rebuilds are strict
+        // correctness paths even if another refresh published in parallel.
+        if (options?.signal?.aborted || !this.graphs || this.pendingFullRefresh) {
+          throw error;
+        }
+        // A newer promoted refresh already published a usable graph set. Do
+        // not let this older failed scan overwrite its healthy schedule with
+        // failure backoff.
+        if (
+          scanState.lastSequence < this.latestPublishedRefreshScan &&
+          this.graphs
+        ) {
+          return this.graphs;
+        }
         // Periodic discovery of out-of-contract writers is advisory once the
         // write-through index is warm. Preserve that last known set and back
         // off after a store failure instead of making every graph reader repeat
         // the same expensive scan. Cold seeds and mutation-dirty rebuilds are
         // correctness paths: if either condition applies by the time the scan
         // fails, keep the original strict rejection behavior.
-        if (options?.signal?.aborted || !this.graphs || this.pendingFullRefresh) {
-          throw error;
-        }
         this.noteRevalidationFailure();
         return this.graphs;
       });
     }
-    this.refreshInFlight = task;
+    const flight: GraphSetRefreshFlight = { priority, task };
+    this.refreshesInFlight.set(priority, flight);
     try {
       return await task;
     } finally {
-      if (this.refreshInFlight === task) this.refreshInFlight = null;
+      if (this.refreshesInFlight.get(priority) === flight) {
+        this.refreshesInFlight.delete(priority);
+      }
     }
   }
 
-  private async refreshIndexLoop(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
+  private coalescableRefresh(priority: StoreWorkPriority): GraphSetRefreshFlight | undefined {
+    const maxRank = refreshPriorityRank(priority);
+    for (const candidate of REFRESH_PRIORITIES) {
+      if (refreshPriorityRank(candidate) > maxRank) break;
+      const flight = this.refreshesInFlight.get(candidate);
+      if (flight) return flight;
+    }
+    return undefined;
+  }
+
+  private async refreshIndexLoop(
+    source: GraphSetRefreshSource,
+    options: QueryOptions | undefined,
+    scanState: GraphSetRefreshScanState,
+  ): Promise<Set<string>> {
     for (;;) {
       const isDirtyRebuild = this.pendingFullRefresh != null;
       const sourceForScan = this.pendingFullRefresh ?? source;
@@ -338,13 +394,22 @@ export class GraphSetIndexStore implements TripleStore {
       const scanOptions: QueryOptions | undefined = isDirtyRebuild
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
+      const scanSequence = ++this.refreshScanSequence;
+      scanState.lastSequence = scanSequence;
       const next = new Set((await this.inner.listGraphs(scanOptions)).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
+      // Priority promotion intentionally permits overlapping scans. Fence the
+      // shared cache by scan start order so an older, slower background response
+      // cannot overwrite a later ACK/normal snapshot that already published.
+      if (scanSequence < this.latestPublishedRefreshScan) {
+        return this.graphs ?? next;
+      }
       // This scan reflects every mutation up to `generation` (synchronous from
       // here — no await — so a concurrent write can't slip between the check and
       // the clear; if one had, it would have bumped the generation above and we
       // would have retried, preserving the pending refresh source for the next
       // scan attempt).
+      this.latestPublishedRefreshScan = scanSequence;
       this.pendingFullRefresh = null;
       this.replaceGraphSet(next, sourceForScan);
       return this.graphs!;
@@ -493,6 +558,21 @@ function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
 
 function positiveFiniteMs(value: number | undefined, fallback: number): number {
   return Number.isFinite(value) && (value as number) > 0 ? value as number : fallback;
+}
+
+function refreshPriority(
+  source: GraphSetRefreshSource,
+  options: QueryOptions | undefined,
+): StoreWorkPriority {
+  return source === 'seed' || source === 'revalidate'
+    ? options?.priority ?? 'normal'
+    : 'background';
+}
+
+const REFRESH_PRIORITIES: readonly StoreWorkPriority[] = ['ack', 'normal', 'background'];
+
+function refreshPriorityRank(priority: StoreWorkPriority): number {
+  return REFRESH_PRIORITIES.indexOf(priority);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
