@@ -61,7 +61,7 @@ describe('sync responder snapshot budget defaults', () => {
   });
 
   it('allows operators to override every responder snapshot budget limit', () => {
-    expect(resolveSyncResponderSnapshotBudgetOptions({
+    expect(resolveSyncResponderSnapshotBudgetOptions(undefined, {
       DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: '101',
       DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '202',
       DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT: '99',

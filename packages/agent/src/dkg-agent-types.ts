@@ -788,6 +788,8 @@ export interface DurableSyncDiagnostics {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures?: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure?: number;
 }
 
 export interface SharedMemorySyncDiagnostics {
@@ -805,6 +807,8 @@ export interface SharedMemorySyncDiagnostics {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures?: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure?: number;
 }
 
 export interface CatchupSyncDiagnostics {

@@ -8,10 +8,89 @@ import {
   SyncBackpressureBusyError,
   withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
+import { PriorityAdmissionQueue } from '../src/sync/priority-admission-queue.js';
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('sync global backpressure', () => {
+  it('preserves the original FIFO sequence across a running-to-queued handoff', async () => {
+    let running = 0;
+    const starts: string[] = [];
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => running < 1,
+      onStart: (entry) => {
+        running += 1;
+        starts.push(entry.payload);
+        return () => { running -= 1; };
+      },
+    });
+    const options = (payload: string, sequence?: number, allowQueueOverflow = false) => ({
+      payload,
+      ownerKey: payload,
+      lane: 'responder' as const,
+      priority: 1,
+      priorityClass: 'elevated' as const,
+      queueLimit: 1,
+      agingThresholdMs: 30_000,
+      sequence,
+      allowQueueOverflow,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    const first = queue.acquire(options('first'));
+    const releaseFirst = await first.release;
+    const later = queue.acquire(options('later'));
+    const handoff = queue.acquire(options('handoff', first.sequence, true));
+
+    releaseFirst();
+    const releaseHandoff = await handoff.release;
+    expect(starts).toEqual(['first', 'handoff']);
+    releaseHandoff();
+    const releaseLater = await later.release;
+    expect(starts).toEqual(['first', 'handoff', 'later']);
+    releaseLater();
+  });
+
+  it('cleans a displaced entry once so its timeout cannot corrupt later admissions', async () => {
+    let running = 0;
+    const starts: string[] = [];
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => running < 1,
+      onStart: (entry) => {
+        running += 1;
+        starts.push(entry.payload);
+        return () => { running -= 1; };
+      },
+    });
+    const acquire = (payload: string, priority: number) => queue.acquire({
+      payload,
+      ownerKey: payload,
+      lane: 'responder',
+      priority,
+      priorityClass: priority > 0 ? 'elevated' : 'deprioritized',
+      queueLimit: 1,
+      timeoutMs: payload === 'low' ? 10 : 100,
+      agingThresholdMs: 30_000,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+      createTimeoutError: () => new Error('timed out'),
+    });
+
+    const first = acquire('first', 0);
+    const releaseFirst = await first.release;
+    const low = acquire('low', -1);
+    const high = acquire('high', 1);
+    await expect(low.release).rejects.toThrow('displaced');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    releaseFirst();
+    const releaseHigh = await high.release;
+    releaseHigh();
+    expect(starts).toEqual(['first', 'high']);
+    expect(queue.length).toBe(0);
+  });
+
   it('serializes concurrent sync work when global limit is 1 while non-sync work can proceed', async () => {
     const ctx = createOperationContext('sync');
     const policy = resolveSyncGlobalBackpressure({

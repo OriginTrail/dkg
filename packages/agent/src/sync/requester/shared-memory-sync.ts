@@ -26,6 +26,8 @@ export interface SharedMemorySyncSummary {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure: number;
 }
 
 interface SharedMemorySyncContext {
@@ -64,12 +66,6 @@ interface SharedMemorySyncContext {
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   stopOnBackoffWorthyFailure?: boolean;
-  /** Admission boundary for one complete CG sequence; queue wait precedes deadline creation. */
-  runContextGraphSync?: <T>(
-    contextGraphId: string,
-    remainingContextGraphs: number,
-    work: () => Promise<T>,
-  ) => Promise<T>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -117,30 +113,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     failedPeers: 0,
     failedPhases: 0,
     backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
   };
-
-  if (context.runContextGraphSync && contextGraphIds.length > 0) {
-    for (const [index, contextGraphId] of contextGraphIds.entries()) {
-      const remaining = contextGraphIds.length - index;
-      const part = await context.runContextGraphSync(
-        contextGraphId,
-        remaining,
-        () => runSharedMemorySync({
-          ...context,
-          contextGraphIds: [contextGraphId],
-          runContextGraphSync: undefined,
-          createContextGraphSyncDeadline: () => createContextGraphSyncDeadline(remaining),
-        }),
-      );
-      for (const key of Object.keys(summary) as Array<keyof SharedMemorySyncSummary>) {
-        summary[key] = key === 'failedPeers'
-          ? Math.max(summary[key], part[key])
-          : summary[key] + part[key];
-      }
-      if (stopOnBackoffWorthyFailure && part.backoffWorthyFailures > 0) break;
-    }
-    return summary;
-  }
 
   const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint?: boolean } = {}) => {
     const updateCheckpoint = options.updateCheckpoint ?? true;

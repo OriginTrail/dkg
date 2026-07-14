@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import { runOrderedContextGraphSyncs } from '../src/sync/requester/ordered-sync.js';
 import {
   resolveSyncGlobalBackpressure,
+  SyncBackpressureBusyError,
   withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
 import { syncPriorityClass } from '../src/sync/policy.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 const ctx = createOperationContext('sync');
 const noop = () => {};
@@ -49,43 +52,279 @@ function durableContext(contextGraphIds: string[]) {
   };
 }
 
+function lifecycleAgent(
+  priorities: Record<string, number>,
+  runAdmission: (contextGraphId: string, work: () => Promise<unknown>) => Promise<unknown>,
+) {
+  return {
+    config: { syncContextGraphPriorities: priorities },
+    createContextGraphSyncDeadline: () => Date.now() + 1_000,
+    fetchSyncPages: async (
+      _ctx: unknown,
+      _peer: string,
+      contextGraphId: string,
+      _swm: boolean,
+      phase: 'data' | 'meta',
+    ) => ({
+      ...page(contextGraphId, phase),
+      quads: phase === 'data'
+        ? [{
+            subject: `urn:${contextGraphId}`,
+            predicate: 'urn:predicate',
+            object: 'urn:object',
+            graph: 'urn:graph',
+          }]
+        : [],
+    }),
+    processDurableBatchInWorker: async (dataQuads: unknown[], metaQuads: unknown[]) => ({
+      verifiedData: dataQuads,
+      verifiedMeta: metaQuads,
+      totalFetchedDataQuads: dataQuads.length,
+      totalFetchedMetaQuads: metaQuads.length,
+      rejectedKcs: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    }),
+    insertSyncedQuadsAndInvalidateListCache: async () => {},
+    syncCheckpoints: new Map(),
+    runContextGraphSyncWithBackpressure: async (
+      _ctx: unknown,
+      contextGraphId: string,
+      _lane: string,
+      _label: string,
+      work: () => Promise<unknown>,
+    ) => runAdmission(contextGraphId, work),
+    log: { info: noop, warn: noop, debug: noop },
+  };
+}
+
 describe('requester per-CG priority admission', () => {
-  it('runs a mixed durable list in the supplied stable priority order', async () => {
+  it('wires configured priority order through the durable lifecycle admission boundary', async () => {
     const admissions: string[] = [];
-    await runDurableSync({
-      ...durableContext(['high-a', 'high-b', 'default', 'low']),
-      runContextGraphSync: async (contextGraphId, _remaining, work) => {
+    const agent = lifecycleAgent(
+      { high: 100, low: -10 },
+      async (contextGraphId, work) => {
         admissions.push(contextGraphId);
         return work();
       },
+    );
+
+    await (LifecycleSyncMethods.prototype.runLegacyDurableSync as any).call(
+      agent,
+      ctx,
+      'peer',
+      ['low', 'high', 'default'],
+    );
+
+    expect(admissions).toEqual(['high', 'default', 'low']);
+  });
+
+  it('preserves completed durable progress when a later admission is deferred', async () => {
+    const admissions: string[] = [];
+    const agent = lifecycleAgent({}, async (contextGraphId, work) => {
+      admissions.push(contextGraphId);
+      if (contextGraphId === 'second') {
+        throw new SyncBackpressureBusyError('queue full');
+      }
+      return work();
+    });
+
+    const summary = await (LifecycleSyncMethods.prototype.runLegacyDurableSync as any).call(
+      agent,
+      ctx,
+      'peer',
+      ['first', 'second', 'third'],
+    );
+
+    expect(admissions).toEqual(['first', 'second']);
+    expect(summary.insertedDataTriples).toBe(1);
+    expect(summary.insertedTriples).toBe(1);
+    expect(summary.deferredBackpressure).toBe(1);
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.backoffWorthyFailures).toBe(0);
+  });
+
+  it('marks changelog admission pressure deferred without routing that graph to legacy', async () => {
+    const admissions: string[] = [];
+    const emptyResult = {
+      insertedTriples: 0,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      bytesReceived: 0,
+      resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+      rejectedKcs: 0,
+      failedPeers: 0,
+      failedPhases: 0,
+      deniedPhases: 0,
+      backoffWorthyFailures: 0,
+      deferredBackpressure: 0,
+    };
+    const agent = {
+      config: { syncContextGraphPriorities: {} },
+      getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
+      isPrivateContextGraph: async () => false,
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        contextGraphId: string,
+        _lane: string,
+        _label: string,
+        work: () => Promise<unknown>,
+      ) => {
+        admissions.push(contextGraphId);
+        if (contextGraphId === 'second') {
+          throw new SyncBackpressureBusyError('queue full');
+        }
+        return work();
+      },
+      runChangelogSyncForCg: async () => ({ ...emptyResult, completedPhases: 1 }),
+      log: { info: noop, warn: noop },
+    };
+
+    const lane = await (LifecycleSyncMethods.prototype.runChangelogLane as any).call(
+      agent,
+      ctx,
+      'peer',
+      ['first', 'second', 'third'],
+    );
+
+    expect(admissions).toEqual(['first', 'second']);
+    expect(lane.result.completedPhases).toBe(1);
+    expect(lane.result.deferredBackpressure).toBe(1);
+    expect(lane.remainingLegacyCgs).toEqual([]);
+  });
+
+  it('preserves completed shared-memory progress when a later admission is deferred', async () => {
+    const admissions: string[] = [];
+    const warnings: string[] = [];
+    const contextGraphIds = ['first', 'second', 'third'];
+    const agent = {
+      config: { syncContextGraphPriorities: {} },
+      store: {},
+      listSubGraphs: async () => [],
+      createContextGraphSyncDeadline: () => Date.now() + 1_000,
+      fetchSyncPages: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+        _swm: boolean,
+        phase: string,
+      ) => ({
+        ...page(contextGraphId, phase),
+        nextOffset: 1,
+      }),
+      getOrCreateSyncVerifyWorker: () => ({
+        processSharedMemoryBatch: async () => ({
+          verifiedData: [],
+          verifiedMeta: [],
+          totalFetchedDataQuads: 0,
+          totalFetchedMetaQuads: 0,
+          droppedDataTriples: 0,
+          emptyResponses: 1,
+          entityCreators: [],
+        }),
+      }),
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        contextGraphId: string,
+        _lane: string,
+        _label: string,
+        work: () => Promise<unknown>,
+      ) => {
+        admissions.push(contextGraphId);
+        if (contextGraphId === 'second') {
+          throw new SyncBackpressureBusyError('queue full');
+        }
+        return work();
+      },
+      syncCheckpoints: new Map(),
+      workspaceOwnedEntities: new Map(),
+      log: {
+        info: noop,
+        warn: (_ctx: unknown, message: string) => warnings.push(message),
+        debug: noop,
+      },
+    };
+
+    const summary = await (
+      LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as any
+    ).call(agent, 'peer', contextGraphIds, {
+      sharedMemorySyncPlan: {
+        publicContextGraphIds: contextGraphIds,
+        privateRecoverFromCurator: [],
+        eligibleContextGraphIds: contextGraphIds,
+      },
+    });
+
+    expect(admissions).toEqual(['first', 'second']);
+    expect(warnings).toEqual([]);
+    expect(summary.completedPhases).toBe(2);
+    expect(summary.checkpointAdvances).toBe(2);
+    expect(summary.deferredBackpressure).toBe(1);
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.backoffWorthyFailures).toBe(0);
+  });
+
+  it('runs a mixed durable list in the supplied stable priority order', async () => {
+    const admissions: string[] = [];
+    await runOrderedContextGraphSyncs({
+      contextGraphIds: ['high-a', 'high-b', 'default', 'low'],
+      emptyResult: () => 0,
+      runWithAdmission: async (contextGraphId, work) => {
+        admissions.push(contextGraphId);
+        return work();
+      },
+      runOne: async (contextGraphId) => {
+        await runDurableSync(durableContext([contextGraphId]));
+        return 0;
+      },
+      merge: (summary) => summary,
+      markDeferred: (summary) => summary,
     });
     expect(admissions).toEqual(['high-a', 'high-b', 'default', 'low']);
   });
 
   it('runs a mixed SWM list in the supplied stable priority order', async () => {
     const admissions: string[] = [];
-    await runSharedMemorySync({
-      ctx,
-      remotePeerId: 'peer',
+    await runOrderedContextGraphSyncs({
       contextGraphIds: ['high-a', 'high-b', 'default', 'low'],
-      createContextGraphSyncDeadline: () => Date.now() + 1_000,
-      fetchSyncPages: async (_ctx, _peer, contextGraphId, _swm, phase) => page(contextGraphId, phase),
-      processSharedMemoryBatch: async () => ({
-        verifiedData: [], verifiedMeta: [], totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0,
-        droppedDataTriples: 0, emptyResponses: 1, entityCreators: [],
-      }),
-      ensureContextGraph: async () => {},
-      storeInsert: async () => {},
-      deleteCheckpoint: noop,
-      setCheckpoint: noop,
-      ensureOwnedMap: () => new Map(),
-      logInfo: noop,
-      logWarn: noop,
-      logDebug: noop,
-      runContextGraphSync: async (contextGraphId, _remaining, work) => {
+      emptyResult: () => 0,
+      runWithAdmission: async (contextGraphId, work) => {
         admissions.push(contextGraphId);
         return work();
       },
+      runOne: async (contextGraphId) => {
+        await runSharedMemorySync({
+          ctx,
+          remotePeerId: 'peer',
+          contextGraphIds: [contextGraphId],
+          createContextGraphSyncDeadline: () => Date.now() + 1_000,
+          fetchSyncPages: async (_ctx, _peer, id, _swm, phase) => page(id, phase),
+          processSharedMemoryBatch: async () => ({
+            verifiedData: [], verifiedMeta: [], totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0,
+            droppedDataTriples: 0, emptyResponses: 1, entityCreators: [],
+          }),
+          ensureContextGraph: async () => {},
+          storeInsert: async () => {},
+          deleteCheckpoint: noop,
+          setCheckpoint: noop,
+          ensureOwnedMap: () => new Map(),
+          logInfo: noop,
+          logWarn: noop,
+          logDebug: noop,
+        });
+        return 0;
+      },
+      merge: (summary) => summary,
+      markDeferred: (summary) => summary,
     });
     expect(admissions).toEqual(['high-a', 'high-b', 'default', 'low']);
   });
@@ -96,7 +335,7 @@ describe('requester per-CG priority admission', () => {
     const starts: string[] = [];
     let releaseLowOne!: () => void;
     let lowOneBlocked = true;
-    const runContextGraphSync = <T>(contextGraphId: string, _remaining: number, work: () => Promise<T>) => {
+    const runContextGraphSync = <T>(contextGraphId: string, work: () => Promise<T>) => {
       const priority = priorities[contextGraphId] ?? 0;
       return withGlobalSyncBackpressure({
         policy,
@@ -110,22 +349,29 @@ describe('requester per-CG priority admission', () => {
         return work();
       });
     };
-    const batch = runDurableSync({
-      ...durableContext(['low-1', 'low-2']),
-      fetchSyncPages: async (_ctx, _peer, contextGraphId, _swm, phase) => {
-        if (contextGraphId === 'low-1' && phase === 'meta' && lowOneBlocked) {
-          await new Promise<void>((resolve) => { releaseLowOne = resolve; });
-          lowOneBlocked = false;
-        }
-        return page(contextGraphId, phase);
+    const runBatch = (contextGraphIds: string[]) => runOrderedContextGraphSyncs({
+      contextGraphIds,
+      emptyResult: () => 0,
+      runWithAdmission: runContextGraphSync,
+      runOne: async (contextGraphId) => {
+        await runDurableSync({
+          ...durableContext([contextGraphId]),
+          fetchSyncPages: async (_ctx, _peer, id, _swm, phase) => {
+            if (id === 'low-1' && phase === 'meta' && lowOneBlocked) {
+              await new Promise<void>((resolve) => { releaseLowOne = resolve; });
+              lowOneBlocked = false;
+            }
+            return page(id, phase);
+          },
+        });
+        return 0;
       },
-      runContextGraphSync,
+      merge: (summary) => summary,
+      markDeferred: (summary) => summary,
     });
+    const batch = runBatch(['low-1', 'low-2']);
     while (!starts.includes('low-1')) await new Promise((resolve) => setTimeout(resolve, 0));
-    const high = runDurableSync({
-      ...durableContext(['high']),
-      runContextGraphSync,
-    });
+    const high = runBatch(['high']);
     await new Promise((resolve) => setTimeout(resolve, 0));
     releaseLowOne();
     await Promise.all([batch, high]);

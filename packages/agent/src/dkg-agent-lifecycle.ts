@@ -223,6 +223,7 @@ import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import { runOrderedContextGraphSyncs } from './sync/requester/ordered-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
@@ -696,6 +697,8 @@ function emptyDurableSyncResult(): DurableSyncResult {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
+    backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
   };
 }
 
@@ -720,6 +723,7 @@ function mergeDurableSyncResults(a: DurableSyncResult, b: DurableSyncResult): Du
     failedPhases: a.failedPhases + b.failedPhases,
     deniedPhases: a.deniedPhases + b.deniedPhases,
     backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
+    deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
   };
 }
 
@@ -740,6 +744,8 @@ function emptySharedMemorySyncResult(): SharedMemorySyncResult {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
+    backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
   };
 }
 
@@ -764,6 +770,7 @@ function mergeSharedMemorySyncResults(
     failedPhases: a.failedPhases + b.failedPhases,
     deniedPhases: a.deniedPhases + b.deniedPhases,
     backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
+    deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
   };
 }
 
@@ -2961,6 +2968,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const outcome = await this.trySyncFromPeer(remotePeer, () => {
         syncAccountingClearedBackoff = true;
       });
+      if (outcome === 'deferred-backpressure') {
+        this.log.info(
+          createOperationContext('sync'),
+          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure`,
+        );
+        return outcome;
+      }
       if (
         outcome !== 'skipped-no-sync' &&
         outcome !== 'already-syncing' &&
@@ -3672,6 +3686,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const lane = await this.runChangelogLane(ctx, remotePeerId, contextGraphIds, onAccessDenied);
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
+        if ((changelogResult.deferredBackpressure ?? 0) > 0) return changelogResult;
       } catch (err) {
         this.log.warn(ctx, `Changelog sync lane failed for ${remotePeerId.slice(-8)}; using legacy sync: ${String(err)}`);
         legacyContextGraphIds = contextGraphIds;
@@ -3708,37 +3723,53 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphIds,
       this.config.syncContextGraphPriorities,
     );
-    const runSync = () => runDurableSync({
-        ctx,
-        remotePeerId,
-        contextGraphIds: orderedContextGraphIds,
-        onPhase,
-        onAccessDenied,
-        syncAgentsMeta,
-        createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
-        fetchSyncPages: this.fetchSyncPages.bind(this),
-        sinceBatchIdFor,
-        stopOnBackoffWorthyFailure,
-        runContextGraphSync: options?.globalAdmissionHeld
-          ? undefined
-          : (contextGraphId, _remaining, work) => this.runContextGraphSyncWithBackpressure(
-              ctx,
-              contextGraphId,
-              'durable',
-              `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
-              work,
-            ),
-        processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-        storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
-          priority: 'background',
-          source: 'agent.durableSync.storeInsert',
-        }),
-        deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-        setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-        logInfo: (opCtx, message) => this.log.info(opCtx, message),
-        logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-        logDebug: (opCtx, message) => this.log.debug(opCtx, message),
-      });
+    const runOne = (contextGraphId: string, remainingContextGraphs: number) => runDurableSync({
+      ctx,
+      remotePeerId,
+      contextGraphIds: [contextGraphId],
+      onPhase,
+      onAccessDenied,
+      syncAgentsMeta,
+      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
+      fetchSyncPages: this.fetchSyncPages.bind(this),
+      sinceBatchIdFor,
+      stopOnBackoffWorthyFailure,
+      processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
+      storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
+        priority: 'background',
+        source: 'agent.durableSync.storeInsert',
+      }),
+      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+      logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+    });
+    const runSync = () => runOrderedContextGraphSyncs({
+      contextGraphIds: orderedContextGraphIds,
+      emptyResult: emptyDurableSyncResult,
+      runWithAdmission: options?.globalAdmissionHeld
+        ? (_contextGraphId, work) => work()
+        : (contextGraphId, work) => this.runContextGraphSyncWithBackpressure(
+            ctx,
+            contextGraphId,
+            'durable',
+            `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
+            work,
+          ),
+      runOne,
+      merge: (summary, part) => ({
+        ...mergeDurableSyncResults(summary, part),
+        failedPeers: Math.max(summary.failedPeers, part.failedPeers),
+      }),
+      markDeferred: (summary) => ({
+        ...summary,
+        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+      }),
+      shouldStop: (part) => Boolean(
+        stopOnBackoffWorthyFailure && (part.backoffWorthyFailures ?? 0) > 0,
+      ),
+    });
 
     const singleFlightKey = durableSyncSingleFlightKey({
       remotePeerId,
@@ -3788,6 +3819,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         result = mergeDurableSyncResults(result, cgResult);
         if (cgResult.deniedPhases > 0) onAccessDenied?.(cg);
       } catch (err) {
+        const backpressureError = getSyncBackpressureBusyError(err);
+        if (backpressureError) {
+          result.deferredBackpressure = (result.deferredBackpressure ?? 0) + 1;
+          this.log.info(ctx, `Deferring changelog sync at CG ${cg} due to local backpressure: ${backpressureError.message}`);
+          break;
+        }
         this.log.warn(ctx, `Changelog sync failed for CG ${cg} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(err)}`);
         legacyCgs.push(cg);
       }
@@ -4193,11 +4230,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return admission;
       };
 
-      const syncPublicContextGraph = (contextGraphId: string) => runSharedMemorySync({
+      const syncPublicContextGraph = (contextGraphId: string, remainingContextGraphs: number) => runSharedMemorySync({
               ctx,
               remotePeerId,
               contextGraphIds: [contextGraphId],
-              createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
+              createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
               fetchSyncPages: this.fetchSyncPages.bind(this),
               processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
                 this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
@@ -4210,14 +4247,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
               getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
               stopOnBackoffWorthyFailure,
-              runContextGraphSync: (contextGraphId, _remaining, work) =>
-                this.runContextGraphSyncWithBackpressure(
-                  ctx,
-                  contextGraphId,
-                  'shared_memory',
-                  `shared-memory:${contextGraphId}:${remotePeerId.slice(-8)}`,
-                  work,
-                ),
               ensureContextGraph: async (contextGraphId) => {
                 const graphManager = new GraphManager(this.store);
                 await graphManager.ensureContextGraph(contextGraphId);
@@ -4261,9 +4290,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       // Interleave public incremental sync and private curator recovery in one
       // stable priority order. Each branch owns one global slot per CG.
-      for (const contextGraphId of orderedEligibleContextGraphIds) {
+      for (const [index, contextGraphId] of orderedEligibleContextGraphIds.entries()) {
+        const remainingContextGraphs = orderedEligibleContextGraphIds.length - index;
         if (publicSet.has(contextGraphId)) {
-          const publicResult = await syncPublicContextGraph(contextGraphId);
+          let publicResult: SharedMemorySyncResult;
+          try {
+            publicResult = await this.runContextGraphSyncWithBackpressure(
+              ctx,
+              contextGraphId,
+              'shared_memory',
+              `shared-memory:${contextGraphId}:${remotePeerId.slice(-8)}`,
+              () => syncPublicContextGraph(contextGraphId, remainingContextGraphs),
+            );
+          } catch (err) {
+            const backpressureError = getSyncBackpressureBusyError(err);
+            if (!backpressureError) throw err;
+            summary.deferredBackpressure = (summary.deferredBackpressure ?? 0) + 1;
+            this.log.info(ctx, `Deferring shared-memory sync at CG ${contextGraphId} due to local backpressure: ${backpressureError.message}`);
+            break;
+          }
           summary = mergeSharedMemorySyncResults(summary, publicResult);
           if (stopOnBackoffWorthyFailure && (publicResult.backoffWorthyFailures ?? 0) > 0) break;
           continue;
@@ -4302,6 +4347,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           }
         } catch (err) {
+          const backpressureError = getSyncBackpressureBusyError(err);
+          if (backpressureError) {
+            summary.deferredBackpressure = (summary.deferredBackpressure ?? 0) + 1;
+            this.log.info(ctx, `Deferring SWM curator recovery at CG ${contextGraphId} due to local backpressure: ${backpressureError.message}`);
+            break;
+          }
           this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
           summary.failedPeers += 1;
           summary.backoffWorthyFailures = (summary.backoffWorthyFailures ?? 0) + 1;

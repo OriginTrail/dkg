@@ -117,6 +117,41 @@ function captureHandler(
 }
 
 describe('sync responder protection', () => {
+  it.each([
+    ['omitted priorities', undefined],
+    ['all-zero priorities', { 'sync-protection': 0 }],
+  ])('preserves one continuous same-peer admission with %s', async (_label, priorities) => {
+    const queryGates: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    let authStarted = 0;
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
+      query: async () => {
+        const gate = deferred<QueryResult>();
+        queryGates.push(gate);
+        return gate.promise;
+      },
+    }), {
+      contextGraphPriorities: priorities,
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        return true;
+      },
+    });
+
+    const first = cap.invoke(makeEnvelope(), REMOTE_A);
+    while (queryGates.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    const second = cap.invoke(makeEnvelope(), REMOTE_A);
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authStarted).toBe(1);
+
+    queryGates.shift()?.resolve({ type: 'bindings', bindings: [] });
+    await first;
+    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    while (queryGates.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    queryGates.shift()?.resolve({ type: 'bindings', bindings: [] });
+    await second;
+  });
+
   it('prioritizes only authorized responder work while keeping pre-authorization FIFO', async () => {
     const queryGates: Array<ReturnType<typeof deferred<QueryResult>>> = [];
     const queryOrder: string[] = [];

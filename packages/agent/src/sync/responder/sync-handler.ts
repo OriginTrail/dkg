@@ -39,6 +39,10 @@ import {
   type SyncSchedulerLane,
   type SyncResponderSnapshotLimitsConfig,
 } from '../policy.js';
+import {
+  PriorityAdmissionQueue,
+  type PriorityAdmission,
+} from '../priority-admission-queue.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -51,6 +55,10 @@ type PreparedResponderSession = {
   rowListCacheKey: string;
   refreshRowList: boolean;
 };
+
+type PreparedResponderStage =
+  | { kind: 'respond'; bytes: Uint8Array }
+  | { kind: 'authorized'; authDurationMs: number };
 
 interface RegisterSyncHandlerParams {
   /**
@@ -143,21 +151,12 @@ export interface ResolvedSyncResponderSnapshotPolicy {
   localBytesEstimateClamped: boolean;
 }
 
-function looksLikeSnapshotEnvironment(
-  value: SyncResponderSnapshotLimitsConfig | Readonly<Record<string, string | undefined>> | undefined,
-): value is Readonly<Record<string, string | undefined>> {
-  return value !== undefined && Object.values(SNAPSHOT_BUDGET_ENV).some((name) => name in value);
-}
-
 /** Resolve each leaf independently: environment, then config, then the compatibility default. */
 export function resolveSyncResponderSnapshotPolicy(
-  configOrLegacyEnv?: SyncResponderSnapshotLimitsConfig | Readonly<Record<string, string | undefined>>,
-  explicitEnv?: Readonly<Record<string, string | undefined>>,
+  config?: SyncResponderSnapshotLimitsConfig,
+  env: Readonly<Record<string, string | undefined>> = process.env,
   onWarning: (message: string) => void = () => {},
 ): ResolvedSyncResponderSnapshotPolicy {
-  const legacyEnv = looksLikeSnapshotEnvironment(configOrLegacyEnv);
-  const config = legacyEnv ? undefined : configOrLegacyEnv as SyncResponderSnapshotLimitsConfig | undefined;
-  const env = legacyEnv ? configOrLegacyEnv : explicitEnv ?? process.env;
   validateSyncResponderSnapshotLimitsConfig(config);
   const warnings = new Set<string>();
   const warnOnce = (message: string) => {
@@ -217,11 +216,11 @@ export function resolveSyncResponderSnapshotPolicy(
 
 /** Production snapshot limits, with explicit config and environment overrides in rows/bytes. */
 export function resolveSyncResponderSnapshotBudgetOptions(
-  configOrLegacyEnv?: SyncResponderSnapshotLimitsConfig | Readonly<Record<string, string | undefined>>,
-  env?: Readonly<Record<string, string | undefined>>,
+  config?: SyncResponderSnapshotLimitsConfig,
+  env: Readonly<Record<string, string | undefined>> = process.env,
   onWarning?: (message: string) => void,
 ): SyncResponderSnapshotBudgetOptions {
-  return resolveSyncResponderSnapshotPolicy(configOrLegacyEnv, env, onWarning).budget;
+  return resolveSyncResponderSnapshotPolicy(config, env, onWarning).budget;
 }
 
 class SyncResponderBusyError extends Error {
@@ -231,187 +230,79 @@ class SyncResponderBusyError extends Error {
   }
 }
 
-interface SyncResponderQueueEntry {
+interface SyncResponderQueuePayload {
   peerId: string;
+  contextGraphId?: string;
+}
+
+type SyncResponderScheduling = {
   contextGraphId?: string;
   lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
   priority: number;
   priorityClass: SyncPriorityClass;
-  sequence: number;
-  enqueuedAt: number;
-  resolve: (release: () => void) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  timer: ReturnType<typeof setTimeout>;
-  onAbort?: () => void;
-}
+};
 
 function createSyncResponderLimiter() {
   let running = 0;
   const runningByPeer = new Map<string, number>();
-  const queuedByPeer = new Map<string, number>();
-  const queue: SyncResponderQueueEntry[] = [];
-  let sequence = 0;
-
-  const canRun = (peerId: string): boolean =>
-    running < SYNC_RESPONDER_GLOBAL_CONCURRENCY &&
-    (runningByPeer.get(peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY;
-
-  const releaseFor = (peerId: string): (() => void) => {
-    let released = false;
-    running += 1;
-    runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
-    return () => {
-      if (released) return;
-      released = true;
-      running -= 1;
-      const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
-      if (peerRunning <= 0) runningByPeer.delete(peerId);
-      else runningByPeer.set(peerId, peerRunning);
-      pump();
-    };
-  };
-
-  const incrementQueued = (peerId: string): void => {
-    queuedByPeer.set(peerId, (queuedByPeer.get(peerId) ?? 0) + 1);
-  };
-
-  const decrementQueued = (peerId: string): void => {
-    const count = (queuedByPeer.get(peerId) ?? 1) - 1;
-    if (count <= 0) queuedByPeer.delete(peerId);
-    else queuedByPeer.set(peerId, count);
-  };
-
-  const removeQueued = (entry: SyncResponderQueueEntry): boolean => {
-    const index = queue.indexOf(entry);
-    if (index < 0) return false;
-    queue.splice(index, 1);
-    decrementQueued(entry.peerId);
-    clearTimeout(entry.timer);
-    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
-    return true;
-  };
-
-  const startQueued = (entry: SyncResponderQueueEntry, aged: boolean): void => {
-    decrementQueued(entry.peerId);
-    clearTimeout(entry.timer);
-    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
-    const attributes = { lane: entry.lane, priority_class: entry.priorityClass };
-    getMetrics().syncSchedulerQueueWaitMs.record(
-      Math.max(0, Date.now() - entry.enqueuedAt),
-      attributes,
-    );
-    getMetrics().syncSchedulerDecisionsTotal.add(1, { ...attributes, outcome: 'started' });
-    if (aged) getMetrics().syncSchedulerDecisionsTotal.add(1, { ...attributes, outcome: 'aged' });
-    entry.resolve(releaseFor(entry.peerId));
-  };
-
-  const pump = (): void => {
-    while (running < SYNC_RESPONDER_GLOBAL_CONCURRENCY) {
-      const now = Date.now();
-      const runnable = queue
-        .map((entry, index) => ({ entry, index }))
-        .filter(({ entry }) => canRun(entry.peerId));
-      if (runnable.length === 0) return;
-      const aged = runnable
-        .filter(({ entry }) => now - entry.enqueuedAt >= SYNC_RESPONDER_MAX_QUEUE_WAIT_MS / 2)
-        .sort((a, b) => a.entry.sequence - b.entry.sequence)[0];
-      const selected = aged ?? runnable.sort((a, b) => (
-        b.entry.priority - a.entry.priority
-        || a.entry.sequence - b.entry.sequence
-      ))[0];
-      const [entry] = queue.splice(selected.index, 1);
-      startQueued(entry, Boolean(aged));
-    }
-  };
+  const queue = new PriorityAdmissionQueue<SyncResponderQueuePayload>({
+    canRun: (entry) => (
+      running < SYNC_RESPONDER_GLOBAL_CONCURRENCY
+      && (runningByPeer.get(entry.payload.peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY
+    ),
+    onStart: (entry) => {
+      const { peerId } = entry.payload;
+      running += 1;
+      runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
+      return () => {
+        running = Math.max(0, running - 1);
+        const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
+        if (peerRunning <= 0) runningByPeer.delete(peerId);
+        else runningByPeer.set(peerId, peerRunning);
+      };
+    },
+  });
 
   const acquire = (
     peerId: string,
-    scheduling: {
-      contextGraphId?: string;
-      lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
-      priority: number;
-      priorityClass: SyncPriorityClass;
-    },
+    scheduling: SyncResponderScheduling,
     signal?: AbortSignal,
-    transitionFromRunning = false,
-  ): Promise<() => void> => {
-    throwIfAborted(signal);
-    if (canRun(peerId) && queue.length === 0) {
-      getMetrics().syncSchedulerDecisionsTotal.add(1, {
-        lane: scheduling.lane,
-        priority_class: scheduling.priorityClass,
-        outcome: 'started',
-      });
-      return Promise.resolve(releaseFor(peerId));
-    }
-    const globalFull = queue.length >= SYNC_RESPONDER_QUEUE_LIMIT;
-    const peerFull = (queuedByPeer.get(peerId) ?? 0) >= SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT;
-    if ((globalFull || peerFull) && !transitionFromRunning) {
-      const displaced = queue
-        .map((entry, index) => ({ entry, index }))
-        .filter(({ entry }) => (
-          entry.priority < scheduling.priority
-          && (!peerFull || entry.peerId === peerId)
-        ))
-        .sort((a, b) => a.entry.priority - b.entry.priority || b.entry.sequence - a.entry.sequence)[0];
-      if (!displaced) {
-        getMetrics().syncSchedulerDecisionsTotal.add(1, {
-          lane: scheduling.lane,
-          priority_class: scheduling.priorityClass,
-          outcome: 'rejected',
-        });
-        throw new SyncResponderBusyError(globalFull
-          ? 'sync responder queue full'
-          : 'sync responder peer queue full');
-      }
-      const victim = displaced.entry;
-      removeQueued(victim);
-      getMetrics().syncSchedulerDecisionsTotal.add(1, {
-        lane: victim.lane,
-        priority_class: victim.priorityClass,
-        outcome: 'displaced',
-      });
-      victim.reject(new SyncResponderBusyError('sync responder queued request displaced'));
-    }
-    return new Promise((resolve, reject) => {
-      const entry: SyncResponderQueueEntry = {
-        peerId,
-        ...scheduling,
-        sequence: sequence++,
-        enqueuedAt: Date.now(),
-        resolve,
-        reject,
-        signal,
-        timer: setTimeout(() => {
-          if (removeQueued(entry)) reject(new SyncResponderBusyError('sync responder queue wait exceeded'));
-        }, SYNC_RESPONDER_MAX_QUEUE_WAIT_MS),
-      };
-      entry.onAbort = () => {
-        if (removeQueued(entry)) reject(asAbortError(signal?.reason));
-      };
-      incrementQueued(peerId);
-      queue.push(entry);
-      if (signal) {
-        signal.addEventListener('abort', entry.onAbort, { once: true });
-        if (signal.aborted) entry.onAbort();
-      }
-    });
-  };
+    transition?: { sequence: number },
+  ): PriorityAdmission<SyncResponderQueuePayload> => queue.acquire({
+    payload: { peerId, contextGraphId: scheduling.contextGraphId },
+    ownerKey: peerId,
+    lane: scheduling.lane,
+    priority: scheduling.priority,
+    priorityClass: scheduling.priorityClass,
+    signal,
+    queueLimit: SYNC_RESPONDER_QUEUE_LIMIT,
+    ownerQueueLimit: SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT,
+    timeoutMs: SYNC_RESPONDER_MAX_QUEUE_WAIT_MS,
+    agingThresholdMs: SYNC_RESPONDER_MAX_QUEUE_WAIT_MS / 2,
+    sequence: transition?.sequence,
+    allowQueueOverflow: transition !== undefined,
+    createBusyError: (reason) => new SyncResponderBusyError(
+      reason === 'global_queue_full'
+        ? 'sync responder queue full'
+        : 'sync responder peer queue full',
+    ),
+    createDisplacedError: () => new SyncResponderBusyError(
+      'sync responder queued request displaced',
+    ),
+    createTimeoutError: () => new SyncResponderBusyError(
+      'sync responder queue wait exceeded',
+    ),
+  });
 
   return {
     async run<T>(
       peerId: string,
       signal: AbortSignal | undefined,
-      scheduling: {
-        contextGraphId?: string;
-        lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
-        priority: number;
-        priorityClass: SyncPriorityClass;
-      },
+      scheduling: SyncResponderScheduling,
       fn: () => Promise<T>,
     ): Promise<T> {
-      const release = await acquire(peerId, scheduling, signal);
+      const admission = acquire(peerId, scheduling, signal);
+      const release = await admission.release;
       try {
         throwIfAborted(signal);
         return await fn();
@@ -419,27 +310,19 @@ function createSyncResponderLimiter() {
         release();
       }
     },
+
     async runTwoStage<T, U>(
       peerId: string,
       signal: AbortSignal | undefined,
-      firstScheduling: {
-        contextGraphId?: string;
-        lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
-        priority: number;
-        priorityClass: SyncPriorityClass;
-      },
+      firstScheduling: SyncResponderScheduling,
       first: () => Promise<T>,
       transition: (value: T) => {
-        scheduling: {
-          contextGraphId?: string;
-          lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
-          priority: number;
-          priorityClass: SyncPriorityClass;
-        };
+        scheduling: SyncResponderScheduling;
         work: () => Promise<U>;
       } | undefined,
     ): Promise<T | U> {
-      const releaseFirst = await acquire(peerId, firstScheduling, signal);
+      const firstAdmission = acquire(peerId, firstScheduling, signal);
+      const releaseFirst = await firstAdmission.release;
       let value: T;
       try {
         throwIfAborted(signal);
@@ -448,29 +331,31 @@ function createSyncResponderLimiter() {
         releaseFirst();
         throw error;
       }
+
       const next = transition(value);
       if (!next) {
         releaseFirst();
         return value;
       }
 
-      // Queue the authorized stage before releasing pre-authorization. That
-      // atomic hand-off lets the scheduler compare it with all queued work,
-      // while release still happens before we await the next admission.
-      let secondAdmission: Promise<() => void>;
+      let secondAdmission: PriorityAdmission<SyncResponderQueuePayload>;
       try {
-        // This request already occupies one running slot. Its synchronous
-        // running->queued hand-off may transiently append one entry beyond the
-        // queue cap, but releasing the running slot pumps one entry immediately,
-        // so the observable bounded queue never grows. This preserves the
-        // existing "1 running + 4 queued per peer" contract.
-        secondAdmission = acquire(peerId, next.scheduling, signal, true);
+        // Reuse the request's original arrival sequence so equal-priority work
+        // cannot lose FIFO position merely because authorization required a
+        // running-to-queued handoff.
+        secondAdmission = acquire(
+          peerId,
+          next.scheduling,
+          signal,
+          { sequence: firstAdmission.sequence },
+        );
       } catch (error) {
         releaseFirst();
         throw error;
       }
       releaseFirst();
-      const releaseSecond = await secondAdmission;
+
+      const releaseSecond = await secondAdmission.release;
       try {
         throwIfAborted(signal);
         return await next.work();
@@ -544,6 +429,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
   const limiter = createSyncResponderLimiter();
+  // Preserve the original one-admission auth+serve path unless an operator
+  // actually configures a non-zero priority. An empty/all-zero map is a true
+  // compatibility no-op for responder scheduling.
+  const prioritySchedulingEnabled = Object.values(contextGraphPriorities ?? {})
+    .some((priority) => priority !== 0);
   let warnedPreDispatchCancellation = false;
 
   const pruneSyncSessionTokens = (now = Date.now()) => {
@@ -639,11 +529,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       logDebug(createOperationContext('sync'), message());
     };
 
-    return limiter.runTwoStage(peerId, signal, {
-      lane: 'pre_authorization',
-      priority: 0,
-      priorityClass: 'default',
-    }, async () => {
+    const prepareResponderStage = async (): Promise<PreparedResponderStage> => {
       throwIfAborted(signal);
 
       // facet open-serve. The public `_catalog` subgraph (a DCAT
@@ -654,7 +540,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const rows = await raceAgainstAbort(readCatalogPage({ store, contextGraphId, offset, limit }), signal);
         const serialized = serializeResponderRows(rows);
         logFirstPageDetail(() => `Sync responder catalog facet for "${contextGraphId}": rows=${rows.length}`);
-        return new TextEncoder().encode(serialized ?? '');
+        return { kind: 'respond', bytes: new TextEncoder().encode(serialized ?? '') };
       }
 
       const authStartedAt = Date.now();
@@ -663,21 +549,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       throwIfAborted(signal);
       if (!authorized) {
         logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
-        return new TextEncoder().encode(syncDeniedResponse);
+        return { kind: 'respond', bytes: new TextEncoder().encode(syncDeniedResponse) };
       }
-      return { authDurationMs };
-    }, (preAuthorization) => {
-      if (preAuthorization instanceof Uint8Array) return undefined;
-      const priority = contextGraphPriority(contextGraphPriorities, contextGraphId);
-      return {
-        scheduling: {
-          contextGraphId,
-          lane: 'responder' as const,
-          priority,
-          priorityClass: syncPriorityClass(priority),
-        },
-        work: async () => {
-      const authDurationMs = preAuthorization.authDurationMs;
+      return { kind: 'authorized', authDurationMs };
+    };
+
+    const serveAuthorizedStage = async (authDurationMs: number): Promise<Uint8Array> => {
       throwIfAborted(signal);
 
       if (store.queryCancellation === 'pre-dispatch' && !warnedPreDispatchCancellation) {
@@ -847,12 +724,50 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
       return new TextEncoder().encode(nquads.join('\n'));
-        },
-      };
-    }).then((res) => {
-      if (!(res instanceof Uint8Array)) {
-        throw new Error('sync responder authorized stage did not produce response bytes');
-      }
+    };
+
+    const preAuthorizationScheduling: SyncResponderScheduling = {
+      lane: 'pre_authorization',
+      priority: 0,
+      priorityClass: 'default',
+    };
+    const response: Promise<Uint8Array> = prioritySchedulingEnabled
+      ? limiter.runTwoStage(
+          peerId,
+          signal,
+          preAuthorizationScheduling,
+          prepareResponderStage,
+          (prepared) => {
+            if (prepared.kind === 'respond') return undefined;
+            const priority = contextGraphPriority(contextGraphPriorities, contextGraphId);
+            return {
+              scheduling: {
+                contextGraphId,
+                lane: 'responder' as const,
+                priority,
+                priorityClass: syncPriorityClass(priority),
+              },
+              work: () => serveAuthorizedStage(prepared.authDurationMs),
+            };
+          },
+        ).then((result) => {
+          if (result instanceof Uint8Array) return result;
+          if (result.kind === 'respond') return result.bytes;
+          throw new Error('sync responder authorized stage did not produce response bytes');
+        })
+      : limiter.run(
+          peerId,
+          signal,
+          { contextGraphId, lane: 'responder', priority: 0, priorityClass: 'default' },
+          async () => {
+            const prepared = await prepareResponderStage();
+            return prepared.kind === 'respond'
+              ? prepared.bytes
+              : serveAuthorizedStage(prepared.authDurationMs);
+          },
+        );
+
+    return response.then((res) => {
       getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
       return res;
     }).catch((err) => {

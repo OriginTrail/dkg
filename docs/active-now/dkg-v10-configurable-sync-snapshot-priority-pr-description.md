@@ -21,6 +21,11 @@ prevents low-priority work from starving indefinitely.
 The priority map is deliberately local policy. It is never sent over the wire
 and is not trusted from a remote requester.
 
+Local admission pressure is also modeled explicitly. If one CG completes and a
+later CG cannot enter the bounded queue, the completed counters and checkpoints
+are preserved, the batch returns a deferred result, and the peer is retried
+without peer-failure backoff.
+
 ## Why This Is Needed
 
 DKG V10 already has process-local sync concurrency and queue limits, as well as
@@ -176,9 +181,11 @@ flowchart LR
 
 ### Per-CG requester admission
 
-Durable and shared-memory sync runners now expose a boundary for one complete
-CG sequence. A multi-CG request is stably ordered by local priority and each CG
-is admitted separately.
+Durable and shared-memory runners are execution-only: they fetch, verify, store,
+and checkpoint the CGs passed to them, but they do not recursively schedule
+themselves. Lifecycle orchestration stably orders the batch by local priority,
+admits one CG, invokes the single-CG runner, and immediately merges its result
+before attempting the next admission.
 
 ```mermaid
 sequenceDiagram
@@ -209,8 +216,15 @@ The admission boundary is intentionally outside the complete CG operation:
 - a sync deadline is created after queue admission, so queue wait does not
   consume the CG's network/store execution budget.
 
-Summary counters are merged after each CG. Existing stop-on-backoff behavior is
-preserved.
+Summary counters are merged after each CG. A typed local admission rejection
+increments `deferredBackpressure`, stops the remaining fanout, and returns the
+partial summary. It does not increment `failedPeers`,
+`backoffWorthyFailures`, or peer retry backoff. Sync-on-connect reports
+`deferred-backpressure`; partial progress updates only the progress timestamp,
+never the clean-success timestamp.
+
+Existing stop-on-backoff behavior is preserved for actual peer or transport
+pressure.
 
 ### Requester lanes covered
 
@@ -243,7 +257,14 @@ Existing `syncGlobalMaxInflight`, `syncGlobalLimit`,
 as before. A resolved inflight limit of `0` continues to disable this global
 admission layer.
 
-The scheduler now stores bounded metadata with every queued entry:
+Requester and responder limiters now share one internal priority-admission
+queue. The shared primitive owns stable sequencing, aging selection,
+strictly-higher-priority displacement, queued abort/timeout cleanup,
+exactly-once rejection, and scheduler metrics. Thin wrappers retain their
+different capacity policies: global requester limits on one side, and
+global/per-peer responder limits on the other.
+
+The scheduler stores bounded metadata with every queued entry:
 
 ```text
 CG ID for diagnostics
@@ -273,7 +294,15 @@ Existing retry/backoff handling remains the owner of what happens next.
 
 ### Authorization-safe responder priority
 
-Responder scheduling is split into two stages:
+Responder behavior has an explicit compatibility switch:
+
+- omitted, empty, or all-zero priorities use the original single admission
+  across authorization and page serving;
+- at least one non-zero priority enables authorization-safe two-stage
+  scheduling.
+
+With priority scheduling enabled, responder scheduling is split into two
+stages:
 
 ```mermaid
 flowchart TD
@@ -296,7 +325,10 @@ authorized CG-specific stage remain neutral.
 The transition is atomic from the scheduler's perspective. The authorized
 stage is queued before the neutral running slot is released, allowing it to
 compete with all queued work without exceeding the existing running limit.
-The hand-off preserves the established per-peer capacity contract.
+The hand-off reuses the request's original arrival sequence, so equal-priority
+work does not lose FIFO position merely because authorization introduced a
+second admission stage. Stage results are a discriminated union rather than a
+byte-array sentinel.
 
 Existing responder protection remains:
 
@@ -341,6 +373,9 @@ flowchart LR
 At startup, the lifecycle resolves one effective snapshot policy and passes
 the resulting budget directly to the sync responder. Resolution is performed
 once for the running agent rather than independently at each request.
+Resolver inputs are explicit `(config, env, onWarning)`; the implementation
+does not infer whether an object is configuration or an environment map by
+inspecting its keys.
 
 Backward compatibility is explicit:
 
@@ -393,7 +428,9 @@ dkg.sync.scheduler.decisions_total{lane,priority_class,outcome}
 ```
 
 Outcomes cover scheduler events such as started, aged, rejected, displaced,
-and aborted. Labels use bounded lane, priority-class, and outcome enums.
+and aborted. These are event counts rather than throughput counts: an aged
+start intentionally emits both `started` and `aged`. Labels use bounded
+lane, priority-class, and outcome enums.
 
 CG IDs, peer IDs, session IDs, operation IDs, and raw numeric priorities are
 not metric labels.
@@ -420,11 +457,14 @@ The implementation preserves these boundaries:
   scheduler;
 - queue wait happens before the CG deadline starts;
 - responder priority is applied only after authorization;
+- empty/all-zero responder priority policy retains one continuous admission;
 - all queues remain bounded;
 - equal priorities remain stable FIFO;
 - aging bounds starvation;
-- aborts remove queued entries and listeners;
+- aborts, timeouts, and displacement remove queued entries and listeners
+  exactly once;
 - nested changelog resync reuses its existing CG admission;
+- local admission deferral preserves prior results and never penalizes a peer;
 - sync store writes remain background priority;
 - StorageACK priority handling is unchanged;
 - priority policy is local and never accepted from the network;
@@ -439,8 +479,9 @@ The implementation preserves these boundaries:
 - No database migration.
 - No change to default snapshot limits.
 - No change to default requester or responder concurrency.
-- No change to behavior when every CG uses the default priority `0`, except
-  that a multi-CG requester batch releases global admission between CGs.
+- No responder scheduling change when priorities are omitted or all `0`.
+- Multi-CG requester batches release global admission between CGs even when
+  every CG uses priority `0`.
 - Existing environment-only snapshot configuration remains valid.
 
 ### Non-goals
@@ -490,23 +531,39 @@ The added and extended tests cover:
 - bounded queue rejection and strictly-higher-priority displacement;
 - abort cleanup;
 - per-CG durable and shared-memory admission;
+- partial durable and shared-memory accounting across admission deferral;
+- deferred sync-on-connect retry without peer backoff or clean-success stamp;
+- changelog admission deferral without same-attempt legacy fallback;
 - a later elevated CG overtaking a lower-priority batch tail;
 - mixed public shared-memory and private recovery ordering;
+- original single-stage responder admission for omitted/all-zero priorities;
 - responder priority only after successful authorization;
 - unauthorized elevated-CG claims receiving no priority;
+- FIFO sequence preservation across authorization handoff;
+- displacement cleanup without later timeout double-settlement;
 - preservation of global and per-peer responder limits;
 - CLI configuration parsing and daemon-to-agent forwarding.
 
 Verification performed in the implementation worktree:
 
 ```text
-focused policy/requester/backpressure/snapshot tests: 42 passed
-responder protection and sync coalescing tests:       29 passed
-CLI config/wiring/catch-up tests:                    126 passed
-@origintrail-official/dkg-core build:                passed
-@origintrail-official/dkg-agent build + type tests:  passed
-@origintrail-official/dkg CLI build:                 passed
-git diff --check:                                    passed
+agent unit suite:                                    56 files / 648 tests passed
+CLI config + daemon wiring tests:                     2 files / 119 tests passed
+devnet manifest gate:                                 2 files / 8 tests passed
+devnet folded public/private StorageACK flow:         1 test passed
+devnet core peers/features:                           5 of 6 tests passed
+  - normal full-scan sync/publish path passed
+  - offline-core case stopped before sync: a four-core/min-signature-3
+    cluster has only two remote core ACKs while one core is offline
+live custom-policy restart:                           passed
+  - global/local rows resolved as 123456 / 23456
+  - global/local byte estimates resolved as 64 MiB / 16 MiB
+  - priority classes resolved as elevated=1 / deprioritized=1
+  - restarted edge rejoined with five connected peers
+@origintrail-official/dkg-core build:                 passed
+@origintrail-official/dkg-agent build + type tests:   passed
+@origintrail-official/dkg CLI build:                  passed
+git diff --check:                                     passed
 ```
 
 ## Main Code Surfaces
@@ -515,18 +572,22 @@ git diff --check:                                    passed
   - configuration types, validation, priority normalization, stable ordering,
     and bounded priority classes;
 - `packages/agent/src/sync/backpressure.ts`
-  - priority-aware global requester queue, aging, displacement, abort cleanup,
-    and pressure diagnostics;
+  - global requester capacity wrapper and pressure diagnostics;
+- `packages/agent/src/sync/priority-admission-queue.ts`
+  - shared priority/FIFO ordering, aging, displacement, abort/timeout cleanup,
+    handoff sequence preservation, and scheduler metrics;
+- `packages/agent/src/sync/requester/ordered-sync.ts`
+  - explicit per-CG requester orchestration and partial-result preservation;
 - `packages/agent/src/sync/requester/durable-sync.ts`
-  - complete per-CG durable admission boundary;
+  - durable execution and progress accounting;
 - `packages/agent/src/sync/requester/shared-memory-sync.ts`
-  - complete per-CG shared-memory admission boundary;
+  - shared-memory execution and progress accounting;
 - `packages/agent/src/dkg-agent-lifecycle.ts`
   - policy resolution, requester-lane integration, mixed public/private SWM
     ordering, startup logging, and responder wiring;
 - `packages/agent/src/sync/responder/sync-handler.ts`
-  - snapshot config resolution and authorization-safe two-stage responder
-    scheduling;
+  - explicit snapshot config resolution, default single-stage admission, and
+    authorization-safe two-stage priority scheduling;
 - `packages/agent/src/dkg-agent.ts`
   - fail-fast validation and one-time priority normalization;
 - `packages/cli/src/config.ts` and
