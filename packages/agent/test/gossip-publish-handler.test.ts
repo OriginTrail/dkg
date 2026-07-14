@@ -6,7 +6,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
-import type { ContextGraphSub } from '../src/index.js';
+import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'test-gossip-handler';
 
@@ -34,13 +34,14 @@ function makePublishMessage(opts: {
 function createHandler(store?: OxigraphStore, callbacks?: Partial<{
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
-  subscribeToContextGraph: (id: string) => void;
   setContextGraphSubscription: (id: string, next: ContextGraphSub) => void;
+  recordDiscoveredContextGraph: (id: string, metadata: ContextGraphDiscoveryMetadata) => void;
 }>) {
   const s = store ?? new OxigraphStore();
   const subscriptions = new Map<string, ContextGraphSub>();
   return {
     store: s,
+    subscriptions,
     handler: new GossipPublishHandler(
       s,
       undefined,
@@ -48,8 +49,15 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
       {
         contextGraphExists: callbacks?.contextGraphExists ?? (async () => false),
         getContextGraphOwner: callbacks?.getContextGraphOwner ?? (async () => null),
-        subscribeToContextGraph: callbacks?.subscribeToContextGraph ?? (() => {}),
         setContextGraphSubscription: callbacks?.setContextGraphSubscription ?? ((id, next) => { subscriptions.set(id, next); }),
+        recordDiscoveredContextGraph: callbacks?.recordDiscoveredContextGraph ?? ((id, metadata) => {
+          subscriptions.set(id, {
+            ...metadata,
+            subscribed: false,
+            synced: false,
+            metaSynced: false,
+          });
+        }),
       },
     ),
   };
@@ -218,6 +226,54 @@ describe('GossipPublishHandler', () => {
     expect(bindings.length).toBeGreaterThan(0);
   });
 
+  it('inserts validated ontology definitions without activating a member subscription', async () => {
+    const { store, handler, subscriptions } = createHandler();
+    const id = 'ontology-discovery-only';
+    const data = makePublishMessage({
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      nquads: [
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.SCHEMA_NAME}> "Ontology Discovery Only" <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+      ].join('\n'),
+    });
+
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+
+    expect(subscriptions.get(id)).toMatchObject({
+      name: 'Ontology Discovery Only',
+      subscribed: false,
+      synced: false,
+      metaSynced: false,
+    });
+
+    const inserted = await store.query(`
+      ASK WHERE {
+        GRAPH <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> {
+          <did:dkg:context-graph:${id}>
+            <${DKG_ONTOLOGY.RDF_TYPE}>
+            <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+        }
+      }
+    `);
+    expect(inserted).toEqual({ type: 'boolean', value: true });
+  });
+
+  it('does not catalogue ontology rows that lack a ContextGraph definition', async () => {
+    const { handler, subscriptions } = createHandler();
+    const id = 'ontology-name-only';
+    const data = makePublishMessage({
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      nquads: [
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.SCHEMA_NAME}> "Not A Definition" <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.RDF_TYPE}> <http://schema.org/Thing> <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+      ].join('\n'),
+    });
+
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+
+    expect(subscriptions.has(id)).toBe(false);
+  });
+
   it('keeps legacy subscription-map fallback when setContextGraphSubscription is omitted', async () => {
     const store = new OxigraphStore();
     const subscriptions = new Map<string, ContextGraphSub>();
@@ -228,7 +284,6 @@ describe('GossipPublishHandler', () => {
       {
         contextGraphExists: async () => false,
         getContextGraphOwner: async () => null,
-        subscribeToContextGraph: () => {},
       },
     );
 
@@ -245,7 +300,7 @@ describe('GossipPublishHandler', () => {
 
     expect(subscriptions.get(id)).toMatchObject({
       name: 'Legacy Callback Discovery',
-      subscribed: true,
+      subscribed: false,
       synced: false,
       metaSynced: false,
     });
@@ -262,7 +317,6 @@ describe('GossipPublishHandler', () => {
       {
         contextGraphExists: async () => false,
         getContextGraphOwner: async () => null,
-        subscribeToContextGraph: () => {},
       },
       { requireContextGraphSubscriptionSetter: true },
     )).toThrow('requires setContextGraphSubscription');

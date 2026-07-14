@@ -655,6 +655,31 @@ export interface ContextGraphSub {
   pendingMeta?: boolean;
 }
 
+/**
+ * Metadata that passive discovery is allowed to contribute to the local
+ * Context Graph catalogue.
+ *
+ * Discovery deliberately cannot choose membership, sync, hosting, or VM
+ * reconciliation state. Those transitions belong to explicit edge intent or
+ * to the temporary core compatibility activation performed by DKGAgent after
+ * recording a newly discovered graph (remove with host-mode separation #1611).
+ */
+export interface ContextGraphDiscoveryMetadata {
+  name?: string;
+  onChainId?: string;
+  onChainHash?: string;
+  participantAgents?: string[];
+}
+
+export interface ContextGraphDiscoveryOptions {
+  /**
+   * Whether a newly discovered core subscription joins the ordinary catch-up
+   * scope. Chain registry discovery historically installed gossip handlers
+   * without joining that scope, so its caller passes false.
+   */
+  trackSyncScope?: boolean;
+}
+
 export interface ContextGraphSubscriptionRecord {
   id: string;
   name?: string;
