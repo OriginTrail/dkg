@@ -86,7 +86,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -142,7 +142,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
 
     const newSnapshotCols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as { name: string }[])
       .map(c => c.name);
@@ -632,7 +632,7 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
 
     const upgraded = new DashboardDB({ dataDir: upgradeDir });
     try {
-      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(25);
+      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(27);
 
       const ftsTables = upgraded.db.prepare(
         `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'logs_fts%'`,
@@ -691,6 +691,308 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
     } finally {
       vacuumDb.close();
     }
+  });
+});
+
+describe('DashboardDB — V27 join-approval ledger migration', () => {
+  it('repairs a missing audit-cap trigger on a current-version database', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    expect(raw.pragma('user_version', { simple: true })).toBe(27);
+    raw.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
+    `).get()).toBeTruthy();
+  });
+
+  it('upgrades a V24 database and makes the typed reservation ledger usable', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;
+      DROP TABLE IF EXISTS context_graph_join_policy_audit;
+      DROP TABLE IF EXISTS context_graph_join_approval_ledger;
+    `);
+    raw.pragma('user_version = 24');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
+    expect(db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'context_graph_join_policy_audit'
+    `).get()).toBeTruthy();
+    expect(db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'context_graph_join_approval_ledger'
+    `).get()).toBeTruthy();
+    expect(db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
+    `).get()).toBeTruthy();
+
+    const now = Date.now();
+    const reservation = db.reserveContextGraphAutomaticApproval({
+      contextGraphId: 'cg-v24-upgrade',
+      timestamp: now,
+      contextGraphLimit: 1,
+      nodeLimit: 1,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'v24-upgrade-request',
+      policyVersion: 1,
+      policyEpoch: now,
+    });
+    expect(reservation).toMatchObject({ allowed: true });
+    expect(db.commitContextGraphAutomaticApproval({
+      contextGraphId: 'cg-v24-upgrade',
+      timestamp: now + 1,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'v24-upgrade-request',
+      policyEpoch: now,
+    })).toBe(true);
+    expect(db.listContextGraphJoinPolicyAudit('cg-v24-upgrade').map((row) => row.event_type))
+      .toEqual(['join_auto_reservation', 'join_admission_committed']);
+    expect(db.db.prepare(`
+      SELECT policy_epoch, state, reserved_at, committed_at
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ? AND request_digest = ?
+    `).get('cg-v24-upgrade', 'v24-upgrade-request')).toEqual({
+      policy_epoch: now,
+      state: 'committed',
+      reserved_at: now,
+      committed_at: now + 1,
+    });
+  });
+
+  it('replaces the V26 trigger now that live reservations no longer depend on audit', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TABLE IF EXISTS context_graph_join_approval_ledger;
+      DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;
+      CREATE TRIGGER cap_cg_join_policy_audit_rows
+      AFTER INSERT ON context_graph_join_policy_audit
+      BEGIN
+        DELETE FROM context_graph_join_policy_audit
+        WHERE id <= NEW.id - 100000
+          AND event_type NOT IN (
+            'join_admission_committed',
+            'join_policy_changed'
+          )
+          AND NOT (
+            event_type = 'join_auto_reservation'
+            AND outcome = 'reserved'
+            AND ts >= (CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 3600000)
+          );
+      END;
+    `);
+    raw.prepare(`
+      INSERT INTO context_graph_join_policy_audit (
+        ts, context_graph_id, event_type, outcome
+      ) VALUES (?, ?, 'join_admission_committed', 'approved')
+    `).run(Date.now(), 'cg-v26-preserved-proof');
+    raw.pragma('user_version = 26');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
+    const trigger = db.db.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
+    `).get() as { sql: string };
+    expect(trigger.sql).toContain("'join_admission_committed'");
+    expect(trigger.sql).toContain("'join_policy_changed'");
+    expect(trigger.sql).not.toContain("'join_auto_reservation'");
+    expect(db.listContextGraphJoinPolicyAudit('cg-v26-preserved-proof')).toHaveLength(1);
+  });
+
+  it('projects V26 reservation and commit audit rows into typed ledger state', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    const now = Date.now();
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE IF EXISTS context_graph_join_approval_ledger;');
+    const insert = raw.prepare(`
+      INSERT INTO context_graph_join_policy_audit (
+        ts, context_graph_id, event_type, actor, agent_address, outcome,
+        request_digest, policy_version, details
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insert.run(
+      now,
+      'cg-v26-ledger-migration',
+      'join_auto_reservation',
+      'did:dkg:agent:owner',
+      '0x0000000000000000000000000000000000000001',
+      'reserved',
+      'legacy-request',
+      1,
+      JSON.stringify({ policyEpoch: 777 }),
+    );
+    insert.run(
+      now + 1,
+      'cg-v26-ledger-migration',
+      'join_admission_committed',
+      'did:dkg:agent:owner',
+      '0x0000000000000000000000000000000000000001',
+      'approved',
+      'legacy-request',
+      1,
+      JSON.stringify({ policyEpoch: 777 }),
+    );
+    raw.pragma('user_version = 26');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.prepare(`
+      SELECT policy_epoch, state, reserved_at, committed_at, actor,
+             agent_address, policy_version
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ? AND request_digest = ?
+    `).get('cg-v26-ledger-migration', 'legacy-request')).toEqual({
+      policy_epoch: 777,
+      state: 'committed',
+      reserved_at: now,
+      committed_at: now + 1,
+      actor: 'did:dkg:agent:owner',
+      agent_address: '0x0000000000000000000000000000000000000001',
+      policy_version: 1,
+    });
+    expect(db.commitContextGraphAutomaticApproval({
+      contextGraphId: 'cg-v26-ledger-migration',
+      timestamp: now + 2,
+      actor: 'did:dkg:agent:caller',
+      agentAddress: '0x0000000000000000000000000000000000000002',
+      requestDigest: 'legacy-request',
+      policyEpoch: 777,
+    })).toBe(true);
+    expect(db.listContextGraphJoinPolicyAudit('cg-v26-ledger-migration').filter(
+      (row) => row.event_type === 'join_admission_committed',
+    )).toHaveLength(1);
+  });
+
+  it('caps audit flood noise while ledger reservations keep enforcing limits', () => {
+    const now = Date.now();
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: now,
+      contextGraphId: 'cg-old-noise',
+      eventType: 'join_auto_decision',
+      outcome: 'pending',
+    });
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: now,
+      contextGraphId: 'cg-proof',
+      eventType: 'join_admission_committed',
+      outcome: 'approved',
+      requestDigest: 'committed-request',
+    });
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: now,
+      contextGraphId: 'cg-proof',
+      eventType: 'join_policy_changed',
+      outcome: 'open',
+    });
+    expect(db.reserveContextGraphAutomaticApproval({
+      contextGraphId: 'cg-reservation-cap-v27',
+      timestamp: now,
+      contextGraphLimit: 1,
+      nodeLimit: 100,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'live-reservation',
+      policyVersion: 1,
+      policyEpoch: now,
+    })).toMatchObject({ allowed: true });
+
+    // Advance the AUTOINCREMENT high-water so one insert crosses the cap
+    // without allocating 100k fixture rows. The first four rows are all below
+    // the trigger cutoff. Audit reservations may now be removed because the
+    // dedicated ledger, rather than an audit event name/JSON shape, owns quota.
+    db.db.prepare(`UPDATE sqlite_sequence SET seq = 100004 WHERE name = ?`)
+      .run('context_graph_join_policy_audit');
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: now,
+      contextGraphId: 'cg-new-noise',
+      eventType: 'join_admission_failed',
+      outcome: 'pending',
+    });
+
+    const retained = db.db.prepare(`
+      SELECT context_graph_id, event_type
+      FROM context_graph_join_policy_audit
+      ORDER BY id ASC
+    `).all() as Array<{ context_graph_id: string; event_type: string }>;
+    expect(retained).not.toContainEqual({
+      context_graph_id: 'cg-old-noise',
+      event_type: 'join_auto_decision',
+    });
+    expect(retained).not.toContainEqual({
+      context_graph_id: 'cg-reservation-cap-v27',
+      event_type: 'join_auto_reservation',
+    });
+    expect(retained).toEqual(expect.arrayContaining([
+      { context_graph_id: 'cg-proof', event_type: 'join_admission_committed' },
+      { context_graph_id: 'cg-proof', event_type: 'join_policy_changed' },
+      { context_graph_id: 'cg-new-noise', event_type: 'join_admission_failed' },
+    ]));
+
+    expect(db.reserveContextGraphAutomaticApproval({
+      contextGraphId: 'cg-reservation-cap-v27',
+      timestamp: now + 1,
+      contextGraphLimit: 1,
+      nodeLimit: 100,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000002',
+      requestDigest: 'rate-limited-request',
+      policyVersion: 1,
+      policyEpoch: now,
+    })).toMatchObject({ allowed: false, reason: 'context-graph-rate-limit' });
+  });
+
+  it('still applies time retention to volume-cap-exempt proof events', () => {
+    expect(db.reserveContextGraphAutomaticApproval({
+      timestamp: 1,
+      contextGraphId: 'cg-expired-proof',
+      contextGraphLimit: 1,
+      nodeLimit: 1,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'expired-ledger-state',
+      policyVersion: 1,
+      policyEpoch: 1,
+    })).toMatchObject({ allowed: true });
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: 1,
+      contextGraphId: 'cg-expired-proof',
+      eventType: 'join_admission_committed',
+      outcome: 'approved',
+    });
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: 1,
+      contextGraphId: 'cg-expired-proof',
+      eventType: 'join_policy_changed',
+      outcome: 'manual',
+    });
+
+    db.prune();
+    expect(db.listContextGraphJoinPolicyAudit('cg-expired-proof')).toHaveLength(0);
+    expect(db.db.prepare(`
+      SELECT COUNT(*) AS count FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = 'cg-expired-proof'
+    `).get()).toEqual({ count: 0 });
   });
 });
 
@@ -872,7 +1174,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -893,7 +1195,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
       .map((c) => c.name);
     expect(cols).toContain('on_chain_hash');
     expect(cols).toContain('last_reconciled_ordinal');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
   });
 });
 
@@ -977,7 +1279,7 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1006,7 +1308,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
   });
 
   it('fresh install lands at the current schema and already carries the ka_numbers table', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -1043,7 +1345,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -1136,7 +1438,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   });
 
   it('fresh install carries the sync_checkpoints table and expiry index', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
     const tables = db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all();
@@ -1202,7 +1504,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
     expect(db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all()).toHaveLength(1);
@@ -1651,7 +1953,7 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1717,7 +2019,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
 
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1746,7 +2048,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toContain('context_graph_id');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
   });
 
   it('insertNotification writes context_graph_id to the column; omitted → NULL', () => {
@@ -1989,7 +2291,7 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
     raw.pragma('user_version = 17');
     raw.close();
     const upgraded = new DashboardDB({ dataDir: dir });
-    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(27);
     // insert works → table exists
     upgraded.insertReplicationEvent({ ts: now, context_graph_id: 'cg', action: 'promote' });
     expect(upgraded.getReplicationSummary(60_000).promotes).toBe(1);
@@ -2044,6 +2346,6 @@ describe('SqliteChangelogEraGuard — OT-RFC-59 §6 P0 durable era guard', () =>
       .map((t) => t.name);
     expect(tables).toContain('changelog_cursors');
     expect(tables).toContain('changelog_era');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
   });
 });

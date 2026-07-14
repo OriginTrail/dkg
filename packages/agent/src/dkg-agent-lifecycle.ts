@@ -2174,14 +2174,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'missing fields' }));
         }
-        // Reserve before any attacker-controlled CG lookup or signature work.
-        // The shared processing lane is told that this reservation is already
-        // held, while local HTTP callers continue to reserve inside it.
+        // Reserve the transport-authenticated peer and queue slot before any
+        // attacker-controlled CG lookup or signature work. Payload-derived CG
+        // and agent buckets are charged only after verification in the shared
+        // processing lane.
         const releaseIngress = this.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)
           ? () => {}
           : this.reserveContextGraphJoinIngress(
               contextGraphId,
-              delegation.agentAddress,
               peerId.toString(),
             );
         try {
@@ -2246,8 +2246,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }
           return new TextEncoder().encode(JSON.stringify({
             ok: true,
-            ...(!decision.alreadyMember ? { status: decision.status } : {}),
-            ...(decision.alreadyMember ? { alreadyMember: true } : {}),
+            status: decision.status,
+            // Origin/main requesters only understand `alreadyMember` and may
+            // drop the immediate approval notification before the response
+            // establishes curator trust. Alias every completed approval so a
+            // rolling-upgrade requester still transitions synchronously.
+            ...(decision.alreadyMember || decision.status === 'approved'
+              ? { alreadyMember: true }
+              : {}),
             ...(decision.autoApproved ? { autoApproved: true } : {}),
           }));
         } finally {

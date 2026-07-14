@@ -45,9 +45,9 @@ describe('V12 migration', () => {
     // `message_idempotency` table. Both bumps are tested at the
     // DB layer in `db.test.ts`; this assertion just pins that
     // the substrate store fixtures are created against the
-    // current SCHEMA_VERSION (now 24 after the OT-RFC-59 changelog_cursors
-    // and changelog_era tables were added).
-    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
+    // current SCHEMA_VERSION (now 27 after admission state moved into a
+    // dedicated typed ledger).
+    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
   });
 });
 

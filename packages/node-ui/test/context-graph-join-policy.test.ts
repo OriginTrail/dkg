@@ -49,6 +49,40 @@ describe('DashboardDB context graph join policy', () => {
       `contextGraphJoinPolicy:${contextGraphId}`,
     );
     expect(second.getContextGraphJoinPolicy(contextGraphId)).toBeNull();
+
+    second.db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(
+      JSON.stringify({
+        version: 1,
+        contextGraphId,
+        mode: 'open',
+        ownerDid: 'did:dkg:agent:0x1234567890123456789012345678901234567890',
+        maxMembers: 10_001,
+        maxApprovalsPerHour: 20,
+        updatedAt: 1235,
+      }),
+      `contextGraphJoinPolicy:${contextGraphId}`,
+    );
+    expect(second.getContextGraphJoinPolicy(contextGraphId)).toBeNull();
+
+    second.db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(
+      JSON.stringify({
+        version: 1,
+        contextGraphId,
+        mode: 'manual',
+        ownerDid: 'did:dkg:agent:0x1234567890123456789012345678901234567890',
+        maxMembers: 10_001,
+        maxApprovalsPerHour: 1_001,
+        updatedAt: 1236,
+      }),
+      `contextGraphJoinPolicy:${contextGraphId}`,
+    );
+    expect(second.getContextGraphJoinPolicy(contextGraphId)).toEqual({
+      version: 1,
+      contextGraphId,
+      mode: 'manual',
+      ownerDid: 'did:dkg:agent:0x1234567890123456789012345678901234567890',
+      updatedAt: 1236,
+    });
     second.close();
   });
 
@@ -96,7 +130,24 @@ describe('DashboardDB context graph join policy', () => {
       nodeApprovalsLastHour: 3,
     });
 
-    expect(db.listContextGraphJoinPolicyAudit('cg-a')).toHaveLength(2);
+    const nextWindow = at + 60 * 60 * 1000 + 1;
+    expect(db.reserveContextGraphAutomaticApproval({
+      contextGraphId: 'cg-a',
+      timestamp: nextWindow,
+      contextGraphLimit: 2,
+      nodeLimit: 3,
+      actor: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+      agentAddress: '0x0000000000000000000000000000000000000006',
+      requestDigest: 'next-window-request',
+      policyVersion: 1,
+      policyEpoch: 100,
+    })).toMatchObject({
+      allowed: true,
+      contextGraphApprovalsLastHour: 1,
+      nodeApprovalsLastHour: 1,
+    });
+
+    expect(db.listContextGraphJoinPolicyAudit('cg-a')).toHaveLength(3);
     expect(db.listContextGraphJoinPolicyAudit('cg-b')).toHaveLength(1);
     db.close();
   });
@@ -131,6 +182,7 @@ describe('DashboardDB context graph join policy', () => {
       actor: 'did:dkg:agent:caller',
       agentAddress: '0x0000000000000000000000000000000000000002',
       requestDigest: 'reserved-request',
+      policyEpoch: 1234,
       details: { memberCountBefore: 1, policyEpoch: -1 },
     };
 
@@ -211,8 +263,9 @@ describe('DashboardDB context graph join policy', () => {
     db.close();
   });
 
-  it('time-prunes policy audit rows and installs a hard row-cap trigger', () => {
+  it('time-prunes audit independently while live ledger quota remains authoritative', () => {
     const { db } = createDb();
+    const now = Date.now();
     db.appendContextGraphJoinPolicyAudit({
       timestamp: 1,
       contextGraphId: 'cg-old-audit',
@@ -220,15 +273,46 @@ describe('DashboardDB context graph join policy', () => {
       outcome: 'pending',
     });
     db.appendContextGraphJoinPolicyAudit({
-      timestamp: Date.now(),
+      timestamp: now,
       contextGraphId: 'cg-new-audit',
       eventType: 'join_auto_decision',
       outcome: 'pending',
     });
+    expect(db.reserveContextGraphAutomaticApproval({
+      timestamp: now,
+      contextGraphId: 'cg-pruned-reservation-audit',
+      contextGraphLimit: 1,
+      nodeLimit: 10,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'live-ledger-request',
+      policyVersion: 1,
+      policyEpoch: 10,
+    })).toMatchObject({ allowed: true });
+    db.db.prepare(`
+      UPDATE context_graph_join_policy_audit SET ts = 1
+      WHERE context_graph_id = 'cg-pruned-reservation-audit'
+    `).run();
 
     db.prune();
     expect(db.listContextGraphJoinPolicyAudit('cg-old-audit')).toHaveLength(0);
     expect(db.listContextGraphJoinPolicyAudit('cg-new-audit')).toHaveLength(1);
+    expect(db.listContextGraphJoinPolicyAudit('cg-pruned-reservation-audit')).toHaveLength(0);
+    expect(db.getContextGraphAutomaticApprovalUsage('cg-pruned-reservation-audit', now)).toEqual({
+      contextGraphApprovalsLastHour: 1,
+      nodeApprovalsLastHour: 1,
+    });
+    expect(db.reserveContextGraphAutomaticApproval({
+      timestamp: now + 1,
+      contextGraphId: 'cg-pruned-reservation-audit',
+      contextGraphLimit: 1,
+      nodeLimit: 10,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000002',
+      requestDigest: 'blocked-by-live-ledger',
+      policyVersion: 1,
+      policyEpoch: 10,
+    })).toMatchObject({ allowed: false, reason: 'context-graph-rate-limit' });
     expect(db.db.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
@@ -236,7 +320,7 @@ describe('DashboardDB context graph join policy', () => {
     db.close();
   });
 
-  it('never evicts a live approval reservation while volume-capping audit rows', () => {
+  it('volume-caps reservation audit rows without evicting operational ledger state', () => {
     const { db } = createDb();
     const now = Date.now();
     const first = db.reserveContextGraphAutomaticApproval({
@@ -262,6 +346,8 @@ describe('DashboardDB context graph join policy', () => {
       eventType: 'join_auto_decision',
       outcome: 'pending',
     });
+
+    expect(db.listContextGraphJoinPolicyAudit('cg-reservation-cap')).toHaveLength(0);
 
     expect(db.reserveContextGraphAutomaticApproval({
       contextGraphId: 'cg-reservation-cap',
@@ -300,6 +386,52 @@ describe('DashboardDB context graph join policy', () => {
       allowed: false,
       reason: 'context-graph-rate-limit',
     });
+    db.close();
+  });
+
+  it('commits the exact policy epoch even when the wall clock moves backward', () => {
+    const { db } = createDb();
+    const contextGraphId = 'cg-clock-rollback';
+    const requestDigest = 'same-request-multiple-epochs';
+    const actor = 'did:dkg:agent:owner';
+    const agentAddress = '0x0000000000000000000000000000000000000001';
+    const reserve = (timestamp: number, policyEpoch: number) =>
+      db.reserveContextGraphAutomaticApproval({
+        contextGraphId,
+        timestamp,
+        contextGraphLimit: 3,
+        nodeLimit: 10,
+        actor,
+        agentAddress,
+        requestDigest,
+        policyVersion: 1,
+        policyEpoch,
+      });
+
+    expect(reserve(20_000_000, 100)).toMatchObject({ allowed: true });
+    // Newer policy generation, older wall-clock timestamp.
+    expect(reserve(19_999_000, 101)).toMatchObject({ allowed: true });
+    expect(db.commitContextGraphAutomaticApproval({
+      contextGraphId,
+      timestamp: 20_000_001,
+      actor,
+      agentAddress,
+      requestDigest,
+      policyEpoch: 101,
+    })).toBe(true);
+
+    expect(db.db.prepare(`
+      SELECT policy_epoch, state, committed_at
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ? AND request_digest = ?
+      ORDER BY policy_epoch ASC
+    `).all(contextGraphId, requestDigest)).toEqual([
+      { policy_epoch: 100, state: 'reserved', committed_at: null },
+      { policy_epoch: 101, state: 'committed', committed_at: 20_000_001 },
+    ]);
+    const commitAudit = db.listContextGraphJoinPolicyAudit(contextGraphId)
+      .find((row) => row.event_type === 'join_admission_committed');
+    expect(JSON.parse(commitAudit?.details as string)).toMatchObject({ policyEpoch: 101 });
     db.close();
   });
 });

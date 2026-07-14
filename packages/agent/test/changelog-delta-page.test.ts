@@ -127,8 +127,15 @@ describe('readChangelogDeltaPage — delta serving', () => {
       [delegation, 'https://dkg.network/ontology#allowedDelegateePeer', '"12D3KooWAuthorized"', topMeta],
       [joinRequest, 'https://dkg.network/ontology#requesterPeerId', '"12D3KooWPrivateApplicant"', topMeta],
       ['urn:ordinary:data', 'urn:p', '"ordinary"', G1],
+      ['_:ordinary-blank-node', 'urn:p', '"blank-node-preserved"', G1],
       [joinRequest, 'urn:p', '"misplaced-private-moderation"', G1],
     ]);
+    const queries: string[] = [];
+    const query = store.query.bind(store);
+    store.query = async (sparql, options) => {
+      queries.push(sparql);
+      return query(sparql, options);
+    };
     const resp = await readChangelogDeltaPage({
       reader: new FakeReader({ era: 'E1', seq: 2 }, [rec(1, topMeta, 'upsert'), rec(2, G1, 'upsert')]),
       store, contextGraphId: CG, sinceSeq: 0, requesterEra: 'E1', limit: 100,
@@ -146,8 +153,23 @@ describe('readChangelogDeltaPage — delta serving', () => {
     // escape through another admitted graph either; unrelated data remains.
     const dataRecord = resp.records.find((record) => record.graph === G1);
     expect(dataRecord?.quads).toContain('"ordinary"');
+    expect(dataRecord?.quads).toContain('"blank-node-preserved"');
     expect(dataRecord?.quads).not.toContain(joinRequest);
     expect(dataRecord?.quads).not.toContain('misplaced-private-moderation');
+
+    // Redaction happens inside the graph read, before any moderation rows are
+    // returned to Node. This guards against reintroducing the old read-all then
+    // JS-filter path, whose memory cost grew with the full moderation history.
+    const graphReads = queries.filter((sparql) =>
+      sparql.includes('GRAPH ?g { ?s ?p ?o }') &&
+      sparql.includes('VALUES ?g'),
+    );
+    expect(graphReads).toHaveLength(2);
+    for (const sparql of graphReads) {
+      expect(sparql).toContain(
+        'FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), "did:dkg:join-request:"))',
+      );
+    }
     await store.close();
   });
 

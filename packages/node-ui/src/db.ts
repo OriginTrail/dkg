@@ -8,6 +8,8 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxStore,
+  type ContextGraphJoinPolicyRecord,
+  parseContextGraphJoinPolicyRecord,
 } from '@origintrail-official/dkg-core';
 
 export {
@@ -15,7 +17,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 25;
+const SCHEMA_VERSION = 27;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -121,15 +123,7 @@ export interface LogVolumePruneResult {
   status: 'more' | 'reclaim-pending' | 'done' | 'done-compacted';
 }
 
-export interface StoredContextGraphJoinPolicy {
-  version: 1;
-  contextGraphId: string;
-  mode: 'manual' | 'open';
-  ownerDid: string;
-  maxMembers?: number;
-  maxApprovalsPerHour?: number;
-  updatedAt: number;
-}
+export type StoredContextGraphJoinPolicy = ContextGraphJoinPolicyRecord;
 
 export interface ContextGraphJoinPolicyAuditInput {
   timestamp: number;
@@ -169,7 +163,22 @@ export interface ContextGraphAutomaticApprovalCommitInput {
   actor: string;
   agentAddress: string;
   requestDigest: string;
+  policyEpoch: number;
   details?: Record<string, unknown>;
+}
+
+type ContextGraphAutomaticApprovalLedgerState = 'reserved' | 'committed';
+
+interface ContextGraphAutomaticApprovalLedgerRow {
+  context_graph_id: string;
+  request_digest: string;
+  policy_epoch: number;
+  reserved_at: number;
+  state: ContextGraphAutomaticApprovalLedgerState;
+  committed_at: number | null;
+  actor: string;
+  agent_address: string;
+  policy_version: number;
 }
 
 /**
@@ -242,7 +251,25 @@ export class DashboardDB {
   private migrate(): void {
     const version = this.db.pragma('user_version', { simple: true }) as number;
     const upgradedExistingDb = version > 0 && version < SCHEMA_VERSION;
-    if (version >= SCHEMA_VERSION) return;
+    const ensureJoinPolicyAuditCapTrigger = () => this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS cap_cg_join_policy_audit_rows
+      AFTER INSERT ON context_graph_join_policy_audit
+      BEGIN
+        DELETE FROM context_graph_join_policy_audit
+        WHERE id <= NEW.id - 100000
+          AND event_type NOT IN (
+            'join_admission_committed',
+            'join_policy_changed'
+          );
+      END;
+    `);
+    if (version > SCHEMA_VERSION) return;
+    if (version === SCHEMA_VERSION) {
+      // Repair restored/development databases that carry the current version
+      // but lost the idempotent audit-cap trigger.
+      ensureJoinPolicyAuditCapTrigger();
+      return;
+    }
 
     if (version < 1) {
       this.db.exec(`
@@ -921,9 +948,9 @@ export class DashboardDB {
     }
 
     if (version < 25) {
-      // Durable security audit for private-CG open enrollment. Rate-limit
-      // reservations live in the same table so the count+reserve transaction
-      // remains atomic across concurrent join requests and daemon restarts.
+      // Durable security audit for private-CG open enrollment. V25/V26 also
+      // used this table as admission state; V27 projects those legacy rows into
+      // the typed operational ledger below.
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS context_graph_join_policy_audit (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -947,22 +974,138 @@ export class DashboardDB {
       `);
     }
 
-    // Keep the append-only security trail bounded even under a signed-wallet
-    // request flood. This is outside the version gate so development builds or
-    // restored DBs that already report schema 25 still acquire the trigger.
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS cap_cg_join_policy_audit_rows
-      AFTER INSERT ON context_graph_join_policy_audit
-      BEGIN
-        DELETE FROM context_graph_join_policy_audit
-        WHERE id <= NEW.id - 100000
-          AND NOT (
-            event_type = 'join_auto_reservation'
+    if (version < 26) {
+      // Bound flood-generated decision noise without letting that same flood
+      // erase the two records needed to reconstruct a private-CG admission:
+      // who changed the policy, and who was automatically admitted under it.
+      // V26 additionally retained live reservations because they still enforced
+      // the rolling one-hour ceilings. V27 removes that dependency below.
+      //
+      // V25 already installed this trigger, so DROP before CREATE is required:
+      // CREATE TRIGGER IF NOT EXISTS would silently preserve the old predicate
+      // on an upgraded database.
+      this.db.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
+    }
+
+    if (version < 27) {
+      // Operational admission state is deliberately separate from the audit
+      // stream. Audit retention and event naming must never alter rate-limit,
+      // epoch, or commit-idempotency behaviour.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_join_approval_ledger (
+          context_graph_id TEXT NOT NULL,
+          request_digest TEXT NOT NULL,
+          policy_epoch INTEGER NOT NULL,
+          reserved_at INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('reserved', 'committed')),
+          committed_at INTEGER,
+          actor TEXT NOT NULL,
+          agent_address TEXT NOT NULL,
+          policy_version INTEGER NOT NULL,
+          PRIMARY KEY (context_graph_id, request_digest, policy_epoch),
+          CHECK (length(context_graph_id) > 0),
+          CHECK (length(request_digest) > 0),
+          CHECK (typeof(policy_epoch) = 'integer'),
+          CHECK (typeof(reserved_at) = 'integer'),
+          CHECK (committed_at IS NULL OR typeof(committed_at) = 'integer'),
+          CHECK (typeof(policy_version) = 'integer'),
+          CHECK (
+            (state = 'reserved' AND committed_at IS NULL)
+            OR (state = 'committed' AND committed_at IS NOT NULL)
+          )
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_reserved_at
+          ON context_graph_join_approval_ledger(reserved_at);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_cg_reserved_at
+          ON context_graph_join_approval_ledger(context_graph_id, reserved_at);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_digest_reserved_at
+          ON context_graph_join_approval_ledger(context_graph_id, request_digest, reserved_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_committed_at
+          ON context_graph_join_approval_ledger(committed_at);
+      `);
+
+      // Best-effort one-time projection for V25/V26 databases. Invalid legacy
+      // JSON cannot abort startup; only rows with a typed numeric epoch can be
+      // authoritative operational state. For duplicate audit reservations,
+      // retain the newest row for each (CG, digest, epoch).
+      this.db.exec(`
+        WITH raw_reservations AS (
+          SELECT
+            id,
+            context_graph_id,
+            request_digest,
+            CASE
+              WHEN json_valid(details)
+                AND json_type(details, '$.policyEpoch') IN ('integer', 'real')
+                THEN CAST(json_extract(details, '$.policyEpoch') AS INTEGER)
+              ELSE NULL
+            END AS policy_epoch,
+            ts AS reserved_at,
+            COALESCE(actor, '') AS actor,
+            COALESCE(agent_address, '') AS agent_address,
+            COALESCE(policy_version, 1) AS policy_version
+          FROM context_graph_join_policy_audit
+          WHERE event_type = 'join_auto_reservation'
             AND outcome = 'reserved'
-            AND ts >= (CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 3600000)
-          );
-      END;
-    `);
+            AND request_digest IS NOT NULL
+        ),
+        ranked_reservations AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY context_graph_id, request_digest, policy_epoch
+            ORDER BY reserved_at DESC, id DESC
+          ) AS rank
+          FROM raw_reservations
+          WHERE policy_epoch IS NOT NULL
+        ),
+        raw_commits AS (
+          SELECT
+            context_graph_id,
+            request_digest,
+            CASE
+              WHEN json_valid(details)
+                AND json_type(details, '$.policyEpoch') IN ('integer', 'real')
+                THEN CAST(json_extract(details, '$.policyEpoch') AS INTEGER)
+              ELSE NULL
+            END AS policy_epoch,
+            MIN(ts) AS committed_at
+          FROM context_graph_join_policy_audit
+          WHERE event_type = 'join_admission_committed'
+            AND outcome = 'approved'
+            AND request_digest IS NOT NULL
+          GROUP BY context_graph_id, request_digest, policy_epoch
+        )
+        INSERT OR IGNORE INTO context_graph_join_approval_ledger (
+          context_graph_id, request_digest, policy_epoch, reserved_at,
+          state, committed_at, actor, agent_address, policy_version
+        )
+        SELECT
+          reservation.context_graph_id,
+          reservation.request_digest,
+          reservation.policy_epoch,
+          reservation.reserved_at,
+          CASE WHEN commit_row.committed_at IS NULL THEN 'reserved' ELSE 'committed' END,
+          commit_row.committed_at,
+          reservation.actor,
+          reservation.agent_address,
+          reservation.policy_version
+        FROM ranked_reservations AS reservation
+        LEFT JOIN raw_commits AS commit_row
+          ON commit_row.context_graph_id = reservation.context_graph_id
+         AND commit_row.request_digest = reservation.request_digest
+         AND commit_row.policy_epoch = reservation.policy_epoch
+        WHERE reservation.rank = 1;
+      `);
+
+      // V26's trigger protected live reservation audit rows because they were
+      // operational state. The ledger makes that coupling obsolete, so replace
+      // the trigger while preserving the flood-resistant proof exemptions.
+      this.db.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
+    }
+
+    // Keep this repair outside the version gate. Restored/development DBs can
+    // carry the current user_version while missing a trigger; recreating it is
+    // idempotent and keeps the audit bound fail-closed on every open.
+    ensureJoinPolicyAuditCapTrigger();
 
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
@@ -1001,6 +1144,15 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM notifications WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM replication_events WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM context_graph_join_policy_audit WHERE ts < ${cutoff}`);
+    // The admission ledger has its own typed lifetime. It intentionally does
+    // not depend on whether the corresponding audit rows still exist. Preserve
+    // the historical retention envelope for durable commit idempotency while
+    // allowing fully expired reservation/commit state to age out.
+    this.db.prepare(`
+      DELETE FROM context_graph_join_approval_ledger
+      WHERE reserved_at < ?
+        AND (committed_at IS NULL OR committed_at < ?)
+    `).run(cutoff, cutoff);
     this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(Date.now());
     // Universal Messenger idempotency table. Shorter TTL than the
     // operator retention: no realistic dedup window extends beyond
@@ -1312,41 +1464,7 @@ export class DashboardDB {
     ).get(this.contextGraphJoinPolicyKey(contextGraphId)) as { value: string } | undefined;
     if (!row) return null;
     try {
-      const parsed = JSON.parse(row.value) as Partial<StoredContextGraphJoinPolicy>;
-      if (
-        parsed.version !== 1 ||
-        parsed.contextGraphId !== contextGraphId ||
-        (parsed.mode !== 'manual' && parsed.mode !== 'open') ||
-        typeof parsed.ownerDid !== 'string' ||
-        !parsed.ownerDid ||
-        typeof parsed.updatedAt !== 'number' ||
-        !Number.isFinite(parsed.updatedAt)
-      ) {
-        return null;
-      }
-      if (parsed.mode === 'open' && (
-        !Number.isInteger(parsed.maxMembers) ||
-        (parsed.maxMembers ?? 0) <= 0 ||
-        (parsed.maxMembers ?? 0) > 10_000 ||
-        !Number.isInteger(parsed.maxApprovalsPerHour) ||
-        (parsed.maxApprovalsPerHour ?? 0) <= 0 ||
-        (parsed.maxApprovalsPerHour ?? 0) > 1_000
-      )) {
-        return null;
-      }
-      return {
-        version: 1,
-        contextGraphId,
-        mode: parsed.mode,
-        ownerDid: parsed.ownerDid,
-        ...(parsed.mode === 'open'
-          ? {
-              maxMembers: parsed.maxMembers!,
-              maxApprovalsPerHour: parsed.maxApprovalsPerHour!,
-            }
-          : {}),
-        updatedAt: parsed.updatedAt,
-      };
+      return parseContextGraphJoinPolicyRecord(JSON.parse(row.value), contextGraphId);
     } catch {
       // Corrupt policy state is indistinguishable from no policy. The agent's
       // default is manual, so this is intentionally fail-closed.
@@ -1399,30 +1517,24 @@ export class DashboardDB {
       const since = input.timestamp - 60 * 60 * 1000;
       const cgRow = this.stmt('countContextGraphAutomaticApprovalReservations', `
         SELECT COUNT(*) AS count
-        FROM context_graph_join_policy_audit
-        WHERE event_type = 'join_auto_reservation'
-          AND outcome = 'reserved'
-          AND context_graph_id = ?
-          AND ts >= ?
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
+          AND reserved_at >= ?
       `).get(input.contextGraphId, since) as { count: number };
       const nodeRow = this.stmt('countNodeAutomaticApprovalReservations', `
         SELECT COUNT(*) AS count
-        FROM context_graph_join_policy_audit
-        WHERE event_type = 'join_auto_reservation'
-          AND outcome = 'reserved'
-          AND ts >= ?
+        FROM context_graph_join_approval_ledger
+        WHERE reserved_at >= ?
       `).get(since) as { count: number };
       const contextGraphCount = Number(cgRow?.count ?? 0);
       const nodeCount = Number(nodeRow?.count ?? 0);
       const existing = this.stmt('findContextGraphAutomaticApprovalReservation', `
         SELECT 1 AS found
-        FROM context_graph_join_policy_audit
-        WHERE event_type = 'join_auto_reservation'
-          AND outcome = 'reserved'
-          AND context_graph_id = ?
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
           AND request_digest = ?
-          AND CAST(json_extract(details, '$.policyEpoch') AS INTEGER) = ?
-          AND ts >= ?
+          AND policy_epoch = ?
+          AND reserved_at >= ?
         LIMIT 1
       `).get(
         input.contextGraphId,
@@ -1453,6 +1565,31 @@ export class DashboardDB {
           reason: 'node-rate-limit',
         };
       }
+
+      // The typed ledger row and its audit projection share one transaction:
+      // failures cannot consume quota without an audit event or emit an audit
+      // reservation without durable operational state. An expired replay of
+      // the same digest+epoch refreshes its reservation timestamp and consumes
+      // the rolling-window quota again, matching the former append-only model.
+      this.stmt('upsertContextGraphAutomaticApprovalReservation', `
+        INSERT INTO context_graph_join_approval_ledger (
+          context_graph_id, request_digest, policy_epoch, reserved_at,
+          state, committed_at, actor, agent_address, policy_version
+        ) VALUES (?, ?, ?, ?, 'reserved', NULL, ?, ?, ?)
+        ON CONFLICT(context_graph_id, request_digest, policy_epoch) DO UPDATE SET
+          reserved_at = excluded.reserved_at,
+          actor = excluded.actor,
+          agent_address = excluded.agent_address,
+          policy_version = excluded.policy_version
+      `).run(
+        input.contextGraphId,
+        input.requestDigest,
+        input.policyEpoch,
+        input.timestamp,
+        input.actor,
+        input.agentAddress,
+        input.policyVersion,
+      );
       this.appendContextGraphJoinPolicyAudit({
         timestamp: input.timestamp,
         contextGraphId: input.contextGraphId,
@@ -1481,64 +1618,49 @@ export class DashboardDB {
     input: ContextGraphAutomaticApprovalCommitInput,
   ): boolean {
     const commit = this.db.transaction((): boolean => {
-      const reservation = this.stmt('findLatestContextGraphAutomaticApprovalReservation', `
-        SELECT actor, agent_address, policy_version, details
-        FROM context_graph_join_policy_audit
-        WHERE event_type = 'join_auto_reservation'
-          AND outcome = 'reserved'
-          AND context_graph_id = ?
+      const reservation = this.stmt('findExactContextGraphAutomaticApprovalReservation', `
+        SELECT context_graph_id, request_digest, policy_epoch, reserved_at,
+               state, committed_at, actor, agent_address, policy_version
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
           AND request_digest = ?
-        ORDER BY id DESC
-        LIMIT 1
-      `).get(input.contextGraphId, input.requestDigest) as {
-        actor: string | null;
-        agent_address: string | null;
-        policy_version: number | null;
-        details: string | null;
-      } | undefined;
-      if (!reservation) return false;
-
-      let reservationDetails: Record<string, unknown>;
-      try {
-        reservationDetails = reservation.details
-          ? JSON.parse(reservation.details) as Record<string, unknown>
-          : {};
-      } catch {
-        throw new Error('Automatic approval reservation contains invalid audit details.');
-      }
-      const policyEpoch = reservationDetails.policyEpoch;
-      if (typeof policyEpoch !== 'number' || !Number.isFinite(policyEpoch)) {
-        throw new Error('Automatic approval reservation is missing its policy epoch.');
-      }
-
-      const existing = this.stmt('findCommittedContextGraphAutomaticApproval', `
-        SELECT 1 AS found
-        FROM context_graph_join_policy_audit
-        WHERE event_type = 'join_admission_committed'
-          AND outcome = 'approved'
-          AND context_graph_id = ?
-          AND request_digest = ?
-          AND CAST(json_extract(details, '$.policyEpoch') AS INTEGER) = ?
+          AND policy_epoch = ?
         LIMIT 1
       `).get(
         input.contextGraphId,
         input.requestDigest,
-        policyEpoch,
-      ) as { found: number } | undefined;
-      if (existing) return true;
+        input.policyEpoch,
+      ) as ContextGraphAutomaticApprovalLedgerRow | undefined;
+      if (!reservation) return false;
+      if (reservation.state === 'committed') return true;
+
+      const updated = this.stmt('commitContextGraphAutomaticApprovalReservation', `
+        UPDATE context_graph_join_approval_ledger
+        SET state = 'committed', committed_at = ?
+        WHERE context_graph_id = ?
+          AND request_digest = ?
+          AND policy_epoch = ?
+          AND state = 'reserved'
+      `).run(
+        input.timestamp,
+        reservation.context_graph_id,
+        reservation.request_digest,
+        reservation.policy_epoch,
+      );
+      if (updated.changes !== 1) return false;
 
       this.appendContextGraphJoinPolicyAudit({
         timestamp: input.timestamp,
         contextGraphId: input.contextGraphId,
         eventType: 'join_admission_committed',
-        actor: reservation.actor ?? input.actor,
-        agentAddress: reservation.agent_address ?? input.agentAddress,
+        actor: reservation.actor || input.actor,
+        agentAddress: reservation.agent_address || input.agentAddress,
         outcome: 'approved',
         requestDigest: input.requestDigest,
-        policyVersion: reservation.policy_version ?? undefined,
+        policyVersion: reservation.policy_version,
         details: {
           ...input.details,
-          policyEpoch,
+          policyEpoch: reservation.policy_epoch,
         },
       });
       return true;
@@ -1553,18 +1675,14 @@ export class DashboardDB {
     const since = timestamp - 60 * 60 * 1000;
     const contextGraphApprovalsLastHour = Number((this.stmt('getContextGraphAutomaticApprovalUsage', `
       SELECT COUNT(*) AS count
-      FROM context_graph_join_policy_audit
-      WHERE event_type = 'join_auto_reservation'
-        AND outcome = 'reserved'
-        AND context_graph_id = ?
-        AND ts >= ?
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ?
+        AND reserved_at >= ?
     `).get(contextGraphId, since) as { count: number } | undefined)?.count ?? 0);
     const nodeApprovalsLastHour = Number((this.stmt('getNodeAutomaticApprovalUsage', `
       SELECT COUNT(*) AS count
-      FROM context_graph_join_policy_audit
-      WHERE event_type = 'join_auto_reservation'
-        AND outcome = 'reserved'
-        AND ts >= ?
+      FROM context_graph_join_approval_ledger
+      WHERE reserved_at >= ?
     `).get(since) as { count: number } | undefined)?.count ?? 0);
     return { contextGraphApprovalsLastHour, nodeApprovalsLastHour };
   }

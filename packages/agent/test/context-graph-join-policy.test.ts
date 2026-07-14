@@ -10,6 +10,8 @@ import {
   type ContextGraphJoinPolicyStore,
 } from '../src/index.js';
 import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
+import { ContextGraphJoinAdmissionLockManager } from '../src/context-graph-join-admission-lock.js';
+import { Messenger } from '../src/p2p/messenger.js';
 
 type JoinRequestHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
 
@@ -209,6 +211,98 @@ describe('context graph open enrollment policy', () => {
     });
   }
 
+  it('requires a live same-manager, same-CG admission token before internal mutations', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-lock-capability';
+    const otherContextGraphId = 'private-policy-lock-capability-other';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await createPrivateCg(agent, otherContextGraphId, owner.agentAddress);
+    const joiner = await agent.registerAgent('lock-capability-joiner', { framework: 'test' });
+
+    const store = (agent as any).store;
+    const insertSpy = vi.spyOn(store, 'insert');
+    const deleteSpy = vi.spyOn(store, 'deleteByPattern');
+    insertSpy.mockClear();
+    deleteSpy.mockClear();
+    const mutationCounts = () => [insertSpy.mock.calls.length, deleteSpy.mock.calls.length];
+    const expectRejectedBeforeMutation = async (operation: () => Promise<unknown>) => {
+      const before = mutationCounts();
+      await expect(operation()).rejects.toThrow(/live admission-lock token/i);
+      expect(mutationCounts()).toEqual(before);
+    };
+
+    // Every internal mutation boundary rejects callers that bypass the public
+    // lock-taking wrapper.
+    await expectRejectedBeforeMutation(() => (agent as any).commitInviteAgentToContextGraph(
+      undefined,
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    ));
+    await expectRejectedBeforeMutation(() => (agent as any).commitRemoveAgentFromContextGraph(
+      undefined,
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    ));
+    await expectRejectedBeforeMutation(() => (agent as any).commitJoinRequestApproval(
+      undefined,
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    ));
+    await expectRejectedBeforeMutation(() => (agent as any).commitJoinRequestRejection(
+      undefined,
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    ));
+
+    await expectRejectedBeforeMutation(() => (agent as any).commitInviteAgentToContextGraph(
+      {},
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    ));
+
+    // A real branded token is still scoped to the manager that issued it.
+    const foreignManager = new ContextGraphJoinAdmissionLockManager();
+    await foreignManager.withLock(contextGraphId, async (foreignToken) => {
+      await expectRejectedBeforeMutation(() => (agent as any).commitInviteAgentToContextGraph(
+        foreignToken,
+        contextGraphId,
+        joiner.agentAddress,
+        owner.agentAddress,
+      ));
+    });
+
+    // The node's own token cannot authorize a different CG.
+    await (agent as any).withContextGraphJoinAdmissionLock(
+      otherContextGraphId,
+      async (wrongCgToken: unknown) => {
+        await expectRejectedBeforeMutation(() => (agent as any).commitInviteAgentToContextGraph(
+          wrongCgToken,
+          contextGraphId,
+          joiner.agentAddress,
+          owner.agentAddress,
+        ));
+      },
+    );
+
+    // Reusing a retained token after its callback releases the lock is denied.
+    let expiredToken: unknown;
+    await (agent as any).withContextGraphJoinAdmissionLock(
+      contextGraphId,
+      async (token: unknown) => { expiredToken = token; },
+    );
+    await expectRejectedBeforeMutation(() => (agent as any).commitInviteAgentToContextGraph(
+      expiredToken,
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    ));
+  });
+
   it('defaults to manual and lets only the exact owner enable a private CG', async () => {
     const { agent, owner } = await boot();
     const otherOwner = await agent.registerAgent('other-owner', { framework: 'test' });
@@ -339,6 +433,38 @@ describe('context graph open enrollment policy', () => {
     expect(pending).toMatchObject({ status: 'pending', autoApproved: false, reason: 'manual-policy' });
     expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
       .not.toContain(secondJoiner.agentAddress.toLowerCase());
+  }, 30_000);
+
+  it('returns the legacy alreadyMember alias to a pre-open-enrollment requester', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-rolling-upgrade';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+
+    const joiner = await agent.registerAgent('legacy-wire-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({ contextGraphId, delegation, agentName: joiner.name })),
+      agent.peerId,
+    )));
+
+    expect(response).toMatchObject({
+      ok: true,
+      status: 'approved',
+      alreadyMember: true,
+      autoApproved: true,
+    });
+    // This intentionally mirrors the origin/main consumer: it ignores both
+    // `status` and `autoApproved` and only treats `alreadyMember` as final.
+    const legacyRequesterStatus = response.ok && response.alreadyMember
+      ? 'approved'
+      : 'pending';
+    expect(legacyRequesterStatus).toBe('approved');
   }, 30_000);
 
   it('refreshes already-member credentials without allowing carrier swaps or rollback', async () => {
@@ -515,15 +641,14 @@ describe('context graph open enrollment policy', () => {
       .mockRejectedValueOnce(new Error('simulated atomic status update failure'))
       .mockImplementation(originalUpdate);
 
-    // Make the initial admission consume the final per-agent ingress slot.
+    // Make the initial admission consume the final verified-agent ingress slot.
     // The exact signed repair retry must bypass that just-consumed slot, while
     // all different payloads remain rate-limited.
     for (let index = 0; index < 5; index += 1) {
-      agent.reserveContextGraphJoinIngress(
+      agent.chargeVerifiedContextGraphJoinIngress(
         contextGraphId,
         joiner.agentAddress,
-        agent.peerId,
-      )();
+      );
     }
 
     await expect(agent.processIncomingJoinRequest(
@@ -682,32 +807,102 @@ describe('context graph open enrollment policy', () => {
     expect(await agent.getJoinRequestStatus(contextGraphId, second.agentAddress)).toBeNull();
   }, 30_000);
 
-  it('bounds incoming join rates and queue depth before admission work', async () => {
+  it('bounds pre-auth peers and queues separately from verified CGs and agents', async () => {
     const { agent } = await boot();
     const releases: Array<() => void> = [];
     for (let i = 0; i < 6; i++) {
-      const release = agent.reserveContextGraphJoinIngress('cg-agent-rate', 'same-agent', 'same-peer');
-      release();
+      agent.chargeVerifiedContextGraphJoinIngress('cg-agent-rate', 'same-agent');
     }
-    expect(() => agent.reserveContextGraphJoinIngress(
+    expect(() => agent.chargeVerifiedContextGraphJoinIngress(
       'cg-agent-rate',
       'same-agent',
-      'same-peer',
     )).toThrow(/agent rate limit/i);
+
+    for (let i = 0; i < 100; i++) {
+      agent.chargeVerifiedContextGraphJoinIngress('cg-context-rate', `agent-${i}`);
+    }
+    expect(() => agent.chargeVerifiedContextGraphJoinIngress(
+      'cg-context-rate',
+      'agent-overflow',
+    )).toThrow(/context graph rate limit/i);
+
+    for (let i = 0; i < 20; i++) {
+      agent.reserveContextGraphJoinIngress('cg-peer-rate', 'same-peer')();
+    }
+    expect(() => agent.reserveContextGraphJoinIngress(
+      'cg-peer-rate',
+      'same-peer',
+    )).toThrow(/peer rate limit/i);
 
     for (let i = 0; i < 64; i++) {
       releases.push(agent.reserveContextGraphJoinIngress(
         'cg-queue-depth',
-        `agent-${i}`,
         `peer-${i}`,
       ));
     }
     expect(() => agent.reserveContextGraphJoinIngress(
       'cg-queue-depth',
-      'agent-overflow',
       'peer-overflow',
     )).toThrow(/queue.*busy/i);
     for (const release of releases) release();
+  }, 30_000);
+
+  it('does not charge spoofed agent or CG buckets before signature verification', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-unverified-buckets';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const victim = await agent.registerAgent('unverified-bucket-victim', { framework: 'test' });
+    const validDelegation = await agent.signJoinRequest(contextGraphId, victim.agentAddress);
+    const invalidDelegation = { ...validDelegation, signature: '0x01' };
+    const handler = joinRequestHandler(agent);
+
+    // One hundred invalid frames would exhaust both the old six-per-agent
+    // bucket and the old hundred-per-CG bucket. Spread them across peers so
+    // the legitimate pre-auth per-peer circuit breaker remains independent.
+    for (let index = 0; index < 100; index += 1) {
+      const response = JSON.parse(decoder.decode(await handler(
+        encoder.encode(JSON.stringify({
+          contextGraphId,
+          delegation: invalidDelegation,
+          agentName: victim.name,
+        })),
+        `invalid-carrier-${Math.floor(index / 20)}`,
+      )));
+      expect(response.ok).toBe(false);
+    }
+
+    const validResponse = JSON.parse(decoder.decode(await handler(
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: validDelegation,
+        agentName: victim.name,
+      })),
+      agent.peerId,
+    )));
+    expect(validResponse).toMatchObject({ ok: true, status: 'pending' });
+  }, 30_000);
+
+  it('enforces both join-request payload limits on the registered protocol path', async () => {
+    const register = vi.spyOn(Messenger.prototype, 'register');
+    try {
+      const { agent } = await boot();
+      const getOwner = vi.spyOn(agent, 'getContextGraphOwner');
+      const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+        new Uint8Array(64 * 1024 + 1),
+        '12D3KooWOversizedJoinRequest',
+      )));
+
+      expect(response).toMatchObject({
+        ok: false,
+        error: 'join-request payload exceeds 64 KiB',
+      });
+      expect(getOwner).not.toHaveBeenCalled();
+      expect(register.mock.calls.some(([protocol, , options]) =>
+        protocol === PROTOCOL_JOIN_REQUEST
+          && options?.maxWireBytes === 80 * 1024)).toBe(true);
+    } finally {
+      register.mockRestore();
+    }
   }, 30_000);
 
   it('rate-limits the P2P handler before CG lookups and cleans rejected return paths', async () => {

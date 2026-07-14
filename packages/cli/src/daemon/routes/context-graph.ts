@@ -966,7 +966,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           ok: true,
           status: decision.alreadyMember ? 'already-member' : decision.status,
           delivered: 'local',
-          ...(decision.alreadyMember ? { alreadyMember: true } : {}),
+          // Legacy requesters only understand `alreadyMember`. Keep it as a
+          // compatibility alias for every completed approval while retaining
+          // the precise current status/autoApproved fields.
+          ...(decision.alreadyMember || decision.status === 'approved'
+            ? { alreadyMember: true }
+            : {}),
           ...(decision.autoApproved ? { autoApproved: true } : {}),
         });
       }
@@ -996,13 +1001,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
       return jsonResponse(res, 200, {
         ok: true,
-        status: result.alreadyMember
-          ? 'already-member'
-          : result.autoApproved
-            ? 'approved'
+        status: result.autoApproved
+          ? 'approved'
+          : result.alreadyMember
+            ? 'already-member'
             : 'pending',
         delivered: result.delivered,
-        ...(result.alreadyMember ? { alreadyMember: true } : {}),
+        ...(result.alreadyMember || result.autoApproved ? { alreadyMember: true } : {}),
         ...(result.autoApproved ? { autoApproved: true } : {}),
       });
     } catch (err: unknown) {

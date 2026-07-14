@@ -28,6 +28,8 @@ import type {
   CompatibleProtocolOutboxStore,
   MessageIdempotencyStore,
   SwmSenderKeyPackageAckReasonCode,
+  ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
+  ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -773,20 +775,8 @@ export interface ContextGraphMembershipStore {
  * privacy, revocation, encryption-key, capacity, and rate checks enforced by
  * the agent at decision time.
  */
-export type ContextGraphJoinPolicyMode = 'manual' | 'open';
-
-export interface ContextGraphJoinPolicyRecord {
-  version: 1;
-  contextGraphId: string;
-  mode: ContextGraphJoinPolicyMode;
-  /** Exact curator DID at the time the policy was written. */
-  ownerDid: string;
-  /** Required for `open`; counts active allowed agents, including the curator. */
-  maxMembers?: number;
-  /** Required for `open`; rolling per-CG one-hour admission ceiling. */
-  maxApprovalsPerHour?: number;
-  updatedAt: number;
-}
+export type ContextGraphJoinPolicyMode = CoreContextGraphJoinPolicyMode;
+export type ContextGraphJoinPolicyRecord = CoreContextGraphJoinPolicyRecord;
 
 export type ContextGraphJoinPolicyAuditEventType =
   | 'join_policy_changed'
@@ -851,8 +841,9 @@ export interface ContextGraphJoinPolicyStore {
     policyEpoch: number;
   }): Promise<ContextGraphJoinPolicyRateReservation>;
   /**
-   * Idempotently record the durable admission authorized by the newest
-   * matching reservation. Returns false when no reservation exists.
+   * Idempotently record the durable admission authorized by the exact policy
+   * snapshot that reserved it. Returns false when no matching reservation
+   * exists; callers must never infer recency from wall-clock timestamps.
    */
   commitAutomaticApproval(input: {
     contextGraphId: string;
@@ -860,6 +851,7 @@ export interface ContextGraphJoinPolicyStore {
     actor: string;
     agentAddress: string;
     requestDigest: string;
+    policyEpoch: number;
     details?: Record<string, unknown>;
   }): Promise<boolean>;
 }

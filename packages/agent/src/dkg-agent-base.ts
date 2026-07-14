@@ -390,6 +390,8 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
+import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
+import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -1302,7 +1304,8 @@ export class DKGAgentBase {
    * and policy changes. Keeping all three on the same per-CG queue makes a
    * switch back to `manual` linearizable with in-flight join requests.
    */
-  protected readonly contextGraphJoinAdmissionQueues = new Map<string, Promise<void>>();
+  protected readonly contextGraphJoinAdmissionLockManager = new ContextGraphJoinAdmissionLockManager();
+  protected readonly contextGraphMembershipMutations = new ContextGraphMembershipMutationStore();
   /** In-memory ingress buckets; values are accepted request timestamps. */
   protected readonly contextGraphJoinIngressBuckets = new Map<string, number[]>();
   /** Active + queued incoming requests per CG (policy/admin operations excluded). */
@@ -1314,7 +1317,10 @@ export class DKGAgentBase {
    * bypass its own just-consumed ingress token without weakening limits for a
    * different payload. The ordinary 60s buckets have expired when this does.
    */
-  protected readonly contextGraphJoinAdmissionRepairDigests = new Map<string, number>();
+  protected readonly contextGraphJoinAdmissionRepairDigests = new Map<string, {
+    expiresAt: number;
+    policyEpoch?: number;
+  }>();
   /** Manual-policy requests waiting on the CG queue; checked by admissions. */
   protected readonly contextGraphJoinPolicyDisableIntentCounts = new Map<string, number>();
   /**

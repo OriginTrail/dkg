@@ -435,13 +435,17 @@ export async function readChangelogDeltaPage(params: {
       records.push({ seq, graph, op: 'drop' });
       continue;
     }
-    const rows = await readRowsAcrossGraphs(params.store, [graph], params.signal);
     // Changelog upserts serialize a complete graph, including top-level `_meta`.
-    // Join-request resources are curator-only moderation state and must never
-    // ride that otherwise-authorized graph snapshot to admitted members.
-    const quads = serializeResponderRows(
-      rows.filter((row) => !row.s.startsWith(DKG_JOIN_REQUEST_SUBJECT_PREFIX)),
+    // Push the curator-only join-request deny into the store query: filtering
+    // after readRowsAcrossGraphs() would still materialize an unbounded history
+    // of approved/rejected moderation rows on every upsert.
+    const rows = await readRowsAcrossGraphsExcludingSubjectPrefix(
+      params.store,
+      [graph],
+      DKG_JOIN_REQUEST_SUBJECT_PREFIX,
+      params.signal,
     );
+    const quads = serializeResponderRows(rows);
     // Always include at least one record; otherwise stop before exceeding the
     // budget (a single graph over budget is emitted alone, never split).
     if (records.length > 0 && bytes + quads.length > budget) {
@@ -882,6 +886,28 @@ async function readRowsAcrossGraphs(
     .sort(compareRows);
 }
 
+async function readRowsAcrossGraphsExcludingSubjectPrefix(
+  store: TripleStore,
+  graphs: readonly string[],
+  excludedSubjectPrefix: string,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const values = graphValues(graphs);
+  if (!values) return [];
+  const res = await store.query(`
+    SELECT ?g ?s ?p ?o WHERE {
+      VALUES ?g { ${values} }
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), ${sparqlString(excludedSubjectPrefix)}))
+    }
+  `, syncResponderStoreOptions(signal, 'sync.responder.readRowsAcrossGraphsExcludingSubjectPrefix'));
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g)
+    .sort(compareRows);
+}
+
 async function readRowsPageAcrossGraphs(
   store: TripleStore,
   graphs: readonly string[],
@@ -1106,7 +1132,14 @@ async function readDurableMetaRows(
   const registeredSubGraphSubjects = new Set(dedupeStrings(registeredSubGraphNames)
     .filter((name) => validateSubGraphName(name).valid)
     .map((name) => `${cgEntity}/${name}`));
-  const rows = await readRowsAcrossGraphs(store, [metaGraph], signal);
+  // Keep curator moderation state out of the canonical durable-meta snapshot
+  // before it reaches Node, matching the store-bounded paged fallback below.
+  const rows = await readRowsAcrossGraphsExcludingSubjectPrefix(
+    store,
+    [metaGraph],
+    DKG_JOIN_REQUEST_SUBJECT_PREFIX,
+    signal,
+  );
   const nonWorkingLifecycles = new Set<string>();
   for (const row of rows) {
     if (row.p === DKG_MEMORY_LAYER && stripLiteral(row.o) !== MemoryLayer.WorkingMemory) {
@@ -1131,10 +1164,6 @@ async function readDurableMetaRows(
   }
 
   return rows.filter((row) => {
-    // Join requests are curator-only moderation records. Keep this as an
-    // explicit deny before the admission union so a malformed request carrying
-    // lifecycle/assertion predicates cannot enter through another branch.
-    if (row.s.startsWith(DKG_JOIN_REQUEST_SUBJECT_PREFIX)) return false;
     return row.s === cgEntity ||
     registeredSubGraphSubjects.has(row.s) ||
     row.s.startsWith('did:dkg:activity:') ||
@@ -1187,7 +1216,7 @@ async function readDurableMetaRowsPage(
     SELECT ?g ?s ?p ?o WHERE {
       VALUES ?g { <${assertSafeIri(metaGraph)}> }
       GRAPH ?g { ?s ?p ?o }
-      FILTER(!STRSTARTS(STR(?s), ${sparqlString(DKG_JOIN_REQUEST_SUBJECT_PREFIX)}))
+      FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), ${sparqlString(DKG_JOIN_REQUEST_SUBJECT_PREFIX)}))
       FILTER(
         ?s = <${assertSafeIri(cgEntity)}>
         ${registeredSubGraphClause}

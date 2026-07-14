@@ -22,7 +22,7 @@ export interface ContextGraphJoinPolicyResponse {
   memberCount?: number;
   approvalsLastHour?: number;
   ownerAgentAddress?: string;
-  updatedAt?: string | null;
+  updatedAt?: number | null;
   [key: string]: unknown;
 }
 

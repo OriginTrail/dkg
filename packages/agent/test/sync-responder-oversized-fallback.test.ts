@@ -99,6 +99,12 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
 
     const canonicalStore = new OxigraphStore();
     await canonicalStore.insert(quads);
+    const canonicalQueries: string[] = [];
+    const canonicalQuery = canonicalStore.query.bind(canonicalStore);
+    canonicalStore.query = async (sparql, options) => {
+      canonicalQueries.push(sparql);
+      return canonicalQuery(sparql, options);
+    };
     const paged = new OxigraphStore();
     await paged.insert(quads);
 
@@ -124,6 +130,10 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(pagedResult).toEqual(canonical);
     // …and it actually paged in the store (bounded ORDER BY/OFFSET/LIMIT).
     boundedQuery.assertObserved();
+    expect(canonicalQueries.some((sparql) =>
+      sparql.includes(`VALUES ?g { <${meta}> }`) &&
+      sparql.includes('FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), "did:dkg:join-request:"))'),
+    )).toBe(true);
 
     // Sanity: the fixture really exercised the branches we think it did.
     const has = (subject: string) => [...canonical].some((line) => line.startsWith(`<${subject}>`));

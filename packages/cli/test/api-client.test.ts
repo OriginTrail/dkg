@@ -334,11 +334,15 @@ describe('ApiClient', () => {
         mode: 'open',
         maxMembers: 50,
         maxApprovalsPerHour: 20,
+        updatedAt: 1_752_490_123_456,
       };
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
       globalThis.fetch = fetch;
 
-      await expect(client.getContextGraphJoinPolicy('0xOwner/private graph')).resolves.toEqual(body);
+      const result = await client.getContextGraphJoinPolicy('0xOwner/private graph');
+      const updatedAt: number | null | undefined = result.updatedAt;
+      expect(result).toEqual(body);
+      expect(updatedAt).toBe(1_752_490_123_456);
       expect(calls[0].url).toBe(
         `http://127.0.0.1:${PORT}/api/context-graph/0xOwner%2Fprivate%20graph/join-policy`,
       );

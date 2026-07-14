@@ -378,8 +378,25 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-admission-lock.js';
+import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
 
 /* eslint-disable @typescript-eslint/no-this-alias */
+
+interface ContextGraphAgentInviteMutationPlan {
+  contextGraphId: string;
+  agentAddress: string;
+  delegation?: SignedAgentDelegation;
+  alreadyAllowed: boolean;
+  noOp: boolean;
+  cgMetaGraph: string;
+  delegationUri?: string;
+  quadsToInsert: Quad[];
+  curatorAgentAddress?: string;
+}
+
+export type PreparedContextGraphAgentInviteMutation =
+  PreparedContextGraphMembershipMutation<ContextGraphAgentInviteMutationPlan>;
 
 export class ContextGraphMethods extends DKGAgentBase {
   async createContextGraph(this: DKGAgent, opts: {
@@ -1616,8 +1633,9 @@ export class ContextGraphMethods extends DKGAgentBase {
     callerAgentAddress?: string,
     delegation?: SignedAgentDelegation,
   ): Promise<void> {
-    return this.withContextGraphJoinAdmissionLock(contextGraphId, () =>
+    return this.withContextGraphJoinAdmissionLock(contextGraphId, (admissionLockToken) =>
       this.commitInviteAgentToContextGraph(
+        admissionLockToken,
         contextGraphId,
         agentAddress,
         callerAgentAddress,
@@ -1625,15 +1643,40 @@ export class ContextGraphMethods extends DKGAgentBase {
       ));
   }
 
-  /** Internal agent-membership mutation; caller must hold the CG admission lock. */
+  /** Policy-agnostic invite orchestration; caller must hold the CG admission lock. */
   async commitInviteAgentToContextGraph(this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
     contextGraphId: string,
     agentAddress: string,
     callerAgentAddress?: string,
     delegation?: SignedAgentDelegation,
-    beforeMutation?: () => void,
   ): Promise<void> {
-    const ctx = createOperationContext('system');
+    const prepared = await this.prepareInviteAgentToContextGraph(
+      admissionLockToken,
+      contextGraphId,
+      agentAddress,
+      callerAgentAddress,
+      delegation,
+    );
+    await this.commitPreparedInviteAgentToContextGraph(
+      admissionLockToken,
+      contextGraphId,
+      prepared,
+    );
+  }
+
+  /**
+   * Complete every awaited invite preflight and return a single-use opaque
+   * mutation capability. Preparing never changes membership state.
+   */
+  async prepareInviteAgentToContextGraph(this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+    delegation?: SignedAgentDelegation,
+  ): Promise<PreparedContextGraphAgentInviteMutation> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
     const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
     if (!ethAddrRe.test(agentAddress)) {
       throw new Error(`Invalid Ethereum address: "${agentAddress}".`);
@@ -1658,45 +1701,19 @@ export class ContextGraphMethods extends DKGAgentBase {
       (a) => a.toLowerCase() === agentAddress.toLowerCase(),
     ) ?? false;
 
-    // Codex review on #873 (line 14061) — idempotency early-return.
-    // Mirrors the peer-path branch at ~line 13967. A no-op re-invite
-    // of an agent that's already in the allowlist with no fresh
-    // delegation must not insert duplicate quads OR emit the
-    // public-CG warn — pre-fix, the warn ran on every call regardless
-    // of whether the store was about to mutate, which misled
-    // operators auditing the warn stream (empirically reproduced by
-    // @branarakic on the patched daemon at `704b49cf`).
-    if (alreadyAllowed && !delegation) {
-      this.upsertContextGraphMember({
-        contextGraphId,
-        principalType: 'agent',
-        principalId: agentAddress,
-        role: 'participant',
-        status: 'active',
-        source: 'allowed-agent',
-      });
-      this.log.info(ctx, `Agent ${agentAddress} already in allowlist for "${contextGraphId}" — skipping`);
-      return;
-    }
-
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const quadsToInsert: Quad[] = [];
+    const curatorAgentAddress = (!existingParticipants || existingParticipants.length === 0)
+      ? this.defaultAgentAddress
+      : undefined;
 
-    if ((!existingParticipants || existingParticipants.length === 0) && this.defaultAgentAddress) {
+    if (curatorAgentAddress) {
       quadsToInsert.push({
         subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-        object: `"${this.defaultAgentAddress}"`,
+        object: `"${curatorAgentAddress}"`,
         graph: cgMetaGraph,
-      });
-      this.upsertContextGraphMember({
-        contextGraphId,
-        principalType: 'agent',
-        principalId: this.defaultAgentAddress,
-        role: 'curator',
-        status: 'active',
-        source: 'allowed-agent',
       });
     }
 
@@ -1713,25 +1730,11 @@ export class ContextGraphMethods extends DKGAgentBase {
       });
     }
 
-    // If the agent gave us a signed delegation (via the join-request
-    // path), promote its delegatee identifiers into the CG's allowlist
-    // so post-approval sync requests from the joiner's node pass auth
-    // even though they're signed by the node's operational key (which
-    // is NOT the agent's primary key).
-    //
-    // Each (cg, agent) pair gets ONE delegation node — re-approving
-    // the same agent overwrites the prior delegation.
-    //
-    // Automatic admission supplies a synchronous final guard here, after
-    // every awaited ownership/member preflight and immediately before the
-    // first store mutation. This is its linearization point against an
-    // authenticated switch back to manual mode.
-    beforeMutation?.();
+    let delegationUri: string | undefined;
     if (delegation) {
       const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
       const DKG = 'https://dkg.network/ontology#';
-      const delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${agentAddress.toLowerCase()}`;
-      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: delegationUri });
+      delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${agentAddress.toLowerCase()}`;
       quadsToInsert.push({ subject: delegationUri, predicate: RDF_TYPE, object: `${DKG}AgentDelegation`, graph: cgMetaGraph });
       quadsToInsert.push({ subject: delegationUri, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${agentAddress.toLowerCase()}"`, graph: cgMetaGraph });
       quadsToInsert.push({ subject: delegationUri, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${delegation.issuedAtMs}"`, graph: cgMetaGraph });
@@ -1746,12 +1749,88 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
     }
 
+    return this.contextGraphMembershipMutations.prepare(
+      admissionLockToken,
+      contextGraphId,
+      {
+        contextGraphId,
+        agentAddress,
+        delegation,
+        alreadyAllowed,
+        noOp: alreadyAllowed && !delegation,
+        cgMetaGraph,
+        delegationUri,
+        quadsToInsert,
+        curatorAgentAddress,
+      },
+    );
+  }
+
+  /**
+   * Cross the membership write boundary using a prepared capability. There
+   * are no awaited preflights before the first store mutation in this method.
+   */
+  async commitPreparedInviteAgentToContextGraph(this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    prepared: PreparedContextGraphAgentInviteMutation,
+  ): Promise<void> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
+    const plan = this.contextGraphMembershipMutations.consume(
+      admissionLockToken,
+      contextGraphId,
+      prepared,
+    );
+    const {
+      agentAddress,
+      delegation,
+      alreadyAllowed,
+      noOp,
+      cgMetaGraph,
+      delegationUri,
+      quadsToInsert,
+      curatorAgentAddress,
+    } = plan;
+    const ctx = createOperationContext('system');
+
+    // Preserve idempotent manual re-invites while keeping even the local
+    // membership projection on the commit side of the prepared capability.
+    if (noOp) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: agentAddress,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+      this.log.info(ctx, `Agent ${agentAddress} already in allowlist for "${contextGraphId}" — skipping`);
+      return;
+    }
+
+    // A synchronous admission-specific guard can run after prepare returns
+    // and immediately before this call. The first awaited operation here is
+    // therefore also the first persistent membership mutation.
+    if (delegationUri) {
+      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: delegationUri });
+    }
     await this.store.insert(quadsToInsert);
     this.invalidateListContextGraphsCache();
 
     this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
     this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
+
+    if (curatorAgentAddress) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: curatorAgentAddress,
+        role: 'curator',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+    }
 
     // Issue #865 — companion warning to the peer-invite path above.
     // Allowlist writes on explicit-public CGs are allowed (the
@@ -1791,12 +1870,24 @@ export class ContextGraphMethods extends DKGAgentBase {
    * Remove an agent from a context graph's allowlist.
    */
   async removeAgentFromContextGraph(this: DKGAgent, contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
-    return this.withContextGraphJoinAdmissionLock(contextGraphId, () =>
-      this.commitRemoveAgentFromContextGraph(contextGraphId, agentAddress, callerAgentAddress));
+    return this.withContextGraphJoinAdmissionLock(contextGraphId, (admissionLockToken) =>
+      this.commitRemoveAgentFromContextGraph(
+        admissionLockToken,
+        contextGraphId,
+        agentAddress,
+        callerAgentAddress,
+      ));
   }
 
   /** Internal agent-membership removal; caller must hold the CG admission lock. */
-  async commitRemoveAgentFromContextGraph(this: DKGAgent, contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
+  async commitRemoveAgentFromContextGraph(
+    this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+  ): Promise<void> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
     const ctx = createOperationContext('system');
     const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
     if (!ethAddrRe.test(agentAddress)) {
@@ -1851,7 +1942,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirty(contextGraphId);
     this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
-    this.queueSharedMemoryGossipSubscription(contextGraphId);
+    // Reconciled after the projection is invalidated at the end of removal.
     // Drop any cached sender-key send state for this CG so the next
     // write re-resolves recipients (now excluding the revoked agent
     // via the tombstone) and mints a fresh epoch. Without this the
@@ -1864,6 +1955,13 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
     }
     await this.saveSwmSenderKeyState();
+    // `queueSharedMemoryGossipSubscription` may start a metadata projection
+    // read while the revocation mutation is still completing. Invalidate once
+    // more after all awaited removal work so that an in-flight pre-revoke
+    // snapshot cannot become the clean cached value returned to the very next
+    // admission check.
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
+    this.queueSharedMemoryGossipSubscription(contextGraphId);
 
     this.log.info(ctx, `Removed agent ${agentAddress} from context graph "${contextGraphId}" (tombstoned)`);
   }
