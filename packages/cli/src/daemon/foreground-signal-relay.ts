@@ -1,4 +1,24 @@
-import { signalWorkerProcessGroup, WORKER_GROUP_TERM_GRACE_MS } from './worker-process-group.js';
+import { signalWorkerProcessGroup } from './worker-process-group.js';
+import {
+  SHUTDOWN_HARD_TIMEOUT_MS,
+  SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
+} from './shutdown.js';
+
+/**
+ * How long a relayed terminating signal waits before the worker group is
+ * SIGKILLed.
+ *
+ * This is a backstop for a worker that *cannot* exit -- a wedged event loop
+ * that never runs its signal handler -- so it must sit strictly outside the
+ * worker's own shutdown contract. A worker shutting down as designed already
+ * forces its own exit at SHUTDOWN_HARD_TIMEOUT_MS (+ a forced-cleanup tail);
+ * escalating any sooner would hard-kill a healthy node mid-flush on every slow
+ * Ctrl-C. Note this is NOT the post-exit reap grace in worker-process-group.ts:
+ * that one sweeps residual descendants of an already-dead worker, and 5s is
+ * correct for it.
+ */
+export const FOREGROUND_RELAY_KILL_GRACE_MS =
+  SHUTDOWN_HARD_TIMEOUT_MS + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS + 4_000;
 
 /**
  * Terminal-delivered signals whose POSIX default action ends the supervisor.
@@ -76,7 +96,7 @@ export function createForegroundSignalRelay(opts: {
   const suspendSelf = io.suspendSelf ?? (() => { kill(process.pid, 'SIGSTOP'); });
   const arm = io.setTimeout ?? ((handler, ms) => setTimeout(handler, ms));
   const disarm = io.clearTimeout ?? ((timer) => clearTimeout(timer));
-  const killGraceMs = io.killGraceMs ?? WORKER_GROUP_TERM_GRACE_MS;
+  const killGraceMs = io.killGraceMs ?? FOREGROUND_RELAY_KILL_GRACE_MS;
 
   let worker: RelayWorker | null = null;
   let terminating: NodeJS.Signals | null = null;
@@ -120,7 +140,14 @@ export function createForegroundSignalRelay(opts: {
   };
 
   const onStop = (): void => {
-    relay('SIGTSTP');
+    // SIGSTOP, not SIGTSTP. The worker's process group is orphaned by
+    // construction -- setsid() put it in a session whose only external parent
+    // (this supervisor) lives elsewhere -- and POSIX *discards* SIGTSTP sent to
+    // a default-disposition process in an orphaned group. Relaying SIGTSTP is a
+    // silent no-op that would suspend the supervisor while the worker and its
+    // managed store kept running. SIGSTOP is the one stop signal exempt from
+    // that rule; SIGCONT is never orphan-discarded, so `fg` still resumes both.
+    relay('SIGSTOP');
     // Suspend only after the worker is stopped, so the job halts as one unit
     // and the shell reports a stopped job rather than a vanished one.
     suspendSelf();
