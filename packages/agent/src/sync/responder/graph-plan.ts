@@ -32,6 +32,7 @@ const DKG_BATCH_ID = `${DKG}batchId`;
 const SCHEMA_NAME = 'http://schema.org/name';
 const PROV_GENERATED = 'http://www.w3.org/ns/prov#generated';
 const PROV_USED = 'http://www.w3.org/ns/prov#used';
+const DKG_JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS = 30_000;
 
 function syncResponderStoreOptions(signal: AbortSignal | undefined, source: string): QueryOptions {
@@ -1125,19 +1126,22 @@ async function readDurableMetaRows(
     }
   }
 
-  return rows.filter((row) =>
-    row.s === cgEntity ||
+  return rows.filter((row) => {
+    // Join requests are curator-only moderation records. Keep this as an
+    // explicit deny before the admission union so a malformed request carrying
+    // lifecycle/assertion predicates cannot enter through another branch.
+    if (row.s.startsWith(DKG_JOIN_REQUEST_SUBJECT_PREFIX)) return false;
+    return row.s === cgEntity ||
     registeredSubGraphSubjects.has(row.s) ||
     row.s.startsWith('did:dkg:activity:') ||
-    row.s.startsWith('did:dkg:join-request:') ||
     nonWorkingLifecycles.has(row.s) ||
     assertionGraphs.has(row.s) ||
     eventSubjects.has(row.s) ||
     (
       row.s.includes('/assertion/') &&
       [...assertionNames].some((name) => row.s.endsWith(`/${name}`))
-    ),
-  );
+    );
+  });
 }
 
 /**
@@ -1179,11 +1183,11 @@ async function readDurableMetaRowsPage(
     SELECT ?g ?s ?p ?o WHERE {
       VALUES ?g { <${assertSafeIri(metaGraph)}> }
       GRAPH ?g { ?s ?p ?o }
+      FILTER(!STRSTARTS(STR(?s), ${sparqlString(DKG_JOIN_REQUEST_SUBJECT_PREFIX)}))
       FILTER(
         ?s = <${assertSafeIri(cgEntity)}>
         ${registeredSubGraphClause}
         || STRSTARTS(STR(?s), "did:dkg:activity:")
-        || STRSTARTS(STR(?s), "did:dkg:join-request:")
         || EXISTS { GRAPH ?g { ?s <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
         || EXISTS { GRAPH ?g { ?agLifecycle <${DKG_ASSERTION_GRAPH}> ?s ; <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
         || EXISTS {

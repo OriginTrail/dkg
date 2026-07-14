@@ -59,9 +59,11 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
       { graph: meta, subject: cgEntity, predicate: 'http://schema.org/name', object: '"cg-root"' },
       // B: a registered sub-graph subject (registration rows are keyed on it)
       ...subGraphRegistrationQuads(cgId, 'sub1'),
-      // C / D: activity + join-request prefixes
+      // C: activity records are shared; D: join-request moderation records are
+      // curator-only, even if malformed to match another admitted branch.
       { graph: meta, subject: 'did:dkg:activity:act1', predicate: `${DKG_NS}note`, object: '"act"' },
       { graph: meta, subject: 'did:dkg:join-request:jr1', predicate: `${DKG_NS}note`, object: '"jr"' },
+      { graph: meta, subject: 'did:dkg:join-request:jr1', predicate: `${DKG_NS}memoryLayer`, object: VM },
       // E: a non-working lifecycle (kept); its own rows are kept
       { graph: meta, subject: 'urn:lc:vm', predicate: `${DKG_NS}memoryLayer`, object: VM },
       { graph: meta, subject: 'urn:lc:vm', predicate: `${DKG_NS}assertionGraph`, object: 'urn:ag:1' },
@@ -128,7 +130,7 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(has(cgEntity)).toBe(true); // A
     expect(has(`${cgEntity}/sub1`)).toBe(true); // B
     expect(has('did:dkg:activity:act1')).toBe(true); // C
-    expect(has('did:dkg:join-request:jr1')).toBe(true); // D
+    expect(has('did:dkg:join-request:jr1')).toBe(false); // D
     expect(has('urn:lc:vm')).toBe(true); // E
     expect(has('urn:lc:dual')).toBe(true); // E dual
     expect(has('urn:ag:1')).toBe(true); // F
