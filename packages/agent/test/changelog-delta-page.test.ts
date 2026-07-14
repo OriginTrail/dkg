@@ -113,19 +113,41 @@ describe('readChangelogDeltaPage — delta serving', () => {
     await store.close();
   });
 
-  it('INCLUDES the top-level _meta graph (unlike the durable-data phase) so it converges', async () => {
+  it('includes top-level meta while keeping join-request moderation curator-local', async () => {
     // OT-RFC-59 review 🔴 3594: the changelog lane serves data AND meta in one stream, so
     // it must emit topMeta — otherwise a changelog-only public CG never syncs its top-level
-    // metadata. The durable-DATA phase still excludes it (its META phase serves it).
+    // metadata. Join requests are the exception: those are curator-only moderation state.
     const topMeta = `${cgPrefix}/_meta`;
-    const store = await storeWith([['urn:s', 'http://dkg.io/ontology/merkleRoot', '"0xabc"', topMeta]]);
+    const delegation = `did:dkg:agent-delegation:${CG}:0x1234`;
+    const joinRequest = `did:dkg:join-request:${CG}:0x5678`;
+    const store = await storeWith([
+      ['urn:s', 'http://dkg.io/ontology/merkleRoot', '"0xabc"', topMeta],
+      [cgPrefix, 'https://dkg.network/ontology#allowedAgent', '"0x1234"', topMeta],
+      [delegation, 'https://dkg.network/ontology#delegationAgent', '"0x1234"', topMeta],
+      [delegation, 'https://dkg.network/ontology#allowedDelegateePeer', '"12D3KooWAuthorized"', topMeta],
+      [joinRequest, 'https://dkg.network/ontology#requesterPeerId', '"12D3KooWPrivateApplicant"', topMeta],
+      ['urn:ordinary:data', 'urn:p', '"ordinary"', G1],
+      [joinRequest, 'urn:p', '"misplaced-private-moderation"', G1],
+    ]);
     const resp = await readChangelogDeltaPage({
       reader: new FakeReader({ era: 'E1', seq: 2 }, [rec(1, topMeta, 'upsert'), rec(2, G1, 'upsert')]),
       store, contextGraphId: CG, sinceSeq: 0, requesterEra: 'E1', limit: 100,
     });
     expect(resp.kind).toBe('delta');
     if (resp.kind !== 'delta') return;
-    expect(resp.records.map((r) => r.graph)).toContain(topMeta); // topMeta now emitted
+    const metaRecord = resp.records.find((record) => record.graph === topMeta);
+    expect(metaRecord?.quads).toContain('"0xabc"');
+    expect(metaRecord?.quads).toContain(delegation);
+    expect(metaRecord?.quads).toContain('12D3KooWAuthorized');
+    expect(metaRecord?.quads).not.toContain(joinRequest);
+    expect(metaRecord?.quads).not.toContain('12D3KooWPrivateApplicant');
+
+    // The deny is subject-based, so a misplaced moderation resource cannot
+    // escape through another admitted graph either; unrelated data remains.
+    const dataRecord = resp.records.find((record) => record.graph === G1);
+    expect(dataRecord?.quads).toContain('"ordinary"');
+    expect(dataRecord?.quads).not.toContain(joinRequest);
+    expect(dataRecord?.quads).not.toContain('misplaced-private-moderation');
     await store.close();
   });
 

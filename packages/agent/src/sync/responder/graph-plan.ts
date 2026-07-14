@@ -435,8 +435,12 @@ export async function readChangelogDeltaPage(params: {
       records.push({ seq, graph, op: 'drop' });
       continue;
     }
+    const rows = await readRowsAcrossGraphs(params.store, [graph], params.signal);
+    // Changelog upserts serialize a complete graph, including top-level `_meta`.
+    // Join-request resources are curator-only moderation state and must never
+    // ride that otherwise-authorized graph snapshot to admitted members.
     const quads = serializeResponderRows(
-      await readRowsAcrossGraphs(params.store, [graph], params.signal),
+      rows.filter((row) => !row.s.startsWith(DKG_JOIN_REQUEST_SUBJECT_PREFIX)),
     );
     // Always include at least one record; otherwise stop before exceeding the
     // budget (a single graph over budget is emitted alone, never split).
