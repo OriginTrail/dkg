@@ -12,6 +12,29 @@ import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
+export type ContextGraphJoinPolicyMode = 'manual' | 'open';
+
+export interface ContextGraphJoinPolicyResponse {
+  contextGraphId: string;
+  mode: ContextGraphJoinPolicyMode;
+  maxMembers?: number | null;
+  maxApprovalsPerHour?: number | null;
+  memberCount?: number;
+  approvalsLastHour?: number;
+  ownerAgentAddress?: string;
+  updatedAt?: string | null;
+  [key: string]: unknown;
+}
+
+export type ContextGraphJoinPolicyUpdate =
+  | { mode: 'manual' }
+  | {
+      mode: 'open';
+      maxMembers: number;
+      maxApprovalsPerHour: number;
+      acknowledgeOpenEnrollment: true;
+    };
+
 export type QueryResult =
   | { type: 'bindings'; bindings: Array<Record<string, string>> }
   | { type: 'boolean'; value: boolean }
@@ -436,7 +459,8 @@ export class ApiClient {
     }
 
     const tokens = await loadTokens();
-    const token = tokens.size > 0 ? tokens.values().next().value : undefined;
+    const environmentToken = process.env.DKG_AUTH_TOKEN?.trim();
+    const token = environmentToken || (tokens.size > 0 ? tokens.values().next().value : undefined);
     const portOrBaseUrl = !hasEnvPort && config
       ? configuredApiBaseUrl(config.apiHost, port)
       : port;
@@ -1717,6 +1741,17 @@ export class ApiClient {
     return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
   }
 
+  async getContextGraphJoinPolicy(contextGraphId: string): Promise<ContextGraphJoinPolicyResponse> {
+    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-policy`);
+  }
+
+  async setContextGraphJoinPolicy(
+    contextGraphId: string,
+    update: ContextGraphJoinPolicyUpdate,
+  ): Promise<ContextGraphJoinPolicyResponse> {
+    return this.put(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-policy`, update);
+  }
+
   async getAgentIdentity(): Promise<{
     agentAddress: string;
     agentDid: string;
@@ -1983,6 +2018,19 @@ export class ApiClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: res.statusText }));
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+    }
+    return res.json() as Promise<T>;
+  }
+
+  private async put<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     });
