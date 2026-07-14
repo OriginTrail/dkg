@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
-import {
-  VmReconcileDispatcher,
-  VmReconcileQueueClosedError,
-} from '../src/chain-reconciler.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
+import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 
 describe('DKGAgent outbox shutdown lifecycle', () => {
   it('closes reconcile admission and cancels queued jobs before store teardown', async () => {
@@ -52,6 +51,58 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     expect(queuedStarted).toBe(false);
     expect(stopNode).toHaveBeenCalledOnce();
     expect(closeStore).toHaveBeenCalledOnce();
+  });
+
+  it('continues shutdown after the bounded reconcile drain timeout', async () => {
+    const originalTimeout = DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 1,
+    });
+    try {
+      const dispatcher = new VmReconcileDispatcher(
+        async () => new Promise<void>(() => undefined),
+        () => undefined,
+      );
+      void dispatcher.triggerManual('stuck');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const closeStore = vi.fn(async () => {});
+      const stopNode = vi.fn(async () => {});
+      const warn = vi.fn();
+      const agent = Object.create(DKGAgent.prototype) as any;
+      Object.assign(agent, {
+        started: true,
+        chainPoller: null,
+        vmReconcileDispatcher: dispatcher,
+        coreHostRecordingsClosed: false,
+        drainCoreHostRecordings: vi.fn(async () => {}),
+        messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+        clearRandomSamplingBindRetry: vi.fn(),
+        clearStorageACKRegistrationRetry: vi.fn(),
+        storageACKRegistrationRetryInFlight: false,
+        randomSamplingHandle: null,
+        inFlightSubstrateFanOutCount: () => 0,
+        router: { closePooling: vi.fn(async () => {}) },
+        node: { stop: stopNode },
+        store: { close: closeStore },
+        log: { warn },
+      });
+
+      await expect(agent.stop()).resolves.toBeUndefined();
+
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('1 VM reconcile job(s) still active after 1ms drain bound'),
+      );
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
   });
 
   it('cancels and awaits the active outbox drain before network teardown', async () => {

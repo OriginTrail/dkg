@@ -244,9 +244,9 @@ import {
   VmReconcileDispatcher,
   RecentUalSet,
   type ChainReconcilerDeps,
-  type ContextGraphReconcileResult,
   type OrdinalOutcome,
 } from './chain-reconciler.js';
+import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -873,6 +873,8 @@ export class DKGAgentBase {
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */
   protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
+  /** Next eligible CG index for bounded periodic-sweep admission. */
+  protected vmReconcileSweepCursor = 0;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */

@@ -29,6 +29,11 @@ import {
   absorbConfirmed,
   ordinalsToReconcile,
 } from './reconcile-cursor.js';
+import {
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+  type VmReconcileSource,
+} from './vm-reconcile-service.js';
 
 /**
  * Outcome of attempting to reconcile a single per-CG registration ordinal.
@@ -171,62 +176,10 @@ export async function reconcileContextGraph(
  * live-failure hold, so invalid combinations of pending flags are impossible.
  * This is the single owner of per-key coalescing semantics: a burst produces at
  * most one trailing pass, with periodic work taking priority over live nudges.
- * Trigger methods are deliberately fire-and-forget; callers that need an
- * completion boundary must use waitForIdle() explicitly.
+ * Trigger methods are deliberately fire-and-forget; callers that need a
+ * completion boundary must use waitForIdle() explicitly. Agent/API result
+ * models and route-facing errors live in `vm-reconcile-service.ts`.
  */
-export type VmReconcileTriggerSource = 'live' | 'periodic';
-export type VmReconcileSource = VmReconcileTriggerSource | 'manual';
-export type ContextGraphReconcileStatus = 'current' | 'progress' | 'pending' | 'watermark-ahead';
-
-export interface ContextGraphReconcileResult {
-  contextGraphId: string;
-  onChainId: string;
-  source: VmReconcileSource;
-  status: ContextGraphReconcileStatus;
-  attempted: boolean;
-  headOrdinal: number;
-  watermarkBefore: number;
-  watermarkAfter: number;
-  reconciledOrdinals: number;
-  unresolvedOrdinals: number;
-}
-
-export class ContextGraphOnChainIdUnresolvedError extends Error {
-  readonly code = 'ContextGraphOnChainIdUnresolved';
-
-  constructor(contextGraphId: string) {
-    super(`Context graph "${contextGraphId}" has no resolved on-chain id`);
-    this.name = 'ContextGraphOnChainIdUnresolvedError';
-  }
-}
-
-export class VmReconcileUnavailableError extends Error {
-  readonly code = 'VmReconcileUnavailable';
-
-  constructor() {
-    super('Chain-driven VM reconciliation is unavailable on this node');
-    this.name = 'VmReconcileUnavailableError';
-  }
-}
-
-export class VmReconcileQueueFullError extends Error {
-  readonly code = 'VmReconcileQueueFull';
-
-  constructor(readonly maxPending: number) {
-    super(`VM reconcile queue is full (${maxPending} pending context graphs)`);
-    this.name = 'VmReconcileQueueFullError';
-  }
-}
-
-export class VmReconcileQueueClosedError extends Error {
-  readonly code = 'VmReconcileQueueClosed';
-
-  constructor() {
-    super('VM reconcile queue is closed for node shutdown');
-    this.name = 'VmReconcileQueueClosedError';
-  }
-}
-
 type VmReconcileHold = 'ready' | 'live-blocked';
 
 interface VmReconcileDispatchWork<T> {
@@ -316,6 +269,18 @@ export class VmReconcileDispatcher<T> {
     void this.admit(key, 'periodic').catch(() => undefined);
   }
 
+  /**
+   * Attempt periodic admission without hiding bounded-queue overflow.
+   *
+   * Sweep orchestration retains its round-robin cursor at the first rejected
+   * key, so stable iteration order cannot permanently starve the tail.
+   */
+  tryTriggerPeriodic(key: string): boolean {
+    if (!this.canAdmitWithoutOverflow(key)) return false;
+    void this.admit(key, 'periodic').catch(() => undefined);
+    return true;
+  }
+
   /** Operator path; errors and the typed domain result propagate to the API. */
   triggerManual(key: string): Promise<T> {
     return this.dispatch(key, 'manual');
@@ -389,6 +354,13 @@ export class VmReconcileDispatcher<T> {
     return state;
   }
 
+  private canAdmitWithoutOverflow(key: string): boolean {
+    if (this.closed) return false;
+    const state = this.states.get(key);
+    if (state?.pending || state?.trailing) return true;
+    return this.queued < this.maxPending;
+  }
+
   private admit(key: string, source: VmReconcileSource): Promise<T> {
     if (this.closed) return Promise.reject(new VmReconcileQueueClosedError());
     const state = this.stateFor(key);
@@ -400,12 +372,13 @@ export class VmReconcileDispatcher<T> {
     }
 
     if (state.active) {
-      // Manual retries are observations of the same operation, not evidence
-      // of newer chain work, so they share the active result without adding a
-      // trailing closure. Live/periodic triggers can represent an event that
-      // arrived after the active pass took its head snapshot and therefore
-      // retain one coalesced trailing pass.
-      if (source === 'manual') return state.active.promise;
+      // An operator request must observe a head snapshot taken no earlier than
+      // that request. It may share an already-active operator pass, but never
+      // an older automatic pass. In that case it joins or creates one fresh
+      // trailing pass; repeated operator requests coalesce there.
+      if (source === 'manual' && state.active.source === 'manual') {
+        return state.active.promise;
+      }
       if (state.trailing) {
         this.mergeWork(state.trailing, source);
         return state.trailing.promise;
@@ -512,7 +485,9 @@ export class VmReconcileDispatcher<T> {
         .then(() => this.run(work.key, work.source))
         .then(
           (result) => {
-            if (work.automatic) state.hold = 'ready';
+            // Any successful full pass, including an operator-forced recovery,
+            // proves the failed-live hold can be released.
+            state.hold = 'ready';
             work.resolve(result);
           },
           (error) => {
@@ -533,9 +508,15 @@ export class VmReconcileDispatcher<T> {
           state.active = undefined;
           const trailing = state.trailing;
           state.trailing = undefined;
-          if (trailing && state.hold === 'live-blocked' && !trailing.periodicRequested) {
+          if (
+            trailing
+            && state.hold === 'live-blocked'
+            && trailing.source === 'live'
+            && !trailing.periodicRequested
+          ) {
             // A failing live pass must not immediately retry itself. Preserve
             // the failure hold until the periodic reliability path arrives.
+            // A manual completion boundary is never suppressed by this rule.
             this.queued -= 1;
             trailing.reject(failure);
           } else if (trailing && !this.closed) {

@@ -233,16 +233,18 @@ import {
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
-  ContextGraphOnChainIdUnresolvedError,
   reconcileContextGraph,
   RecentUalSet,
   VmReconcileDispatcher,
-  VmReconcileUnavailableError,
   type ChainReconcilerDeps,
-  type ContextGraphReconcileResult,
   type OrdinalOutcome,
-  type VmReconcileSource,
 } from './chain-reconciler.js';
+import {
+  ContextGraphOnChainIdUnresolvedError,
+  VmReconcileUnavailableError,
+  type ContextGraphReconcileResult,
+  type VmReconcileSource,
+} from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -2546,7 +2548,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * burst of live nudges) collapse into one sweep per CG.
    */
   async runVmReconcileSweep(this: DKGAgent): Promise<void> {
-    if (!this.vmReconcileEnabled() || !this.vmReconcileDispatcher) return;
+    const dispatcher = this.vmReconcileDispatcher;
+    if (!this.vmReconcileEnabled() || !dispatcher) return;
+    const eligible: string[] = [];
     for (const [localCgId, sub] of this.subscribedContextGraphs) {
       // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
       // (subscribed BEFORE its first publish, so unbound) before the skip-gate
@@ -2556,8 +2560,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       // Member subscriptions AND Phase D core-hosted public CGs get swept.
       if ((!sub.subscribed && !sub.coreHosted) || !sub.onChainId) continue;
-      void this.vmReconcileDispatcher.triggerPeriodic(localCgId);
+      eligible.push(localCgId);
     }
+
+    if (eligible.length === 0) {
+      this.vmReconcileSweepCursor = 0;
+      return;
+    }
+
+    // Admission is bounded, so retain the first rejected index as the next
+    // sweep's starting point. A stable Map order can therefore never refill
+    // the queue with the same prefix and permanently starve later CGs.
+    const start = this.vmReconcileSweepCursor % eligible.length;
+    for (let offset = 0; offset < eligible.length; offset += 1) {
+      const index = (start + offset) % eligible.length;
+      const localCgId = eligible[index]!;
+      if (!dispatcher.tryTriggerPeriodic(localCgId)) {
+        this.vmReconcileSweepCursor = index;
+        return;
+      }
+    }
+    // Rotate even when every CG coalesced/admitted so membership churn and
+    // concurrent foreground work do not repeatedly privilege index zero.
+    this.vmReconcileSweepCursor = (start + 1) % eligible.length;
   }
 
   /**

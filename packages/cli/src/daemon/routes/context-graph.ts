@@ -418,6 +418,53 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
   return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
+function respondReconcileError(res: ServerResponse, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof ContextGraphNotFoundError) {
+    return jsonResponse(res, 404, { error: message });
+  }
+  if (err instanceof ContextGraphOnChainIdUnresolvedError) {
+    return jsonResponse(res, 409, { error: message });
+  }
+  if (err instanceof VmReconcileQueueFullError) {
+    return jsonResponse(res, 429, { error: message });
+  }
+  if (err instanceof VmReconcileQueueClosedError || err instanceof VmReconcileUnavailableError) {
+    return jsonResponse(res, 503, { error: message });
+  }
+  return jsonResponse(res, 500, { error: message });
+}
+
+async function handleReconcileContextGraphRoute(
+  ctx: Pick<RequestContext, 'req' | 'res' | 'agent'>,
+  isNodeAdminCaller: boolean,
+): Promise<void> {
+  const { req, res, agent } = ctx;
+  if (!isNodeAdminCaller) {
+    return jsonResponse(res, 403, {
+      error: 'POST /api/context-graph/reconcile requires a node-level admin token',
+    });
+  }
+
+  const body = await readBody(req, SMALL_BODY_BYTES);
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body || '{}') as Record<string, unknown>;
+  } catch {
+    return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+  }
+  const contextGraphId = parsed.contextGraphId ?? parsed.id;
+  if (typeof contextGraphId !== 'string' || contextGraphId.length === 0) {
+    return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
+  }
+  try {
+    const result = await agent.runVmReconcileForCg(contextGraphId, 'manual');
+    return jsonResponse(res, 200, result);
+  } catch (err) {
+    return respondReconcileError(res, err);
+  }
+}
+
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -1575,44 +1622,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // only when that evidence shows a gap. Manual work uses the foreground
   // VM-reconcile lane, ahead of the periodic all-CG safety sweep.
   if (req.method === "POST" && path === "/api/context-graph/reconcile") {
-    if (!isNodeAdminCaller()) {
-      return jsonResponse(res, 403, {
-        error: 'POST /api/context-graph/reconcile requires a node-level admin token',
-      });
-    }
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(body || '{}') as Record<string, unknown>;
-    } catch {
-      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
-    }
-    const contextGraphId = parsed.contextGraphId ?? parsed.id;
-    if (typeof contextGraphId !== 'string' || contextGraphId.length === 0) {
-      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
-    }
-    try {
-      const result = await agent.runVmReconcileForCg(contextGraphId, 'manual');
-      return jsonResponse(res, 200, result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (err instanceof ContextGraphNotFoundError) {
-        return jsonResponse(res, 404, { error: message });
-      }
-      if (err instanceof ContextGraphOnChainIdUnresolvedError) {
-        return jsonResponse(res, 409, { error: message });
-      }
-      if (err instanceof VmReconcileQueueFullError) {
-        return jsonResponse(res, 429, { error: message });
-      }
-      if (err instanceof VmReconcileQueueClosedError) {
-        return jsonResponse(res, 503, { error: message });
-      }
-      if (err instanceof VmReconcileUnavailableError) {
-        return jsonResponse(res, 503, { error: message });
-      }
-      return jsonResponse(res, 500, { error: message });
-    }
+    return handleReconcileContextGraphRoute(
+      { req, res, agent },
+      isNodeAdminCaller(),
+    );
   }
 
   // POST /api/context-graph/recover-shared-memory

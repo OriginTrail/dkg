@@ -1,13 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import {
   reconcileContextGraph,
-  VmReconcileQueueClosedError,
-  VmReconcileQueueFullError,
   VmReconcileDispatcher,
   RecentUalSet,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
 } from '../src/chain-reconciler.js';
+import {
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+} from '../src/vm-reconcile-service.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
 
 /**
@@ -398,6 +400,64 @@ describe('VmReconcileDispatcher admission', () => {
     await blocker;
     await expect(Promise.all(requests)).resolves.toEqual(Array(20).fill('done'));
     expect(manualRuns).toBe(1);
+  });
+
+  it('makes manual admission wait for one fresh pass behind active automatic work', async () => {
+    let observedHead = 5;
+    let releaseAutomatic!: () => void;
+    const runs: Array<{ source: string; head: number }> = [];
+    const dispatcher = new VmReconcileDispatcher(async (_key, source) => {
+      const result = { source, head: observedHead };
+      runs.push(result);
+      if (runs.length === 1) {
+        await new Promise<void>((resolve) => { releaseAutomatic = resolve; });
+      }
+      return result;
+    }, () => undefined, { concurrency: 1 });
+
+    const automatic = dispatcher.dispatch('cg', 'periodic');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    dispatcher.triggerLive('cg');
+    const manual = dispatcher.triggerManual('cg');
+    const duplicateManual = dispatcher.triggerManual('cg');
+    observedHead = 6;
+
+    let manualSettled = false;
+    void manual.then(() => { manualSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(manualSettled).toBe(false);
+    expect(manual).toBe(duplicateManual);
+    expect(manual).not.toBe(automatic);
+
+    releaseAutomatic();
+    await expect(automatic).resolves.toEqual({ source: 'periodic', head: 5 });
+    await expect(manual).resolves.toEqual({ source: 'manual', head: 6 });
+    expect(runs).toEqual([
+      { source: 'periodic', head: 5 },
+      { source: 'manual', head: 6 },
+    ]);
+  });
+
+  it('still runs a fresh manual boundary when the older automatic pass fails', async () => {
+    let rejectAutomatic!: (error: Error) => void;
+    const sources: string[] = [];
+    const dispatcher = new VmReconcileDispatcher(async (_key, source) => {
+      sources.push(source);
+      if (sources.length === 1) {
+        await new Promise<void>((_resolve, reject) => { rejectAutomatic = reject; });
+      }
+      return source;
+    }, () => undefined, { concurrency: 1 });
+
+    const automaticFailure = dispatcher.dispatch('cg', 'periodic').catch((error) => error);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const manual = dispatcher.triggerManual('cg');
+    const failure = new Error('automatic pass failed');
+    rejectAutomatic(failure);
+
+    await expect(automaticFailure).resolves.toBe(failure);
+    await expect(manual).resolves.toBe('manual');
+    expect(sources).toEqual(['periodic', 'manual']);
   });
 
   it('rejects excess distinct work with a typed overload error', async () => {

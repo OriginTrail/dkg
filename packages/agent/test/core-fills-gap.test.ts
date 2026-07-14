@@ -45,6 +45,7 @@ import {
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { ReplicationEvent, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
+import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -64,6 +65,7 @@ interface AgentInternals {
   vmReconcileDispatcher: {
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
+    tryTriggerPeriodic: (cg: string) => boolean;
     dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
   } | null;
   store: TripleStore;
@@ -1650,6 +1652,10 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     internals.vmReconcileDispatcher = {
       triggerLive: (cg: string) => { liveTriggered.push(cg); },
       triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
+      tryTriggerPeriodic: (cg: string) => {
+        periodicTriggered.push(cg);
+        return true;
+      },
     };
 
     await internals.runVmReconcileSweep();
@@ -1657,6 +1663,38 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(periodicTriggered).toContain('100');     // hosted → swept
     expect(periodicTriggered).not.toContain('200'); // neither → skipped
     expect(liveTriggered).toEqual([]);
+  });
+
+  it('carries bounded periodic admission forward so every CG is eventually swept', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillSweepFairness', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    internals.subscribedContextGraphs.clear();
+
+    const contextGraphIds = Array.from({ length: 7 }, (_, index) => `fair-${index}`);
+    for (const [index, contextGraphId] of contextGraphIds.entries()) {
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        subscribed: false,
+        coreHosted: true,
+        onChainId: String(index + 1),
+      });
+    }
+
+    const swept: string[] = [];
+    const dispatcher = new VmReconcileDispatcher(
+      async (contextGraphId) => { swept.push(contextGraphId); },
+      () => undefined,
+      { concurrency: 1, maxPending: 1 },
+    );
+    internals.vmReconcileDispatcher = dispatcher;
+
+    for (let sweep = 0; sweep < 4; sweep += 1) {
+      await internals.runVmReconcileSweep();
+      await dispatcher.waitForIdle();
+    }
+
+    expect(new Set(swept)).toEqual(new Set(contextGraphIds));
   });
 
   it('skips ordinal reconciliation when the durable watermark equals chain head', async () => {
