@@ -23,6 +23,8 @@ interface Harness {
   /** Signals delivered through the ChildProcess handle instead of the group. */
   childKills: NodeJS.Signals[];
   terminated: NodeJS.Signals[];
+  /** The delay (ms) of every escalation timer the relay armed. */
+  armedDelays: number[];
   suspended: number;
   raise(signal: NodeJS.Signals): void;
   worker(pid: number | undefined): RelayWorker;
@@ -38,6 +40,7 @@ function harness(opts: { platform?: NodeJS.Platform; groupMissing?: boolean } = 
   const terminated: NodeJS.Signals[] = [];
   let suspended = 0;
   let timers: Array<() => void> = [];
+  const armedDelays: number[] = [];
 
   const kill = ((pid: number, signal?: number | NodeJS.Signals) => {
     kills.push(`${pid}:${String(signal ?? 'SIGTERM')}`);
@@ -54,8 +57,9 @@ function harness(opts: { platform?: NodeJS.Platform; groupMissing?: boolean } = 
     },
     off: (signal, handler) => { listeners.get(signal)?.delete(handler); },
     suspendSelf: () => { suspended += 1; },
-    setTimeout: (handler) => {
+    setTimeout: (handler, ms) => {
       timers.push(handler);
+      armedDelays.push(ms);
       return { unref: () => {} } as unknown as NodeJS.Timeout;
     },
     clearTimeout: () => { timers = []; },
@@ -66,6 +70,7 @@ function harness(opts: { platform?: NodeJS.Platform; groupMissing?: boolean } = 
     kills,
     childKills,
     terminated,
+    armedDelays,
     get suspended() { return suspended; },
     raise: (signal) => { for (const handler of listeners.get(signal) ?? []) handler(); },
     worker: (pid) => ({
@@ -197,13 +202,37 @@ describe('foreground signal relay', () => {
     expect(h.kills).toEqual(['-4242:SIGSTOP', '-4242:SIGCONT']);
   });
 
-  it('waits out the worker\'s own shutdown budget before force-killing it', () => {
-    // The escalation is a backstop for a worker that CANNOT exit, so it must sit
-    // outside the worker's graceful-shutdown contract. Escalating sooner would
-    // SIGKILL a healthy node mid-flush on every slow Ctrl-C.
+  it('arms the force-kill for longer than the worker\'s own shutdown budget', () => {
+    const h = harness();
+    const relay = createForegroundSignalRelay({ onTerminate: () => {}, io: h.io });
+    relay.attach(h.worker(4242));
+
+    h.raise('SIGTERM');
+
+    // The delay the relay ACTUALLY arms is the thing that matters: a worker
+    // shutting down as designed self-exits at its own deadline, so escalating
+    // inside that window would SIGKILL a healthy node mid-flush. Asserting only
+    // that the constant is large would still pass if the relay armed a shorter
+    // timer.
+    expect(h.armedDelays).toEqual([FOREGROUND_RELAY_KILL_GRACE_MS]);
     expect(FOREGROUND_RELAY_KILL_GRACE_MS).toBeGreaterThan(
       SHUTDOWN_HARD_TIMEOUT_MS + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
     );
+  });
+
+  it('does not let repeated signals push the force-kill backstop out', () => {
+    const h = harness();
+    const relay = createForegroundSignalRelay({ onTerminate: () => {}, io: h.io });
+    relay.attach(h.worker(4242));
+
+    h.raise('SIGINT');
+    h.raise('SIGINT');
+    h.raise('SIGINT');
+
+    // Three Ctrl-Cs, one deadline: a user asking harder for the node to die must
+    // not extend the window in which it is allowed to ignore them.
+    expect(h.armedDelays).toEqual([FOREGROUND_RELAY_KILL_GRACE_MS]);
+    expect(h.pendingTimers()).toBe(1);
   });
 
   it('keeps the first terminating signal as the shutdown cause', () => {

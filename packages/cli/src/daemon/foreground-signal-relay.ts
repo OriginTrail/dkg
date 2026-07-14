@@ -122,7 +122,11 @@ export function createForegroundSignalRelay(opts: {
   };
 
   const armEscalation = (): void => {
-    cancelEscalation();
+    // A deadline already running is not extended. Re-arming on every repeat
+    // signal would let a user holding Ctrl-C push the force-kill backstop out
+    // indefinitely -- the opposite of what they are asking for. detach() clears
+    // this between workers, so a replacement always gets its own window.
+    if (escalation) return;
     const target = worker;
     escalation = arm(() => {
       escalation = null;
