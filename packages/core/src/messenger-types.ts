@@ -173,7 +173,38 @@ export interface ProtocolOutboxEntry extends ProtocolOutboxMetadata {
   payload: Uint8Array;
 }
 
+/**
+ * Explicit opt-in key for payload-free outbox storage operations.
+ *
+ * A registry-backed symbol keeps the capability stable across duplicate
+ * package instances while preventing unrelated, same-named store methods from
+ * being mistaken for DKG outbox operations.
+ */
+export const PROTOCOL_OUTBOX_METADATA_CAPABILITY: unique symbol = Symbol.for(
+  '@origintrail-official/dkg-core/protocol-outbox-metadata/v1',
+);
+
+/** Payload-free outbox operations exposed by an explicit store capability. */
+export interface ProtocolOutboxMetadataCapability {
+  /** Delete expired rows without reading or returning payload bytes. */
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[];
+
+  /** Read diagnostics metadata without materializing payload bytes. */
+  listMetadata(): ProtocolOutboxMetadata[];
+}
+
+/**
+ * Store that explicitly opts into payload-free outbox operations.
+ * Implementations commonly return themselves from the symbol-keyed property.
+ */
+export interface ProtocolOutboxMetadataStore extends ProtocolOutboxMetadataCapability {
+  readonly [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: ProtocolOutboxMetadataCapability;
+}
+
 interface ProtocolOutboxStoreBase {
+  /** Optional explicit payload-free storage capability. */
+  readonly [PROTOCOL_OUTBOX_METADATA_CAPABILITY]?: ProtocolOutboxMetadataCapability;
+
   /**
    * Insert or update an outbox entry for `(peer, protocol, messageId)`.
    * First failure creates the entry with `attempts = 1`. Subsequent
@@ -253,26 +284,13 @@ interface ProtocolOutboxStoreBase {
 }
 
 /**
- * Optional payload-free storage capability. First-party stores implement this
- * directly; `ProtocolOutbox` adapts older custom stores at its boundary.
- */
-export interface ProtocolOutboxMetadataStore {
-  /** Delete expired rows without reading or returning payload bytes. */
-  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[];
-
-  /** Read diagnostics metadata without materializing payload bytes. */
-  listMetadata(): ProtocolOutboxMetadata[];
-}
-
-/**
  * Current sender-side outbox store contract. Peer bookkeeping uses a boolean
  * fast path; retry selection remains exclusively `due`/`duePage`-driven.
  *
  * `pendingFor` is an optional compatibility/diagnostic capability. New stores
  * do not need to materialize full payload-bearing peer snapshots.
  */
-export interface ProtocolOutboxStore
-  extends ProtocolOutboxStoreBase, Partial<ProtocolOutboxMetadataStore> {
+export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
   /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
   hasPendingFor(peer: string): boolean;
 
@@ -287,8 +305,7 @@ export interface ProtocolOutboxStore
  * Pre-#1579 custom-store shape retained at the `ProtocolOutbox` boundary.
  * Legacy stores exposed the full peer snapshot instead of a boolean fast path.
  */
-export interface LegacyProtocolOutboxStore
-  extends ProtocolOutboxStoreBase, Partial<ProtocolOutboxMetadataStore> {
+export interface LegacyProtocolOutboxStore extends ProtocolOutboxStoreBase {
   /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
   pendingFor(peer: string): ProtocolOutboxEntry[];
 

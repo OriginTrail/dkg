@@ -6,6 +6,7 @@ import {
   ProtocolOutbox,
 } from '../src/protocol-outbox.js';
 import {
+  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   RESPONSE_CACHE_BYTES,
   type LegacyProtocolOutboxStore,
   type ProtocolOutboxEntry,
@@ -263,13 +264,11 @@ describe('ProtocolOutbox.due / peer presence', () => {
       hasPendingFor: (peer) => peer === PEER_A,
       due: backing.due.bind(backing),
       dropExpired: backing.dropExpired.bind(backing),
-      dropExpiredMetadata: backing.dropExpiredMetadata.bind(backing),
       size: backing.size.bind(backing),
       list: () => {
         listCalls += 1;
         return [newer, otherPeer, older];
       },
-      listMetadata: backing.listMetadata.bind(backing),
       getEntry: backing.getEntry.bind(backing),
     };
     const outbox = new ProtocolOutbox(currentStore);
@@ -358,6 +357,66 @@ describe('ProtocolOutbox.dropExpired', () => {
 });
 
 describe('ProtocolOutbox.listMetadata', () => {
+  it('ignores unrelated same-named methods on existing custom stores', () => {
+    const backing = new InMemoryProtocolOutboxStore();
+    const metadata: ProtocolOutboxMetadata = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: MSG_1,
+      attempts: 1,
+      firstFailureAt: 1_000,
+      lastAttemptAt: 1_000,
+      nextAttemptAt: 6_000,
+      lastError: 'offline',
+    };
+    const entry: ProtocolOutboxEntry = { ...metadata, payload: PAYLOAD };
+    let fullListReads = 0;
+    let fullExpirationReads = 0;
+    let unrelatedListReads = 0;
+    let unrelatedExpirationReads = 0;
+    const existingStore = {
+      enqueue: backing.enqueue.bind(backing),
+      markDelivered: backing.markDelivered.bind(backing),
+      hasEntry: backing.hasEntry.bind(backing),
+      hasPendingFor: backing.hasPendingFor.bind(backing),
+      due: backing.due.bind(backing),
+      dropExpired: () => {
+        fullExpirationReads += 1;
+        return [entry];
+      },
+      size: () => 1,
+      list: () => {
+        fullListReads += 1;
+        return [entry];
+      },
+      getEntry: () => entry,
+      // Pre-existing store-private methods unrelated to DKG outbox metadata.
+      listMetadata: () => {
+        unrelatedListReads += 1;
+        return ['store schema v7'];
+      },
+      dropExpiredMetadata: () => {
+        unrelatedExpirationReads += 1;
+        return ['last store vacuum: yesterday'];
+      },
+    };
+    const outbox = new ProtocolOutbox(existingStore);
+
+    expect(outbox.listMetadata()).toEqual([metadata]);
+    expect(outbox.dropExpiredMetadata(10_000)).toEqual([metadata]);
+    expect({
+      fullListReads,
+      fullExpirationReads,
+      unrelatedListReads,
+      unrelatedExpirationReads,
+    }).toEqual({
+      fullListReads: 1,
+      fullExpirationReads: 1,
+      unrelatedListReads: 0,
+      unrelatedExpirationReads: 0,
+    });
+  });
+
   it('falls back to legacy stores without exposing payloads', () => {
     const backing = new InMemoryProtocolOutboxStore();
     const outbox = new ProtocolOutbox(legacyStoreWithoutMetadata(backing));
@@ -398,6 +457,16 @@ describe('ProtocolOutbox.listMetadata', () => {
     let metadataListReads = 0;
     let metadataExpirationReads = 0;
     const legacyStore: LegacyProtocolOutboxStore = {
+      [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: {
+        dropExpiredMetadata: () => {
+          metadataExpirationReads += 1;
+          return [metadata];
+        },
+        listMetadata: () => {
+          metadataListReads += 1;
+          return [metadata];
+        },
+      },
       enqueue: backing.enqueue.bind(backing),
       markDelivered: backing.markDelivered.bind(backing),
       hasEntry: backing.hasEntry.bind(backing),
@@ -407,18 +476,10 @@ describe('ProtocolOutbox.listMetadata', () => {
         fullExpirationReads += 1;
         return [entry];
       },
-      dropExpiredMetadata: () => {
-        metadataExpirationReads += 1;
-        return [metadata];
-      },
       size: () => 1,
       list: () => {
         fullListReads += 1;
         return [entry];
-      },
-      listMetadata: () => {
-        metadataListReads += 1;
-        return [metadata];
       },
       getEntry: () => entry,
     };
@@ -453,16 +514,18 @@ describe('ProtocolOutbox.listMetadata', () => {
       lastError: 'offline',
     };
     const store: ProtocolOutboxStore = {
+      [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: {
+        dropExpiredMetadata: () => [entry],
+        listMetadata: () => [entry],
+      },
       enqueue: backing.enqueue.bind(backing),
       markDelivered: backing.markDelivered.bind(backing),
       hasEntry: backing.hasEntry.bind(backing),
       hasPendingFor: backing.hasPendingFor.bind(backing),
       due: backing.due.bind(backing),
       dropExpired: backing.dropExpired.bind(backing),
-      dropExpiredMetadata: () => [entry],
       size: backing.size.bind(backing),
       list: backing.list.bind(backing),
-      listMetadata: () => [entry],
       getEntry: backing.getEntry.bind(backing),
     };
     const outbox = new ProtocolOutbox(store);

@@ -35,10 +35,14 @@ import type {
   LegacyProtocolOutboxStore,
   ProtocolOutboxEntry,
   ProtocolOutboxMetadata,
+  ProtocolOutboxMetadataCapability,
   ProtocolOutboxMetadataStore,
   ProtocolOutboxStore,
 } from './messenger-types.js';
-import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
+import {
+  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
+  RESPONSE_CACHE_BYTES,
+} from './messenger-types.js';
 
 export interface ProtocolOutboxOptions {
   /**
@@ -147,11 +151,14 @@ type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
  * Keep peer-presence compatibility at the constructor boundary. Current
  * stores retain their identity; only legacy peer-snapshot stores are adapted.
  */
-function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOutboxStore {
+function normalizeOutboxStore(
+  store: CompatibleProtocolOutboxStore,
+): ProtocolOutboxStore {
   if (typeof store.hasPendingFor === 'function') return store as ProtocolOutboxStore;
 
   const legacy = store as LegacyProtocolOutboxStore;
   const normalized: ProtocolOutboxStore = {
+    [PROTOCOL_OUTBOX_METADATA_CAPABILITY]: legacy[PROTOCOL_OUTBOX_METADATA_CAPABILITY],
     enqueue: legacy.enqueue.bind(legacy),
     markDelivered: legacy.markDelivered.bind(legacy),
     hasEntry: legacy.hasEntry.bind(legacy),
@@ -164,10 +171,6 @@ function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOut
     pendingFor: legacy.pendingFor.bind(legacy),
   };
   if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
-  if (legacy.dropExpiredMetadata) {
-    normalized.dropExpiredMetadata = legacy.dropExpiredMetadata.bind(legacy);
-  }
-  if (legacy.listMetadata) normalized.listMetadata = legacy.listMetadata.bind(legacy);
   return normalized;
 }
 
@@ -311,7 +314,8 @@ export class ProtocolOutbox {
 
   /** Metadata-only expiration, with a compatibility fallback for legacy stores. */
   dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    const dropped = this.store.dropExpiredMetadata?.(now) ?? this.store.dropExpired(now);
+    const metadataStore = this.store[PROTOCOL_OUTBOX_METADATA_CAPABILITY];
+    const dropped = metadataStore?.dropExpiredMetadata(now) ?? this.store.dropExpired(now);
     return dropped.map(cloneOutboxMetadata);
   }
 
@@ -331,7 +335,8 @@ export class ProtocolOutbox {
 
   /** Metadata-only diagnostics snapshot, with a compatibility fallback. */
   listMetadata(): ProtocolOutboxMetadata[] {
-    const entries = this.store.listMetadata?.() ?? this.store.list();
+    const metadataStore = this.store[PROTOCOL_OUTBOX_METADATA_CAPABILITY];
+    const entries = metadataStore?.listMetadata() ?? this.store.list();
     return entries.map(cloneOutboxMetadata);
   }
 
@@ -368,6 +373,10 @@ export class InMemoryProtocolOutboxStore
 
   constructor(options: ProtocolOutboxOptions = {}) {
     this.configurePolicy(options);
+  }
+
+  get [PROTOCOL_OUTBOX_METADATA_CAPABILITY](): ProtocolOutboxMetadataCapability {
+    return this;
   }
 
   private static key(peer: string, protocol: string, messageId: string): string {

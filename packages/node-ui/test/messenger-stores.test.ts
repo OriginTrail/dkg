@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RESPONSE_CACHE_BYTES } from '@origintrail-official/dkg-core';
+import { ProtocolOutbox, RESPONSE_CACHE_BYTES } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   SqliteMessageIdempotencyStore,
@@ -198,15 +198,16 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(pending.every((entry) => !Object.hasOwn(entry, 'payload'))).toBe(true);
   });
 
-  it('keeps payload columns out of metadata listing and expiration queries', () => {
+  it('keeps payload columns out of facade metadata listing and expiration queries', () => {
     const store = new SqliteProtocolOutboxStore(db, { maxAgeMs: 60_000 });
-    store.enqueue(PEER_A, PROTO, MSG_1, new Uint8Array(1024), 'old', 0);
+    const outbox = new ProtocolOutbox(store, { maxAgeMs: 60_000 });
+    outbox.enqueueFailure(PEER_A, PROTO, MSG_1, new Uint8Array(1024), 'old', 0);
     const prepareSpy = vi.spyOn(db.db, 'prepare');
     let metadataSelects: string[] = [];
 
     try {
-      store.listMetadata();
-      store.dropExpiredMetadata(60_001);
+      outbox.listMetadata();
+      outbox.dropExpiredMetadata(60_001);
       metadataSelects = prepareSpy.mock.calls
         .map(([sql]) => String(sql).replace(/\s+/g, ' ').trim())
         .filter((sql) => /^SELECT\b/i.test(sql) && /\bFROM protocol_outbox\b/i.test(sql));

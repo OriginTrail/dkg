@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import {
+  PROTOCOL_OUTBOX_METADATA_CAPABILITY,
   RESPONSE_CACHE_BYTES,
   type IdempotencyCheckResult,
   type KaNumberStore,
@@ -8,6 +9,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
+  type ProtocolOutboxMetadataCapability,
   type ProtocolOutboxMetadataStore,
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
@@ -2695,6 +2697,10 @@ export class SqliteProtocolOutboxStore
   constructor(dashboard: DashboardDB, options: SqliteProtocolOutboxStoreOptions = {}) {
     this.db = dashboard.db;
     this.configurePolicy(options);
+  }
+
+  get [PROTOCOL_OUTBOX_METADATA_CAPABILITY](): ProtocolOutboxMetadataCapability {
+    return this;
   }
 
   configurePolicy(options: SqliteProtocolOutboxStoreOptions = {}): void {
