@@ -386,6 +386,15 @@ had `subscribed=false`, retained `onChainId=3`, and was absent from
 `POST /api/context-graph/subscribe` activated the graph with
 `subscribed=true` and `coreHosted=false`.
 
+A follow-up data-bearing check created another randomly named public graph,
+wrote a unique marker triple into the core node's shared working memory, and
+verified that the core could query the marker. The edge discovered the graph
+with `subscribed=false` but returned zero marker rows before subscription and
+through a 30-second passive window after an edge restart. After an explicit
+subscription with shared-memory catch-up, the same edge query returned the
+marker. This proves the graph data is available and sync-capable, while passive
+discovery alone does not initiate synchronization.
+
 The isolated devnet and its generated deployment metadata were cleaned after
 the run.
 
