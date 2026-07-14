@@ -18,6 +18,7 @@ export default defineConfig({
       'test/async-promote-queue.test.ts',
       'test/multi-root-token-rows.test.ts',
       'test/promote-step-tag.test.ts',
+      'test/ka-graph-skolemization.test.ts',
       'test/agents-meta-bound.test.ts',
       'test/ack-collector.test.ts',
       'test/publish-lifecycle-logger.test.ts',

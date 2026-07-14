@@ -581,6 +581,27 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(fetchCalls.some((c) => String(c[1]?.body ?? '').startsWith('SELECT'))).toBe(false);
   });
 
+  it('replaceGraph sends one staged MOVE update for the complete graph', async () => {
+    const s = new BlazegraphStore(baseUrl);
+    await s.replaceGraph('http://ex.org/g', [{
+      subject: 'http://ex.org/new',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g',
+    }]);
+
+    expect(fetchCalls).toHaveLength(1);
+    const [, init] = fetchCalls[0];
+    const body = String(init?.body);
+    expect((init?.headers as Record<string, string>)['Content-Type'])
+      .toBe('application/sparql-update; charset=utf-8');
+    expect(body).toContain('urn:dkg:internal:atomic-graph-replace:');
+    expect(body).toContain('INSERT DATA');
+    expect(body).toContain('MOVE SILENT GRAPH');
+    expect(body).toContain('TO GRAPH <http://ex.org/g>');
+    expect(body).toContain('<http://ex.org/new> <http://ex.org/p> "new" .');
+  });
+
   it('update honors pre-aborted options before dispatch', async () => {
     const s = new BlazegraphStore(baseUrl);
     const controller = new AbortController();

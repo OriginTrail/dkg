@@ -21,6 +21,10 @@ import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
+import {
+  buildAtomicGraphReplaceUpdate,
+  isAtomicGraphReplaceStagingGraph,
+} from '../atomic-graph-replace.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -322,6 +326,34 @@ export class BlazegraphStore implements TripleStore {
     );
   }
 
+  async replaceGraph(
+    graphUri: string,
+    quads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'BlazegraphStore.replaceGraph',
+    });
+    const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    try {
+      await this.sparqlUpdate(
+        plan.update,
+        { ...options, source: options?.source ?? 'blazegraph.replaceGraph' },
+        'replaceGraph',
+      );
+    } catch (error) {
+      if (plan.cleanup) {
+        await this.sparqlUpdate(
+          plan.cleanup,
+          { ...options, source: 'blazegraph.replaceGraph.cleanup' },
+          'replaceGraphCleanup',
+        ).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
   // -------------------------------------------------------------------
   // Queries
   // -------------------------------------------------------------------
@@ -425,7 +457,9 @@ export class BlazegraphStore implements TripleStore {
       options,
     );
     if (r.type !== 'bindings') return [];
-    return r.bindings.map((b) => b.g).filter(Boolean);
+    return r.bindings
+      .map((b) => b.g)
+      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
   }
 
   // -------------------------------------------------------------------

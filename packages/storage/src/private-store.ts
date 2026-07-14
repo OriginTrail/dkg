@@ -2,10 +2,12 @@ import {
   assertRdfLiteralMutf8Safe,
   assertSafeIri,
   assertSafeRdfTerm,
+  canonicalKnowledgeAssetGraphIdentitySuffix,
   escapeSparqlLiteral,
   isSafeIri,
+  type GraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore, Quad } from './triple-store.js';
+import { tryReplaceGraphAtomically, type TripleStore, type Quad } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
 
 /**
@@ -161,6 +163,81 @@ export class PrivateContentStore {
     return subGraphName
       ? this.graphManager.subGraphPrivateUri(contextGraphId, subGraphName)
       : this.graphManager.privateGraphUri(contextGraphId);
+  }
+
+  /**
+   * Exact private content graph for one rootless KA assertion.
+   *
+   * Public VM currently materializes the latest assertion in a stable UAL-derived
+   * graph, but private content must remain addressable by the commitment that
+   * covered it. Including the assertion version prevents a v2 update from
+   * silently overwriting the private payload committed by an earlier version.
+   */
+  knowledgeAssetPrivateGraphUri(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    subGraphName?: string,
+  ): string {
+    const bucket = this.privateGraph(contextGraphId, subGraphName);
+    return assertSafeIri(
+      `${bucket}/${canonicalKnowledgeAssetGraphIdentitySuffix(scope.agentAddress, BigInt(scope.kaNumber))}`
+        + `/assertions/${scope.assertionVersion}`,
+    );
+  }
+
+  /**
+   * Atomically replace the complete private triple set of one graph-scoped KA.
+   * No marker triples are mixed into this graph: its contents are exactly the
+   * triples covered by the single KA-level private Merkle commitment.
+   */
+  async replaceKnowledgeAssetPrivateTriples(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    quads: readonly Quad[],
+    subGraphName?: string,
+  ): Promise<string> {
+    for (const quad of quads) assertSafePrivateQuad(quad);
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    await this.withGraphWriteLock(graphUri, async () => {
+      const replaced = await tryReplaceGraphAtomically(
+        this.store,
+        graphUri,
+        quads.map((quad) => ({ ...quad, graph: graphUri })),
+      );
+      if (!replaced) {
+        throw Object.assign(
+          new Error(
+            `Triple store cannot atomically replace graph-scoped private content at ${graphUri}`,
+          ),
+          { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED' },
+        );
+      }
+    });
+    return graphUri;
+  }
+
+  /** Read exactly one rootless KA's private triple set. */
+  async getKnowledgeAssetPrivateTriples(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    subGraphName?: string,
+  ): Promise<Quad[]> {
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    const result = await this.store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
+    );
+    if (result.type !== 'quads') return [];
+    return result.quads.map((quad) => ({ ...quad, graph: '' }));
+  }
+
+  async deleteKnowledgeAssetPrivateTriples(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    subGraphName?: string,
+  ): Promise<void> {
+    await this.store.dropGraph(
+      this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName),
+    );
   }
 
   private privateKey(contextGraphId: string, subGraphName?: string): string {

@@ -16,10 +16,17 @@ export {
   registerTripleStoreAdapter,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
+  tryReplaceGraphAtomically,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
 } from './triple-store.js';
+export {
+  ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  buildAtomicGraphReplaceUpdate,
+  isAtomicGraphReplaceStagingGraph,
+  type AtomicGraphReplaceUpdate,
+} from './atomic-graph-replace.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   type TripleStoreCapability,

@@ -1,7 +1,14 @@
 export * from './publisher.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
-export { skolemizeByEntity, autoPartition } from './auto-partition.js';
+export {
+  KNOWLEDGE_ASSET_SKOLEM_PREFIX,
+  skolemizeKnowledgeAsset,
+  skolemizeKnowledgeAssetParts,
+  skolemizeByEntity,
+  autoPartition,
+  type SkolemizedKnowledgeAssetParts,
+} from './auto-partition.js';
 export {
   ASSERTION_NAMED_GRAPH_PREFIX,
   assertionOriginalGraph,

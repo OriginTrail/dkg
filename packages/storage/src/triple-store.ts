@@ -116,6 +116,17 @@ export interface TripleStore {
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;
+  /**
+   * Atomically replace one named graph with the supplied complete quad set.
+   *
+   * Every quad MUST target `graphUri`. On success readers observe the complete
+   * new graph (or no graph for an empty set); on failure they observe either the
+   * complete prior graph or the complete new graph, never a DROP/INSERT prefix.
+   * Optional because third-party adapters may not provide a transactional
+   * SPARQL Update boundary. Rootless KA mutation paths require this capability
+   * and fail closed when it is unavailable.
+   */
+  replaceGraph?(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -173,6 +184,35 @@ export async function tryUpdateWithTouchedGraphs(
     if (
       error instanceof UnsupportedTripleStoreCapabilityError &&
       error.capability === 'update'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt an atomic complete named-graph replacement.
+ *
+ * `false` means the capability is genuinely unavailable and no mutation was
+ * started. Execution failures propagate, including indeterminate remote-store
+ * failures, so callers never mistake an outage for a safe compatibility path.
+ */
+export async function tryReplaceGraphAtomically(
+  store: TripleStore,
+  graphUri: string,
+  quads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replaceGraph = store.replaceGraph;
+  if (typeof replaceGraph !== 'function') return false;
+  try {
+    await replaceGraph.call(store, graphUri, quads, options);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceGraph'
     ) {
       return false;
     }
