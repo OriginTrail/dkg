@@ -1708,6 +1708,10 @@ export async function runDaemonInner(
         dashDb.getContextGraphAutomaticApprovalUsage(contextGraphId, timestamp),
       reserveAutomaticApproval: async (input) =>
         dashDb.reserveContextGraphAutomaticApproval(input),
+      markAutomaticApprovalRepairPending: async (input) =>
+        dashDb.markContextGraphAutomaticApprovalRepairPending(input),
+      getAutomaticApprovalRepair: async (contextGraphId, requestDigest) =>
+        dashDb.getContextGraphAutomaticApprovalRepair(contextGraphId, requestDigest),
       commitAutomaticApproval: async (input) =>
         dashDb.commitContextGraphAutomaticApproval(input),
     },

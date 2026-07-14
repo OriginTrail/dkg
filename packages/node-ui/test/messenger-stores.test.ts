@@ -47,7 +47,7 @@ describe('V12 migration', () => {
     // the substrate store fixtures are created against the
     // current SCHEMA_VERSION (now 27 after admission state moved into a
     // dedicated typed ledger).
-    expect(db.db.pragma('user_version', { simple: true })).toBe(27);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(28);
   });
 });
 

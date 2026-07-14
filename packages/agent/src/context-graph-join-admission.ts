@@ -47,6 +47,12 @@ interface VerifiedIncomingJoinRequest extends IncomingJoinRequestInput {
   repairPolicyEpoch: number | undefined;
 }
 
+interface DurableAutomaticApprovalRepair {
+  policyEpoch: number;
+  actor: string;
+  agentAddress: string;
+}
+
 interface OpenEnrollmentAdmissionTarget {
   ownerDid: string;
   ownerAgentAddress: string;
@@ -209,17 +215,31 @@ export class ContextGraphJoinAdmission {
   async process(input: IncomingJoinRequestInput): Promise<IncomingJoinRequestDecision> {
     this.assertAgentName(input.agentName);
     const requestDigest = contextGraphJoinRequestDigest(input.delegation);
+    const durableRepair = await this.host.policyStore
+      ?.getAutomaticApprovalRepair(input.contextGraphId, requestDigest)
+      .catch(() => null) ?? null;
     const retryableAdmission = this.host.getRetryableAdmission(
       input.contextGraphId,
       input.delegation,
     );
-    const releaseIngress = input.ingressReserved || retryableAdmission
+    const releaseIngress = input.ingressReserved || retryableAdmission || durableRepair
       ? () => {}
       : this.host.reserveIngress(input.contextGraphId, input.carrierPeerId);
 
     try {
+      if (durableRepair) {
+        const repaired = await this.host.withAdmissionLock(
+          input.contextGraphId,
+          () => this.repairDurableAutomaticApproval({
+            ...input,
+            requestDigest,
+            durableRepair,
+          }),
+        );
+        if (repaired) return repaired;
+      }
       this.host.verifyJoinRequest(input.contextGraphId, input.delegation);
-      if (!retryableAdmission) {
+      if (!retryableAdmission && !durableRepair) {
         this.host.chargeVerifiedIngress(input.contextGraphId, input.delegation.agentAddress);
       }
       return await this.host.withAdmissionLock(input.contextGraphId, async (admissionLockToken) =>
@@ -231,6 +251,84 @@ export class ContextGraphJoinAdmission {
         }));
     } finally {
       releaseIngress();
+    }
+  }
+
+  /**
+   * Finish a mutation that already crossed the durable membership boundary.
+   * The exact request digest was signature-verified when its reservation was
+   * created, so expiry must not prevent this idempotent bookkeeping repair.
+   */
+  private async repairDurableAutomaticApproval(input: IncomingJoinRequestInput & {
+    requestDigest: string;
+    durableRepair: DurableAutomaticApprovalRepair;
+  }): Promise<IncomingJoinRequestDecision | null> {
+    const {
+      contextGraphId,
+      delegation,
+      carrierPeerId,
+      requestDigest,
+      durableRepair,
+    } = input;
+    if (
+      durableRepair.agentAddress.toLowerCase() !== delegation.agentAddress.toLowerCase()
+      || !delegation.delegateePeerId
+      || delegation.delegateePeerId !== carrierPeerId
+    ) {
+      return null;
+    }
+    const meta = await this.host.getContextGraphMeta(contextGraphId);
+    if (meta.revokedAgents.some(
+      (address) => address.toLowerCase() === delegation.agentAddress.toLowerCase(),
+    )) {
+      return null;
+    }
+    const activeMembers = await this.host.getActiveMembers(contextGraphId) ?? [];
+    if (!activeMembers.some(
+      (address) => address.toLowerCase() === delegation.agentAddress.toLowerCase(),
+    )) {
+      return null;
+    }
+
+    try {
+      const hasJoinRequest = await this.host.hasJoinRequestRecord(
+        contextGraphId,
+        delegation.agentAddress,
+      );
+      if (
+        hasJoinRequest
+        && await this.host.getJoinRequestStatus(contextGraphId, delegation.agentAddress)
+          !== 'approved'
+      ) {
+        await this.host.markJoinRequestApproved(contextGraphId, delegation.agentAddress);
+      }
+      await this.host.flushJoinApprovalDurably();
+      const committed = await this.host.policyStore?.commitAutomaticApproval({
+        timestamp: Date.now(),
+        contextGraphId,
+        actor: durableRepair.actor,
+        agentAddress: durableRepair.agentAddress,
+        requestDigest,
+        policyEpoch: durableRepair.policyEpoch,
+        details: { recoveredFromDurableRepair: true },
+      });
+      if (!committed) {
+        throw new Error('Automatic approval repair reservation is missing.');
+      }
+      this.host.notifyJoinApproval(contextGraphId, delegation.agentAddress);
+      this.host.clearRetryableAdmission(contextGraphId, delegation);
+      return {
+        status: 'approved',
+        autoApproved: true,
+        alreadyMember: true,
+      };
+    } catch (error) {
+      this.host.markRetryableAdmission(
+        contextGraphId,
+        delegation,
+        durableRepair.policyEpoch,
+      );
+      throw retryableJoinAdmissionError(error);
     }
   }
 
@@ -552,6 +650,14 @@ export class ContextGraphJoinAdmission {
       });
       if (this.host.isPolicyDisableRequested(contextGraphId)) {
         throw new Error('Open enrollment was switched to manual before the membership mutation.');
+      }
+      const repairPendingRecorded = await policyStore.markAutomaticApprovalRepairPending({
+        contextGraphId,
+        requestDigest,
+        policyEpoch: policy.updatedAt,
+      });
+      if (!repairPendingRecorded) {
+        throw new Error('Automatic approval reservation is missing before membership mutation.');
       }
       membershipMutationStarted = true;
       await this.host.commitPreparedJoinRequestApproval({

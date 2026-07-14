@@ -17,7 +17,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 27;
+const SCHEMA_VERSION = 28;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -167,6 +167,18 @@ export interface ContextGraphAutomaticApprovalCommitInput {
   details?: Record<string, unknown>;
 }
 
+export interface ContextGraphAutomaticApprovalRepairInput {
+  contextGraphId: string;
+  requestDigest: string;
+  policyEpoch: number;
+}
+
+export interface ContextGraphAutomaticApprovalRepairRecord {
+  policyEpoch: number;
+  actor: string;
+  agentAddress: string;
+}
+
 type ContextGraphAutomaticApprovalLedgerState = 'reserved' | 'committed';
 
 interface ContextGraphAutomaticApprovalLedgerRow {
@@ -179,6 +191,7 @@ interface ContextGraphAutomaticApprovalLedgerRow {
   actor: string;
   agent_address: string;
   policy_version: number;
+  repair_pending: number;
 }
 
 /**
@@ -263,10 +276,34 @@ export class DashboardDB {
           );
       END;
     `);
+    const ensureJoinApprovalRepairMarker = () => {
+      const table = this.db.prepare(`
+        SELECT 1 AS found FROM sqlite_master
+        WHERE type = 'table' AND name = 'context_graph_join_approval_ledger'
+      `).get() as { found: number } | undefined;
+      if (!table) return;
+      const columns = this.db.pragma(
+        'table_info(context_graph_join_approval_ledger)',
+      ) as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'repair_pending')) {
+        this.db.exec(`
+          ALTER TABLE context_graph_join_approval_ledger
+          ADD COLUMN repair_pending INTEGER NOT NULL DEFAULT 0
+            CHECK (repair_pending IN (0, 1));
+        `);
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_repair
+          ON context_graph_join_approval_ledger(
+            context_graph_id, request_digest, repair_pending, reserved_at DESC
+          );
+      `);
+    };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
-      // but lost the idempotent audit-cap trigger.
+      // but lost an idempotent schema adjunct.
+      ensureJoinApprovalRepairMarker();
       ensureJoinPolicyAuditCapTrigger();
       return;
     }
@@ -1102,6 +1139,13 @@ export class DashboardDB {
       this.db.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
     }
 
+    if (version < 28) {
+      // A reservation alone does not prove that admission crossed its
+      // membership boundary. Persist that distinction so an exact retry can
+      // finish moderation/audit after delegation expiry or daemon restart.
+      ensureJoinApprovalRepairMarker();
+    }
+
     // Keep this repair outside the version gate. Restored/development DBs can
     // carry the current user_version while missing a trigger; recreating it is
     // idempotent and keeps the audit bound fail-closed on every open.
@@ -1614,6 +1658,46 @@ export class DashboardDB {
     return reserve();
   }
 
+  markContextGraphAutomaticApprovalRepairPending(
+    input: ContextGraphAutomaticApprovalRepairInput,
+  ): boolean {
+    const marked = this.stmt('markContextGraphAutomaticApprovalRepairPending', `
+      UPDATE context_graph_join_approval_ledger
+      SET repair_pending = 1
+      WHERE context_graph_id = ?
+        AND request_digest = ?
+        AND policy_epoch = ?
+        AND state = 'reserved'
+    `).run(input.contextGraphId, input.requestDigest, input.policyEpoch);
+    return marked.changes === 1;
+  }
+
+  getContextGraphAutomaticApprovalRepair(
+    contextGraphId: string,
+    requestDigest: string,
+  ): ContextGraphAutomaticApprovalRepairRecord | null {
+    const repair = this.stmt('getContextGraphAutomaticApprovalRepair', `
+      SELECT policy_epoch, actor, agent_address
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ?
+        AND request_digest = ?
+        AND state = 'reserved'
+        AND repair_pending = 1
+      ORDER BY reserved_at DESC
+      LIMIT 1
+    `).get(contextGraphId, requestDigest) as Pick<
+      ContextGraphAutomaticApprovalLedgerRow,
+      'policy_epoch' | 'actor' | 'agent_address'
+    > | undefined;
+    return repair
+      ? {
+          policyEpoch: repair.policy_epoch,
+          actor: repair.actor,
+          agentAddress: repair.agent_address,
+        }
+      : null;
+  }
+
   commitContextGraphAutomaticApproval(
     input: ContextGraphAutomaticApprovalCommitInput,
   ): boolean {
@@ -1636,7 +1720,7 @@ export class DashboardDB {
 
       const updated = this.stmt('commitContextGraphAutomaticApprovalReservation', `
         UPDATE context_graph_join_approval_ledger
-        SET state = 'committed', committed_at = ?
+        SET state = 'committed', committed_at = ?, repair_pending = 0
         WHERE context_graph_id = ?
           AND request_digest = ?
           AND policy_epoch = ?

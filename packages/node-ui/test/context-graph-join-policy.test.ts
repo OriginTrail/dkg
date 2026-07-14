@@ -234,6 +234,71 @@ describe('DashboardDB context graph join policy', () => {
     second.close();
   });
 
+  it('persists exact post-mutation repair state across restart and clears it on commit', () => {
+    const { db: first, dataDir } = createDb();
+    const contextGraphId = 'cg-durable-repair';
+    const timestamp = Date.now();
+    const reservation = {
+      contextGraphId,
+      timestamp,
+      contextGraphLimit: 5,
+      nodeLimit: 10,
+      actor: 'did:dkg:agent:curator',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'repair-request',
+      policyVersion: 1,
+      policyEpoch: 5678,
+    };
+
+    expect(first.reserveContextGraphAutomaticApproval(reservation)).toMatchObject({ allowed: true });
+    expect(first.getContextGraphAutomaticApprovalRepair(
+      contextGraphId,
+      reservation.requestDigest,
+    )).toBeNull();
+    expect(first.markContextGraphAutomaticApprovalRepairPending({
+      contextGraphId,
+      requestDigest: reservation.requestDigest,
+      policyEpoch: reservation.policyEpoch + 1,
+    })).toBe(false);
+    expect(first.markContextGraphAutomaticApprovalRepairPending({
+      contextGraphId,
+      requestDigest: reservation.requestDigest,
+      policyEpoch: reservation.policyEpoch,
+    })).toBe(true);
+    expect(first.getContextGraphAutomaticApprovalRepair(
+      contextGraphId,
+      reservation.requestDigest,
+    )).toEqual({
+      policyEpoch: reservation.policyEpoch,
+      actor: reservation.actor,
+      agentAddress: reservation.agentAddress,
+    });
+    first.close();
+
+    const second = new DashboardDB({ dataDir });
+    expect(second.getContextGraphAutomaticApprovalRepair(
+      contextGraphId,
+      reservation.requestDigest,
+    )).toEqual({
+      policyEpoch: reservation.policyEpoch,
+      actor: reservation.actor,
+      agentAddress: reservation.agentAddress,
+    });
+    expect(second.commitContextGraphAutomaticApproval({
+      contextGraphId,
+      timestamp: timestamp + 1,
+      actor: reservation.actor,
+      agentAddress: reservation.agentAddress,
+      requestDigest: reservation.requestDigest,
+      policyEpoch: reservation.policyEpoch,
+    })).toBe(true);
+    expect(second.getContextGraphAutomaticApprovalRepair(
+      contextGraphId,
+      reservation.requestDigest,
+    )).toBeNull();
+    second.close();
+  });
+
   it('rolls back a policy transition when its audit insert fails', () => {
     const { db } = createDb();
     const contextGraphId = 'cg-atomic-policy';

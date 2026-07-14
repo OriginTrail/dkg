@@ -841,6 +841,25 @@ export interface ContextGraphJoinPolicyStore {
     policyEpoch: number;
   }): Promise<ContextGraphJoinPolicyRateReservation>;
   /**
+   * Durably mark the exact reservation before crossing the membership
+   * mutation boundary. This distinguishes an admission repair from an unused
+   * or abandoned rate-limit reservation after a daemon restart.
+   */
+  markAutomaticApprovalRepairPending(input: {
+    contextGraphId: string;
+    requestDigest: string;
+    policyEpoch: number;
+  }): Promise<boolean>;
+  /** Load an unfinished post-mutation repair without relying on delegation validity. */
+  getAutomaticApprovalRepair(
+    contextGraphId: string,
+    requestDigest: string,
+  ): Promise<{
+    policyEpoch: number;
+    actor: string;
+    agentAddress: string;
+  } | null>;
+  /**
    * Idempotently record the durable admission authorized by the exact policy
    * snapshot that reserved it. Returns false when no matching reservation
    * exists; callers must never infer recency from wall-clock timestamps.

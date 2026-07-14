@@ -28,7 +28,13 @@ function joinRequestHandler(agent: DKGAgent): JoinRequestHandler {
 class MemoryJoinPolicyStore implements ContextGraphJoinPolicyStore {
   readonly records = new Map<string, ContextGraphJoinPolicyRecord>();
   readonly audit: ContextGraphJoinPolicyAuditEvent[] = [];
+  readonly repairPending = new Set<string>();
   beforeReserve?: () => Promise<void>;
+  failNextCommit = false;
+
+  private repairKey(contextGraphId: string, requestDigest: string, policyEpoch: number): string {
+    return `${contextGraphId}::${requestDigest}::${policyEpoch}`;
+  }
 
   async load(contextGraphId: string): Promise<ContextGraphJoinPolicyRecord | null> {
     return this.records.get(contextGraphId) ?? null;
@@ -126,14 +132,60 @@ class MemoryJoinPolicyStore implements ContextGraphJoinPolicyStore {
     };
   }
 
+  async markAutomaticApprovalRepairPending(input: {
+    contextGraphId: string;
+    requestDigest: string;
+    policyEpoch: number;
+  }): Promise<boolean> {
+    const reservation = this.audit.some(
+      (event) => event.eventType === 'join_auto_reservation'
+        && event.contextGraphId === input.contextGraphId
+        && event.requestDigest === input.requestDigest
+        && event.details?.policyEpoch === input.policyEpoch,
+    );
+    if (!reservation) return false;
+    this.repairPending.add(this.repairKey(
+      input.contextGraphId,
+      input.requestDigest,
+      input.policyEpoch,
+    ));
+    return true;
+  }
+
+  async getAutomaticApprovalRepair(contextGraphId: string, requestDigest: string) {
+    for (let index = this.audit.length - 1; index >= 0; index -= 1) {
+      const reservation = this.audit[index];
+      const policyEpoch = reservation.details?.policyEpoch;
+      if (
+        reservation.eventType === 'join_auto_reservation'
+        && reservation.contextGraphId === contextGraphId
+        && reservation.requestDigest === requestDigest
+        && typeof policyEpoch === 'number'
+        && this.repairPending.has(this.repairKey(contextGraphId, requestDigest, policyEpoch))
+      ) {
+        return {
+          policyEpoch,
+          actor: reservation.actor ?? 'unknown-owner',
+          agentAddress: reservation.agentAddress ?? '',
+        };
+      }
+    }
+    return null;
+  }
+
   async commitAutomaticApproval(input: {
     contextGraphId: string;
     timestamp: number;
     actor: string;
     agentAddress: string;
     requestDigest: string;
+    policyEpoch: number;
     details?: Record<string, unknown>;
   }): Promise<boolean> {
+    if (this.failNextCommit) {
+      this.failNextCommit = false;
+      throw new Error('simulated durable approval commit failure');
+    }
     let reservation: ContextGraphJoinPolicyAuditEvent | undefined;
     for (let index = this.audit.length - 1; index >= 0; index -= 1) {
       const candidate = this.audit[index];
@@ -141,6 +193,7 @@ class MemoryJoinPolicyStore implements ContextGraphJoinPolicyStore {
         candidate.eventType === 'join_auto_reservation'
         && candidate.contextGraphId === input.contextGraphId
         && candidate.requestDigest === input.requestDigest
+        && candidate.details?.policyEpoch === input.policyEpoch
       ) {
         reservation = candidate;
         break;
@@ -157,7 +210,14 @@ class MemoryJoinPolicyStore implements ContextGraphJoinPolicyStore {
         && event.requestDigest === input.requestDigest
         && event.details?.policyEpoch === policyEpoch,
     );
-    if (alreadyCommitted) return true;
+    if (alreadyCommitted) {
+      this.repairPending.delete(this.repairKey(
+        input.contextGraphId,
+        input.requestDigest,
+        policyEpoch,
+      ));
+      return true;
+    }
     this.audit.push({
       timestamp: input.timestamp,
       contextGraphId: input.contextGraphId,
@@ -172,6 +232,11 @@ class MemoryJoinPolicyStore implements ContextGraphJoinPolicyStore {
         policyEpoch,
       },
     });
+    this.repairPending.delete(this.repairKey(
+      input.contextGraphId,
+      input.requestDigest,
+      policyEpoch,
+    ));
     return true;
   }
 }
@@ -675,6 +740,56 @@ describe('context graph open enrollment policy', () => {
     expect(policyStore.audit.filter(
       (event) => event.eventType === 'join_admission_committed',
     )).toHaveLength(1);
+  }, 30_000);
+
+  it('repairs a durable membership mutation after delegation expiry and process-marker loss', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-expired-durable-repair';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('expired-repair-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    policyStore.failNextCommit = true;
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).rejects.toMatchObject({
+      name: 'RetryableJoinAdmissionError',
+      message: expect.stringContaining('simulated durable approval commit failure'),
+    });
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+
+    // A daemon restart drops this process-local accelerator. The typed ledger
+    // remains the repair authority and must be consulted before expiry checks.
+    (agent as any).contextGraphJoinAdmissionRepairDigests.clear();
+    expect(agent.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)).toBe(false);
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue((delegation.expiresAtMs ?? 0) + 1);
+    try {
+      await expect(agent.processIncomingJoinRequest(
+        contextGraphId,
+        delegation,
+        joiner.name,
+        agent.peerId,
+      )).resolves.toMatchObject({
+        status: 'approved',
+        autoApproved: true,
+        alreadyMember: true,
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+    expect(policyStore.audit.filter(
+      (event) => event.eventType === 'join_admission_committed',
+    )).toHaveLength(1);
+    expect(policyStore.repairPending.size).toBe(0);
   }, 30_000);
 
   it('leaves missing-key, carrier-mismatched, revoked, and rate-limited requests pending', async () => {
