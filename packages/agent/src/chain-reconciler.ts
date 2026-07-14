@@ -98,6 +98,14 @@ export async function reconcileContextGraph(
   const head = await deps.getKCCount(onChainCgId);
   const before = state.watermark;
 
+  // The persisted contiguous watermark is durable completeness evidence. If
+  // it already covers the chain head, avoid the head-block RPC and all ordinal
+  // work. A watermark ahead of the observed head is surfaced by the caller as
+  // an evidence mismatch, but is equally non-actionable in this pass.
+  if (before >= head) {
+    return { head, watermark: before, reconciled: 0, pending: 0 };
+  }
+
   // Keep transient head-fetch failures distinct from truly head-less chains.
   // A thrown head read means the chain is temporarily unavailable; skip
   // materialization for this pass so reconcileOrdinal never falls back to a
@@ -165,6 +173,40 @@ export async function reconcileContextGraph(
  * most one trailing pass, with periodic work taking priority over live nudges.
  */
 export type VmReconcileTriggerSource = 'live' | 'periodic';
+export type VmReconcileSource = VmReconcileTriggerSource | 'manual';
+export type ContextGraphReconcileStatus = 'current' | 'progress' | 'pending' | 'watermark-ahead';
+
+export interface ContextGraphReconcileResult {
+  contextGraphId: string;
+  onChainId: string;
+  source: VmReconcileSource;
+  status: ContextGraphReconcileStatus;
+  attempted: boolean;
+  headOrdinal: number;
+  watermarkBefore: number;
+  watermarkAfter: number;
+  reconciledOrdinals: number;
+  unresolvedOrdinals: number;
+}
+
+export class ContextGraphOnChainIdUnresolvedError extends Error {
+  readonly code = 'ContextGraphOnChainIdUnresolved';
+
+  constructor(contextGraphId: string) {
+    super(`Context graph "${contextGraphId}" has no resolved on-chain id`);
+    this.name = 'ContextGraphOnChainIdUnresolvedError';
+  }
+}
+
+export class VmReconcileUnavailableError extends Error {
+  readonly code = 'VmReconcileUnavailable';
+
+  constructor() {
+    super('Chain-driven VM reconciliation is unavailable on this node');
+    this.name = 'VmReconcileUnavailableError';
+  }
+}
+
 type VmReconcileHold = 'ready' | 'live-blocked';
 
 interface VmReconcileScheduleState {

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { ContextGraphNotFoundError } from '@origintrail-official/dkg-agent';
+import {
+  ContextGraphNotFoundError,
+  ContextGraphOnChainIdUnresolvedError,
+  VmReconcileUnavailableError,
+} from '@origintrail-official/dkg-agent';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 
 describe('context graph targeted reconcile route', () => {
@@ -17,10 +21,16 @@ describe('context graph targeted reconcile route', () => {
   async function request(
     reconcile: (contextGraphId: string, source: string) => Promise<unknown>,
     body: Record<string, unknown> | string,
+    options: {
+      authEnabled?: boolean;
+      requestToken?: string;
+      agentAddress?: string;
+    } = {},
   ): Promise<{ status: number; body: any }> {
     const agent = {
-      reconcileContextGraphIfBehind: reconcile,
-      resolveAgentByToken: () => undefined,
+      runVmReconcileForCg: reconcile,
+      resolveAgentByToken: (token: string) =>
+        token === options.requestToken ? options.agentAddress : undefined,
     };
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -30,7 +40,7 @@ describe('context graph targeted reconcile route', () => {
         agent,
         publisherControl: {},
         publisherRuntime: null,
-        config: { auth: { enabled: false } },
+        config: { auth: { enabled: options.authEnabled ?? false } },
         startedAt: Date.now(),
         dashDb: {},
         opWallets: {},
@@ -47,14 +57,14 @@ describe('context graph targeted reconcile route', () => {
         assertionImportLocks: new Map(),
         vectorStore: {},
         embeddingProvider: null,
-        validTokens: new Set(),
+        validTokens: new Set(options.requestToken ? [options.requestToken] : []),
         apiHost: '127.0.0.1',
         apiPortRef: { value: 0 },
         routePlugins: [],
         url,
         path: url.pathname,
-        requestToken: undefined,
-        requestAgentAddress: undefined,
+        requestToken: options.requestToken,
+        requestAgentAddress: options.agentAddress,
       } as any);
       if (!res.writableEnded) {
         res.statusCode = 404;
@@ -89,7 +99,10 @@ describe('context graph targeted reconcile route', () => {
         reconciledOrdinals: 0,
         unresolvedOrdinals: 0,
       };
-    }, { contextGraphId: 'target-cg' });
+    }, { contextGraphId: 'target-cg' }, {
+      authEnabled: true,
+      requestToken: 'node-admin-token',
+    });
 
     expect(result.status).toBe(200);
     expect(result.body).toMatchObject({
@@ -109,6 +122,39 @@ describe('context graph targeted reconcile route', () => {
 
     expect(result.status).toBe(404);
     expect(result.body.error).toContain('unknown-cg');
+  });
+
+  it('returns 409 for a subscribed graph with no resolved on-chain id', async () => {
+    const result = await request(async (contextGraphId) => {
+      throw new ContextGraphOnChainIdUnresolvedError(contextGraphId);
+    }, { contextGraphId: 'unbound-cg' });
+
+    expect(result.status).toBe(409);
+    expect(result.body.error).toContain('unbound-cg');
+  });
+
+  it('returns 503 when chain-driven reconciliation is unavailable', async () => {
+    const result = await request(async () => {
+      throw new VmReconcileUnavailableError();
+    }, { contextGraphId: 'target-cg' });
+
+    expect(result.status).toBe(503);
+    expect(result.body.error).toContain('unavailable');
+  });
+
+  it('rejects an agent-scoped token before exposing or enqueueing node-wide graph work', async () => {
+    let called = false;
+    const result = await request(async () => {
+      called = true;
+    }, { contextGraphId: 'another-agent-private-cg' }, {
+      authEnabled: true,
+      requestToken: 'dkg_at_alice',
+      agentAddress: '0x00000000000000000000000000000000000000a1',
+    });
+
+    expect(result.status).toBe(403);
+    expect(result.body.error).toContain('node-level admin token');
+    expect(called).toBe(false);
   });
 
   it('requires a context graph id', async () => {

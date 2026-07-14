@@ -48,6 +48,13 @@ export {
 } from './p2p/multiaddr-peer-target.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
+export {
+  ContextGraphOnChainIdUnresolvedError,
+  VmReconcileUnavailableError,
+  type ContextGraphReconcileResult,
+  type ContextGraphReconcileStatus,
+  type VmReconcileSource,
+} from './chain-reconciler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,

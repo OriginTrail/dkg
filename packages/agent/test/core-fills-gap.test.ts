@@ -52,8 +52,7 @@ interface AgentInternals {
   recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
   reconcileChainOrdinal(localCgId: string, onChainCgId: bigint, ordinal: number, headBlock: number | undefined): Promise<{ status: string }>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
-  runVmReconcileForCg(localCgId: string): Promise<unknown>;
-  reconcileContextGraphIfBehind(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
+  runVmReconcileForCg(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
     status: string;
     attempted: boolean;
     headOrdinal: number;
@@ -1659,7 +1658,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(liveTriggered).toEqual([]);
   });
 
-  it('skips store-heavy reconciliation when the durable watermark equals chain head', async () => {
+  it('skips ordinal reconciliation when the durable watermark equals chain head', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'CoreFillEvidenceGate', chainAdapter: chain });
     stubNode(agent);
@@ -1672,12 +1671,12 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       lastReconciledOrdinal: 2,
     });
     chain.getContextGraphKCCount = async () => 2n;
-    const run = recorder(async () => {
-      throw new Error('must not enter VM reconciliation when evidence is current');
+    const reconcileOrdinal = recorder(async () => {
+      throw new Error('must not reconcile an ordinal when evidence is current');
     });
-    (internals as any).runVmReconcileForCg = run;
+    (internals as any).reconcileChainOrdinal = reconcileOrdinal;
 
-    const result = await internals.reconcileContextGraphIfBehind('evidence-current', 'manual');
+    const result = await internals.runVmReconcileForCg('evidence-current', 'manual');
 
     expect(result).toMatchObject({
       status: 'current',
@@ -1686,7 +1685,36 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       watermarkBefore: 2,
       watermarkAfter: 2,
     });
-    expect(run.calls).toEqual([]);
+    expect(reconcileOrdinal.calls).toEqual([]);
+  });
+
+  it('maps periodic work to background and live/manual work to foreground admission', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillAdmissionPriority', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    internals.subscribedContextGraphs.set('priority-current', {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '322',
+      lastReconciledOrdinal: 0,
+    });
+    chain.getContextGraphKCCount = async () => 0n;
+
+    const priorities: string[] = [];
+    (internals as any).vmReconcileWorkQueue = {
+      enqueue: async <T>(priority: string, run: () => Promise<T>): Promise<T> => {
+        priorities.push(priority);
+        return run();
+      },
+    };
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+
+    await internals.runVmReconcileForCg('priority-current', 'periodic');
+    await internals.runVmReconcileForCg('priority-current', 'live');
+    await internals.runVmReconcileForCg('priority-current', 'manual');
+
+    expect(priorities).toEqual(['background', 'foreground', 'foreground']);
   });
 
   it('a host-only reconcile promotes the missed KA to VM and emits core-fill', async () => {

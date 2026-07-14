@@ -641,7 +641,7 @@ Implications:
 - `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, accessPolicy?, publishPolicy? }`, where `accessPolicy` controls public/private discovery and `publishPolicy` controls open/curated publishing. Use this to promote a free CG to an on-chain identity before publishing to Verifiable Memory. `revealOnChain` is deprecated and ignored on the V10 ContextGraphs path.
 - `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }` (`id` is accepted as an alias for `contextGraphId`; all `/api/context-graph/*` routes accept either).
 - `POST /api/context-graph/subscribe` — subscribe to a context graph. Body: `{ contextGraphId }` (or `{ id }`).
-- `POST /api/context-graph/reconcile` — reconcile one subscribed/hosted context graph against its on-chain KC watermark. Body: `{ contextGraphId }` (or `{ id }`). A current watermark returns without VM-slice or peer catch-up work.
+- `POST /api/context-graph/reconcile` — node-admin maintenance endpoint that reconciles one subscribed/hosted context graph against its on-chain KC watermark. Body: `{ contextGraphId }` (or `{ id }`). A current watermark returns without VM-slice or peer catch-up work. Requires the node-level admin token when daemon auth is enabled; agent-scoped tokens are rejected.
 - `GET /api/context-graph/list` — list known context graphs; tool wrappers default to the caller's created/joined graphs and can expose all known graphs with `scope: "all"`
 - `GET /api/context-graph/exists` — check if a context graph exists
 - `GET /api/sync/catchup-status?contextGraphId=...` — poll CG sync progress after subscribing

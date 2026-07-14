@@ -48,10 +48,21 @@ describe('reconcileContextGraph — sweep', () => {
     expect(persisted).toEqual([{ cg: 'cg', watermark: 3 }]);
   });
 
-  it('does not persist when the watermark does not move (nothing new)', async () => {
-    const { deps, persisted } = makeDeps({ getKCCount: async () => 3 });
+  it('skips head-block and ordinal work when the durable watermark covers the chain head', async () => {
+    let headBlockReads = 0;
+    const { deps, persisted, attempted } = makeDeps({
+      getKCCount: async () => 3,
+      getHeadBlock: async () => {
+        headBlockReads += 1;
+        return 100;
+      },
+    });
     const state = createCursorState(3); // already at head
-    await reconcileContextGraph(deps, state, 'cg', 1n);
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(result).toEqual({ head: 3, watermark: 3, reconciled: 0, pending: 0 });
+    expect(headBlockReads).toBe(0);
+    expect(attempted).toEqual([]);
     expect(persisted).toEqual([]);
   });
 

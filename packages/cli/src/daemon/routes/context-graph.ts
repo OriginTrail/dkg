@@ -56,7 +56,13 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { ContextGraphNotFoundError, DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import {
+  ContextGraphNotFoundError,
+  ContextGraphOnChainIdUnresolvedError,
+  DKGAgent,
+  loadOpWallets,
+  VmReconcileUnavailableError,
+} from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -1567,6 +1573,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // only when that evidence shows a gap. Manual work uses the foreground
   // VM-reconcile lane, ahead of the periodic all-CG safety sweep.
   if (req.method === "POST" && path === "/api/context-graph/reconcile") {
+    if (!isNodeAdminCaller()) {
+      return jsonResponse(res, 403, {
+        error: 'POST /api/context-graph/reconcile requires a node-level admin token',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try {
@@ -1579,17 +1590,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
     }
     try {
-      const result = await agent.reconcileContextGraphIfBehind(contextGraphId, 'manual');
+      const result = await agent.runVmReconcileForCg(contextGraphId, 'manual');
       return jsonResponse(res, 200, result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof ContextGraphNotFoundError) {
         return jsonResponse(res, 404, { error: message });
       }
-      if (message.includes('no resolved on-chain id')) {
+      if (err instanceof ContextGraphOnChainIdUnresolvedError) {
         return jsonResponse(res, 409, { error: message });
       }
-      if (message.includes('reconciliation is unavailable')) {
+      if (err instanceof VmReconcileUnavailableError) {
         return jsonResponse(res, 503, { error: message });
       }
       return jsonResponse(res, 500, { error: message });

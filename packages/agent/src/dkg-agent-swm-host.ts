@@ -233,12 +233,14 @@ import {
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
+  ContextGraphOnChainIdUnresolvedError,
   reconcileContextGraph,
   RecentUalSet,
+  VmReconcileUnavailableError,
   type ChainReconcilerDeps,
+  type ContextGraphReconcileResult,
   type OrdinalOutcome,
-  type ReconcileResult,
-  type VmReconcileTriggerSource,
+  type VmReconcileSource,
 } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -2644,35 +2646,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Evidence-gated, node-wide-admitted VM reconciliation for one CG.
+   * Canonical evidence-gated VM reconciliation operation for one CG.
    *
-   * `sub.synced` is only a readiness bit; it cannot prove that the node has
-   * every on-chain registration. The persisted contiguous watermark can. A
-   * graph whose watermark equals the current on-chain KC count therefore
-   * returns without entering the store-heavy reconciliation path. Unproven
-   * graphs run through the node-wide queue so a startup sweep cannot execute
-   * dozens of SWM scans / peer fetches concurrently.
-   *
-   * Live chain nudges and explicit operator requests are foreground work and
-   * move ahead of the periodic sweep backlog. The active job is never
-   * preempted; reconciliation may already have committed part of its work.
+   * This entry point owns eligibility, self-priming, node-wide admission,
+   * legacy scoped-graph repair, the durable watermark gate, ordinal work,
+   * telemetry, and the API-facing result. The pure
+   * {@link reconcileContextGraph} engine returns immediately when the
+   * contiguous watermark already covers the chain head, before head-block or
+   * ordinal reads. Live/manual calls enter the foreground lane; periodic sweep
+   * work uses the background lane.
    */
-  async reconcileContextGraphIfBehind(
+  async runVmReconcileForCg(
     this: DKGAgent,
     localCgId: string,
-    source: VmReconcileTriggerSource | 'manual' = 'manual',
-  ): Promise<{
-    contextGraphId: string;
-    onChainId: string;
-    source: VmReconcileTriggerSource | 'manual';
-    status: 'current' | 'progress' | 'pending' | 'watermark-ahead';
-    attempted: boolean;
-    headOrdinal: number;
-    watermarkBefore: number;
-    watermarkAfter: number;
-    reconciledOrdinals: number;
-    unresolvedOrdinals: number;
-  }> {
+    source: VmReconcileSource = 'manual',
+  ): Promise<ContextGraphReconcileResult> {
     const priority = source === 'periodic' ? 'background' : 'foreground';
     return this.vmReconcileWorkQueue.enqueue(priority, async () => {
       let sub = this.subscribedContextGraphs.get(localCgId);
@@ -2684,143 +2672,116 @@ export class SwmHostModeMethods extends DKGAgentBase {
         sub = this.subscribedContextGraphs.get(localCgId);
       }
       if (!sub?.onChainId) {
-        throw new Error(`Context graph "${localCgId}" has no resolved on-chain id`);
+        throw new ContextGraphOnChainIdUnresolvedError(localCgId);
       }
       if (!this.vmReconcileEnabled()) {
-        throw new Error('Chain-driven VM reconciliation is unavailable on this node');
+        throw new VmReconcileUnavailableError();
       }
 
       const onChainId = sub.onChainId;
-      const headOrdinal = Number(await this.chain.getContextGraphKCCount!(BigInt(onChainId)));
-      if (!Number.isSafeInteger(headOrdinal) || headOrdinal < 0) {
-        throw new Error(`Invalid on-chain KC count for context graph "${localCgId}": ${headOrdinal}`);
+      const onChainCgId = BigInt(onChainId);
+      let cursor = this.reconcileCursors.get(localCgId);
+      if (!cursor) {
+        cursor = createCursorState(sub.lastReconciledOrdinal ?? 0);
+        this.reconcileCursors.set(localCgId, cursor);
       }
-      const watermarkBefore = sub.lastReconciledOrdinal ?? 0;
-      // Keep the legacy-label -> scoped-VM migration in the SAME admitted lane.
-      // Older nodes could advance a watermark from a legacy confirmation before
-      // the scoped RS graph was materialized; the indexed ASK inside this heal
-      // preserves that upgrade repair without recreating all-CG store fan-out.
-      // Running it before reconciliation can also turn a would-be peer fetch
-      // into a local already-confirmed result.
+      const watermarkBefore = cursor.watermark;
+
+      // Keep the legacy-label -> scoped-VM migration in the SAME admitted lane
+      // and before the evidence gate. Older nodes could advance a watermark
+      // from a legacy confirmation before the scoped RS graph was materialized.
+      // Running the repair first can also turn a would-be peer fetch into a
+      // local already-confirmed result.
       await this.healStrandedScopedKCs(localCgId, sub);
-      if (watermarkBefore >= headOrdinal) {
-        const status = watermarkBefore === headOrdinal ? 'current' : 'watermark-ahead';
-        if (status === 'watermark-ahead') {
-          this.log.warn(
-            createOperationContext('system'),
-            `VM reconcile evidence mismatch for "${localCgId}": watermark=${watermarkBefore} head=${headOrdinal}`,
-          );
-        }
-        return {
-          contextGraphId: localCgId,
-          onChainId,
-          source,
-          status,
-          attempted: false,
-          headOrdinal,
-          watermarkBefore,
-          watermarkAfter: watermarkBefore,
-          reconciledOrdinals: 0,
-          unresolvedOrdinals: 0,
-        };
+
+      const deps: ChainReconcilerDeps = {
+        getKCCount: async (cg) => {
+          const head = Number(await this.chain.getContextGraphKCCount!(cg));
+          if (!Number.isSafeInteger(head) || head < 0) {
+            throw new Error(`Invalid on-chain KC count for context graph "${localCgId}": ${head}`);
+          }
+          return head;
+        },
+        getHeadBlock: async () => {
+          // Capability-absent chains return undefined and disable the reorg
+          // gate; transient RPC failures must throw so the reconciler holds the
+          // watermark instead of advancing on an unobserved head.
+          if (typeof this.chain.getBlockNumber !== 'function') return undefined;
+          return await this.chain.getBlockNumber();
+        },
+        reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
+          this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock),
+        persistWatermark: (lcg, watermark) => {
+          const s = this.subscribedContextGraphs.get(lcg);
+          if (!s) return;
+          const previous = s.lastReconciledOrdinal ?? 0;
+          s.lastReconciledOrdinal = watermark;
+          this.persistContextGraphSubscription(lcg);
+          this.emitReplication({
+            contextGraphId: lcg,
+            onChainCgId: s.onChainId,
+            action: 'cursor-advance',
+            fromWatermark: previous,
+            toWatermark: watermark,
+          });
+        },
+        confirmationDepth: DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH,
+        log: (msg) => this.log.info(createOperationContext('system'), msg),
+      };
+
+      const result = await reconcileContextGraph(deps, cursor, localCgId, onChainCgId);
+      const status: ContextGraphReconcileResult['status'] = watermarkBefore > result.head
+        ? 'watermark-ahead'
+        : result.watermark >= result.head
+          ? 'current'
+          : result.reconciled > 0
+            ? 'progress'
+            : 'pending';
+      if (status === 'watermark-ahead') {
+        this.log.warn(
+          createOperationContext('system'),
+          `VM reconcile evidence mismatch for "${localCgId}": watermark=${watermarkBefore} head=${result.head}`,
+        );
       }
 
-      const result = await this.runVmReconcileForCg(localCgId);
-      if (!result) {
-        throw new Error(`Context graph "${localCgId}" became ineligible for reconciliation`);
+      if (result.reconciled > 0 || result.pending > 0) {
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainId,
+          action: 'sweep',
+          head: result.head,
+          toWatermark: result.watermark,
+          reconciled: result.reconciled,
+          pending: result.pending,
+        });
       }
-      const watermarkAfter = result.watermark;
+      // Phase D — a host-only (non-member) reconcile that actually promoted
+      // KAs is a Core filling its own gap. Distinct telemetry keeps the
+      // Core-to-Core fill path visible to operators.
+      if (result.reconciled > 0 && sub.coreHosted && !sub.subscribed) {
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainId,
+          action: 'core-fill',
+          head: result.head,
+          toWatermark: result.watermark,
+          reconciled: result.reconciled,
+        });
+      }
+
       return {
         contextGraphId: localCgId,
         onChainId,
         source,
-        status: watermarkAfter >= result.head
-          ? 'current'
-          : result.reconciled > 0
-            ? 'progress'
-            : 'pending',
-        attempted: true,
+        status,
+        attempted: watermarkBefore < result.head,
         headOrdinal: result.head,
         watermarkBefore,
-        watermarkAfter,
+        watermarkAfter: result.watermark,
         reconciledOrdinals: result.reconciled,
         unresolvedOrdinals: result.pending,
       };
     });
-  }
-
-  /**
-   * One reconcile pass for a single CG: build the injected deps and hand off to
-   * the pure {@link reconcileContextGraph} orchestrator (which owns the cursor
-   * math + watermark persistence gate). The cursor is created lazily from the
-   * persisted `lastReconciledOrdinal` and lives in {@link reconcileCursors}.
-   */
-  async runVmReconcileForCg(this: DKGAgent, localCgId: string): Promise<ReconcileResult | null> {
-    const sub = this.subscribedContextGraphs.get(localCgId);
-    if ((!sub?.subscribed && !sub?.coreHosted) || !sub.onChainId || !this.vmReconcileEnabled()) return null;
-    const onChainCgId = BigInt(sub.onChainId);
-
-    let cursor = this.reconcileCursors.get(localCgId);
-    if (!cursor) {
-      cursor = createCursorState(sub.lastReconciledOrdinal ?? 0);
-      this.reconcileCursors.set(localCgId, cursor);
-    }
-
-    const deps: ChainReconcilerDeps = {
-      getKCCount: async (cg) => Number(await this.chain.getContextGraphKCCount!(cg)),
-      getHeadBlock: async () => {
-        // Capability-absent chains return undefined and disable the reorg gate;
-        // transient RPC failures must throw so the reconciler holds the
-        // watermark instead of advancing on an unobserved head.
-        if (typeof this.chain.getBlockNumber !== 'function') return undefined;
-        return await this.chain.getBlockNumber();
-      },
-      reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
-        this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock),
-      persistWatermark: (lcg, watermark) => {
-        const s = this.subscribedContextGraphs.get(lcg);
-        if (!s) return;
-        const previous = s.lastReconciledOrdinal ?? 0;
-        s.lastReconciledOrdinal = watermark;
-        this.persistContextGraphSubscription(lcg);
-        this.emitReplication({
-          contextGraphId: lcg,
-          onChainCgId: s.onChainId,
-          action: 'cursor-advance',
-          fromWatermark: previous,
-          toWatermark: watermark,
-        });
-      },
-      confirmationDepth: DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH,
-      log: (msg) => this.log.info(createOperationContext('system'), msg),
-    };
-
-    const result = await reconcileContextGraph(deps, cursor, localCgId, onChainCgId);
-    if (result.reconciled > 0 || result.pending > 0) {
-      this.emitReplication({
-        contextGraphId: localCgId,
-        onChainCgId: sub.onChainId,
-        action: 'sweep',
-        head: result.head,
-        toWatermark: result.watermark,
-        reconciled: result.reconciled,
-        pending: result.pending,
-      });
-    }
-    // Phase D — a host-only (non-member) reconcile that actually promoted KAs
-    // is a Core filling its own gap. Distinct telemetry so operators can see
-    // the Core-to-Core fill path working (success-criteria metric).
-    if (result.reconciled > 0 && sub.coreHosted && !sub.subscribed) {
-      this.emitReplication({
-        contextGraphId: localCgId,
-        onChainCgId: sub.onChainId,
-        action: 'core-fill',
-        head: result.head,
-        toWatermark: result.watermark,
-        reconciled: result.reconciled,
-      });
-    }
-    return result;
   }
 
   /**

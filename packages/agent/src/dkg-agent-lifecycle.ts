@@ -2792,7 +2792,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (this.vmReconcileEnabled()) {
       this.vmReconcileScheduler = new VmReconcileScheduler(
         async (localCgId, source) => {
-          await this.reconcileContextGraphIfBehind(localCgId, source);
+          await this.runVmReconcileForCg(localCgId, source);
         },
         (localCgId, err) => {
           this.log.warn(
