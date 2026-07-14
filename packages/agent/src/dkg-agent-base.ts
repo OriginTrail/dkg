@@ -390,6 +390,8 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
+import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
+import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -1304,6 +1306,30 @@ export class DKGAgentBase {
    * curator resolution is the final fallback for older rows.
    */
   protected readonly joinRequestAcceptedBy = new Map<string, Set<string>>();
+  /**
+   * Shared serialization lane for manual approvals, automatic admissions,
+   * and policy changes. Keeping all three on the same per-CG queue makes a
+   * switch back to `manual` linearizable with in-flight join requests.
+   */
+  protected readonly contextGraphJoinAdmissionLockManager = new ContextGraphJoinAdmissionLockManager();
+  protected readonly contextGraphMembershipMutations = new ContextGraphMembershipMutationStore();
+  /** In-memory ingress buckets; values are accepted request timestamps. */
+  protected readonly contextGraphJoinIngressBuckets = new Map<string, number[]>();
+  /** Active + queued incoming requests per CG (policy/admin operations excluded). */
+  protected readonly contextGraphJoinIngressDepth = new Map<string, number>();
+  protected contextGraphJoinIngressLastCleanupAt = 0;
+  /**
+   * Exact signed requests that crossed the membership mutation boundary but
+   * still need status/audit repair. A short-lived marker lets Messenger retry
+   * bypass its own just-consumed ingress token without weakening limits for a
+   * different payload. The ordinary 60s buckets have expired when this does.
+   */
+  protected readonly contextGraphJoinAdmissionRepairDigests = new Map<string, {
+    expiresAt: number;
+    policyEpoch?: number;
+  }>();
+  /** Manual-policy requests waiting on the CG queue; checked by admissions. */
+  protected readonly contextGraphJoinPolicyDisableIntentCounts = new Map<string, number>();
   /**
    * Per-peer timestamp of the last reconnect-on-gossip dial we attempted.
    * Prevents a noisy topic from generating a dial storm against a peer we

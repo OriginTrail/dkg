@@ -42,6 +42,17 @@ export interface ParsedInvite {
   hasUnparsedExtra: boolean;
 }
 
+export function joinRequestWasApproved(result: {
+  status?: string;
+  alreadyMember?: boolean;
+  autoApproved?: boolean;
+}): boolean {
+  return result.alreadyMember === true
+    || result.autoApproved === true
+    || result.status === 'approved'
+    || result.status === 'already-member';
+}
+
 const PEER_ID_RE = /^(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|12D3Koo[1-9A-HJ-NP-Za-km-z]{45,53})$/;
 
 export function parseInviteCode(raw: string): ParsedInvite {
@@ -378,12 +389,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       setPendingCgId(cgId);
 
-      if (result.alreadyMember) {
-        // Curator-side short-circuit: requester is already in the
-        // allowlist. The HTTP response is itself authoritative — the
-        // curator's separate `join-approved` P2P notification is
-        // fire-and-forget and may be dropped, so don't make the modal
-        // depend on it. Drive the transition synchronously.
+      if (joinRequestWasApproved(result)) {
+        // The HTTP response is authoritative for both an existing member and
+        // a newly auto-approved one. The separate P2P notification is
+        // fire-and-forget and may race or be dropped, so drive the transition
+        // synchronously instead of showing a false pending state.
         await transitionToApproved(cgId);
         return;
       }

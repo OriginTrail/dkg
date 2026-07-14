@@ -58,7 +58,12 @@ const FIXED_MSG_ID = '00000000-0000-4000-8000-000000000001';
 
 interface RouterDouble {
   send: ReturnType<typeof recorder<[string, string, Uint8Array, ...unknown[]], Promise<Uint8Array>>>;
-  register: ReturnType<typeof recorder<[string, StreamHandler], void>>;
+  register: ReturnType<
+    typeof recorder<
+      [string, StreamHandler, { maxReadBytes: number }?],
+      void
+    >
+  >;
   /** Inbound stream handler captured from `register` for tests that invoke it. */
   inboundHandler?: StreamHandler;
 }
@@ -71,7 +76,11 @@ function makeRouter(
       ...args: [string, string, Uint8Array, ...unknown[]]
     ) => Promise<Uint8Array>,
   );
-  const register = recorder((_protocol: string, handler: StreamHandler): void => {
+  const register = recorder((
+    _protocol: string,
+    handler: StreamHandler,
+    _options?: { maxReadBytes: number },
+  ): void => {
     router.inboundHandler = handler;
   });
   const router: RouterDouble = { send, register };
@@ -429,6 +438,20 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
 });
 
 describe('Messenger.register (receiver-side idempotency)', () => {
+  it('forwards a reliable-envelope wire cap to the protocol router', () => {
+    const { messenger, router } = makeSubstrate();
+
+    messenger.register(PROTO, async () => new Uint8Array([0xaa]), {
+      maxWireBytes: 80 * 1024,
+    });
+
+    expect(router.register.calls.at(-1)).toEqual([
+      PROTO,
+      expect.any(Function),
+      { maxReadBytes: 80 * 1024 },
+    ]);
+  });
+
   it('decodes the envelope and invokes the handler with the inner payload', async () => {
     const { messenger, router } = makeSubstrate();
     const handler = recorder(async (req: Uint8Array, _peer: string) => {

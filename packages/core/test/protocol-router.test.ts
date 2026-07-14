@@ -316,6 +316,67 @@ describe('ProtocolRouter', () => {
       };
     }
 
+    it('honors a per-registration read cap without changing the router-wide limit', async () => {
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
+      try {
+        const inbound = new Map<
+          string,
+          (stream: FakeInboundStream, connection: unknown) => Promise<void>
+        >();
+        const node = {
+          libp2p: {
+            handle: (
+              protocol: string,
+              handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>,
+            ) => {
+              inbound.set(protocol, handler);
+            },
+            unhandle: () => undefined,
+          },
+        } as unknown as DKGNode;
+        const router = new ProtocolRouter(node, { maxReadBytes: 4 });
+        const cappedProtocol = `${PROTOCOL}/capped`;
+        const defaultProtocol = `${PROTOCOL}/default`;
+        let cappedHandlerCalls = 0;
+        let defaultHandlerCalls = 0;
+
+        router.register(cappedProtocol, async (data) => {
+          cappedHandlerCalls += 1;
+          return data;
+        }, { maxReadBytes: 2 });
+        router.register(defaultProtocol, async (data) => {
+          defaultHandlerCalls += 1;
+          return data;
+        });
+
+        const connection = {
+          remotePeer: {
+            toString: () => REMOTE_PEER,
+            toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+          },
+        };
+        const cappedStream = new FakeInboundStream([new Uint8Array([1, 2, 3])]);
+        const defaultStream = new FakeInboundStream([new Uint8Array([1, 2, 3])]);
+
+        await inbound.get(cappedProtocol)!(cappedStream, connection);
+        await inbound.get(defaultProtocol)!(defaultStream, connection);
+
+        expect(cappedHandlerCalls).toBe(0);
+        expect(cappedStream.sent).toBeNull();
+        expect(errorSpy.calls).toContainEqual([
+          expect.stringContaining(cappedProtocol),
+          'Read limit exceeded (2 bytes)',
+        ]);
+        expect(defaultHandlerCalls).toBe(1);
+        expect(defaultStream.sent).toEqual(new Uint8Array([1, 2, 3]));
+        expect(router.maxReadBytes).toBe(4);
+      } finally {
+        console.error = originalError;
+      }
+    });
+
     it('passes a live AbortSignal to raw handlers and preserves it through close', async () => {
       let seenSignal: AbortSignal | undefined;
       const fixture = makeInboundFixture();

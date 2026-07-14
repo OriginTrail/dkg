@@ -1847,6 +1847,28 @@ export async function runDaemonInner(
         dashDb.deleteContextGraphMember(contextGraphId, principalType, principalId);
       },
     },
+    contextGraphJoinPolicyStore: {
+      load: async (contextGraphId) => dashDb.getContextGraphJoinPolicy(contextGraphId),
+      save: async (record) => {
+        dashDb.setContextGraphJoinPolicy(record);
+      },
+      appendAudit: async (event) => {
+        dashDb.appendContextGraphJoinPolicyAudit(event);
+      },
+      saveWithAudit: async (record, event) => {
+        dashDb.setContextGraphJoinPolicyWithAudit(record, event);
+      },
+      getAutomaticApprovalUsage: async (contextGraphId, timestamp) =>
+        dashDb.getContextGraphAutomaticApprovalUsage(contextGraphId, timestamp),
+      reserveAutomaticApproval: async (input) =>
+        dashDb.reserveContextGraphAutomaticApproval(input),
+      markAutomaticApprovalRepairPending: async (input) =>
+        dashDb.markContextGraphAutomaticApprovalRepairPending(input),
+      getAutomaticApprovalRepair: async (contextGraphId, requestDigest) =>
+        dashDb.getContextGraphAutomaticApprovalRepair(contextGraphId, requestDigest),
+      commitAutomaticApproval: async (input) =>
+        dashDb.commitContextGraphAutomaticApproval(input),
+    },
     messengerStores: {
       idempotencyStore: messengerIdempotencyStore,
       outboxStore: messengerOutboxStore,

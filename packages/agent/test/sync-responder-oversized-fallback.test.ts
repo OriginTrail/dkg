@@ -76,6 +76,7 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
       // curator-only moderation records and must not be replicated.
       { graph: meta, subject: 'did:dkg:activity:act1', predicate: `${DKG_NS}note`, object: '"act"' },
       { graph: meta, subject: 'did:dkg:join-request:jr1', predicate: `${DKG_NS}note`, object: '"jr"' },
+      { graph: meta, subject: 'did:dkg:join-request:jr1', predicate: `${DKG_NS}memoryLayer`, object: VM },
       // E: a non-working lifecycle (kept); its own rows are kept
       { graph: meta, subject: 'urn:lc:vm', predicate: `${DKG_NS}memoryLayer`, object: VM },
       { graph: meta, subject: 'urn:lc:vm', predicate: `${DKG_NS}assertionGraph`, object: 'urn:ag:1' },

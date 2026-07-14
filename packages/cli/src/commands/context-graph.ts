@@ -334,17 +334,21 @@ contextGraphCmd
       // before any peers are connected.
       const signed = await client.signJoinRequest(contextGraphId);
       // Step 2: forward via P2P. The daemon delivers the signed
-      // delegation to the curator (direct dial first, then broadcast
-      // fallback for legacy invites). Returns delivery count so we can
+      // delegation directly to the curator. Returns delivery count so we can
       // warn on no-curator.
       const result = await client.requestJoin(contextGraphId, signed.delegation, curatorPeerId);
       if (result.delivered === 0) {
         console.error(`Could not deliver join request to curator for "${contextGraphId}". No reachable curator found.`);
         process.exit(1);
       }
-      console.log(`Join request sent for "${contextGraphId}" (delivered to ${result.delivered} peer${result.delivered === 1 ? '' : 's'}).`);
-      console.log('  Waiting for curator approval. Check status with:');
-      console.log(`  dkg context-graph info ${contextGraphId}`);
+      if (result.status === 'approved' || result.status === 'already-member' || result.autoApproved || result.alreadyMember) {
+        console.log(`Join approved for "${contextGraphId}".`);
+        console.log(`  Open it with: dkg context-graph info ${contextGraphId}`);
+      } else {
+        console.log(`Join request sent for "${contextGraphId}" (delivered to ${result.delivered} peer${result.delivered === 1 ? '' : 's'}).`);
+        console.log('  Waiting for curator approval. Check status with:');
+        console.log(`  dkg context-graph info ${contextGraphId}`);
+      }
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -421,6 +425,87 @@ contextGraphCmd
         const ts = req.timestamp ? ` — ${req.timestamp}` : '';
         console.log(`  [${req.status}] ${req.agentAddress}${name}${ts}`);
       }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+const joinPolicyCmd = contextGraphCmd
+  .command('join-policy')
+  .description('Inspect or change private Context Graph open enrollment (owner only)');
+
+joinPolicyCmd
+  .command('status <contextGraphId>')
+  .description('Show whether open enrollment is enabled for a private Context Graph')
+  .action(async (contextGraphId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const policy = await client.getContextGraphJoinPolicy(contextGraphId);
+      console.log(`Open enrollment policy for "${policy.contextGraphId || contextGraphId}":`);
+      console.log(`  Mode:                    ${policy.mode}`);
+      console.log(`  Members:                 ${policy.memberCount ?? 'unknown'}`);
+      console.log(`  Maximum members:         ${policy.maxMembers ?? 'not set'}`);
+      console.log(`  Approvals in last hour:  ${policy.approvalsLastHour ?? 'unknown'}`);
+      console.log(`  Maximum approvals/hour:  ${policy.maxApprovalsPerHour ?? 'not set'}`);
+      if (policy.mode === 'open') {
+        console.warn('WARNING: Anyone who knows this Context Graph ID can request private access through open enrollment and may gain publishing authority.');
+      } else {
+        console.log('  New join requests require manual approval. Existing members are not revoked.');
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+joinPolicyCmd
+  .command('open <contextGraphId>')
+  .description('Enable open enrollment for a private Context Graph (owner only; security-sensitive)')
+  .requiredOption('--max-members <positive>', 'Hard cap on total approved members', (value: string) => (
+    parsePositiveIntegerOption(value, '--max-members')
+  ))
+  .option(
+    '--max-approvals-per-hour <positive>',
+    'Rolling cap on automatic approvals per hour',
+    (value: string) => parsePositiveIntegerOption(value, '--max-approvals-per-hour'),
+    20,
+  )
+  .option('--yes', 'Acknowledge the open-enrollment security risk')
+  .action(async (contextGraphId: string, opts: ActionOpts) => {
+    try {
+      console.warn('WARNING: Anyone who knows this Context Graph ID can request private access through open enrollment and may gain publishing authority.');
+      if (!opts.yes) {
+        throw new Error('Open enrollment was not enabled. Re-run with --yes to acknowledge this risk.');
+      }
+
+      const maxMembers = Number(opts.maxMembers);
+      const maxApprovalsPerHour = Number(opts.maxApprovalsPerHour);
+      const client = await ApiClient.connect();
+      await client.setContextGraphJoinPolicy(contextGraphId, {
+        mode: 'open',
+        maxMembers,
+        maxApprovalsPerHour,
+        acknowledgeOpenEnrollment: true,
+      });
+      console.log(`Open enrollment enabled for "${contextGraphId}".`);
+      console.log(`  Maximum members:         ${maxMembers}`);
+      console.log(`  Maximum approvals/hour:  ${maxApprovalsPerHour}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+joinPolicyCmd
+  .command('manual <contextGraphId>')
+  .description('Disable open enrollment and require manual approval for future requests')
+  .action(async (contextGraphId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.setContextGraphJoinPolicy(contextGraphId, { mode: 'manual' });
+      console.log(`Open enrollment disabled for "${contextGraphId}"; future join requests require manual approval.`);
+      console.log('Existing members remain approved; disabling open enrollment does not revoke existing members.');
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
