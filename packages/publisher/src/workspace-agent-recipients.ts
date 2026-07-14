@@ -58,7 +58,7 @@ export async function resolveWorkspaceAgentRecipients(
 
   const recipients: WorkspaceAgentRecipient[] = [];
   for (const agentAddress of access.agentAddresses) {
-    const agentRecipients = await resolveAgentRecipientKeys(store, agentAddress);
+    const agentRecipients = await resolveWorkspaceAgentRecipientKeys(store, agentAddress);
     recipients.push(...agentRecipients);
   }
   return { requiresEncryption: true, recipients };
@@ -175,7 +175,7 @@ async function getWorkspaceAccessMetadata(
  * honoured only when the proof ecrecovers to the agent's wallet; bogus revocation
  * triples are ignored so they can't be used to brick an honest peer's key.
  */
-async function resolveAgentRecipientKeys(
+export async function resolveWorkspaceAgentRecipientKeys(
   store: TripleStore,
   agentAddress: string,
 ): Promise<WorkspaceAgentRecipient[]> {
@@ -203,6 +203,7 @@ async function resolveAgentRecipientKeys(
   let sawWrongAlgorithm = false;
   let sawUntrustedOnly = false;
   let sawInvalidProof = false;
+  let sawMalformedKey = false;
 
   for (const row of result.bindings) {
     const publicKey = stringBinding(row['key']);
@@ -223,11 +224,13 @@ async function resolveAgentRecipientKeys(
     let publicKeyBytes: Uint8Array;
     try {
       publicKeyBytes = decodeWorkspaceEncryptionKey(stripRdfLiteral(publicKey));
-    } catch (err) {
-      throw new Error(
-        `Unverifiable public encryption key for DKG agent ${checksum}: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-      );
+    } catch {
+      // Candidate rows can coexist across replicated/profile graphs. A junk
+      // row must not poison a separately wallet-verified active key for the
+      // same agent; ignore it exactly as we ignore an invalid proof, then fail
+      // closed below only if no authenticated candidate survives.
+      sawMalformedKey = true;
+      continue;
     }
 
     const cleanProof = stripRdfLiteral(proof);
@@ -251,6 +254,9 @@ async function resolveAgentRecipientKeys(
   }
 
   if (verifiedKeys.size === 0) {
+    if (sawMalformedKey) {
+      throw new Error(`Unverifiable public encryption key for DKG agent ${checksum}`);
+    }
     if (sawUntrustedOnly) {
       throw new Error(`Untrusted RDF-only public encryption key for DKG agent ${checksum}`);
     }

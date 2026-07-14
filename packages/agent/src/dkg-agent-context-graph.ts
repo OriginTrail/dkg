@@ -378,8 +378,25 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-admission-lock.js';
+import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
 
 /* eslint-disable @typescript-eslint/no-this-alias */
+
+interface ContextGraphAgentInviteMutationPlan {
+  contextGraphId: string;
+  agentAddress: string;
+  delegation?: SignedAgentDelegation;
+  alreadyAllowed: boolean;
+  noOp: boolean;
+  cgMetaGraph: string;
+  delegationUri?: string;
+  quadsToInsert: Quad[];
+  curatorAgentAddress?: string;
+}
+
+export type PreparedContextGraphAgentInviteMutation =
+  PreparedContextGraphMembershipMutation<ContextGraphAgentInviteMutationPlan>;
 
 export class ContextGraphMethods extends DKGAgentBase {
   async createContextGraph(this: DKGAgent, opts: {
@@ -838,7 +855,9 @@ export class ContextGraphMethods extends DKGAgentBase {
   /**
    * Register an existing context graph on-chain. This is the explicit upgrade
    * step that unlocks Verifiable Memory, chain-based discovery, and economic
-   * participation. Requires a funded wallet with TRAC.
+   * participation. Requires native gas. Direct registration also requires the
+   * configured TRAC deposit; an eligible PCA-backed registration consumes one
+   * quota-backed waiver instead.
    */
   async registerContextGraph(this: DKGAgent, id: string, opts?: {
     /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
@@ -1226,27 +1245,60 @@ export class ContextGraphMethods extends DKGAgentBase {
       } else {
         publishAuthority = await this.getChainPublishAuthorityAddress(id);
       }
-      // Uniform strict check across EOA and PCA modes:
-      //  - EOA: publishAuthority is the chain signer; local curator
-      //    must equal the chain signer — UNLESS the EOA mismatch
-      //    auto-promotion below relaxes it.
-      //  - PCA: publishAuthority is ownerOf(pcaAccountId); local curator
-      //    must equal the PCA owner. Registered agents are publish-time
-      //    delegates only — publish-time authorization lives on chain in
-      //    `ContextGraphs.isAuthorizedPublisher`.
-      if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
-        if (isPcaCurated) {
-          // PCA mode stays strict: `ContextGraphs.createContextGraph`
-          // mints the governance NFT to msg.sender (= chain signer),
-          // and a mismatch would silently produce a CG whose
-          // on-chain owner is NOT the advertised PCA owner.
-          // Relaxing this would let users create CGs they cannot
-          // govern. The PCA owner must control the chain signer.
+      // PCA registration mirrors the post-#1366 on-chain authorization:
+      // either the PCA owner OR a wallet registered to this exact PCA may
+      // create the CG. Keep the local curator and registration-tx signer
+      // identical in both modes so the local owner and the Context Graph NFT
+      // owner cannot silently diverge:
+      //
+      //   owner mode: local curator == tx signer == PCA owner
+      //   agent mode: local curator == tx signer == registered PCA agent
+      //
+      // The advertised publishAuthority remains the live PCA owner in both
+      // modes, as required by ContextGraphs._validatePCACoherence. In agent
+      // mode the registered agent owns the newly minted CG NFT while the PCA
+      // owner and every registered PCA agent remain authorized publishers.
+      if (isPcaCurated && publishAuthority) {
+        const chainSigner = await this.getRegistrationTxSignerAddress();
+        if (!chainSigner) {
           throw new Error(
-            `Context graph "${id}" cannot be registered as curated by local curator ${ownerAddress} because ` +
-            `PCA account ${publishAuthorityAccountId} is owned by ${publishAuthority}; only the PCA owner can register, registered agents may only publish.`,
+            `Context graph "${id}" cannot be PCA-registered: the chain adapter does not expose its registration-tx signer, so PCA owner/agent authorization cannot be verified. PCA mode requires a chain adapter that surfaces its signer (e.g. via \`signerAddress\` / \`getSignerAddress()\` / \`getOperationalPrivateKey()\`).`,
           );
         }
+
+        const normalizedChainSigner = ethers.getAddress(chainSigner);
+        const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
+        if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase()) {
+          throw new Error(
+            `Context graph "${id}" cannot be PCA-registered: local curator ${ownerAddress} differs from registration chain signer ${normalizedChainSigner}. The local curator must control the wallet that will own the on-chain Context Graph NFT.`,
+          );
+        }
+
+        if (!signerIsOwner) {
+          if (typeof this.chain.getConvictionAgentAccountId !== 'function') {
+            throw new Error(
+              'PCA curated context graph registration by an agent requires chain adapter PCA agent lookup support.',
+            );
+          }
+          const signerAccountId = await this.chain.getConvictionAgentAccountId(
+            normalizedChainSigner,
+            { strict: true },
+          );
+          if (signerAccountId !== publishAuthorityAccountId) {
+            throw new Error(
+              `Context graph "${id}" cannot be PCA-registered: chain signer ${normalizedChainSigner} is not a registered agent of PCA account ${publishAuthorityAccountId} ` +
+              `(registered account: ${signerAccountId}). The signer must own the PCA or be registered to that exact account.`,
+            );
+          }
+          this.log.info(
+            ctx,
+            `PCA-curated CG "${id}": registered agent ${normalizedChainSigner} will own the Context Graph NFT; ` +
+            `PCA account ${publishAuthorityAccountId} owner ${publishAuthority} remains the live publish authority.`,
+          );
+        }
+      } else if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
+        // EOA mode: publishAuthority is the chain signer; local curator must
+        // equal it unless the explicit auto-promotion path below is allowed.
         if (opts?.strictEoaCuratorMatch) {
           // Opt-in strict mode for callers that explicitly want
           // the legacy "curator agent MUST equal chain signer"
@@ -1332,35 +1384,6 @@ export class ContextGraphMethods extends DKGAgentBase {
         // here on — downstream PCA/signer parity checks compare
         // against this value.
         ownerAddress = publishAuthority;
-      }
-      // PCA-only: the chain signer (= msg.sender for the registration
-      // tx) MUST equal the PCA owner. `ContextGraphs.createContextGraph`
-      // on-chain mints the governance NFT to msg.sender, so any
-      // divergence between the configured chain signer and the PCA
-      // owner would make the chain signer (not the advertised PCA owner)
-      // the actual on-chain context-graph owner — breaking later
-      // `onlyContextGraphOwner` operations (publish-policy/authority
-      // updates, etc.). Per Codex PR #502 round-4/5: keep "advertised
-      // curator == on-chain owner == chain signer == PCA owner" and
-      // FAIL CLOSED when the registration signer cannot be
-      // introspected — a custom adapter that exposes
-      // `getPublishingConvictionAccountOwner()` but not its tx signer
-      // would otherwise sneak past the invariant. Codex PR #502
-      // round-8: use the dedicated `getRegistrationTxSignerAddress`
-      // probe so future readers can't confuse it with a publish-time
-      // delegate principal.
-      if (isPcaCurated && publishAuthority) {
-        const chainSigner = await this.getRegistrationTxSignerAddress();
-        if (!chainSigner) {
-          throw new Error(
-            `Context graph "${id}" cannot be PCA-registered: the chain adapter does not expose its registration-tx signer, so the "chain signer == PCA owner" invariant cannot be verified. PCA mode requires a chain adapter that surfaces its signer (e.g. via \`signerAddress\` / \`getSignerAddress()\` / \`getOperationalPrivateKey()\`) so the on-chain governance NFT is guaranteed to mint to the advertised PCA owner.`,
-          );
-        }
-        if (chainSigner.toLowerCase() !== publishAuthority.toLowerCase()) {
-          throw new Error(
-            `Context graph "${id}" cannot be PCA-registered: chain signer ${chainSigner} differs from PCA owner ${publishAuthority}. The PCA owner must control the chain signer used to submit the registration tx; otherwise the on-chain governance NFT mints to ${chainSigner} rather than the advertised curator.`,
-          );
-        }
       }
       if (
         !publishAuthority
@@ -1610,7 +1633,50 @@ export class ContextGraphMethods extends DKGAgentBase {
     callerAgentAddress?: string,
     delegation?: SignedAgentDelegation,
   ): Promise<void> {
-    const ctx = createOperationContext('system');
+    return this.withContextGraphJoinAdmissionLock(contextGraphId, (admissionLockToken) =>
+      this.commitInviteAgentToContextGraph(
+        admissionLockToken,
+        contextGraphId,
+        agentAddress,
+        callerAgentAddress,
+        delegation,
+      ));
+  }
+
+  /** Policy-agnostic invite orchestration; caller must hold the CG admission lock. */
+  async commitInviteAgentToContextGraph(this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+    delegation?: SignedAgentDelegation,
+  ): Promise<void> {
+    const prepared = await this.prepareInviteAgentToContextGraph(
+      admissionLockToken,
+      contextGraphId,
+      agentAddress,
+      callerAgentAddress,
+      delegation,
+    );
+    await this.commitPreparedInviteAgentToContextGraph(
+      admissionLockToken,
+      contextGraphId,
+      prepared,
+    );
+  }
+
+  /**
+   * Complete every awaited invite preflight and return a single-use opaque
+   * mutation capability. Preparing never changes membership state.
+   */
+  async prepareInviteAgentToContextGraph(this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+    delegation?: SignedAgentDelegation,
+  ): Promise<PreparedContextGraphAgentInviteMutation> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
     const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
     if (!ethAddrRe.test(agentAddress)) {
       throw new Error(`Invalid Ethereum address: "${agentAddress}".`);
@@ -1635,45 +1701,19 @@ export class ContextGraphMethods extends DKGAgentBase {
       (a) => a.toLowerCase() === agentAddress.toLowerCase(),
     ) ?? false;
 
-    // Codex review on #873 (line 14061) — idempotency early-return.
-    // Mirrors the peer-path branch at ~line 13967. A no-op re-invite
-    // of an agent that's already in the allowlist with no fresh
-    // delegation must not insert duplicate quads OR emit the
-    // public-CG warn — pre-fix, the warn ran on every call regardless
-    // of whether the store was about to mutate, which misled
-    // operators auditing the warn stream (empirically reproduced by
-    // @branarakic on the patched daemon at `704b49cf`).
-    if (alreadyAllowed && !delegation) {
-      this.upsertContextGraphMember({
-        contextGraphId,
-        principalType: 'agent',
-        principalId: agentAddress,
-        role: 'participant',
-        status: 'active',
-        source: 'allowed-agent',
-      });
-      this.log.info(ctx, `Agent ${agentAddress} already in allowlist for "${contextGraphId}" — skipping`);
-      return;
-    }
-
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const quadsToInsert: Quad[] = [];
+    const curatorAgentAddress = (!existingParticipants || existingParticipants.length === 0)
+      ? this.defaultAgentAddress
+      : undefined;
 
-    if ((!existingParticipants || existingParticipants.length === 0) && this.defaultAgentAddress) {
+    if (curatorAgentAddress) {
       quadsToInsert.push({
         subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-        object: `"${this.defaultAgentAddress}"`,
+        object: `"${curatorAgentAddress}"`,
         graph: cgMetaGraph,
-      });
-      this.upsertContextGraphMember({
-        contextGraphId,
-        principalType: 'agent',
-        principalId: this.defaultAgentAddress,
-        role: 'curator',
-        status: 'active',
-        source: 'allowed-agent',
       });
     }
 
@@ -1690,19 +1730,11 @@ export class ContextGraphMethods extends DKGAgentBase {
       });
     }
 
-    // If the agent gave us a signed delegation (via the join-request
-    // path), promote its delegatee identifiers into the CG's allowlist
-    // so post-approval sync requests from the joiner's node pass auth
-    // even though they're signed by the node's operational key (which
-    // is NOT the agent's primary key).
-    //
-    // Each (cg, agent) pair gets ONE delegation node — re-approving
-    // the same agent overwrites the prior delegation.
+    let delegationUri: string | undefined;
     if (delegation) {
       const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
       const DKG = 'https://dkg.network/ontology#';
-      const delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${agentAddress.toLowerCase()}`;
-      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: delegationUri });
+      delegationUri = `did:dkg:agent-delegation:${contextGraphId}:${agentAddress.toLowerCase()}`;
       quadsToInsert.push({ subject: delegationUri, predicate: RDF_TYPE, object: `${DKG}AgentDelegation`, graph: cgMetaGraph });
       quadsToInsert.push({ subject: delegationUri, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${agentAddress.toLowerCase()}"`, graph: cgMetaGraph });
       quadsToInsert.push({ subject: delegationUri, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${delegation.issuedAtMs}"`, graph: cgMetaGraph });
@@ -1717,12 +1749,86 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
     }
 
+    return this.contextGraphMembershipMutations.prepare(
+      admissionLockToken,
+      contextGraphId,
+      {
+        contextGraphId,
+        agentAddress,
+        delegation,
+        alreadyAllowed,
+        noOp: alreadyAllowed && !delegation,
+        cgMetaGraph,
+        delegationUri,
+        quadsToInsert,
+        curatorAgentAddress,
+      },
+    );
+  }
+
+  /**
+   * Cross the membership write boundary using a prepared capability. There
+   * are no awaited preflights before the first store mutation in this method.
+   */
+  async commitPreparedInviteAgentToContextGraph(this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    prepared: PreparedContextGraphAgentInviteMutation,
+  ): Promise<void> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
+    const plan = this.contextGraphMembershipMutations.consume(
+      admissionLockToken,
+      contextGraphId,
+      prepared,
+    );
+    const {
+      agentAddress,
+      delegation,
+      alreadyAllowed,
+      noOp,
+      cgMetaGraph,
+      delegationUri,
+      quadsToInsert,
+      curatorAgentAddress,
+    } = plan;
+    const ctx = createOperationContext('system');
+
+    // Preserve idempotent manual re-invites while keeping even the local
+    // membership projection on the commit side of the prepared capability.
+    if (noOp) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: agentAddress,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+      this.log.info(ctx, `Agent ${agentAddress} already in allowlist for "${contextGraphId}" — skipping`);
+      return;
+    }
+
+    // A synchronous admission-specific guard can run after prepare returns
+    // and immediately before this call. The first awaited operation here is
+    // therefore also the first persistent membership mutation.
+    if (delegationUri) {
+      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: delegationUri });
+    }
     await this.store.insert(quadsToInsert);
     this.invalidateListContextGraphsCache();
 
     this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
-    this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
+    if (curatorAgentAddress) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: curatorAgentAddress,
+        role: 'curator',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+    }
 
     // Issue #865 — companion warning to the peer-invite path above.
     // Allowlist writes on explicit-public CGs are allowed (the
@@ -1762,6 +1868,24 @@ export class ContextGraphMethods extends DKGAgentBase {
    * Remove an agent from a context graph's allowlist.
    */
   async removeAgentFromContextGraph(this: DKGAgent, contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
+    return this.withContextGraphJoinAdmissionLock(contextGraphId, (admissionLockToken) =>
+      this.commitRemoveAgentFromContextGraph(
+        admissionLockToken,
+        contextGraphId,
+        agentAddress,
+        callerAgentAddress,
+      ));
+  }
+
+  /** Internal agent-membership removal; caller must hold the CG admission lock. */
+  async commitRemoveAgentFromContextGraph(
+    this: DKGAgent,
+    admissionLockToken: ContextGraphJoinAdmissionLockToken,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+  ): Promise<void> {
+    this.contextGraphJoinAdmissionLockManager.assertHeld(contextGraphId, admissionLockToken);
     const ctx = createOperationContext('system');
     const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
     if (!ethAddrRe.test(agentAddress)) {
@@ -1816,7 +1940,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirty(contextGraphId);
     this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
-    this.queueSharedMemoryGossipSubscription(contextGraphId);
+    // Reconciled after the projection is invalidated at the end of removal.
     // Drop any cached sender-key send state for this CG so the next
     // write re-resolves recipients (now excluding the revoked agent
     // via the tombstone) and mints a fresh epoch. Without this the
@@ -1829,6 +1953,13 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
     }
     await this.saveSwmSenderKeyState();
+    // `queueSharedMemoryGossipSubscription` may start a metadata projection
+    // read while the revocation mutation is still completing. Invalidate once
+    // more after all awaited removal work so that an in-flight pre-revoke
+    // snapshot cannot become the clean cached value returned to the very next
+    // admission check.
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
+    this.queueSharedMemoryGossipSubscription(contextGraphId);
 
     this.log.info(ctx, `Removed agent ${agentAddress} from context graph "${contextGraphId}" (tombstoned)`);
   }

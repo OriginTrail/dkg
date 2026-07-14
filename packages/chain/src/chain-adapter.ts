@@ -1010,9 +1010,10 @@ export interface ChainAdapter {
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
-   * Used by the daemon's curated-CG registration preflight to enforce
-   * `local curator == ownerOf(pcaAccountId)` so an agent wallet cannot
-   * impersonate ownership when tying a CG to a PCA.
+   * Used by the daemon's curated-CG registration preflight to populate the
+   * coherence-required publishAuthority. Registration authorization is then
+   * checked separately: the tx signer must be this owner or an agent registered
+   * to the exact PCA.
    */
   getPublishingConvictionAccountOwner?(accountId: bigint): Promise<string>;
 

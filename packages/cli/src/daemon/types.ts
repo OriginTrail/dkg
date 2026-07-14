@@ -10,6 +10,8 @@ export type CatchupJobState =
   | "done"
   | "failed"
   | "denied"
+  /** Local scheduler capacity was unavailable; retry is safe. */
+  | "deferred"
   /**
    * Catchup completed but no peer could deliver the CG content within
    * the run — every per-peer sync round either failed or returned

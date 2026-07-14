@@ -103,7 +103,11 @@ function emptySyncPage(phase: string): SyncPageResult {
 
 async function createAgentWithSend(
   sendToPeer: (...args: unknown[]) => Promise<Uint8Array>,
-  backpressure?: { syncGlobalMaxInflight: number; syncGlobalQueueLimit: number },
+  backpressure?: {
+    syncGlobalMaxInflight: number;
+    syncGlobalQueueLimit: number;
+    syncContextGraphPriorities?: Record<string, number>;
+  },
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'SyncFetchCoalescing',
@@ -420,21 +424,26 @@ describe('DKGAgent sync fetch coalescing', () => {
       eligibleContextGraphIds: ['private-cg'],
       publicContextGraphIds: [] as string[],
       privateRecoverFromCurator: ['private-cg'],
+      expectedAdmissionLanes: ['swm-recovery:'],
     },
     {
       name: 'mixed public/private',
       eligibleContextGraphIds: ['public-cg', 'private-cg'],
       publicContextGraphIds: ['public-cg'],
       privateRecoverFromCurator: ['private-cg'],
+      expectedAdmissionLanes: ['shared-memory:', 'swm-recovery:'],
+      syncContextGraphPriorities: { 'private-cg': 100, 'public-cg': -10 },
     },
-  ])('uses one global admission for $name shared-memory aggregation', async ({
+  ])('uses per-CG global admission for $name shared-memory aggregation', async ({
     eligibleContextGraphIds,
     publicContextGraphIds,
     privateRecoverFromCurator,
+    expectedAdmissionLanes,
+    syncContextGraphPriorities,
   }) => {
     const agent = await createAgentWithSend(
       async () => new Uint8Array(0),
-      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0, syncContextGraphPriorities },
     );
     const backpressureLogs: string[] = [];
     (agent as any).log.info = (_ctx: unknown, message: string) => {
@@ -469,9 +478,15 @@ describe('DKGAgent sync fetch coalescing', () => {
       const runningAdmissions = backpressureLogs.filter((message) => (
         message.startsWith('Sync backpressure running ')
       ));
-      expect(runningAdmissions).toHaveLength(1);
-      expect(runningAdmissions[0]).toContain('running shared-memory:');
-      expect(runningAdmissions[0]).not.toContain('swm-recovery:');
+      expect(runningAdmissions).toHaveLength(expectedAdmissionLanes.length);
+      for (const expectedLane of expectedAdmissionLanes) {
+        expect(runningAdmissions.some((message) => message.includes(`running ${expectedLane}`))).toBe(true);
+      }
+      expect(runningAdmissions.map((message) => (
+        expectedAdmissionLanes.find((lane) => message.includes(`running ${lane}`))
+      ))).toEqual(syncContextGraphPriorities
+        ? ['swm-recovery:', 'shared-memory:']
+        : expectedAdmissionLanes);
     } finally {
       await agent.stop().catch(() => {});
     }

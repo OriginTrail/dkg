@@ -12,6 +12,29 @@ import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
+export type ContextGraphJoinPolicyMode = 'manual' | 'open';
+
+export interface ContextGraphJoinPolicyResponse {
+  contextGraphId: string;
+  mode: ContextGraphJoinPolicyMode;
+  maxMembers?: number | null;
+  maxApprovalsPerHour?: number | null;
+  memberCount?: number;
+  approvalsLastHour?: number;
+  ownerAgentAddress?: string;
+  updatedAt?: number | null;
+  [key: string]: unknown;
+}
+
+export type ContextGraphJoinPolicyUpdate =
+  | { mode: 'manual' }
+  | {
+      mode: 'open';
+      maxMembers: number;
+      maxApprovalsPerHour: number;
+      acknowledgeOpenEnrollment: true;
+    };
+
 export type QueryResult =
   | { type: 'bindings'; bindings: Array<Record<string, string>> }
   | { type: 'boolean'; value: boolean }
@@ -436,7 +459,8 @@ export class ApiClient {
     }
 
     const tokens = await loadTokens();
-    const token = tokens.size > 0 ? tokens.values().next().value : undefined;
+    const environmentToken = process.env.DKG_AUTH_TOKEN?.trim();
+    const token = environmentToken || (tokens.size > 0 ? tokens.values().next().value : undefined);
     const portOrBaseUrl = !hasEnvPort && config
       ? configuredApiBaseUrl(config.apiHost, port)
       : port;
@@ -1340,6 +1364,7 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1362,6 +1387,7 @@ export class ApiClient {
             rejectedKcs: number;
             failedPeers: number;
             failedPhases: number;
+            deferredBackpressure: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1377,6 +1403,7 @@ export class ApiClient {
             droppedDataTriples: number;
             failedPeers: number;
             failedPhases: number;
+            deferredBackpressure: number;
           };
         };
       }
@@ -1401,6 +1428,7 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1423,6 +1451,7 @@ export class ApiClient {
             rejectedKcs: number;
             failedPeers: number;
             failedPhases: number;
+            deferredBackpressure: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1438,6 +1467,7 @@ export class ApiClient {
             droppedDataTriples: number;
             failedPeers: number;
             failedPhases: number;
+            deferredBackpressure: number;
           };
         };
       }
@@ -1454,7 +1484,7 @@ export class ApiClient {
     jobId: string;
     contextGraphId: string;
     includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'denied' | 'failed' | 'unreachable';
+    status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
     queuedAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -1466,6 +1496,7 @@ export class ApiClient {
       peersTried: number;
       peersResponded: number;
       peersSucceeded: number;
+      deferredBackpressure: number;
       dataSynced: number;
       sharedMemorySynced: number;
       denied: boolean;
@@ -1488,6 +1519,7 @@ export class ApiClient {
           rejectedKcs: number;
           failedPeers: number;
           failedPhases: number;
+          deferredBackpressure: number;
         };
         sharedMemory: {
           fetchedMetaTriples: number;
@@ -1503,6 +1535,7 @@ export class ApiClient {
           droppedDataTriples: number;
           failedPeers: number;
           failedPhases: number;
+          deferredBackpressure: number;
         };
       };
     };
@@ -1673,8 +1706,7 @@ export class ApiClient {
   /**
    * Forward a previously-signed join delegation to the curator over
    * P2P. The daemon dials `curatorPeerId` directly (DHT-resolved if
-   * not currently connected) and falls back to broadcasting through
-   * connected peers. Returns the delivery count so callers can detect
+   * not currently connected). Returns the delivery count so callers can detect
    * "no curator reachable" without inspecting log output.
    */
   async requestJoin(
@@ -1682,7 +1714,13 @@ export class ApiClient {
     delegation: unknown,
     curatorPeerId: string,
     agentName?: string,
-  ): Promise<{ ok: boolean; status: string; delivered: number | 'local'; alreadyMember?: boolean }> {
+  ): Promise<{
+    ok: boolean;
+    status: string;
+    delivered: number | 'local';
+    alreadyMember?: boolean;
+    autoApproved?: boolean;
+  }> {
     return this.post(
       `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
       { delegation, curatorPeerId, ...(agentName ? { agentName } : {}) },
@@ -1715,6 +1753,17 @@ export class ApiClient {
     }>;
   }> {
     return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
+  }
+
+  async getContextGraphJoinPolicy(contextGraphId: string): Promise<ContextGraphJoinPolicyResponse> {
+    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-policy`);
+  }
+
+  async setContextGraphJoinPolicy(
+    contextGraphId: string,
+    update: ContextGraphJoinPolicyUpdate,
+  ): Promise<ContextGraphJoinPolicyResponse> {
+    return this.put(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-policy`, update);
   }
 
   async getAgentIdentity(): Promise<{
@@ -1983,6 +2032,19 @@ export class ApiClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: res.statusText }));
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+    }
+    return res.json() as Promise<T>;
+  }
+
+  private async put<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     });

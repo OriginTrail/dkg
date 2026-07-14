@@ -900,8 +900,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // DID) so peers validate against the same creator-scoped DID.
           // `dkg:curator` (wallet DID) is for local authorization only.
           getContextGraphOwner: (id) => this.getContextGraphCreator(id),
-          subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
           setContextGraphSubscription: (id, next, options) => this.setContextGraphSubscription(id, next, options),
+          recordDiscoveredContextGraph: (id, next) => { this.recordDiscoveredContextGraph(id, next); },
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
           getCgMeta: (id) => this.getCgMeta(id),
           markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },

@@ -121,8 +121,10 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
   // -2 tools (dkg_publish + dkg_shared_memory_publish), taking the surface from
   // 31 → 29. The one-shot is NOT a new tool: it EXTENDS dkg_knowledge_asset_create
   // with optional quads + alsoShareSwm [D3], so the count drops by exactly 2.
-  it('registered surface contains exactly 29 tools (full production surface, post-PR locked count)', () => {
-    expect(server.tools.size).toBe(29);
+  // PCA-agent CG registration: +1 explicit on-chain registration tool, taking
+  // the full surface from 29 → 30.
+  it('registered surface contains exactly 30 tools (full production surface, post-PR locked count)', () => {
+    expect(server.tools.size).toBe(30);
   });
 });
 

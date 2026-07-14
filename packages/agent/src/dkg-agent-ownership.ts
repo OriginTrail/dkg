@@ -533,9 +533,10 @@ export class OwnershipMethods extends DKGAgentBase {
    *   3. `signerAddress` property (mock adapter and parity tests).
    *   4. `getOperationalPrivateKey()` (legacy adapters).
    *
-   * Returning `undefined` triggers the round-5 "fail closed" branch
-   * in `registerContextGraph`: PCA registration is rejected because
-   * the invariant cannot be verified.
+   * Returning `undefined` triggers the fail-closed branch in
+   * `registerContextGraph`: PCA registration is rejected because neither
+   * owner nor exact-PCA agent authorization can be verified and the local
+   * curator cannot be aligned with the minted CG NFT owner.
    */
   async getRegistrationTxSignerAddress(this: DKGAgent): Promise<string | undefined> {
     const chain = this.chain;
@@ -615,45 +616,38 @@ export class OwnershipMethods extends DKGAgentBase {
   // `registerContextGraph`.
 
   /**
-   * Return true when `senderPeerId` is currently acting as the curator
-   * of `contextGraphId`. Used as a minimal anti-spoof gate on join
-   * lifecycle notifications (approve/reject) — those arrive unsigned
-   * over p2p, so without this check any peer that knows a local
-   * agent's address could forge a rejection and drive our UI into a
-   * false "denied" state (Codex tier-4k N27).
-   *
-   * Resolution order:
-   *  1. If the CG's recorded curator is a peer-ID DID
-   *     (`did:dkg:agent:<libp2p-peer-id>`, legacy/creator path), match
-   *     directly against `senderPeerId`.
-   *  2. Otherwise the CG was registered with a wallet-scoped curator
-   *     (`did:dkg:agent:0x…`). Consult the agent registry and accept
-   *     the sender iff the curator agent's currently advertised peer
-   *     ID matches. Registry lookup is cheap (local graph query).
-   *
-   * A missing curator / registry failure is treated as "not curator"
-   * — we'd rather drop a real rejection than surface a forged one.
-   */
-  /**
    * Authorise the sender of a join-approved/rejected notification for
    * `(contextGraphId, agentAddress)`. Tries two sources, in order:
    *
-   *   1. `joinRequestAcceptedBy` — peers that returned `{ok: true}`
-   *      to our broadcast in `forwardJoinRequest`. This is the only
-   *      check that works for the freshly-rejected case (no _meta
-   *      access yet).
-   *   2. `senderIsContextGraphCurator` — meta-graph curator lookup
-   *      with registry fallback. This catches the case where we
-   *      restarted between submit and decision (in-memory map lost),
-   *      or where we're an already-approved member receiving a later
-   *      decision (we have meta access from the prior approval).
+   *   1. The invite-supplied curator persisted with this exact requester
+   *      generation. Persisting it before transport both closes the
+   *      immediate-decision race and survives requester restart.
+   *   2. `joinRequestAcceptedBy` — the legacy in-memory record of peers that
+   *      accepted or durably queued this exact request generation.
+   *   3. `senderIsContextGraphCurator` — meta-graph curator lookup with
+   *      registry fallback for already-approved members.
    */
   public async isTrustedJoinDecisionSender(this: DKGAgent,
     contextGraphId: string,
     agentAddress: string,
+    requestGeneration: string,
     senderPeerId: string,
   ): Promise<boolean> {
-    const acceptedKey = `${contextGraphId}::${agentAddress.toLowerCase()}`;
+    const requesterState = await this.readRequesterJoinRequestState(
+      contextGraphId,
+      agentAddress,
+    );
+    if (
+      requesterState?.requestGeneration === requestGeneration &&
+      requesterState.curatorPeerId === senderPeerId
+    ) {
+      return true;
+    }
+    const acceptedKey = this.joinRequestTrackingKey(
+      contextGraphId,
+      agentAddress,
+      requestGeneration,
+    );
     const accepted = this.joinRequestAcceptedBy.get(acceptedKey);
     if (accepted?.has(senderPeerId)) return true;
     return this.senderIsContextGraphCurator(contextGraphId, senderPeerId);

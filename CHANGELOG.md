@@ -4,6 +4,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Fixed
+
+- **PCA agents can register PCA-backed Context Graphs:** the agent, CLI/API, and MCP surfaces now match the deployed contract by allowing either the PCA owner or a wallet registered to that exact PCA to register a curated Context Graph. Eligible registrations consume a quota-backed deposit waiver instead of requiring a separate liquid-TRAC deposit; exact-account authorization and Context Graph NFT ownership alignment remain fail-closed.
+
 ## [10.0.6] - 2026-07-13
 
 Mainnet-readiness and high-load hardening on top of 10.0.5. Adds the OT-RFC-59 changelog-backed verified delta-sync lane, eliminates several store and reconciliation full-scan paths, bounds sync, StorageACK, outbox, managed-Oxigraph, and auto-update resource usage, and hardens publish recovery across transient quorum, RPC-throttle, funding, and receipt-timeout failures. Also completes the StorageACK priority-lane follow-ups, makes RDF handling safe for control characters and non-ASCII backends, and preserves the `oxigraph-worker` backend after its proposed retirement was reverted. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.5).
