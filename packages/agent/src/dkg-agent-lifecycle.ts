@@ -1038,6 +1038,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return false;
       }
     });
+    this.messenger.setOutboxResponseHandler(PROTOCOL_JOIN_REQUEST, async (result) => {
+      await this.handleJoinRequestOutboxResponse(result);
+    });
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
       chainId: this.config.networkIdentity?.chainId,
@@ -2328,12 +2331,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
           trustedDecisionInProgress = true;
-          const decisionApplied = await this.applyRequesterJoinDecision(
+          const decisionApplied = await this.finalizeRequesterJoinRejection({
             contextGraphId,
-            rejectedAddr,
+            agentAddress: rejectedAddr,
             requestGeneration,
-            'rejected',
-          );
+            expectedCuratorPeerId: peerId.toString(),
+            source: 'join-rejected',
+          });
           if (!decisionApplied) {
             this.log.warn(
               createOperationContext('system'),
@@ -2341,34 +2345,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
-          this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
-          this.upsertContextGraphMember({
-            contextGraphId,
-            principalType: 'agent',
-            principalId: rejectedAddr,
-            role: 'requester',
-            status: 'removed',
-            source: 'join-rejected',
-          });
-          this.joinRequestAcceptedBy.delete(this.joinRequestTrackingKey(
-            contextGraphId,
-            rejectedAddr,
-            requestGeneration,
-          ));
-          // Drop the optimistic "this CG belongs to <rejectedAddr>" hint
-          // seeded by `signJoinRequest`. Otherwise multi-agent nodes keep
-          // building authenticated sync requests on behalf of the rejected
-          // agent and the curator denies the very next catch-up after a
-          // *different* local agent is allowlisted, until something else
-          // overwrites the map.
-          const localHint = this.localApprovedAgentByCG.get(contextGraphId);
-          if (localHint && localHint === rejectedAddr.toLowerCase()) {
-            this.localApprovedAgentByCG.delete(contextGraphId);
-          }
-          this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
-            contextGraphId,
-            agentAddress: rejectedAddr,
-          });
           return new TextEncoder().encode(JSON.stringify({ ok: true }));
         }
 

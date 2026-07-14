@@ -1312,12 +1312,27 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     requestGeneration: string,
     status: 'approved' | 'rejected',
+    expectedCuratorPeerId?: string,
   ): Promise<boolean> {
     if (!isJoinRequestGeneration(requestGeneration)) return false;
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
     return withRequesterJoinStateLock(this, key, async () => {
       const current = await this.readRequesterJoinRequestState(contextGraphId, agentAddress);
       if (!current || current.requestGeneration !== requestGeneration) return false;
+      // Request generations are derived from the signed delegation, not the
+      // invite-supplied curator. A user can therefore re-forward the same
+      // generation to another curator while an older response is in flight.
+      // Keep this guard under the requester-state lock so the old curator
+      // cannot terminate the replacement request between a read and write.
+      // Legacy pending rows without curator provenance retain the existing
+      // trusted-sender fallback used by live decision notifications.
+      if (
+        expectedCuratorPeerId &&
+        current.curatorPeerId !== undefined &&
+        current.curatorPeerId !== expectedCuratorPeerId
+      ) {
+        return false;
+      }
       if (current.status === status) return true;
       if (current.status !== 'pending') return false;
       await this.writeRequesterJoinRequestState(contextGraphId, agentAddress, {
@@ -1326,6 +1341,69 @@ export class JoinRequestMethods extends DKGAgentBase {
       });
       return true;
     });
+  }
+
+  /**
+   * Canonical requester-side rejection finalizer shared by live curator
+   * notifications and delayed outbox NACKs. Sender authentication stays at
+   * each transport edge; the generation/curator transition is revalidated
+   * atomically here before common cleanup and notification run.
+   */
+  async finalizeRequesterJoinRejection(
+    this: DKGAgent,
+    input: {
+      contextGraphId: string;
+      agentAddress: string;
+      requestGeneration: string;
+      expectedCuratorPeerId: string;
+      reason?: string;
+      source: 'join-rejected' | 'join-request-outbox-response';
+    },
+  ): Promise<boolean> {
+    const decisionApplied = await this.applyRequesterJoinDecision(
+      input.contextGraphId,
+      input.agentAddress,
+      input.requestGeneration,
+      'rejected',
+      input.expectedCuratorPeerId,
+    );
+    if (!decisionApplied) return false;
+
+    this.upsertContextGraphMember({
+      contextGraphId: input.contextGraphId,
+      principalType: 'agent',
+      principalId: input.agentAddress,
+      role: 'requester',
+      status: 'removed',
+      source: 'join-rejected',
+    });
+    this.joinRequestAcceptedBy.delete(this.joinRequestTrackingKey(
+      input.contextGraphId,
+      input.agentAddress,
+      input.requestGeneration,
+    ));
+    const localHint = this.localApprovedAgentByCG.get(input.contextGraphId);
+    if (localHint === input.agentAddress.toLowerCase()) {
+      this.localApprovedAgentByCG.delete(input.contextGraphId);
+    }
+
+    const reason = input.reason?.trim();
+    const ctx = createOperationContext('system');
+    if (input.source === 'join-request-outbox-response') {
+      this.log.warn(
+        ctx,
+        `Queued join request for "${input.contextGraphId}" was rejected by curator ${input.expectedCuratorPeerId.slice(-8)}${reason ? `: ${reason}` : ''}`,
+      );
+    } else {
+      this.log.info(ctx, `Join request rejected for "${input.contextGraphId}"`);
+    }
+    this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
+      contextGraphId: input.contextGraphId,
+      agentAddress: input.agentAddress,
+      ...(reason ? { reason } : {}),
+      source: input.source,
+    });
+    return true;
   }
 
   /**
@@ -1382,6 +1460,65 @@ export class JoinRequestMethods extends DKGAgentBase {
       } else {
         await this.clearRequesterJoinRequestState(contextGraphId, agentAddress);
       }
+    });
+  }
+
+  /**
+   * Reconcile a join-request NACK that arrives after the original send was
+   * durably queued. Only the invite-supplied curator may terminate the exact
+   * pending generation. Normal completion, including a malformed/stale no-op,
+   * deliberately tells Messenger to drop the outbox row. A durable-state
+   * failure throws so the row remains queued and can be reconciled again.
+   */
+  async handleJoinRequestOutboxResponse(
+    this: DKGAgent,
+    input: {
+      peerId: string;
+      requestPayload: Uint8Array;
+      response: Uint8Array;
+    },
+  ): Promise<void> {
+    let responseBody: { ok?: unknown; error?: unknown };
+    try {
+      responseBody = JSON.parse(new TextDecoder().decode(input.response));
+    } catch {
+      return;
+    }
+    if (responseBody?.ok !== false) return;
+
+    let requestBody: {
+      contextGraphId?: unknown;
+      delegation?: SignedAgentDelegation;
+      requestGeneration?: unknown;
+    };
+    try {
+      requestBody = JSON.parse(new TextDecoder().decode(input.requestPayload));
+    } catch {
+      return;
+    }
+    const contextGraphId = typeof requestBody.contextGraphId === 'string'
+      ? requestBody.contextGraphId
+      : '';
+    const delegation = requestBody.delegation;
+    const requestGeneration = typeof requestBody.requestGeneration === 'string'
+      ? requestBody.requestGeneration
+      : '';
+    if (!contextGraphId || !delegation?.agentAddress || !requestGeneration) {
+      return;
+    }
+    if (deriveJoinRequestGeneration(delegation) !== requestGeneration) {
+      return;
+    }
+    const reason = typeof responseBody.error === 'string' && responseBody.error.trim()
+      ? responseBody.error.trim()
+      : 'join request rejected';
+    await this.finalizeRequesterJoinRejection({
+      contextGraphId,
+      agentAddress: delegation.agentAddress,
+      requestGeneration,
+      expectedCuratorPeerId: input.peerId,
+      reason,
+      source: 'join-request-outbox-response',
     });
   }
 

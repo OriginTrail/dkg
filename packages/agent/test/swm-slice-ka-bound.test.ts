@@ -3,6 +3,7 @@ import {
   OxigraphStore,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
+  type QueryOptions,
   type SwmKaGraphBound,
   type Quad,
 } from '@origintrail-official/dkg-storage';
@@ -86,6 +87,16 @@ function captureQuerySources(store: OxigraphStore): string[] {
     return (orig as (s: string, o?: unknown) => unknown)(sparql, opts);
   }) as typeof store.query;
   return sources;
+}
+
+function captureQueryOptions(store: OxigraphStore): QueryOptions[] {
+  const options: QueryOptions[] = [];
+  const orig = store.query.bind(store);
+  store.query = (async (sparql: string, opts?: QueryOptions) => {
+    if (opts) options.push(opts);
+    return orig(sparql, opts);
+  }) as typeof store.query;
+  return options;
 }
 
 /** A minimal chain whose KCCreated event verifies the given finalization. */
@@ -193,26 +204,54 @@ describe('deriveSwmKaGraphBound (T4)', () => {
   });
 
   it('wires a derived bound through to the SWM read (and no bound leaves it plain)', async () => {
-    const sliceSourcesFor = async (msg: FinalizationMessageMsg): Promise<string[]> => {
+    const sliceQueriesFor = async (msg: FinalizationMessageMsg): Promise<QueryOptions[]> => {
       const store = new OxigraphStore();
-      const sources = captureQuerySources(store);
+      const options = captureQueryOptions(store);
       const handler = new FinalizationHandler(store, undefined);
       await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CG);
-      return sources.filter((s) => s.startsWith(SLICE));
+      return options.filter((entry) => entry.source?.startsWith(SLICE));
     };
 
-    const bounded = await sliceSourcesFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
-    expect(bounded).toContain(SLICE_BOUNDED);
+    const bounded = await sliceQueriesFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
+    expect(bounded.map((entry) => entry.source)).toContain(SLICE_BOUNDED);
+    expect(bounded.every((entry) => entry.priority === 'background')).toBe(true);
 
-    const unbounded = await sliceSourcesFor(makeMsg({ startKAId: 0, endKAId: 0 }));
-    expect(unbounded).not.toContain(SLICE_BOUNDED);
-    expect(unbounded).toContain(SLICE);
+    const unbounded = await sliceQueriesFor(makeMsg({ startKAId: 0, endKAId: 0 }));
+    expect(unbounded.map((entry) => entry.source)).not.toContain(SLICE_BOUNDED);
+    expect(unbounded.map((entry) => entry.source)).toContain(SLICE);
+    expect(unbounded.every((entry) => entry.priority === 'background')).toBe(true);
 
     // Kill-switch is applied at the boundary: a derivable bound is not used.
     process.env.DKG_DISABLE_SWM_KA_BOUND = '1';
-    const killed = await sliceSourcesFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
-    expect(killed).not.toContain(SLICE_BOUNDED);
-    expect(killed).toContain(SLICE);
+    const killed = await sliceQueriesFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
+    expect(killed.map((entry) => entry.source)).not.toContain(SLICE_BOUNDED);
+    expect(killed.map((entry) => entry.source)).toContain(SLICE);
+    expect(killed.every((entry) => entry.priority === 'background')).toBe(true);
+  });
+
+  it('runs the chain-reconcile unbounded backstop in the background lane', async () => {
+    const store = new OxigraphStore();
+    const root = 'urn:test:chain-reconcile-priority';
+    await store.insert([{
+      subject: root,
+      predicate: 'http://schema.org/name',
+      object: '"priority"',
+      graph: swmGraph(AUTHOR_A, 7),
+    }]);
+    const options = captureQueryOptions(store);
+    const handler = new FinalizationHandler(store, undefined);
+    const seam = handler as unknown as {
+      getSharedMemoryQuadsForRoots: (
+        contextGraphId: string,
+        rootEntities: string[],
+        subGraphName?: string,
+      ) => Promise<Quad[]>;
+    };
+
+    await expect(seam.getSharedMemoryQuadsForRoots(CG, [root])).resolves.toHaveLength(1);
+    const sliceQueries = options.filter((entry) => entry.source === SLICE);
+    expect(sliceQueries.length).toBeGreaterThan(0);
+    expect(sliceQueries.every((entry) => entry.priority === 'background')).toBe(true);
   });
 });
 
@@ -254,8 +293,14 @@ describe('bounded SWM read is merkle-equivalent to the unbounded read (T5b)', ()
     // fallback-owning primitive, never the raw unsafe loader.
     const { quads: bounded } = await loadSharedMemorySliceWithKaBoundFallback(
       store, bucket, { rootEntities: [root] }, bound,
-      { bounded: 'test.bounded', widened: 'test.widened', unbounded: 'test.unbounded' },
-      async () => (qs) => qs,
+      {
+        sources: {
+          bounded: 'test.bounded',
+          widened: 'test.widened',
+          unbounded: 'test.unbounded',
+        },
+        createAccept: async () => (qs) => qs,
+      },
     );
     const unbounded = await loadSelectedSharedMemoryQuads(store, bucket, { rootEntities: [root] });
 

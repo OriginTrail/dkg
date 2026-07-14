@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
+import {
+  registerSyncHandler,
+  SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT,
+} from '../src/sync/responder/sync-handler.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { QueryOptions, QueryResult, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
@@ -276,6 +279,56 @@ describe('sync responder protection', () => {
     queryGates.get('block-c')?.resolve({ type: 'bindings', bindings: [] });
     queryGates.get('default')?.resolve({ type: 'bindings', bindings: [] });
     await Promise.all([...blockers, defaultRequest]);
+  });
+
+  // A request whose Context Graph carries a non-default priority is admitted in
+  // two stages, and the authorized stage reserves its queue slot up front —
+  // that reservation counts against the per-peer queue limit. So a reservation
+  // left behind by a request that never reaches the authorized stage is not a
+  // leak the peer can wait out: once SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT of
+  // them pile up, every later request from that peer is refused as "peer queue
+  // full" while its queue is in fact empty, and the peer never recovers.
+  //
+  // Both cases below short-circuit before the authorized stage. Drive more of
+  // them than the per-peer limit through ONE responder — a fresh handler would
+  // get a fresh limiter and hide the leak — then prove the peer is still served.
+  it.each([
+    ['denied before the authorized stage', false],
+    ['whose authorization throws', true],
+  ])('releases the handoff reservation for a request %s', async (_label, authorizationThrows) => {
+    const shortCircuitedRequests = SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT + 1;
+    let authCalls = 0;
+    let served = 0;
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
+      query: async () => {
+        served += 1;
+        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+      },
+    }), {
+      contextGraphPriorities: { 'sync-protection': 5 },
+      authorizeSyncRequest: async () => {
+        authCalls += 1;
+        if (authCalls > shortCircuitedRequests) return true;
+        if (authorizationThrows) throw new Error('authorization exploded');
+        return false;
+      },
+    });
+
+    for (let i = 0; i < shortCircuitedRequests; i++) {
+      const response = await cap.invoke(makeEnvelope(), REMOTE_A)
+        .catch((error: unknown) => error);
+      // Capacity is never the reason these fail: a busy rejection here would
+      // mean the previous requests never gave their reserved slots back.
+      expect(String(response instanceof Error ? response.message : ''))
+        .not.toMatch(/queue full/);
+      if (!authorizationThrows) {
+        expect(new TextDecoder().decode(response as Uint8Array)).toBe('sync-denied');
+      }
+    }
+
+    await expect(cap.invoke(makeEnvelope(), REMOTE_A)).resolves.toBeInstanceOf(Uint8Array);
+    expect(served).toBe(1);
   });
 
   it('caps durable page computation at three globally and one per peer', async () => {

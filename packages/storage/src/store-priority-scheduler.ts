@@ -11,6 +11,7 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   backgroundQueued: number;
   maxConcurrent: number;
   ackReservedSlots: number;
+  normalReservedSlots: number;
   backgroundReservedSlots: number;
   ackQueueLimit: number;
   normalQueueLimit: number;
@@ -40,6 +41,16 @@ export class StoreSchedulerBusyError extends Error {
 
 export type StorePriorityQueueLimits = Record<StoreWorkPriority, number>;
 
+export interface StorePrioritySchedulerOptions {
+  maxConcurrent?: number;
+  ackReservedSlots?: number;
+  normalReservedSlots?: number;
+  backgroundReservedSlots?: number;
+  queueLimits?: number | Partial<StorePriorityQueueLimits>;
+  queueWaitTimeoutMs?: number;
+  now?: () => number;
+}
+
 interface QueueEntry<T> {
   priority: StoreWorkPriority;
   operation: string;
@@ -52,8 +63,16 @@ interface QueueEntry<T> {
   waitTimer?: ReturnType<typeof setTimeout>;
 }
 
+interface NonAckLaneCapacity {
+  limit: number;
+  normalReservedSlots: number;
+  backgroundReservedSlots: number;
+  backgroundLimit: number;
+}
+
 const DEFAULT_MAX_CONCURRENT = 8;
 const DEFAULT_ACK_RESERVED_SLOTS = 1;
+const DEFAULT_NORMAL_RESERVED_SLOTS = 1;
 const DEFAULT_BACKGROUND_RESERVED_SLOTS = 1;
 export const DEFAULT_STORE_QUEUE_LIMIT = 64;
 export const DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS = 10_000;
@@ -125,29 +144,67 @@ export class StorePriorityScheduler {
   private ackInflight = 0;
   private normalInflight = 0;
   private backgroundInflight = 0;
+  private readonly maxConcurrent: number;
+  private readonly ackReservedSlots: number;
+  private readonly normalReservedSlots: number;
+  private readonly backgroundReservedSlots: number;
+  private readonly queueWaitTimeoutMs: number;
+  private readonly now: () => number;
   private readonly queueLimits: StorePriorityQueueLimits;
 
+  constructor(options?: StorePrioritySchedulerOptions);
+  /** @deprecated Use the named options object. Retained for package compatibility. */
   constructor(
-    private readonly maxConcurrent = parsePositiveIntegerEnv('DKG_STORE_MAX_CONCURRENT', DEFAULT_MAX_CONCURRENT),
-    private readonly ackReservedSlots = parsePositiveIntegerEnv(
-      'DKG_STORE_ACK_RESERVED_SLOTS',
-      DEFAULT_ACK_RESERVED_SLOTS,
-    ),
-    private readonly now = () => performance.now(),
-    private readonly backgroundReservedSlots = parseNonNegativeIntegerEnv(
-      'DKG_STORE_BACKGROUND_RESERVED_SLOTS',
-      DEFAULT_BACKGROUND_RESERVED_SLOTS,
-    ),
-    queueLimits: number | Partial<StorePriorityQueueLimits> = resolveQueueLimitsFromEnv(),
-    private readonly queueWaitTimeoutMs = parsePositiveIntegerEnv(
-      'DKG_STORE_QUEUE_WAIT_TIMEOUT_MS',
-      DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
-    ),
+    maxConcurrent?: number,
+    ackReservedSlots?: number,
+    now?: () => number,
+    backgroundReservedSlots?: number,
+    queueLimits?: number | Partial<StorePriorityQueueLimits>,
+    queueWaitTimeoutMs?: number,
+  );
+  constructor(
+    optionsOrMaxConcurrent: StorePrioritySchedulerOptions | number = {},
+    legacyAckReservedSlots?: number,
+    legacyNow?: () => number,
+    legacyBackgroundReservedSlots?: number,
+    legacyQueueLimits?: number | Partial<StorePriorityQueueLimits>,
+    legacyQueueWaitTimeoutMs?: number,
   ) {
-    this.queueLimits = normalizeQueueLimits(queueLimits);
+    const legacyCall = typeof optionsOrMaxConcurrent === 'number' || arguments.length > 1;
+    const options: StorePrioritySchedulerOptions = legacyCall
+      ? {
+          maxConcurrent: typeof optionsOrMaxConcurrent === 'number'
+            ? optionsOrMaxConcurrent
+            : undefined,
+          ackReservedSlots: legacyAckReservedSlots,
+          now: legacyNow,
+          backgroundReservedSlots: legacyBackgroundReservedSlots,
+          queueLimits: legacyQueueLimits,
+          queueWaitTimeoutMs: legacyQueueWaitTimeoutMs,
+        }
+      : optionsOrMaxConcurrent;
+    this.maxConcurrent = options.maxConcurrent
+      ?? parsePositiveIntegerEnv('DKG_STORE_MAX_CONCURRENT', DEFAULT_MAX_CONCURRENT);
+    this.ackReservedSlots = options.ackReservedSlots
+      ?? parsePositiveIntegerEnv('DKG_STORE_ACK_RESERVED_SLOTS', DEFAULT_ACK_RESERVED_SLOTS);
+    this.normalReservedSlots = options.normalReservedSlots
+      ?? parseNonNegativeIntegerEnv('DKG_STORE_NORMAL_RESERVED_SLOTS', DEFAULT_NORMAL_RESERVED_SLOTS);
+    this.backgroundReservedSlots = options.backgroundReservedSlots
+      ?? parseNonNegativeIntegerEnv(
+        'DKG_STORE_BACKGROUND_RESERVED_SLOTS',
+        DEFAULT_BACKGROUND_RESERVED_SLOTS,
+      );
+    this.queueWaitTimeoutMs = options.queueWaitTimeoutMs
+      ?? parsePositiveIntegerEnv(
+        'DKG_STORE_QUEUE_WAIT_TIMEOUT_MS',
+        DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
+      );
+    this.now = options.now ?? (() => performance.now());
+    this.queueLimits = normalizeQueueLimits(options.queueLimits ?? resolveQueueLimitsFromEnv());
   }
 
   get snapshot(): StorePrioritySchedulerSnapshot {
+    const laneCapacity = this.nonAckLaneCapacity();
     return {
       ackInflight: this.ackInflight,
       normalInflight: this.normalInflight,
@@ -157,7 +214,8 @@ export class StorePriorityScheduler {
       backgroundQueued: this.queues.background.length,
       maxConcurrent: this.maxConcurrent,
       ackReservedSlots: this.effectiveAckReserve(),
-      backgroundReservedSlots: this.effectiveBackgroundReserve(),
+      normalReservedSlots: laneCapacity.normalReservedSlots,
+      backgroundReservedSlots: laneCapacity.backgroundReservedSlots,
       ackQueueLimit: this.queueLimits.ack,
       normalQueueLimit: this.queueLimits.normal,
       backgroundQueueLimit: this.queueLimits.background,
@@ -248,18 +306,25 @@ export class StorePriorityScheduler {
     if (totalInflight >= this.maxConcurrent) return false;
     if (priority === 'ack') return true;
 
-    const nonAckLimit = this.nonAckLimit();
+    const laneCapacity = this.nonAckLaneCapacity();
     const nonAckInflight = this.normalInflight + this.backgroundInflight;
-    if (nonAckInflight >= nonAckLimit) return false;
-    if (priority === 'normal' && this.shouldHoldBackgroundFloor()) return false;
+    if (nonAckInflight >= laneCapacity.limit) return false;
+    if (priority === 'background' && this.backgroundInflight >= laneCapacity.backgroundLimit) {
+      return false;
+    }
+    if (
+      priority === 'normal' &&
+      this.shouldHoldBackgroundFloor(laneCapacity.backgroundReservedSlots)
+    ) {
+      return false;
+    }
     return true;
   }
 
-  private shouldHoldBackgroundFloor(): boolean {
-    const backgroundReserve = this.effectiveBackgroundReserve();
-    return backgroundReserve > 0 &&
+  private shouldHoldBackgroundFloor(backgroundReservedSlots: number): boolean {
+    return backgroundReservedSlots > 0 &&
       this.queues.background.length > 0 &&
-      this.backgroundInflight < backgroundReserve;
+      this.backgroundInflight < backgroundReservedSlots;
   }
 
   private effectiveAckReserve(): number {
@@ -270,8 +335,19 @@ export class StorePriorityScheduler {
     return Math.max(1, this.maxConcurrent - this.effectiveAckReserve());
   }
 
-  private effectiveBackgroundReserve(): number {
-    return Math.min(this.backgroundReservedSlots, Math.max(0, this.nonAckLimit() - 1));
+  private nonAckLaneCapacity(): NonAckLaneCapacity {
+    const limit = this.nonAckLimit();
+    const normalReservedSlots = Math.min(
+      Math.max(0, this.normalReservedSlots),
+      Math.max(0, limit - 1),
+    );
+    const backgroundLimit = Math.max(1, limit - normalReservedSlots);
+    const backgroundReservedSlots = Math.min(
+      Math.max(0, this.backgroundReservedSlots),
+      backgroundLimit,
+      Math.max(0, limit - 1),
+    );
+    return { limit, normalReservedSlots, backgroundReservedSlots, backgroundLimit };
   }
 
   private start(entry: QueueEntry<unknown>): void {

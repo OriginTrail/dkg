@@ -171,6 +171,8 @@ export async function reconcileContextGraph(
  * live-failure hold, so invalid combinations of pending flags are impossible.
  * This is the single owner of per-key coalescing semantics: a burst produces at
  * most one trailing pass, with periodic work taking priority over live nudges.
+ * Trigger methods are deliberately fire-and-forget; callers that need an
+ * completion boundary must use waitForIdle() explicitly.
  */
 export type VmReconcileTriggerSource = 'live' | 'periodic';
 export type VmReconcileSource = VmReconcileTriggerSource | 'manual';
@@ -274,6 +276,7 @@ export class VmReconcileDispatcher<T> {
   private readonly states = new Map<string, VmReconcileDispatchState<T>>();
   private readonly pending: Array<VmReconcileDispatchWork<T>> = [];
   private readonly idleWaiters = new Set<() => void>();
+  private readonly keyIdleWaiters = new Map<string, Set<() => void>>();
   private readonly concurrency: number;
   private readonly maxPending: number;
   private readonly maxForegroundBurst: number;
@@ -302,15 +305,15 @@ export class VmReconcileDispatcher<T> {
     this.maxForegroundBurst = maxForegroundBurst;
   }
 
-  /** Low-latency chain-event nudge; suppressed after failure until a sweep. */
-  triggerLive(key: string): Promise<void> {
-    if (this.states.get(key)?.hold === 'live-blocked') return Promise.resolve();
-    return this.admit(key, 'live').then(() => undefined, () => undefined);
+  /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
+  triggerLive(key: string): void {
+    if (this.states.get(key)?.hold === 'live-blocked') return;
+    void this.admit(key, 'live').catch(() => undefined);
   }
 
-  /** Reliability path; every periodic sweep gets one retry after a failure. */
-  triggerPeriodic(key: string): Promise<void> {
-    return this.admit(key, 'periodic').then(() => undefined, () => undefined);
+  /** Enqueue the reliability path; every periodic sweep gets one failure retry. */
+  triggerPeriodic(key: string): void {
+    void this.admit(key, 'periodic').catch(() => undefined);
   }
 
   /** Operator path; errors and the typed domain result propagate to the API. */
@@ -352,6 +355,7 @@ export class VmReconcileDispatcher<T> {
           state.trailing = undefined;
         }
         if (!state.active) this.states.delete(key);
+        this.resolveKeyIdleWaiters(key);
       }
       this.queued = 0;
       this.resolveIdleWaiters();
@@ -359,7 +363,19 @@ export class VmReconcileDispatcher<T> {
     return this.waitForIdle();
   }
 
-  waitForIdle(): Promise<void> {
+  /** Wait globally for shutdown, or for one CG including its trailing pass. */
+  waitForIdle(key?: string): Promise<void> {
+    if (key !== undefined) {
+      if (!this.isInFlight(key)) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        let waiters = this.keyIdleWaiters.get(key);
+        if (!waiters) {
+          waiters = new Set();
+          this.keyIdleWaiters.set(key, waiters);
+        }
+        waiters.add(resolve);
+      });
+    }
     if (this.active === 0 && this.queued === 0) return Promise.resolve();
     return new Promise<void>((resolve) => this.idleWaiters.add(resolve));
   }
@@ -401,7 +417,10 @@ export class VmReconcileDispatcher<T> {
     }
 
     const work = this.createQueuedWork(key, source);
-    if (!work) return Promise.reject(new VmReconcileQueueFullError(this.maxPending));
+    if (!work) {
+      if (state.hold === 'ready') this.states.delete(key);
+      return Promise.reject(new VmReconcileQueueFullError(this.maxPending));
+    }
     state.pending = work;
     this.pending.push(work);
     this.sortPending();
@@ -472,6 +491,14 @@ export class VmReconcileDispatcher<T> {
     this.idleWaiters.clear();
   }
 
+  private resolveKeyIdleWaiters(key: string): void {
+    if (this.isInFlight(key)) return;
+    const waiters = this.keyIdleWaiters.get(key);
+    if (!waiters) return;
+    this.keyIdleWaiters.delete(key);
+    for (const resolve of waiters) resolve();
+  }
+
   private drain(): void {
     while (!this.closed && this.active < this.concurrency && this.pending.length > 0) {
       const work = this.takeNext();
@@ -520,6 +547,7 @@ export class VmReconcileDispatcher<T> {
           }
           this.drain();
           this.resolveIdleWaiters();
+          this.resolveKeyIdleWaiters(work.key);
         });
     }
   }

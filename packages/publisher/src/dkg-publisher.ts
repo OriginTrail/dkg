@@ -6328,7 +6328,28 @@ export class DKGPublisher implements Publisher {
     const effectivePromoteQuads = skippedRoots.size > 0
       ? quadsToPromote.filter(q => !skippedRoots.has(q.subject) && !skippedRoots.has(q.subject.split('/.well-known/genid/')[0]))
       : quadsToPromote;
-    await this.deleteAssertionScopedQuads(graphUri, [...effectivePromoteQuads, ...trustedGeneratedCatalogQuads]);
+    const wmQuadsToDelete = [...effectivePromoteQuads, ...trustedGeneratedCatalogQuads];
+    // A full promote that consumes every WM quad can drop its assertion-scoped
+    // graphs directly. Besides being cheaper, this avoids serializing a large
+    // connected blank-node component as one DELETE ... WHERE pattern. Such a
+    // pattern is legal SPARQL but its self-join can grow combinatorially (a
+    // 100-triple Wikidata assertion took minutes of one-core Oxigraph CPU).
+    //
+    // Keep the precise delete path whenever anything must remain in WM:
+    // subset shares, foreign-owned-root skips, or reserved provenance/trust
+    // rows filtered out of the SWM payload. `wmQuadsToDelete` is derived only
+    // from `assertionQuads`, and the trusted catalog subset is disjoint from
+    // `effectivePromoteQuads`, so equal lengths prove the full graph is
+    // consumed without a second store scan.
+    const consumesEntireAssertion =
+      promotingAllEntities
+      && skippedRoots.size === 0
+      && wmQuadsToDelete.length === assertionQuads.length;
+    if (consumesEntireAssertion) {
+      await this.dropAssertionScopedGraphs(graphUri);
+    } else {
+      await this.deleteAssertionScopedQuads(graphUri, wmQuadsToDelete);
+    }
 
     // Update the assertion's memory layer from WM → SWM in _meta
     const assertionMetaGraph = contextGraphMetaUri(contextGraphId);

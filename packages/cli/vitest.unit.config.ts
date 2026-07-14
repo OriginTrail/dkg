@@ -80,6 +80,7 @@ export default defineConfig({
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
+          'test/publisher-ka-recovery.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic

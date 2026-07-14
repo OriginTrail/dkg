@@ -38,7 +38,7 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
-import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
+import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -870,14 +870,16 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       chainBase: undefined,
       pollIntervalMs: 10,
       errorBackoffMs: 10,
-      knowledgeAssetVmPublishExecutor: async (input) => {
-        executorCalls.push(input);
-        return {
-          status: 'tentative',
-          ual: 'did:dkg:local/runtime-route',
-          merkleRoot: ethers.getBytes(input.request.sealMerkleRoot),
-          kaManifest: [],
-        } as any;
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          executorCalls.push(input);
+          return {
+            status: 'tentative',
+            ual: 'did:dkg:local/runtime-route',
+            merkleRoot: ethers.getBytes(input.request.sealMerkleRoot),
+            kaManifest: [],
+          } as any;
+        },
       },
     });
 
@@ -1002,7 +1004,9 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       chainBase: undefined,
       pollIntervalMs: 10,
       errorBackoffMs: 10,
-      knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(fakeAgent as unknown as DKGAgent),
+      knowledgeAssetVmPublishHandler: {
+        execute: createKnowledgeAssetVmPublishHandler(fakeAgent as unknown as DKGAgent).execute,
+      },
     });
 
     try {

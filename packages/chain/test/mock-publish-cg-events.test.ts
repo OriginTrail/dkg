@@ -44,6 +44,8 @@ describe('MockChainAdapter.publishToContextGraph — emits publish events', () =
     expect(resolved!.batchId).toBe(result.batchId);
     expect(resolved!.txHash).toBe(result.txHash);
     expect(resolved!.publisherAddress.toLowerCase()).toBe(mock.signerAddress.toLowerCase());
+    expect(resolved!.merkleRoot).toEqual(new Uint8Array(32));
+    expect(resolved!.authorAddress?.toLowerCase()).toBe(mock.signerAddress.toLowerCase());
   });
 
   it('emits both KCCreated and KnowledgeBatchCreated for publishToContextGraph (mirrors the archived V9 helper)', async () => {
