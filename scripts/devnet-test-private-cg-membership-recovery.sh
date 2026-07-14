@@ -95,6 +95,12 @@ CURATOR_AGENT=""
 CURATOR_PEER=""
 JOINER_AGENT=""
 JOINER_PEER=""
+EXPECTED_DELEGATION_AGENT_LOWER=""
+EXPECTED_DELEGATION_PEER=""
+EXPECTED_DELEGATION_OP_KEY_LOWER=""
+EXPECTED_DELEGATION_SCOPE=""
+EXPECTED_DELEGATION_ISSUED_AT=""
+EXPECTED_DELEGATION_EXPIRES_AT=""
 CURATOR_STOPPED=0
 JOINER_STOPPED=0
 FAIL_REASON=""
@@ -376,8 +382,22 @@ joiner_allowlist_count() {
 }
 
 joiner_delegation_count() {
-  query_count "$1" _meta \
-    "?delegation <https://dkg.network/ontology#allowedDelegateePeer> \"$JOINER_PEER\""
+  local delegation_subject pattern
+  if [ -z "$EXPECTED_DELEGATION_AGENT_LOWER" ] \
+    || [ -z "$EXPECTED_DELEGATION_PEER" ] \
+    || [ -z "$EXPECTED_DELEGATION_OP_KEY_LOWER" ] \
+    || [ -z "$EXPECTED_DELEGATION_ISSUED_AT" ] \
+    || [ -z "$EXPECTED_DELEGATION_EXPIRES_AT" ]; then
+    printf '0'
+    return 0
+  fi
+  delegation_subject="did:dkg:agent-delegation:$CG_ID:$EXPECTED_DELEGATION_AGENT_LOWER"
+  pattern="<$delegation_subject> <https://dkg.network/ontology#delegationAgent> \"$EXPECTED_DELEGATION_AGENT_LOWER\" ;
+    <https://dkg.network/ontology#delegationIssuedAt> \"$EXPECTED_DELEGATION_ISSUED_AT\" ;
+    <https://dkg.network/ontology#delegationExpiresAt> \"$EXPECTED_DELEGATION_EXPIRES_AT\" ;
+    <https://dkg.network/ontology#allowedDelegateePeer> \"$EXPECTED_DELEGATION_PEER\" ;
+    <https://dkg.network/ontology#allowedDelegateeKey> \"$EXPECTED_DELEGATION_OP_KEY_LOWER\" ."
+  query_count "$1" _meta "$pattern"
 }
 
 context_graph_exists() {
@@ -513,14 +533,22 @@ snapshot_phase() {
   save_artifact "$phase-context-graph-list.json" "$list"
   save_artifact "$phase-subscriptions-api.json" "$subscriptions"
   save_artifact "$phase-catchup.json" "$catchup"
-  save_artifact "$phase-counts.json" "$(ROOT="$root" SUB="$sub" META="$meta" POLICY="$policy" ALLOWED="$allowed" DELEGATION="$delegation" node -e '
+  save_artifact "$phase-counts.json" "$(ROOT="$root" SUB="$sub" META="$meta" POLICY="$policy" ALLOWED="$allowed" DELEGATION="$delegation" DELEGATION_AGENT="$EXPECTED_DELEGATION_AGENT_LOWER" DELEGATION_PEER="$EXPECTED_DELEGATION_PEER" DELEGATION_KEY="$EXPECTED_DELEGATION_OP_KEY_LOWER" DELEGATION_SCOPE="$EXPECTED_DELEGATION_SCOPE" DELEGATION_ISSUED="$EXPECTED_DELEGATION_ISSUED_AT" DELEGATION_EXPIRES="$EXPECTED_DELEGATION_EXPIRES_AT" node -e '
     process.stdout.write(JSON.stringify({
       rootSwm: process.env.ROOT || null,
       subgraphSwm: process.env.SUB || null,
       meta: process.env.META || null,
       privatePolicy: process.env.POLICY || null,
       joinerAllowed: process.env.ALLOWED || null,
-      joinerDelegateePeer: process.env.DELEGATION || null,
+      joinerDelegationTupleMatches: process.env.DELEGATION || null,
+      expectedDelegation: {
+        agentAddress: process.env.DELEGATION_AGENT || null,
+        delegateePeerId: process.env.DELEGATION_PEER || null,
+        delegateeOpKey: process.env.DELEGATION_KEY || null,
+        scope: process.env.DELEGATION_SCOPE || null,
+        issuedAtMs: process.env.DELEGATION_ISSUED || null,
+        expiresAtMs: process.env.DELEGATION_EXPIRES || null,
+      },
     }, null, 2));
   ')"
 }
@@ -769,6 +797,31 @@ SIGN_RESPONSE="$(api_call "$JOINER_NODE" POST "/api/context-graph/$CG_ENCODED/si
 DELEGATION="$(json_get "$SIGN_RESPONSE" delegation)"
 [ -n "$DELEGATION" ] && [ "$DELEGATION" != "null" ] \
   || fail "sign-join returned no delegation"
+EXPECTED_DELEGATION_AGENT="$(json_get "$DELEGATION" agentAddress)"
+EXPECTED_DELEGATION_PEER="$(json_get "$DELEGATION" delegateePeerId)"
+EXPECTED_DELEGATION_OP_KEY="$(json_get "$DELEGATION" delegateeOpKey)"
+EXPECTED_DELEGATION_SCOPE="$(json_get "$DELEGATION" scope)"
+EXPECTED_DELEGATION_ISSUED_AT="$(json_get "$DELEGATION" issuedAtMs)"
+EXPECTED_DELEGATION_EXPIRES_AT="$(json_get "$DELEGATION" expiresAtMs)"
+EXPECTED_DELEGATION_AGENT_LOWER="$(printf '%s' "$EXPECTED_DELEGATION_AGENT" | tr '[:upper:]' '[:lower:]')"
+EXPECTED_DELEGATION_OP_KEY_LOWER="$(printf '%s' "$EXPECTED_DELEGATION_OP_KEY" | tr '[:upper:]' '[:lower:]')"
+JOINER_AGENT_LOWER="$(printf '%s' "$JOINER_AGENT" | tr '[:upper:]' '[:lower:]')"
+[ "$EXPECTED_DELEGATION_AGENT_LOWER" = "$JOINER_AGENT_LOWER" ] \
+  || fail "signed delegation agent does not match the joining member: $DELEGATION"
+[ "$EXPECTED_DELEGATION_PEER" = "$JOINER_PEER" ] \
+  || fail "signed delegation peer does not match the joining node: $DELEGATION"
+[[ "$EXPECTED_DELEGATION_OP_KEY_LOWER" =~ ^0x[[:xdigit:]]{40}$ ]] \
+  || fail "signed delegation has no valid operational delegatee key: $DELEGATION"
+[ "$(SCOPE="$EXPECTED_DELEGATION_SCOPE" CG="$CG_ID" node -e '
+  const scope = process.env.SCOPE || "";
+  const cg = process.env.CG || "";
+  process.stdout.write(scope.startsWith("sync:deployment=") && scope.endsWith(`:${cg}`) ? "1" : "0");
+')" = "1" ] || fail "signed delegation scope is not bound to this deployment and context graph: $DELEGATION"
+[[ "$EXPECTED_DELEGATION_ISSUED_AT" =~ ^[0-9]+$ ]] \
+  && [[ "$EXPECTED_DELEGATION_EXPIRES_AT" =~ ^[0-9]+$ ]] \
+  && [ "$EXPECTED_DELEGATION_EXPIRES_AT" -gt "$EXPECTED_DELEGATION_ISSUED_AT" ] \
+  && [ "$EXPECTED_DELEGATION_EXPIRES_AT" -gt "$(node -e 'process.stdout.write(String(Date.now()))')" ] \
+  || fail "signed delegation has an invalid or expired validity window: $DELEGATION"
 
 REQUEST_BODY="$(DELEGATION="$DELEGATION" CURATOR_PEER_ENV="$CURATOR_PEER" node -e '
   process.stdout.write(JSON.stringify({

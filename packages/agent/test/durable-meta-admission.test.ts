@@ -10,12 +10,13 @@ import {
 } from '../src/sync/responder/durable-meta-admission.js';
 
 describe('durable-meta delegation admission', () => {
-  it('uses one store predicate to admit allowed and exclude orphaned or revoked delegations', async () => {
+  it('admits allowed or participant members and excludes orphaned or revoked delegations', async () => {
     const store = new OxigraphStore();
     const contextGraphId = 'durable-meta-admission';
     const cgEntity = contextGraphDataGraphUri(contextGraphId);
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
     const active = `did:dkg:agent-delegation:${contextGraphId}:0xactive`;
+    const participant = `did:dkg:agent-delegation:${contextGraphId}:0xparticipant`;
     const orphaned = `did:dkg:agent-delegation:${contextGraphId}:0xorphaned`;
     const revoked = `did:dkg:agent-delegation:${contextGraphId}:0xrevoked`;
     const unrelated = 'did:dkg:agent-delegation:another-cg:0xactive';
@@ -41,8 +42,14 @@ describe('durable-meta delegation admission', () => {
       {
         graph: metaGraph,
         subject: cgEntity,
-        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
         object: '"0xrevoked"',
+      },
+      {
+        graph: metaGraph,
+        subject: cgEntity,
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+        object: '"0xPaRtIcIpAnT"',
       },
       {
         graph: metaGraph,
@@ -51,6 +58,7 @@ describe('durable-meta delegation admission', () => {
         object: '"0xReVoKeD"',
       },
       ...delegation(active, '0xactive'),
+      ...delegation(participant, '0xparticipant'),
       ...delegation(orphaned, '0xorphaned'),
       ...delegation(revoked, '0xrevoked'),
       ...delegation(unrelated, '0xactive'),
@@ -70,6 +78,6 @@ describe('durable-meta delegation admission', () => {
       ? new Set(result.bindings.map((row) => row['s']).filter(Boolean))
       : new Set<string>();
 
-    expect(embedded).toEqual(new Set([active]));
+    expect(embedded).toEqual(new Set([active, participant]));
   });
 });

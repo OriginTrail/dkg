@@ -23,8 +23,8 @@ export function durableMetaDelegationSubjectAdmissionExpression(
     && EXISTS {
       GRAPH ?g {
         ?s <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?delegatedAgent .
-        <${cgEntity}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?allowedAgent .
-        FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?allowedAgent)))
+        <${cgEntity}> (<${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>|<${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>) ?memberAgent .
+        FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?memberAgent)))
         FILTER NOT EXISTS {
           <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
           FILTER(LCASE(STR(?delegatedAgent)) = LCASE(STR(?revokedAgent)))

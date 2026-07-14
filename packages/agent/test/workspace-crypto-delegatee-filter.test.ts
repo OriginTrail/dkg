@@ -16,7 +16,7 @@ describe('workspace crypto delegatee authorization lookups', () => {
     agent = undefined;
   });
 
-  it('returns peer and key credentials only for allowed, non-revoked delegation principals', async () => {
+  it('returns peer and key credentials only for effective, non-revoked delegation principals', async () => {
     agent = await DKGAgent.create({
       name: 'WorkspaceCryptoDelegateeFilter',
       chainAdapter: new MockChainAdapter(),
@@ -25,12 +25,15 @@ describe('workspace crypto delegatee authorization lookups', () => {
     const cgEntity = contextGraphDataGraphUri(contextGraphId);
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
     const allowedAgent = ethers.Wallet.createRandom().address;
+    const participantAgent = ethers.Wallet.createRandom().address;
     const orphanedAgent = ethers.Wallet.createRandom().address;
     const revokedAgent = ethers.Wallet.createRandom().address;
     const allowedKey = ethers.Wallet.createRandom().address;
+    const participantKey = ethers.Wallet.createRandom().address;
     const orphanedKey = ethers.Wallet.createRandom().address;
     const revokedKey = ethers.Wallet.createRandom().address;
     const allowedPeer = '12D3KooWAllowedDelegatee';
+    const participantPeer = '12D3KooWParticipantDelegatee';
     const orphanedPeer = '12D3KooWOrphanedDelegatee';
     const revokedPeer = '12D3KooWRevokedDelegatee';
     const delegationSubject = (principal: string) =>
@@ -62,8 +65,14 @@ describe('workspace crypto delegatee authorization lookups', () => {
       {
         graph: metaGraph,
         subject: cgEntity,
-        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
         object: `"${revokedAgent}"`,
+      },
+      {
+        graph: metaGraph,
+        subject: cgEntity,
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+        object: `"${participantAgent}"`,
       },
       {
         graph: metaGraph,
@@ -72,6 +81,7 @@ describe('workspace crypto delegatee authorization lookups', () => {
         object: `"${revokedAgent.toLowerCase()}"`,
       },
       ...delegationQuads(allowedAgent, allowedPeer, allowedKey),
+      ...delegationQuads(participantAgent, participantPeer, participantKey),
       ...delegationQuads(orphanedAgent, orphanedPeer, orphanedKey),
       ...delegationQuads(revokedAgent, revokedPeer, revokedKey),
     ]);
@@ -79,12 +89,12 @@ describe('workspace crypto delegatee authorization lookups', () => {
     const peers = await (agent as any).getContextGraphAllowedDelegateePeers(contextGraphId);
     const keys = await (agent as any).getContextGraphAllowedDelegateeKeys(contextGraphId);
 
-    expect([...peers.entries()]).toEqual([
-      [allowedAgent.toLowerCase(), [allowedPeer]],
-    ]);
-    expect([...keys.entries()]).toEqual([
-      [allowedAgent.toLowerCase(), [allowedKey.toLowerCase()]],
-    ]);
+    expect(peers.size).toBe(2);
+    expect(keys.size).toBe(2);
+    expect(peers.get(allowedAgent.toLowerCase())).toEqual([allowedPeer]);
+    expect(keys.get(allowedAgent.toLowerCase())).toEqual([allowedKey.toLowerCase()]);
+    expect(peers.get(participantAgent.toLowerCase())).toEqual([participantPeer]);
+    expect(keys.get(participantAgent.toLowerCase())).toEqual([participantKey.toLowerCase()]);
     expect(peers.has(orphanedAgent.toLowerCase())).toBe(false);
     expect(peers.has(revokedAgent.toLowerCase())).toBe(false);
     expect(keys.has(orphanedAgent.toLowerCase())).toBe(false);

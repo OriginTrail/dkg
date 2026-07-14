@@ -1204,7 +1204,6 @@ function buildDurableMetaRowsQuery(
         || ${activeDelegationSubjectExpression}
         ${registeredSubGraphClause}
         || STRSTARTS(STR(?s), "did:dkg:activity:")
-        || STRSTARTS(STR(?s), "did:dkg:join-request:")
         || EXISTS { GRAPH ?g { ?s <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
         || EXISTS { GRAPH ?g { ?agLifecycle <${DKG_ASSERTION_GRAPH}> ?s ; <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
         || EXISTS {

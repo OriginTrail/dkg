@@ -545,8 +545,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         GRAPH <${cgMetaGraph}> {
           ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer .
-          <${cgEntity}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?allowedAgent .
-          FILTER(LCASE(STR(?agent)) = LCASE(STR(?allowedAgent)))
+          <${cgEntity}> (<${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>|<${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>) ?memberAgent .
+          FILTER(LCASE(STR(?agent)) = LCASE(STR(?memberAgent)))
           FILTER NOT EXISTS {
             <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
             FILTER(LCASE(STR(?agent)) = LCASE(STR(?revokedAgent)))
@@ -599,8 +599,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         GRAPH <${cgMetaGraph}> {
           ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?key .
-          <${cgEntity}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?allowedAgent .
-          FILTER(LCASE(STR(?agent)) = LCASE(STR(?allowedAgent)))
+          <${cgEntity}> (<${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>|<${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>) ?memberAgent .
+          FILTER(LCASE(STR(?agent)) = LCASE(STR(?memberAgent)))
           FILTER NOT EXISTS {
             <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
             FILTER(LCASE(STR(?agent)) = LCASE(STR(?revokedAgent)))

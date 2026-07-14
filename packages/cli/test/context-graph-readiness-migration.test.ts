@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   migrateLegacyContextGraphReadiness,
+  persistProjectSyncedReadiness,
   type ContextGraphReadinessStore,
 } from '../src/context-graph-readiness.js';
 
@@ -202,5 +203,70 @@ describe('legacy context-graph readiness provenance migration', () => {
       durableVerified: true,
       sharedMemoryVerified: true,
     });
+  });
+});
+
+describe('PROJECT_SYNCED readiness provenance', () => {
+  it('persists inserted durable data only after metadata is confirmed', async () => {
+    const f = fixture({ confirmedMeta: true });
+
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent,
+      store: f.store,
+      contextGraphId: f.contextGraphId,
+      dataSynced: 7,
+      sharedMemorySynced: 0,
+    })).resolves.toBe(true);
+
+    expect(f.getProvenance()).toMatchObject({
+      version: 1,
+      durableVerified: true,
+      sharedMemoryVerified: false,
+    });
+  });
+
+  it('preserves current proof for the other data plane', async () => {
+    const f = fixture({ confirmedMeta: true });
+    f.store.setContextGraphReadinessProvenance(f.contextGraphId, {
+      version: 1,
+      durableVerified: true,
+      sharedMemoryVerified: false,
+    });
+
+    await persistProjectSyncedReadiness({
+      agent: f.agent,
+      store: f.store,
+      contextGraphId: f.contextGraphId,
+      dataSynced: 0,
+      sharedMemorySynced: 4,
+    });
+
+    expect(f.getProvenance()).toMatchObject({
+      durableVerified: true,
+      sharedMemoryVerified: true,
+    });
+  });
+
+  it('does not persist an unconfirmed or empty PROJECT_SYNCED event', async () => {
+    const unconfirmed = fixture({ confirmedMeta: false });
+
+    await expect(persistProjectSyncedReadiness({
+      agent: unconfirmed.agent,
+      store: unconfirmed.store,
+      contextGraphId: unconfirmed.contextGraphId,
+      dataSynced: 3,
+      sharedMemorySynced: 0,
+    })).resolves.toBe(false);
+    expect(unconfirmed.getProvenance()).toBeNull();
+
+    const empty = fixture({ confirmedMeta: true });
+    await expect(persistProjectSyncedReadiness({
+      agent: empty.agent,
+      store: empty.store,
+      contextGraphId: empty.contextGraphId,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+    })).resolves.toBe(false);
+    expect(empty.getProvenance()).toBeNull();
   });
 });

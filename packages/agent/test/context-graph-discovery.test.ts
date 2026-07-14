@@ -2926,6 +2926,7 @@ describe('runImmediatePostApprovalSync', () => {
     };
     runCatchupThrows?: Error;
     broadcastThrows?: Error;
+    refreshMetaResults?: Array<boolean | Error>;
   }) {
     const calls = {
       ensureAdmittedCalls: [] as string[],
@@ -2971,8 +2972,10 @@ describe('runImmediatePostApprovalSync', () => {
         approvedAgentAddress: refreshOpts?.memberProof?.approvedAgentAddress,
         expectedDelegateePeerId: refreshOpts?.memberProof?.expectedDelegateePeerId,
       });
-      metaConfirmed = true;
-      return true;
+      const outcome = opts.refreshMetaResults?.[calls.refreshMetaCalls.length - 1] ?? true;
+      if (outcome instanceof Error) throw outcome;
+      if (outcome) metaConfirmed = true;
+      return outcome;
     };
     (a as any).hasConfirmedMetaState = async () => metaConfirmed;
     (a as any).refreshMetaSyncedFlags = async () => undefined;
@@ -3067,6 +3070,59 @@ describe('runImmediatePostApprovalSync', () => {
       cg: 'test-cg-missing-peer',
       includeSwm: true,
     });
+  }, 15000);
+
+  it('retries metadata and falls back after curator data succeeds without authoritative metadata', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      refreshMetaResults: [false, false],
+      runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-missing-authoritative-meta',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync(
+      'test-cg-missing-authoritative-meta',
+      CURATOR_PEER,
+    );
+
+    expect(calls.refreshMetaCalls).toHaveLength(2);
+    expect(calls.runCatchupCalls).toHaveLength(1);
+    expect(calls.broadcastCalls).toEqual([{
+      cg: 'test-cg-missing-authoritative-meta',
+      includeSwm: true,
+    }]);
+  }, 15000);
+
+  it('falls back to broadcast when the curator metadata refresh throws', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      refreshMetaResults: [new Error('curator metadata unavailable')],
+      runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-refresh-throws',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-refresh-throws', CURATOR_PEER);
+
+    expect(calls.refreshMetaCalls).toHaveLength(1);
+    expect(calls.runCatchupCalls).toHaveLength(0);
+    expect(calls.broadcastCalls).toEqual([{
+      cg: 'test-cg-refresh-throws',
+      includeSwm: true,
+    }]);
   }, 15000);
 
   // 🔴 Regression for the Lex-on-PR-#517 round-2 / Codex finding: the

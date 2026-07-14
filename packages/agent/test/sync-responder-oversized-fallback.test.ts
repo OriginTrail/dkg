@@ -72,7 +72,8 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
       { graph: meta, subject: revokedDelegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: '"peer-revoked"' },
       // B: a registered sub-graph subject (registration rows are keyed on it)
       ...subGraphRegistrationQuads(cgId, 'sub1'),
-      // C / D: activity + join-request prefixes
+      // C: activity is durable member metadata. Pending join requests are
+      // curator-only moderation records and must not be replicated.
       { graph: meta, subject: 'did:dkg:activity:act1', predicate: `${DKG_NS}note`, object: '"act"' },
       { graph: meta, subject: 'did:dkg:join-request:jr1', predicate: `${DKG_NS}note`, object: '"jr"' },
       // E: a non-working lifecycle (kept); its own rows are kept
@@ -144,7 +145,7 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(has(revokedDelegation)).toBe(false);
     expect(has(`${cgEntity}/sub1`)).toBe(true); // B
     expect(has('did:dkg:activity:act1')).toBe(true); // C
-    expect(has('did:dkg:join-request:jr1')).toBe(true); // D
+    expect(has('did:dkg:join-request:jr1')).toBe(false);
     expect(has('urn:lc:vm')).toBe(true); // E
     expect(has('urn:lc:dual')).toBe(true); // E dual
     expect(has('urn:ag:1')).toBe(true); // F

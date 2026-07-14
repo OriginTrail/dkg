@@ -151,6 +151,7 @@ import { createInitialPublisherState, createPublicSnapshotStore, createPublisher
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
+  persistProjectSyncedReadiness,
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
@@ -1974,6 +1975,21 @@ export async function runDaemonInner(
     }
     const cgTag = verifiedContextGraphId ? ` cg=${shortId(verifiedContextGraphId)}` : '';
     log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag}: ${text}`);
+  });
+
+  // Register before network startup. A queued join approval can arrive as
+  // soon as the messenger is live, before the later UI/SSE listeners are
+  // installed, and its automatic catch-up proof must survive restart.
+  agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
+    void persistProjectSyncedReadiness({
+      agent,
+      store: dashDb,
+      contextGraphId: typeof data?.contextGraphId === "string" ? data.contextGraphId : "",
+      dataSynced: typeof data?.dataSynced === "number" ? data.dataSynced : 0,
+      sharedMemorySynced: typeof data?.sharedMemorySynced === "number" ? data.sharedMemorySynced : 0,
+    }).catch((err) => {
+      log(`[warn] Failed to persist PROJECT_SYNCED readiness: ${err instanceof Error ? err.message : String(err)}`);
+    });
   });
 
   await agent.start();

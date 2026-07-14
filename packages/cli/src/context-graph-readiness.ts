@@ -360,6 +360,46 @@ export function writeContextGraphReadiness(
 }
 
 /**
+ * Persist readiness proven by the agent's automatic post-approval catch-up.
+ * PROJECT_SYNCED is also used as a UI event, so fail closed unless it carries
+ * actual inserted data and the graph's authoritative metadata is present.
+ */
+export async function persistProjectSyncedReadiness(input: {
+  agent: DKGAgent;
+  store: Partial<ContextGraphReadinessStore>;
+  contextGraphId: string;
+  dataSynced: number;
+  sharedMemorySynced: number;
+}): Promise<boolean> {
+  const contextGraphId = input.contextGraphId.trim();
+  const durableCompleted = Number.isFinite(input.dataSynced) && input.dataSynced > 0;
+  const sharedMemoryCompleted = Number.isFinite(input.sharedMemorySynced) &&
+    input.sharedMemorySynced > 0;
+  if (
+    !contextGraphId ||
+    (!durableCompleted && !sharedMemoryCompleted) ||
+    typeof input.store.setContextGraphReadinessProvenance !== 'function'
+  ) return false;
+
+  const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
+    contextGraphId,
+    { rejectUnregisteredPlaceholder: true },
+  )
+    .catch(() => false);
+  if (!hasConfirmedMeta) return false;
+
+  const current = readContextGraphReadiness(input.store, contextGraphId);
+  const currentVersionVerified = current.version >= CONTEXT_GRAPH_READINESS_VERSION;
+  writeContextGraphReadiness(input.store, contextGraphId, {
+    durableVerified: durableCompleted ||
+      (currentVersionVerified && current.durableVerified),
+    sharedMemoryVerified: sharedMemoryCompleted ||
+      (currentVersionVerified && current.sharedMemoryVerified),
+  });
+  return true;
+}
+
+/**
  * One-time migration for subscription flags written before readiness carried
  * durable per-plane proof. Private/unconfirmed rows fail closed and must
  * complete a new catch-up. Confirmed public rows retain historical clean-empty
