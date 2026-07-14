@@ -354,6 +354,7 @@ must be re-added explicitly afterward.
 - focused CLI regressions:
   - chain scan scheduling/idempotency: 8 passed;
   - subscription diagnostics/cleanup route: 3 passed;
+- focused two-node devnet discovery/subscription boundary: passed;
 - `git diff --check` passed.
 
 The focused boundary suite exercises actual `DKGAgent` startup with a
@@ -370,6 +371,23 @@ The focused boundary suite exercises actual `DKGAgent` startup with a
   persistence;
 - rediscovery cannot downgrade that explicit subscription; and
 - restart rehydrates only the explicitly activated graph.
+
+### Focused devnet boundary
+
+An isolated two-node devnet was run with one core and one edge node. The test
+cleared the edge node's preconfigured user subscriptions, created and
+registered a fresh public graph on the core (`onChainId=3`), and observed the
+graph on the live edge through ontology gossip with `subscribed=false`.
+
+The edge was then restarted to exercise persisted discovery state and the
+startup chain scan scheduled after 15 seconds. After that scan, the graph still
+had `subscribed=false`, retained `onChainId=3`, and was absent from
+`GET /api/context-graph/subscriptions`. A final explicit
+`POST /api/context-graph/subscribe` activated the graph with
+`subscribed=true` and `coreHosted=false`.
+
+The isolated devnet and its generated deployment metadata were cleaned after
+the run.
 
 ### Local fixture limitation
 
