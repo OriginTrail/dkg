@@ -65,21 +65,36 @@ case "$HARNESS_TARGET" in
     CURATOR_NODE="${CURATOR_NODE:-5}"
     JOINER_NODE="${JOINER_NODE:-6}"
     NUM_NODES="${NUM_NODES:-6}"
-    UNRELATED_NODES="1 2 3 4"
-    EXPECTED_UNRELATED_RESPONDERS=4
     ;;
   testnet)
     CURATOR_NODE="${CURATOR_NODE:-1}"
     JOINER_NODE="${JOINER_NODE:-2}"
     NUM_NODES="${NUM_NODES:-4}"
-    UNRELATED_NODES="3 4"
-    EXPECTED_UNRELATED_RESPONDERS=2
     ;;
   *)
     echo "HARNESS_TARGET must be devnet or testnet (got: $HARNESS_TARGET)" >&2
     exit 2
     ;;
 esac
+
+case "$CURATOR_NODE:$JOINER_NODE:$NUM_NODES" in
+  *[!0-9:]*|:*|*::*|*:) echo "CURATOR_NODE, JOINER_NODE, and NUM_NODES must be positive integers" >&2; exit 2 ;;
+esac
+[ "$CURATOR_NODE" -ge 1 ] && [ "$CURATOR_NODE" -le "$NUM_NODES" ] \
+  || { echo "CURATOR_NODE must identify one of the configured nodes" >&2; exit 2; }
+[ "$JOINER_NODE" -ge 1 ] && [ "$JOINER_NODE" -le "$NUM_NODES" ] \
+  || { echo "JOINER_NODE must identify one of the configured nodes" >&2; exit 2; }
+[ "$CURATOR_NODE" -ne "$JOINER_NODE" ] \
+  || { echo "CURATOR_NODE and JOINER_NODE must be different" >&2; exit 2; }
+
+UNRELATED_NODES=""
+for node in $(seq 1 "$NUM_NODES"); do
+  if [ "$node" -ne "$CURATOR_NODE" ] && [ "$node" -ne "$JOINER_NODE" ]; then
+    UNRELATED_NODES="${UNRELATED_NODES:+$UNRELATED_NODES }$node"
+  fi
+done
+EXPECTED_UNRELATED_RESPONDERS=$((NUM_NODES - 2))
+
 SUB_GRAPH_NAME="${SUB_GRAPH_NAME:-ai-tools}"
 ROOT_TRIPLES="${ROOT_TRIPLES:-3}"
 SUB_GRAPH_TRIPLES="${SUB_GRAPH_TRIPLES:-5}"
@@ -148,8 +163,8 @@ if [ "$HARNESS_TARGET" = "devnet" ]; then
     exit 2
   fi
 else
-  if [ "$NUM_NODES" -ne 4 ] || [ "$CURATOR_NODE" -ne 1 ] || [ "$JOINER_NODE" -ne 2 ]; then
-    echo "Testnet mode requires four cores: curator node 1, joiner node 2, unrelated nodes 3-4." >&2
+  if [ "$NUM_NODES" -ne 4 ]; then
+    echo "Testnet mode requires exactly four core nodes." >&2
     exit 2
   fi
   [ "$HARNESS_EXPECT" = "fixed" ] || {
