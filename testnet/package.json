@@ -6,6 +6,6 @@
   "description": "OT-RFC-61 testnet harness — Phase 0 (zero-dependency, no build step)",
   "engines": { "node": ">=20" },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test"
   }
 }
