@@ -5,10 +5,12 @@ import { describe, expect, it } from 'vitest';
 import {
   GraphSetIndexStore,
   OxigraphStore,
+  StorePriorityScheduler,
   createTripleStore,
   registerTripleStoreAdapter,
   type GraphSetMutationEvent,
   type QueryOptions,
+  type StoreWorkPriority,
 } from '../src/index.js';
 import { CountingStore, MutationHookStore, emptyBindings, q } from './graph-set-index-store-harness.js';
 
@@ -28,6 +30,36 @@ class GatedMaintenanceStore extends CountingStore {
     const present = await super.hasGraph(graphUri, options);
     if (this.hasGraphGate) await this.hasGraphGate;
     return present;
+  }
+}
+
+class ScheduledGraphListStore extends CountingStore {
+  readonly listGraphsGates: Partial<Record<StoreWorkPriority, Promise<void>>> = {};
+  readonly listGraphsResults: Partial<Record<StoreWorkPriority, string[]>> = {};
+
+  constructor(
+    inner: OxigraphStore,
+    private readonly scheduler: StorePriorityScheduler,
+  ) {
+    super(inner);
+  }
+
+  override listGraphs(options?: QueryOptions): Promise<string[]> {
+    return this.scheduler.run(
+      options?.priority,
+      options?.source ?? 'test.graph-set.listGraphs',
+      async () => {
+        this.listGraphsCalls++;
+        this.listGraphsOptions.push(options);
+        const priority = options?.priority ?? 'normal';
+        const gate = this.listGraphsGates[priority];
+        if (gate) await gate;
+        const result = this.listGraphsResults[priority];
+        if (result) return result;
+        return this.inner.listGraphs(options);
+      },
+      options?.signal,
+    );
   }
 }
 
@@ -345,6 +377,86 @@ describe('GraphSetIndexStore', () => {
     expect(a).toEqual(['did:dkg:context-graph:coalesced']);
     expect(b).toEqual(['did:dkg:context-graph:coalesced']);
     expect(c).toEqual(['did:dkg:context-graph:coalesced']);
+  });
+
+  it('lets an ack seed bypass an in-flight background seed through the reserved scheduler lane', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2,
+      ackReservedSlots: 1,
+      normalReservedSlots: 0,
+      backgroundReservedSlots: 0,
+    });
+    const inner = new OxigraphStore();
+    const staleGraph = 'did:dkg:context-graph:background-snapshot';
+    const freshGraph = 'did:dkg:context-graph:ack-snapshot';
+    const scheduled = new ScheduledGraphListStore(inner, scheduler);
+    scheduled.listGraphsResults.background = [staleGraph];
+    scheduled.listGraphsResults.ack = [freshGraph];
+    let releaseBackground!: () => void;
+    let releaseAck!: () => void;
+    scheduled.listGraphsGates.background = new Promise<void>((resolve) => {
+      releaseBackground = resolve;
+    });
+    scheduled.listGraphsGates.ack = new Promise<void>((resolve) => {
+      releaseAck = resolve;
+    });
+    const store = new GraphSetIndexStore(scheduled);
+    const background = store.listGraphs({
+      priority: 'background',
+      source: 'agent.finalization.sharedMemorySlice',
+    });
+    let ack: Promise<string[]> | undefined;
+
+    try {
+      await Promise.resolve();
+      expect(scheduled.listGraphsCalls).toBe(1);
+      expect(scheduler.snapshot).toMatchObject({
+        ackInflight: 0,
+        ackQueued: 0,
+        backgroundInflight: 1,
+      });
+
+      ack = store.listGraphs({
+        priority: 'ack',
+        source: 'publisher.storageACK.sharedMemorySlice',
+      });
+      await Promise.resolve();
+
+      expect(scheduled.listGraphsCalls).toBe(2);
+      expect(scheduled.listGraphsOptions).toEqual([
+        {
+          priority: 'background',
+          source: 'agent.finalization.sharedMemorySlice',
+        },
+        {
+          priority: 'ack',
+          source: 'publisher.storageACK.sharedMemorySlice',
+        },
+      ]);
+      expect(scheduler.snapshot).toMatchObject({
+        ackInflight: 1,
+        ackQueued: 0,
+        backgroundInflight: 1,
+      });
+
+      releaseAck();
+      await expect(ack).resolves.toEqual([freshGraph]);
+      expect(scheduler.snapshot).toMatchObject({
+        ackInflight: 0,
+        backgroundInflight: 1,
+      });
+
+      // The older background response completes last with a stale snapshot. It
+      // must neither overwrite the ACK result nor return stale data to its waiter.
+      releaseBackground();
+      await expect(background).resolves.toEqual([freshGraph]);
+      await expect(store.listGraphs()).resolves.toEqual([freshGraph]);
+      expect(scheduled.listGraphsCalls).toBe(2);
+    } finally {
+      releaseAck();
+      releaseBackground();
+      await Promise.allSettled([background, ...(ack ? [ack] : [])]);
+    }
   });
 
   it('restarts an in-flight refresh when a local write lands during the scan', async () => {
