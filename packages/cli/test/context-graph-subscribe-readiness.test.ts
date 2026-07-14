@@ -146,7 +146,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       latestByContextGraph: new Map<string, string>(),
     };
     let runCalls = 0;
-    let confirmedMetaChecks = 0;
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
@@ -173,8 +172,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         state.set(id, { ...state.get(id), ...patch });
       },
       hasConfirmedMetaState: async () => {
-        confirmedMetaChecks += 1;
-        return confirmedMetaChecks > 1
+        return runCalls > 0
           ? opts.hasConfirmedMetaAfterCatchup ?? opts.hasConfirmedMeta
           : opts.hasConfirmedMeta;
       },
@@ -368,6 +366,46 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.response.catchup.status).toBe('queued');
     expect(result.runCalls).toBe(1);
     expect(result.job.status).toBe('unreachable');
+    expect(result.state).toMatchObject({
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: true,
+      pendingMeta: false,
+    });
+    expect(result.readiness).toMatchObject({
+      version: 1,
+      durableVerified: false,
+      sharedMemoryVerified: false,
+    });
+  });
+
+  it('clears stale v1 proof when subscription flags are already fail-closed', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: false,
+      hasConfirmedMetaAfterCatchup: true,
+      isPrivate: true,
+      includeSharedMemory: false,
+      result: privateMetaOnlyResult(),
+      readiness: {
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: true,
+      },
+      initial: {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        pendingMeta: true,
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('queued');
+    expect(result.runCalls).toBe(1);
+    expect(result.job).toMatchObject({
+      status: 'unreachable',
+      error: expect.stringContaining('metadata-only responses cannot prove'),
+    });
     expect(result.state).toMatchObject({
       synced: false,
       sharedMemorySynced: false,
