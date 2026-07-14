@@ -46,6 +46,10 @@ import type { JsonLdContent } from './dkg-agent-utils.js';
 import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
+import type {
+  SyncContextGraphPriorityConfig,
+  SyncResponderSnapshotLimitsConfig,
+} from './sync/policy.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -817,6 +821,8 @@ export interface DurableSyncDiagnostics {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures?: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure?: number;
 }
 
 export interface SharedMemorySyncDiagnostics {
@@ -834,6 +840,8 @@ export interface SharedMemorySyncDiagnostics {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures?: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure?: number;
 }
 
 export interface CatchupSyncDiagnostics {
@@ -980,6 +988,10 @@ export interface DKGAgentConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Daemon-local retained responder snapshot row/estimated-byte policy. */
+  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** Local requester/responder priority by Context Graph ID. Higher runs first. */
+  syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**

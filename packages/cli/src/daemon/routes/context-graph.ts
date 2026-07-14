@@ -1669,41 +1669,59 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           includeSharedMemory: shouldSyncSharedMemory,
         });
         job.result = result;
-        const inspectReadiness = catchupResultHasCleanResponse(result);
-        const hasConfirmedMeta = inspectReadiness
-          ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
-          : false;
-        const isPrivate = hasConfirmedMeta
-          ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
-          : false;
-        const classification = classifyContextGraphCatchupReadiness({
-          result,
-          includeSharedMemory: shouldSyncSharedMemory,
-          hasConfirmedMeta,
-          isPrivate,
-          readinessBeforeCatchup,
-        });
-
-        job.status = classification.jobStatus;
-        job.error = classification.error;
-        if (classification.readinessPatch) {
-          writeContextGraphReadiness(
-            dashDb,
-            contextGraphId,
-            classification.readinessPatch,
-          );
-        }
-        if (classification.statePatch) {
-          agent.markContextGraphSubscriptionState(
-            contextGraphId,
-            classification.statePatch,
-          );
-        }
-        if (classification.eventPayload) {
-          agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
-            contextGraphId,
-            ...classification.eventPayload,
+        // Local scheduler pressure cut the round short. An incomplete round has
+        // no readiness to inspect and must never finalize the subscription, so
+        // short-circuit the whole classification path and report a distinct
+        // retryable status. A remote denial still wins: waiting for local
+        // capacity will never clear it.
+        if (result.deferredBackpressure > 0 && !result.denied) {
+          job.status = "deferred";
+          job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
+        } else {
+          const inspectReadiness = catchupResultHasCleanResponse(result);
+          const hasConfirmedMeta = inspectReadiness
+            ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
+            : false;
+          const isPrivate = hasConfirmedMeta
+            ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
+            : false;
+          const classification = classifyContextGraphCatchupReadiness({
+            result,
+            includeSharedMemory: shouldSyncSharedMemory,
+            hasConfirmedMeta,
+            isPrivate,
+            readinessBeforeCatchup,
           });
+
+          job.status = classification.jobStatus;
+          job.error = classification.error;
+          if (classification.readinessPatch) {
+            writeContextGraphReadiness(
+              dashDb,
+              contextGraphId,
+              classification.readinessPatch,
+            );
+          }
+          if (classification.statePatch) {
+            agent.markContextGraphSubscriptionState(
+              contextGraphId,
+              classification.statePatch,
+            );
+          }
+          if (classification.eventPayload) {
+            agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
+              contextGraphId,
+              ...classification.eventPayload,
+            });
+          }
+
+          // Denial took precedence above, but a denied-yet-still-deferred round
+          // is likewise incomplete: never let it settle as a successful "done".
+          if (job.status === "done" && result.deferredBackpressure > 0) {
+            job.status = "deferred";
+            job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+          }
         }
 
         if (DEBUG_SYNC_TRACE) {

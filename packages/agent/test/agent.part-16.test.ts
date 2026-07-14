@@ -346,6 +346,40 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it('surfaces admission deferral without counting a remote response or success', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupLocalDeferralAccounting',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        const remotePeer = agent.node.peerId;
+        (agent.node.libp2p as any).getConnections = recorder(() => [
+          { remotePeer } as any,
+        ]);
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any));
+        (agent as any).syncFromPeerDetailed = recorder(async () => ({
+          ...cleanDurableSyncResult(),
+          deferredBackpressure: 1,
+        }));
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(result.peersTried).toBe(1);
+        expect(result.peersResponded).toBe(0);
+        expect(result.peersSucceeded).toBe(0);
+        expect(result.deferredBackpressure).toBe(1);
+        expect(result.diagnostics.durable.deferredBackpressure).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
     it('reports raw denied peers even when another peer serves data', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupDeniedButServed',

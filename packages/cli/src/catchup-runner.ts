@@ -27,6 +27,8 @@ export interface CatchupJobResult {
    * progress or a clean non-metadata-only empty completion.
    */
   peersSucceeded: number;
+  /** Context Graph phases deferred by this node's local sync scheduler. */
+  deferredBackpressure: number;
   dataSynced: number;
   sharedMemorySynced: number;
   denied: boolean;
@@ -65,6 +67,7 @@ export interface CatchupJobResult {
       rejectedKcs: number;
       failedPeers: number;
       failedPhases: number;
+      deferredBackpressure: number;
       deniedPhases?: number;
     };
     sharedMemory: {
@@ -81,6 +84,7 @@ export interface CatchupJobResult {
       droppedDataTriples: number;
       failedPeers: number;
       failedPhases: number;
+      deferredBackpressure: number;
       deniedPhases?: number;
     };
   };
@@ -102,7 +106,9 @@ export interface CatchupPhaseProgress {
   insertedDataTriples?: number;
   insertedMetaTriples?: number;
   metaOnlyResponses?: number;
+  bytesReceived?: number;
   emptyResponses?: number;
+  deferredBackpressure?: number;
   deniedPhases?: number;
 }
 
@@ -114,6 +120,7 @@ export function catchupPlaneCompletedWithoutFailure(
     && (progress.timedOutPhases ?? 0) === 0
     && (progress.failedPeers ?? 0) === 0
     && (progress.failedPhases ?? 0) === 0
+    && (progress.deferredBackpressure ?? 0) === 0
     && (progress.deniedPhases ?? 0) === 0;
 }
 
@@ -123,6 +130,7 @@ export function catchupPeerSucceeded(
   peerDenied: boolean,
 ): boolean {
   if (!catchupPeerResponded(durable, shared) || peerDenied) return false;
+  if ((durable.deferredBackpressure ?? 0) > 0 || (shared?.deferredBackpressure ?? 0) > 0) return false;
   const peerTransportFailed = (durable.failedPeers ?? 0) > 0 || (shared ? (shared.failedPeers ?? 0) > 0 : false);
   if (peerTransportFailed) return false;
   const peerPhaseFailed = (durable.failedPhases ?? 0) > 0 || (shared ? (shared.failedPhases ?? 0) > 0 : false);
@@ -149,9 +157,16 @@ export function catchupPeerResponded(
   durable: CatchupPhaseProgress,
   shared: CatchupPhaseProgress | null | undefined,
 ): boolean {
-  const durableFailed = (durable.failedPeers ?? 0) > 0;
-  const sharedFailed = shared ? (shared.failedPeers ?? 0) > 0 : false;
-  return shared ? !durableFailed || !sharedFailed : !durableFailed;
+  const phaseResponded = (phase: CatchupPhaseProgress): boolean => {
+    if ((phase.failedPeers ?? 0) > 0) return false;
+    if ((phase.deferredBackpressure ?? 0) === 0) return true;
+    return (phase.bytesReceived ?? 0) > 0
+      || (phase.completedPhases ?? 0) > 0
+      || (phase.emptyResponses ?? 0) > 0
+      || (phase.insertedMetaTriples ?? 0) > 0
+      || (phase.insertedDataTriples ?? phase.insertedTriples ?? 0) > 0;
+  };
+  return phaseResponded(durable) || Boolean(shared && phaseResponded(shared));
 }
 
 export interface CatchupRunner {

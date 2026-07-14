@@ -26,6 +26,8 @@ export interface DurableSyncSummary {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure: number;
 }
 
 interface DurableSyncContext {
@@ -121,6 +123,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     failedPeers: 0,
     failedPhases: 0,
     backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
   };
 
   const recordPhaseOutcome = (
