@@ -271,13 +271,8 @@ export interface ProtocolOutboxMetadataStore {
  * `pendingFor` is an optional compatibility/diagnostic capability. New stores
  * do not need to materialize full payload-bearing peer snapshots.
  */
-export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
-  /** Optional payload-free cleanup path for first-party and upgraded stores. */
-  dropExpiredMetadata?: ProtocolOutboxMetadataStore['dropExpiredMetadata'];
-
-  /** Optional payload-free diagnostics path for first-party and upgraded stores. */
-  listMetadata?: ProtocolOutboxMetadataStore['listMetadata'];
-
+export interface ProtocolOutboxStore
+  extends ProtocolOutboxStoreBase, Partial<ProtocolOutboxMetadataStore> {
   /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
   hasPendingFor(peer: string): boolean;
 
@@ -292,13 +287,8 @@ export interface ProtocolOutboxStore extends ProtocolOutboxStoreBase {
  * Pre-#1579 custom-store shape retained at the `ProtocolOutbox` boundary.
  * Legacy stores exposed the full peer snapshot instead of a boolean fast path.
  */
-export interface LegacyProtocolOutboxStore extends ProtocolOutboxStoreBase {
-  /** Optional forward-compatible cleanup path that omits payload bytes. */
-  dropExpiredMetadata?: ProtocolOutboxMetadataStore['dropExpiredMetadata'];
-
-  /** Optional forward-compatible diagnostics path that omits payload bytes. */
-  listMetadata?: ProtocolOutboxMetadataStore['listMetadata'];
-
+export interface LegacyProtocolOutboxStore
+  extends ProtocolOutboxStoreBase, Partial<ProtocolOutboxMetadataStore> {
   /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
   pendingFor(peer: string): ProtocolOutboxEntry[];
 
