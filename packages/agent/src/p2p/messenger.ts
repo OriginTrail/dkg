@@ -288,6 +288,18 @@ export type ReliableHandler = (
   peerId: string,
 ) => Promise<Uint8Array>;
 
+export interface OutboxResponseContext {
+  peerId: string;
+  protocolId: string;
+  messageId: string;
+  requestPayload: Uint8Array;
+  response: Uint8Array;
+}
+
+export type OutboxResponseHandler = (
+  context: OutboxResponseContext,
+) => Promise<void> | void;
+
 /**
  * The Universal Messenger substrate.
  *
@@ -449,6 +461,16 @@ export class Messenger {
     string,
     (response: Uint8Array) => boolean
   >();
+  /**
+   * Per-protocol completion hooks for responses that arrive on a durable
+   * outbox retry after the original caller has already returned. Hooks run
+   * before sender idempotency is recorded and before the outbox row is
+   * removed; throwing therefore keeps the exact request queued for retry.
+   */
+  private readonly outboxResponseHandlers = new Map<
+    string,
+    OutboxResponseHandler
+  >();
 
   constructor(deps: MessengerDeps & { sloWindowSamples?: number }) {
     this.router = deps.router;
@@ -500,6 +522,13 @@ export class Messenger {
     validator: (response: Uint8Array) => boolean,
   ): void {
     this.responseAcceptanceValidators.set(protocolId, validator);
+  }
+
+  setOutboxResponseHandler(
+    protocolId: string,
+    handler: OutboxResponseHandler,
+  ): void {
+    this.outboxResponseHandlers.set(protocolId, handler);
   }
 
   private assertResponseAccepted(protocolId: string, response: Uint8Array): void {
@@ -941,6 +970,17 @@ export class Messenger {
         entry.payload,
       );
       this.assertResponseAccepted(entry.protocol, response);
+      const responseHandler = this.outboxResponseHandlers.get(entry.protocol);
+      if (responseHandler) {
+        const requestPayload = decodeReliableEnvelope(entry.payload).payload;
+        await responseHandler({
+          peerId: entry.peer,
+          protocolId: entry.protocol,
+          messageId: entry.messageId,
+          requestPayload,
+          response,
+        });
+      }
       this.idempotencyStore!.record(
         entry.peer,
         entry.protocol,

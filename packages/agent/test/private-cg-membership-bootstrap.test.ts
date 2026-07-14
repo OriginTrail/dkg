@@ -442,6 +442,91 @@ describe('private CG membership bootstrap recovery', () => {
     expect(rootMetaStatus).toEqual({ type: 'boolean', value: false });
   });
 
+  it('turns a queued curator NACK into a terminal requester rejection', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapQueuedNack'));
+    const contextGraphId = 'private-bootstrap-queued-nack';
+    const agentAddress = agent.getDefaultAgentAddress()!;
+    const curatorPeerId = '12D3KooWPrivateBootstrapQueuedNackCurator';
+    const delegation = await agent.signJoinRequest(contextGraphId, agentAddress);
+    const messenger = (agent as any).messenger;
+    const router = messenger.router;
+    router.send = vi.fn()
+      .mockRejectedValueOnce(new Error('no valid addresses for peer'))
+      .mockResolvedValue(encoder.encode(JSON.stringify({
+        ok: false,
+        error: 'unknown CG',
+      })));
+    (agent.node.libp2p as any).getPeers = () => [];
+    const rejectedEvents: any[] = [];
+    agent.eventBus.on(DKGEvent.JOIN_REJECTED, (event) => rejectedEvents.push(event));
+
+    const forwarded = await agent.forwardJoinRequest(
+      contextGraphId,
+      delegation,
+      'requester',
+      curatorPeerId,
+    );
+
+    expect(forwarded.delivered).toBe(0);
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
+    const queued = messenger.listOutbox().find((entry: any) =>
+      entry.peer === curatorPeerId && entry.protocol === PROTOCOL_JOIN_REQUEST);
+    expect(queued).toBeDefined();
+
+    await messenger.processOutboxTick(queued.nextAttemptAt);
+
+    expect(messenger.listOutbox()).not.toContainEqual(expect.objectContaining({
+      peer: curatorPeerId,
+      protocol: PROTOCOL_JOIN_REQUEST,
+    }));
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('rejected');
+    expect(rejectedEvents).toContainEqual(expect.objectContaining({
+      contextGraphId,
+      agentAddress,
+      reason: 'unknown CG',
+      source: 'join-request-outbox-response',
+    }));
+  });
+
+  it('ignores queued NACKs from unrelated peers and stale generations', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapGuardQueuedNack'));
+    const contextGraphId = 'private-bootstrap-guard-queued-nack';
+    const agentAddress = agent.getDefaultAgentAddress()!;
+    const curatorPeerId = '12D3KooWPrivateBootstrapGuardCurator';
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(1_700_000_000_000);
+    const staleDelegation = await agent.signJoinRequest(contextGraphId, agentAddress);
+    now.mockReturnValue(1_700_000_000_001);
+    const currentDelegation = await agent.signJoinRequest(contextGraphId, agentAddress);
+    now.mockRestore();
+    const currentGeneration = agent.getJoinRequestGeneration(currentDelegation);
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      agentAddress,
+      currentGeneration,
+      curatorPeerId,
+    );
+    const nack = encoder.encode(JSON.stringify({ ok: false, error: 'unknown CG' }));
+    const requestPayload = (delegation: SignedAgentDelegation) => encoder.encode(JSON.stringify({
+      contextGraphId,
+      delegation,
+      requestGeneration: agent!.getJoinRequestGeneration(delegation),
+    }));
+
+    await expect(agent.handleJoinRequestOutboxResponse({
+      peerId: '12D3KooWUnrelatedBroadcastPeer',
+      requestPayload: requestPayload(currentDelegation),
+      response: nack,
+    })).resolves.toBe(false);
+    await expect(agent.handleJoinRequestOutboxResponse({
+      peerId: curatorPeerId,
+      requestPayload: requestPayload(staleDelegation),
+      response: nack,
+    })).resolves.toBe(false);
+
+    expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
+  });
+
   it('accepts an immediate curator decision that arrives before the request ACK', async () => {
     ({ agent } = await createAgent('PrivateBootstrapImmediateDecision'));
     const contextGraphId = 'private-bootstrap-immediate-decision';

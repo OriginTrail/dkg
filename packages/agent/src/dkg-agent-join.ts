@@ -766,6 +766,99 @@ export class JoinRequestMethods extends DKGAgentBase {
   }
 
   /**
+   * Reconcile a join-request NACK that arrives after the original send was
+   * durably queued. Only the invite-supplied curator may terminate the exact
+   * pending generation. Returning normally lets Messenger delete the outbox
+   * row; a storage failure from applyRequesterJoinDecision propagates so the
+   * row remains queued and the response can be reconciled again.
+   */
+  async handleJoinRequestOutboxResponse(
+    this: DKGAgent,
+    input: {
+      peerId: string;
+      requestPayload: Uint8Array;
+      response: Uint8Array;
+    },
+  ): Promise<boolean> {
+    let responseBody: { ok?: unknown; error?: unknown };
+    try {
+      responseBody = JSON.parse(new TextDecoder().decode(input.response));
+    } catch {
+      return false;
+    }
+    if (responseBody?.ok !== false) return false;
+
+    let requestBody: {
+      contextGraphId?: unknown;
+      delegation?: SignedAgentDelegation;
+      requestGeneration?: unknown;
+    };
+    try {
+      requestBody = JSON.parse(new TextDecoder().decode(input.requestPayload));
+    } catch {
+      return false;
+    }
+    const contextGraphId = typeof requestBody.contextGraphId === 'string'
+      ? requestBody.contextGraphId
+      : '';
+    const delegation = requestBody.delegation;
+    const requestGeneration = typeof requestBody.requestGeneration === 'string'
+      ? requestBody.requestGeneration
+      : '';
+    if (!contextGraphId || !delegation?.agentAddress || !requestGeneration) {
+      return false;
+    }
+    if (deriveJoinRequestGeneration(delegation) !== requestGeneration) {
+      return false;
+    }
+
+    const current = await this.readRequesterJoinRequestState(
+      contextGraphId,
+      delegation.agentAddress,
+    );
+    if (
+      !current ||
+      current.status !== 'pending' ||
+      current.requestGeneration !== requestGeneration ||
+      current.curatorPeerId !== input.peerId
+    ) {
+      return false;
+    }
+
+    const decisionApplied = await this.applyRequesterJoinDecision(
+      contextGraphId,
+      delegation.agentAddress,
+      requestGeneration,
+      'rejected',
+    );
+    if (!decisionApplied) return false;
+
+    this.joinRequestAcceptedBy.delete(this.joinRequestTrackingKey(
+      contextGraphId,
+      delegation.agentAddress,
+      requestGeneration,
+    ));
+    const localHint = this.localApprovedAgentByCG.get(contextGraphId);
+    if (localHint === delegation.agentAddress.toLowerCase()) {
+      this.localApprovedAgentByCG.delete(contextGraphId);
+    }
+    const reason = typeof responseBody.error === 'string' && responseBody.error.trim()
+      ? responseBody.error.trim()
+      : 'join request rejected';
+    this.log.warn(
+      createOperationContext('system'),
+      `Queued join request for "${contextGraphId}" was rejected by curator ${input.peerId.slice(-8)}: ${reason}`,
+    );
+    this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
+      contextGraphId,
+      agentAddress: delegation.agentAddress,
+      reason,
+      source: 'join-request-outbox-response',
+    });
+    return true;
+  }
+
+  /**
    * Create a context graph. All CGs start as free, P2P collaborative spaces.
    * No blockchain transaction is required. On-chain registration is a separate
    * explicit step via {@link registerContextGraph}.

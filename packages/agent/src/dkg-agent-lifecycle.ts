@@ -970,6 +970,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return false;
       }
     });
+    this.messenger.setOutboxResponseHandler(PROTOCOL_JOIN_REQUEST, async (result) => {
+      await this.handleJoinRequestOutboxResponse(result);
+    });
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
       chainId: this.config.networkIdentity?.chainId,
