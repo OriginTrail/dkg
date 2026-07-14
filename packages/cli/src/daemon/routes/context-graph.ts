@@ -55,7 +55,7 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
@@ -105,6 +105,13 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import {
+  catchupResultHasCleanResponse,
+  classifyContextGraphCatchupReadiness,
+  classifyExistingContextGraphReadiness,
+  readContextGraphReadiness,
+  writeContextGraphReadiness,
+} from '../../context-graph-readiness.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -352,6 +359,9 @@ function classifyRegisterContextGraphError(err: unknown): { status: number; body
     : err && typeof err === 'object' && 'message' in err
       ? String((err as { message?: unknown }).message ?? '')
       : '';
+  if (isPcaUnavailableError(err) || /DKGPublishingConvictionNFT (?:is )?not deployed on this Hub/i.test(msg)) {
+    return { status: 503, body: { error: msg || 'PCA support is unavailable on this network.' } };
+  }
   if (msg.includes('already registered')) return { status: 409, body: { error: msg } };
   if (msg.includes('does not exist')) return { status: 404, body: { error: msg } };
   if (msg.includes('no known creator')) return { status: 503, body: { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' } };
@@ -364,12 +374,19 @@ function classifyRegisterContextGraphError(err: unknown): { status: number; body
   }
   if (msg.includes('PCA account id must be a positive integer')) return { status: 400, body: { error: msg } };
   if (msg.includes('requires chain adapter PCA owner lookup support')) return { status: 501, body: { error: msg } };
+  if (msg.includes('requires chain adapter PCA agent lookup support')) return { status: 501, body: { error: msg } };
   if (/PCA account \d+ does not exist or cannot be looked up/.test(msg)) return { status: 404, body: { error: msg } };
   if (/PCA account \d+ is owned by/.test(msg)) return { status: 403, body: { error: msg } };
-  // PCA chain-signer / signer-introspection invariants (Codex round-4/5/8):
+  // PCA signer authorization and local/on-chain ownership alignment.
+  if (msg.includes('is not a registered agent of PCA account')) return { status: 403, body: { error: msg } };
+  if (msg.includes('local curator') && msg.includes('differs from registration chain signer')) {
+    return { status: 403, body: { error: msg } };
+  }
+  // Compatibility with pre-#1366 owner-only agent errors.
   if (msg.includes('chain signer') && msg.includes('differs from PCA owner')) return { status: 403, body: { error: msg } };
   if (msg.includes('does not expose its registration-tx signer')
-    || msg.includes('invariant cannot be verified')) {
+    || msg.includes('invariant cannot be verified')
+    || msg.includes('owner/agent authorization cannot be verified')) {
     return { status: 501, body: { error: msg } };
   }
   return undefined;
@@ -556,6 +573,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         callerAgentAddress: requestAgentAddress,
         ...(parsed.private === true ? { private: true } : {}),
       });
+      const createdSubscription = agent.getSubscribedContextGraphs().get(id);
+      try {
+        writeContextGraphReadiness(dashDb, id, {
+          durableVerified: createdSubscription?.synced === true,
+          sharedMemoryVerified: createdSubscription?.sharedMemorySynced === true,
+        });
+      } catch (readinessErr) {
+        process.stderr.write(
+          `[DKG-Daemon] WARN: Context graph "${id}" was created, but readiness provenance could not be persisted: ` +
+          `${readinessErr instanceof Error ? readinessErr.message : String(readinessErr)}\n`,
+        );
+      }
     } catch (err: any) {
       const msg = err?.message ?? "";
       if (
@@ -929,7 +958,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
   // POST /api/context-graph/{id}/request-join — signed join request from an invitee
   // If local node is the curator (owns the CG), store locally.
-  // Otherwise, forward via P2P to all connected peers so the curator receives it.
+  // Otherwise, forward via P2P only to the explicit curator from the invite.
   const requestJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/request-join$/);
   if (req.method === "POST" && requestJoinMatch) {
     const contextGraphId = decodeURIComponent(requestJoinMatch[1]);
@@ -942,12 +971,26 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           error: 'Missing signed delegation. Expected `delegation` field with agentAddress, signature, scope, issuedAtMs and at least one of delegateePeerId / delegateeOpKey.',
         });
       }
-      agent.verifyJoinRequest(contextGraphId, delegation);
-
       const isCurator = await agent.isCuratorOf(contextGraphId);
       if (isCurator) {
-        await agent.storePendingJoinRequest(contextGraphId, delegation, agentName);
-        return jsonResponse(res, 200, { ok: true, status: 'pending', delivered: 'local' });
+        const decision = await agent.processIncomingJoinRequest(
+          contextGraphId,
+          delegation,
+          agentName,
+          agent.peerId,
+        );
+        return jsonResponse(res, 200, {
+          ok: true,
+          status: decision.alreadyMember ? 'already-member' : decision.status,
+          delivered: 'local',
+          // Legacy requesters only understand `alreadyMember`. Keep it as a
+          // compatibility alias for every completed approval while retaining
+          // the precise current status/autoApproved fields.
+          ...(decision.alreadyMember || decision.status === 'approved'
+            ? { alreadyMember: true }
+            : {}),
+          ...(decision.autoApproved ? { autoApproved: true } : {}),
+        });
       }
 
       // V10 invites carry the curator's peer-id (`<cgId>\n<peerId>`).
@@ -975,12 +1018,81 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
       return jsonResponse(res, 200, {
         ok: true,
-        status: result.alreadyMember ? 'already-member' : 'pending',
+        status: result.autoApproved
+          ? 'approved'
+          : result.alreadyMember
+            ? 'already-member'
+            : 'pending',
         delivered: result.delivered,
-        ...(result.alreadyMember ? { alreadyMember: true } : {}),
+        ...(result.alreadyMember || result.autoApproved ? { alreadyMember: true } : {}),
+        ...(result.autoApproved ? { autoApproved: true } : {}),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET/PUT /api/context-graph/{id}/join-policy — owner-scoped, durable
+  // manual/open enrollment policy. `open` is intentionally not called merely
+  // "auto approve": it permits any eligible agent that knows the CG id to
+  // request private membership without human review.
+  const joinPolicyMatch = path.match(/^\/api\/context-graph\/([^/]+)\/join-policy$/);
+  if (req.method === 'GET' && joinPolicyMatch) {
+    const contextGraphId = decodeURIComponent(joinPolicyMatch[1]);
+    try {
+      const policy = await agent.getContextGraphJoinPolicy(contextGraphId, requestAgentAddress);
+      return jsonResponse(res, 200, policy);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyRegisterContextGraphError(err);
+      if (classified?.status === 403) {
+        return jsonResponse(res, 403, classified.body ?? { error: msg });
+      }
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+  if (req.method === 'PUT' && joinPolicyMatch) {
+    const contextGraphId = decodeURIComponent(joinPolicyMatch[1]);
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    try {
+      const body = await readBody(req);
+      const parsed = JSON.parse(body || '{}') as {
+        mode?: unknown;
+        maxMembers?: unknown;
+        maxApprovalsPerHour?: unknown;
+        acknowledgeOpenEnrollment?: unknown;
+      };
+      if (parsed.mode !== 'manual' && parsed.mode !== 'open') {
+        return jsonResponse(res, 400, { error: 'mode must be "manual" or "open"' });
+      }
+      const policy = await agent.setContextGraphJoinPolicy(
+        resolvedContextGraphId,
+        {
+          mode: parsed.mode,
+          ...(parsed.mode === 'open'
+            ? {
+                maxMembers: parsed.maxMembers as number,
+                maxApprovalsPerHour: parsed.maxApprovalsPerHour as number,
+                acknowledgeOpenEnrollment: parsed.acknowledgeOpenEnrollment === true,
+              }
+            : {}),
+        },
+        requestAgentAddress,
+      );
+      return jsonResponse(res, 200, policy);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyRegisterContextGraphError(err);
+      if (classified?.status === 403) {
+        return jsonResponse(res, 403, classified.body ?? { error: msg });
+      }
       return jsonResponse(res, 400, { error: msg });
     }
   }
@@ -1524,6 +1636,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const existingSub = subMap?.get(contextGraphId);
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
+    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
@@ -1537,9 +1650,22 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         });
       }
 
-      if (existingSub.synced && (!shouldSyncSharedMemory || existingSub.sharedMemorySynced)) {
-        const jobId = existingJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-        if (!existingJob) {
+      // The persisted bit alone is not proof on upgraded v10.0.6 nodes:
+      // startup could create a namespaced public shadow containing only an
+      // `unregistered` marker and still store metaSynced=true. Validate the
+      // live graph before taking the already-ready shortcut.
+      const hasConfirmedExistingMeta = existingSub.metaSynced === true &&
+        await agent.hasConfirmedMetaState(contextGraphId).catch(() => false);
+      const existingReadiness = classifyExistingContextGraphReadiness({
+        subscription: existingSub,
+        readiness: readinessBeforeCatchup,
+        includeSharedMemory: shouldSyncSharedMemory,
+        hasConfirmedMeta: hasConfirmedExistingMeta,
+      });
+      if (existingReadiness.alreadyReady) {
+        const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
+        const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        if (!reusableDoneJob) {
           const syntheticJob: CatchupJob = {
             jobId,
             contextGraphId,
@@ -1561,6 +1687,25 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           },
         });
       }
+
+      if (existingReadiness.statePatch) {
+        agent.markContextGraphSubscriptionState(
+          contextGraphId,
+          existingReadiness.statePatch,
+        );
+      }
+      if (existingReadiness.readinessPatch) {
+        writeContextGraphReadiness(
+          dashDb,
+          contextGraphId,
+          existingReadiness.readinessPatch,
+        );
+      }
+      // The existing-state classifier may have just invalidated stale v1
+      // provenance because authoritative metadata was missing. Carry the
+      // corrected value into the queued catch-up so a later metadata-only or
+      // incomplete response cannot resurrect the pre-reset true bits.
+      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
     }
 
     console.log(`[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory}`);
@@ -1607,69 +1752,71 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           includeSharedMemory: shouldSyncSharedMemory,
         });
         job.result = result;
-        job.status = "done";
+        // Local scheduler pressure cut the round short. An incomplete round has
+        // no readiness to inspect and must never finalize the subscription, so
+        // short-circuit the whole classification path and report a distinct
+        // retryable status. A remote denial still wins: waiting for local
+        // capacity will never clear it.
+        if (result.deferredBackpressure > 0 && !result.denied) {
+          job.status = "deferred";
+          job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
+        } else {
+          const inspectReadiness = catchupResultHasCleanResponse(result);
+          const hasConfirmedMeta = inspectReadiness
+            ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
+            : false;
+          const isPrivate = hasConfirmedMeta
+            ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
+            : false;
+          const classification = classifyContextGraphCatchupReadiness({
+            result,
+            includeSharedMemory: shouldSyncSharedMemory,
+            hasConfirmedMeta,
+            isPrivate,
+            readinessBeforeCatchup,
+          });
 
-        const d = result.diagnostics?.durable;
-        const s = result.diagnostics?.sharedMemory;
-        const servedUsableData =
-          result.dataSynced > 0 ||
-          result.sharedMemorySynced > 0;
-        const totalConnectedPeers = result.totalPeers ?? result.connectedPeers;
-        const selectedConnectedPeers = result.selectedPeers ?? result.connectedPeers;
-        const cleanResponse =
-          servedUsableData ||
-          (d?.emptyResponses ?? 0) > 0 ||
-          (s?.emptyResponses ?? 0) > 0 ||
-          (!result.denied && (d?.metaOnlyResponses ?? 0) > 0);
-        if (result.denied && !servedUsableData) {
-          job.status = "denied";
-          job.error = result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : "Sync denied by remote peer";
-          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
-        }
-
-        if (job.status === "done") {
-          if (cleanResponse) {
-            const hasContent = await agent.contextGraphHasLocalContent(contextGraphId).catch(() => false);
-            agent.markContextGraphSubscriptionState(contextGraphId, {
-              synced: true,
-              ...(shouldSyncSharedMemory ? { sharedMemorySynced: true } : {}),
-              ...(hasContent ? { metaSynced: true } : {}),
-            });
-          } else if (result.peersTried > 0 && (result.peersResponded ?? result.peersSucceeded) === 0) {
-            // No peer answered within the run — curator likely offline
-            // or no node currently holds this CG. Distinct from `denied`
-            // so the UI can render "couldn't reach the curator" copy +
-            // the signed-join-request CTA. The previous behaviour
-            // collapsed this case into a generic `failed` whose message
-            // ("all reachable peers failed") was easy to misread as a
-            // local error. See `JoinProjectModal.tsx` `unreachable`
-            // branch and `CatchupJobState`.
-            job.status = "unreachable";
-            job.error = "No peer could deliver this project's data — the curator may be offline, or no node currently holds the data. You can still send a signed join request; they will receive it next time they come online.";
-          } else if (result.peersTried > 0) {
-            job.status = "failed";
-            job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
-          } else if (totalConnectedPeers > 0 && selectedConnectedPeers >= totalConnectedPeers && result.syncCapablePeers === 0) {
-            // Connected to peers, but none speak the sync protocol —
-            // i.e. all our connections are non-DKG / mismatched
-            // versions. From the joiner's perspective this is the same
-            // unreachable outcome ("nobody can answer my sync"), so
-            // reuse the dedicated terminal status.
-            job.status = "unreachable";
-            job.error = "No sync-capable peers found for catch-up — the curator may be offline.";
-          } else if (totalConnectedPeers === 0) {
-            // No peers connected at all → definitionally unreachable.
-            job.status = "unreachable";
-            job.error = "No peers connected — couldn't reach the curator. They may be offline, or your node hasn't bootstrapped to the network yet.";
-          }
-
-          if (DEBUG_SYNC_TRACE) {
-            console.log(
-              `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
-                `peers=${result.peersTried}/${result.syncCapablePeers} connected=${totalConnectedPeers} ` +
-                `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+          job.status = classification.jobStatus;
+          job.error = classification.error;
+          if (classification.readinessPatch) {
+            writeContextGraphReadiness(
+              dashDb,
+              contextGraphId,
+              classification.readinessPatch,
             );
           }
+          if (classification.statePatch) {
+            agent.markContextGraphSubscriptionState(
+              contextGraphId,
+              classification.statePatch,
+            );
+          }
+          if (classification.eventPayload) {
+            agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
+              contextGraphId,
+              ...classification.eventPayload,
+            });
+          }
+
+          // Denial took precedence above, but a denied-yet-still-deferred round
+          // is likewise incomplete: never let it settle as a successful "done".
+          if (job.status === "done" && result.deferredBackpressure > 0) {
+            job.status = "deferred";
+            job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+          }
+        }
+
+        if (DEBUG_SYNC_TRACE) {
+          if (job.status === 'denied') {
+            console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
+          }
+          console.log(
+            `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
+              `peers=${result.peersTried}/${result.syncCapablePeers} ` +
+              `connected=${result.totalPeers ?? result.connectedPeers} ` +
+              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+          );
         }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);

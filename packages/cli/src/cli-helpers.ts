@@ -211,6 +211,9 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
     console.log(
       `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
     );
+    if (status.result.deferredBackpressure > 0) {
+      console.log(`Deferred:      ${status.result.deferredBackpressure} phase(s) by local scheduler backpressure`);
+    }
     if (status.result.diagnostics) {
       console.log(
         `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
@@ -242,7 +245,7 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
   const client = await ApiClient.connect();
   const watch = !!opts.watch;
   const intervalSeconds = Math.max(1, Number(opts.interval ?? 2));
-  const terminalStates = new Set(['done', 'failed', 'denied', 'unreachable']);
+  const terminalStates = new Set(['done', 'failed', 'denied', 'deferred', 'unreachable']);
 
   do {
     const status = await client.catchupStatus(contextGraph);

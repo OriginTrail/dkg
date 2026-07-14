@@ -238,7 +238,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -900,8 +900,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // DID) so peers validate against the same creator-scoped DID.
           // `dkg:curator` (wallet DID) is for local authorization only.
           getContextGraphOwner: (id) => this.getContextGraphCreator(id),
-          subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
           setContextGraphSubscription: (id, next, options) => this.setContextGraphSubscription(id, next, options),
+          recordDiscoveredContextGraph: (id, next) => { this.recordDiscoveredContextGraph(id, next); },
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
           getCgMeta: (id) => this.getCgMeta(id),
           markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },

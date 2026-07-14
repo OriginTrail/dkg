@@ -72,6 +72,14 @@ function optionalContextGraphId(contextGraphIdOrUri: string | undefined): string
   return normalizeContextGraphId(contextGraphIdOrUri) || undefined;
 }
 
+function pcaAccountIdPayload(value: string | bigint): string {
+  const normalized = typeof value === 'bigint' ? value.toString() : value.trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw new Error('pcaAccountId must be a positive decimal integer');
+  }
+  return normalized;
+}
+
 /**
  * Author attestation produced by an external signer. Mirrors the
  * `packages/cli/src/api-client.ts` reference so finalize / create KA flows can
@@ -1038,6 +1046,8 @@ export class DkgClient {
   async registerContextGraph(args: {
     id: string;
     accessPolicy?: number;
+    publishPolicy?: number;
+    pcaAccountId?: string | bigint;
   }): Promise<{
     registered: string;
     onChainId?: string;
@@ -1053,7 +1063,11 @@ export class DkgClient {
         hint?: string;
       }>('POST', '/api/context-graph/register', {
         id: normalizeContextGraphId(args.id),
-        accessPolicy: args.accessPolicy,
+        ...(args.accessPolicy !== undefined ? { accessPolicy: args.accessPolicy } : {}),
+        ...(args.publishPolicy !== undefined ? { publishPolicy: args.publishPolicy } : {}),
+        ...(args.pcaAccountId !== undefined
+          ? { pcaAccountId: pcaAccountIdPayload(args.pcaAccountId) }
+          : {}),
       });
       return { ...response, alreadyRegistered: false };
     } catch (err) {
