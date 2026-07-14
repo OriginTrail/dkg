@@ -517,14 +517,79 @@ describe('private CG membership bootstrap recovery', () => {
       peerId: '12D3KooWUnrelatedBroadcastPeer',
       requestPayload: requestPayload(currentDelegation),
       response: nack,
-    })).resolves.toBe(false);
+    })).resolves.toBeUndefined();
     await expect(agent.handleJoinRequestOutboxResponse({
       peerId: curatorPeerId,
       requestPayload: requestPayload(staleDelegation),
       response: nack,
-    })).resolves.toBe(false);
+    })).resolves.toBeUndefined();
 
     expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
+  });
+
+  it('serializes a same-generation curator change against an older queued NACK', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapQueuedNackCuratorRace'));
+    const contextGraphId = 'private-bootstrap-queued-nack-curator-race';
+    const agentAddress = agent.getDefaultAgentAddress()!;
+    const oldCuratorPeerId = '12D3KooWPrivateBootstrapOldCurator';
+    const nextCuratorPeerId = '12D3KooWPrivateBootstrapNextCurator';
+    const delegation = await agent.signJoinRequest(contextGraphId, agentAddress);
+    const requestGeneration = agent.getJoinRequestGeneration(delegation);
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      agentAddress,
+      requestGeneration,
+      oldCuratorPeerId,
+    );
+
+    const originalRead = agent.readRequesterJoinRequestState.bind(agent);
+    let nextCuratorWrite: Promise<void> | undefined;
+    vi.spyOn(agent, 'readRequesterJoinRequestState').mockImplementation(async (...args) => {
+      const current = await originalRead(...args);
+      if (!nextCuratorWrite && current?.curatorPeerId === oldCuratorPeerId) {
+        // Queue the replacement while the NACK holds the same state lock.
+        // It must run after the old rejection write, never between that
+        // handler's curator check and terminal transition.
+        nextCuratorWrite = agent!.setRequesterJoinRequestPending(
+          contextGraphId,
+          agentAddress,
+          requestGeneration,
+          nextCuratorPeerId,
+        );
+      }
+      return current;
+    });
+
+    const requestPayload = encoder.encode(JSON.stringify({
+      contextGraphId,
+      delegation,
+      requestGeneration,
+    }));
+    const nack = encoder.encode(JSON.stringify({ ok: false, error: 'unknown CG' }));
+    await agent.handleJoinRequestOutboxResponse({
+      peerId: oldCuratorPeerId,
+      requestPayload,
+      response: nack,
+    });
+    await nextCuratorWrite;
+
+    expect(await originalRead(contextGraphId, agentAddress)).toEqual({
+      requestGeneration,
+      status: 'pending',
+      curatorPeerId: nextCuratorPeerId,
+    });
+
+    // A replay after the replacement is durable is a normal drop and cannot
+    // reject the same generation now owned by the new curator.
+    await agent.handleJoinRequestOutboxResponse({
+      peerId: oldCuratorPeerId,
+      requestPayload,
+      response: nack,
+    });
+    expect(await originalRead(contextGraphId, agentAddress)).toMatchObject({
+      status: 'pending',
+      curatorPeerId: nextCuratorPeerId,
+    });
   });
 
   it('accepts an immediate curator decision that arrives before the request ACK', async () => {
