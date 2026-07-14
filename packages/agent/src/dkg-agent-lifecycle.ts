@@ -269,7 +269,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, VmReconcileScheduler, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -1037,6 +1037,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       } catch {
         return false;
       }
+    });
+    this.messenger.setOutboxResponseHandler(PROTOCOL_JOIN_REQUEST, async (result) => {
+      await this.handleJoinRequestOutboxResponse(result);
     });
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
@@ -2328,12 +2331,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
           trustedDecisionInProgress = true;
-          const decisionApplied = await this.applyRequesterJoinDecision(
+          const decisionApplied = await this.finalizeRequesterJoinRejection({
             contextGraphId,
-            rejectedAddr,
+            agentAddress: rejectedAddr,
             requestGeneration,
-            'rejected',
-          );
+            expectedCuratorPeerId: peerId.toString(),
+            source: 'join-rejected',
+          });
           if (!decisionApplied) {
             this.log.warn(
               createOperationContext('system'),
@@ -2341,34 +2345,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
-          this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
-          this.upsertContextGraphMember({
-            contextGraphId,
-            principalType: 'agent',
-            principalId: rejectedAddr,
-            role: 'requester',
-            status: 'removed',
-            source: 'join-rejected',
-          });
-          this.joinRequestAcceptedBy.delete(this.joinRequestTrackingKey(
-            contextGraphId,
-            rejectedAddr,
-            requestGeneration,
-          ));
-          // Drop the optimistic "this CG belongs to <rejectedAddr>" hint
-          // seeded by `signJoinRequest`. Otherwise multi-agent nodes keep
-          // building authenticated sync requests on behalf of the rejected
-          // agent and the curator denies the very next catch-up after a
-          // *different* local agent is allowlisted, until something else
-          // overwrites the map.
-          const localHint = this.localApprovedAgentByCG.get(contextGraphId);
-          if (localHint && localHint === rejectedAddr.toLowerCase()) {
-            this.localApprovedAgentByCG.delete(contextGraphId);
-          }
-          this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
-            contextGraphId,
-            agentAddress: rejectedAddr,
-          });
           return new TextEncoder().encode(JSON.stringify({ ok: true }));
         }
 
@@ -2790,15 +2766,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catches up late subscribers (the "Monday Fun Facts" case). Only armed when
     // the chain adapter exposes the per-CG registration-ordinal reads.
     if (this.vmReconcileEnabled()) {
-      this.vmReconcileScheduler = new VmReconcileScheduler(
-        (localCgId) => this.runVmReconcileForCg(localCgId),
-        (localCgId, err) => {
-          this.log.warn(
-            ctx,
-            `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
-      );
+      this.ensureVmReconcileDispatcher();
       const runSweep = (): void => {
         this.runVmReconcileSweep().catch((err: unknown) => {
           this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -500,8 +500,10 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
-        SOURCES,
-        async () => (qs) => { accepts += 1; return qs; },
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => { accepts += 1; return qs; },
+        },
       );
 
       // Bounded read excluded the out-of-range graph, and the accept predicate
@@ -530,8 +532,10 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
-        SOURCES,
-        async () => (qs) => (qs.some((q) => q.object === outObj) ? qs : null),
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => (qs.some((q) => q.object === outObj) ? qs : null),
+        },
       );
 
       expect(accepted).not.toBeNull();
@@ -555,8 +559,10 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         undefined,
-        SOURCES,
-        async () => (qs) => { accepts += 1; return qs; },
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => { accepts += 1; return qs; },
+        },
       );
 
       // Unbounded ⇒ both authors read; accept applied exactly once.

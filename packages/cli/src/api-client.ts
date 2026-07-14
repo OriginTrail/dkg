@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import type { RandomSamplingDisabledReason } from '@origintrail-official/dkg-agent';
+import type {
+  ContextGraphReconcileResult,
+  RandomSamplingDisabledReason,
+} from '@origintrail-official/dkg-agent';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -1414,6 +1417,14 @@ export class ApiClient {
       };
   }> {
     return this.post('/api/context-graph/subscribe', { contextGraphId, includeWorkspace: options?.includeSharedMemory });
+  }
+
+  /**
+   * Reconcile one context graph against its on-chain registration watermark.
+   * A current graph returns without starting VM-slice or peer catch-up work.
+   */
+  async reconcileContextGraph(contextGraphId: string): Promise<ContextGraphReconcileResult> {
+    return this.post('/api/context-graph/reconcile', { contextGraphId });
   }
 
   /** @deprecated Use subscribeToContextGraph */

@@ -77,6 +77,7 @@ import {
   isSkolemizedUri,
   selectACKCandidatePeers,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type AsyncLiftPublisherConfig,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -862,12 +863,13 @@ type StartupGenesisValidation =
 
 type StartupGenesisValidationInput = Partial<Pick<NetworkConfig, '_status' | 'genesisId' | 'networkId' | 'networkName' | 'relays'>>;
 
-type KnowledgeAssetVmPublishExecutor = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor']>;
-type KnowledgeAssetVmPublishPreflight = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight']>;
+type KnowledgeAssetVmPublishHandler = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']>;
 type QueuedKnowledgeAssetVmPublishOptions = Parameters<DKGAgent['publishQueuedKnowledgeAssetVmPublish']>[2];
 
-export function createKnowledgeAssetVmPublishExecutor(agent: DKGAgent): KnowledgeAssetVmPublishExecutor {
-  return async ({ request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput) => {
+export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): KnowledgeAssetVmPublishHandler {
+  const execute: KnowledgeAssetVmPublishHandler['execute'] = async (
+    { request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput,
+  ) => {
     const publishOpts: QueuedKnowledgeAssetVmPublishOptions = {
       ...(publisher ? { publisherOverride: publisher } : {}),
     };
@@ -895,14 +897,16 @@ export function createKnowledgeAssetVmPublishExecutor(agent: DKGAgent): Knowledg
       );
     }
   };
-}
-
-export function createKnowledgeAssetVmPublishPreflight(agent: DKGAgent): KnowledgeAssetVmPublishPreflight {
-  return async ({ request, publisher }) =>
-    agent.preflightQueuedKnowledgeAssetVmPublishExecution(
-      request,
-      publisher ? { publisherOverride: publisher } : undefined,
-    );
+  return {
+    execute,
+    preflight: ({ request, publisher }) =>
+      agent.preflightQueuedKnowledgeAssetVmPublishExecution(
+        request,
+        publisher ? { publisherOverride: publisher } : undefined,
+      ),
+    finalizeRecovered: (input: AsyncKnowledgeAssetVmPublishRecoveryInput) =>
+      agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input),
+  };
 }
 
 export async function validateStartupGenesis(
@@ -2190,8 +2194,7 @@ export async function runDaemonInner(
             log,
           }),
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
-          knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
-          knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+          knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
           log,
         });
         publisherState = outcome;

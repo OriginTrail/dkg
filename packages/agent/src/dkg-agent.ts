@@ -1606,6 +1606,31 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.vmReconcileTimer);
       this.vmReconcileTimer = null;
     }
+    // Close admission before any network/store teardown. Pending reconciles
+    // are rejected immediately and therefore can never start after shutdown
+    // begins; an already-active pass gets a bounded grace period because
+    // cancelling midway could strand a partially applied VM transition.
+    const vmReconcileDispatcher = this.vmReconcileDispatcher;
+    if (vmReconcileDispatcher) {
+      const drain = vmReconcileDispatcher.close();
+      let drainTimedOut = false;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          drainTimedOut = true;
+          resolve();
+        }, DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
+        timeoutHandle.unref?.();
+      });
+      await Promise.race([drain, timeout]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (drainTimedOut) {
+        this.log.warn(
+          createOperationContext('system'),
+          `DKGAgent.stop: ${vmReconcileDispatcher.snapshot().active} VM reconcile job(s) still active after ${DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS}ms drain bound — proceeding with shutdown`,
+        );
+      }
+    }
     this.coreHostRecordingsClosed = true;
     await this.drainCoreHostRecordings();
     if (this.messengerOutboxTimer) {

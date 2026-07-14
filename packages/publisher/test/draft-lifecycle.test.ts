@@ -381,6 +381,85 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
+  it('full promote drops a fully consumed blank-node WM graph instead of shape-deleting it', async () => {
+    const name = 'full-blank-node-promote';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:root', predicate: 'urn:test:contains', object: '_:item' },
+      { subject: '_:item', predicate: 'http://schema.org/name', object: '"Item"' },
+      { subject: '_:item', predicate: 'urn:test:child', object: '_:child' },
+      { subject: '_:child', predicate: 'http://schema.org/name', object: '"Child"' },
+    ]);
+
+    const wmGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    const dropped: string[] = [];
+    const wmShapeDeletes: Quad[][] = [];
+    const realDropGraph = store.dropGraph.bind(store);
+    const realDelete = store.delete.bind(store);
+    store.dropGraph = async (graph) => {
+      dropped.push(graph);
+      return realDropGraph(graph);
+    };
+    store.delete = async (quads) => {
+      if (quads.some((quad) => quad.graph === wmGraph)) wmShapeDeletes.push(quads);
+      return realDelete(quads);
+    };
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT);
+
+    expect(result.promotedCount).toBe(4);
+    expect(dropped).toContain(wmGraph);
+    expect(wmShapeDeletes).toHaveLength(0);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
+  });
+
+  it('full promote keeps the precise-delete path when reserved rows must survive in WM', async () => {
+    const name = 'reserved-row-promote';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:root', predicate: 'http://schema.org/name', object: '"Root"' },
+    ]);
+
+    const wmGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    // The import-file handler writes `urn:dkg:file:` / `urn:dkg:extraction:`
+    // descriptor + provenance rows straight into the WM assertion graph. They
+    // are reserved, so they are filtered out of the SWM payload and must stay
+    // behind in WM. Only the length equality in `consumesEntireAssertion` stops
+    // the graph-drop fast path from taking them with it, so pin it: without that
+    // term this promote would silently destroy every imported file's bookkeeping.
+    await store.insert([{
+      subject: 'urn:dkg:file:report-descriptor',
+      predicate: 'http://schema.org/name',
+      object: '"report.pdf"',
+      graph: wmGraph,
+    }]);
+
+    const dropped: string[] = [];
+    const wmShapeDeletes: Quad[][] = [];
+    const realDropGraph = store.dropGraph.bind(store);
+    const realDelete = store.delete.bind(store);
+    store.dropGraph = async (graph) => {
+      dropped.push(graph);
+      return realDropGraph(graph);
+    };
+    store.delete = async (quads) => {
+      if (quads.some((quad) => quad.graph === wmGraph)) wmShapeDeletes.push(quads);
+      return realDelete(quads);
+    };
+
+    await publisher.assertionPromote(CG_ID, name, AGENT);
+
+    // The fast path must NOT engage: the reserved row is not consumed.
+    expect(dropped).not.toContain(wmGraph);
+    expect(wmShapeDeletes.length).toBeGreaterThan(0);
+
+    const remaining = await publisher.assertionQuery(CG_ID, name, AGENT);
+    expect(remaining.map((quad) => quad.subject))
+      .toContain('urn:dkg:file:report-descriptor');
+    // ...and the user-authored quad it accompanied really was promoted away.
+    expect(remaining.map((quad) => quad.subject)).not.toContain('urn:test:root');
+  });
+
   it('promote strips generated private-CG catalog floor from SWM and WM when trusted', async () => {
     const name = 'private-catalog-promote';
     const cgDid = contextGraphDataUri(CG_ID);

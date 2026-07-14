@@ -201,7 +201,7 @@ function createHandler(
 
 describe('StorageACKHandler priority store lane', () => {
   it('completes ACK verification while slow listGraphs/count jobs are queued', async () => {
-    const scheduler = new StorePriorityScheduler(2, 1);
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
     const events: string[] = [];
     const store = new PriorityLaneStore(scheduler, events);
 
@@ -239,7 +239,7 @@ describe('StorageACKHandler priority store lane', () => {
   });
 
   it('still declines when the prioritized ACK store operation itself exceeds the deadline', async () => {
-    const scheduler = new StorePriorityScheduler(2, 1);
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
     const events: string[] = [];
     const store = new PriorityLaneStore(scheduler, events, { hangAck: true });
     const onDecline = vi.fn();
@@ -257,7 +257,7 @@ describe('StorageACKHandler priority store lane', () => {
   });
 
   it('passes ACK priority options through inline staging writes and flushes', async () => {
-    const scheduler = new StorePriorityScheduler(2, 1);
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
     const events: string[] = [];
     const store = new PriorityLaneStore(scheduler, events);
     const handler = createHandler(store, { ackHandlerDeadlineMs: 1_000 });

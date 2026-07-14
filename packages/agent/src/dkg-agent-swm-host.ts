@@ -232,7 +232,19 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import {
+  reconcileContextGraph,
+  RecentUalSet,
+  VmReconcileDispatcher,
+  type ChainReconcilerDeps,
+  type OrdinalOutcome,
+} from './chain-reconciler.js';
+import {
+  ContextGraphOnChainIdUnresolvedError,
+  VmReconcileUnavailableError,
+  type ContextGraphReconcileResult,
+  type VmReconcileSource,
+} from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -390,6 +402,15 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
+
+type VmReconcileEngineResult = Awaited<ReturnType<typeof reconcileContextGraph>>;
+type VmReconcileTarget = {
+  sub: ContextGraphSub;
+  onChainId: string;
+  onChainCgId: bigint;
+  cursor: CursorState;
+  watermarkBefore: number;
+};
 
 /**
  * Max age (ms) of a cached `publishPolicy` value the host-mode self-signed
@@ -2417,7 +2438,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     // Nudge a reconcile now so the first hosted publish lands promptly; the
     // periodic sweep is the safety net.
-    if (this.vmReconcileScheduler) void this.vmReconcileScheduler.triggerLive(localCgId);
+    if (this.vmReconcileDispatcher) void this.vmReconcileDispatcher.triggerLive(localCgId);
   }
 
   trackCoreHostRecording(this: DKGAgent, start: () => Promise<void>): void {
@@ -2523,11 +2544,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
   /**
    * Trigger a coalesced reconcile sweep for every subscribed CG that has an
    * on-chain id. Used by the periodic timer + the startup prime. Per-CG work is
-   * single-flighted by {@link vmReconcileScheduler} so overlapping ticks (or a
+   * single-flighted by {@link vmReconcileDispatcher} so overlapping ticks (or a
    * burst of live nudges) collapse into one sweep per CG.
    */
   async runVmReconcileSweep(this: DKGAgent): Promise<void> {
-    if (!this.vmReconcileEnabled() || !this.vmReconcileScheduler) return;
+    const dispatcher = this.vmReconcileDispatcher;
+    if (!this.vmReconcileEnabled() || !dispatcher) return;
+    const eligible: string[] = [];
     for (const [localCgId, sub] of this.subscribedContextGraphs) {
       // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
       // (subscribed BEFORE its first publish, so unbound) before the skip-gate
@@ -2537,11 +2560,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       // Member subscriptions AND Phase D core-hosted public CGs get swept.
       if ((!sub.subscribed && !sub.coreHosted) || !sub.onChainId) continue;
-      void this.vmReconcileScheduler.triggerPeriodic(localCgId);
-      // RS heal: relocate any legacy-stranded KC into the scoped graphs the
-      // prover reads (the sweep is the safety net for a missed live nudge).
-      void this.healStrandedScopedKCs(localCgId, sub);
+      eligible.push(localCgId);
     }
+
+    if (eligible.length === 0) {
+      this.vmReconcileSweepCursor = 0;
+      return;
+    }
+
+    // Admission is bounded, so retain the first rejected index as the next
+    // sweep's starting point. A stable Map order can therefore never refill
+    // the queue with the same prefix and permanently starve later CGs.
+    const start = this.vmReconcileSweepCursor % eligible.length;
+    for (let offset = 0; offset < eligible.length; offset += 1) {
+      const index = (start + offset) % eligible.length;
+      const localCgId = eligible[index]!;
+      if (!dispatcher.tryTriggerPeriodic(localCgId)) {
+        this.vmReconcileSweepCursor = index;
+        return;
+      }
+    }
+    // Rotate even when every CG coalesced/admitted so membership churn and
+    // concurrent foreground work do not repeatedly privilege index zero.
+    this.vmReconcileSweepCursor = (start + 1) % eligible.length;
   }
 
   /**
@@ -2622,10 +2663,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const bound = await this.selfPrimeSubscriptionOnChainId(lcg, sub, targetOnChain);
           if (bound) {
             this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> bound + reconcile pre-subscribed "${lcg}"`);
-            if (this.vmReconcileScheduler) void this.vmReconcileScheduler.triggerLive(lcg);
-            // RS heal immediately so a live KARegistered doesn't wait ~60s for
-            // the periodic sweep to relocate the stranded KC.
-            void this.healStrandedScopedKCs(lcg, sub);
+            if (this.vmReconcileDispatcher) void this.vmReconcileDispatcher.triggerLive(lcg);
             return lcg;
           }
         }
@@ -2638,49 +2676,128 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Core hosts — a hosted Core fills its own gaps too.
     if (!sub?.subscribed && !sub?.coreHosted) return null;
     this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> reconcile "${localCgId}"`);
-    if (this.vmReconcileScheduler) void this.vmReconcileScheduler.triggerLive(localCgId);
-    // RS heal immediately on the already-bound path too.
-    void this.healStrandedScopedKCs(localCgId, sub);
+    if (this.vmReconcileDispatcher) void this.vmReconcileDispatcher.triggerLive(localCgId);
     return localCgId;
   }
 
   /**
-   * One reconcile pass for a single CG: build the injected deps and hand off to
-   * the pure {@link reconcileContextGraph} orchestrator (which owns the cursor
-   * math + watermark persistence gate). The cursor is created lazily from the
-   * persisted `lastReconciledOrdinal` and lives in {@link reconcileCursors}.
+   * Canonical evidence-gated VM reconciliation operation for one CG.
+   *
+   * All callers enter the same dispatcher; the admitted domain operation is
+   * decomposed below into target resolution, repair, reconcile dependencies,
+   * telemetry, and result adaptation.
    */
-  async runVmReconcileForCg(this: DKGAgent, localCgId: string): Promise<void> {
-    const sub = this.subscribedContextGraphs.get(localCgId);
-    if ((!sub?.subscribed && !sub?.coreHosted) || !sub.onChainId || !this.vmReconcileEnabled()) return;
-    const onChainCgId = BigInt(sub.onChainId);
+  async runVmReconcileForCg(
+    this: DKGAgent,
+    localCgId: string,
+    source: VmReconcileSource = 'manual',
+  ): Promise<ContextGraphReconcileResult> {
+    return this.ensureVmReconcileDispatcher().dispatch(localCgId, source);
+  }
+
+  ensureVmReconcileDispatcher(
+    this: DKGAgent,
+  ): VmReconcileDispatcher<ContextGraphReconcileResult> {
+    if (!this.vmReconcileDispatcher) {
+      this.vmReconcileDispatcher = new VmReconcileDispatcher(
+        (localCgId, source) => this.executeVmReconcileForCg(localCgId, source),
+        (localCgId, err) => {
+          this.log.warn(
+            createOperationContext('system'),
+            `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        },
+        {
+          concurrency: 1,
+          maxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
+          maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
+        },
+      );
+    }
+    return this.vmReconcileDispatcher;
+  }
+
+  async executeVmReconcileForCg(
+    this: DKGAgent,
+    localCgId: string,
+    source: VmReconcileSource,
+  ): Promise<ContextGraphReconcileResult> {
+    const target = await this.resolveVmReconcileTarget(localCgId);
+
+    // Keep the legacy-label -> scoped-VM migration in the admitted lane and
+    // before the evidence gate. A current watermark can still need this repair.
+    await this.healStrandedScopedKCs(localCgId, target.sub);
+
+    const result = await reconcileContextGraph(
+      this.createVmReconcileDeps(localCgId),
+      target.cursor,
+      localCgId,
+      target.onChainCgId,
+    );
+    const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
+    this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
+    return response;
+  }
+
+  async resolveVmReconcileTarget(
+    this: DKGAgent,
+    localCgId: string,
+  ): Promise<VmReconcileTarget> {
+    let sub = this.subscribedContextGraphs.get(localCgId);
+    if (!sub?.subscribed && !sub?.coreHosted) {
+      throw new ContextGraphNotFoundError(localCgId);
+    }
+    if (!sub.onChainId && sub.subscribed) {
+      await this.selfPrimeSubscriptionOnChainId(localCgId, sub);
+      sub = this.subscribedContextGraphs.get(localCgId);
+    }
+    if (!sub?.onChainId) {
+      throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+    }
+    if (!this.vmReconcileEnabled()) {
+      throw new VmReconcileUnavailableError();
+    }
 
     let cursor = this.reconcileCursors.get(localCgId);
     if (!cursor) {
       cursor = createCursorState(sub.lastReconciledOrdinal ?? 0);
       this.reconcileCursors.set(localCgId, cursor);
     }
+    return {
+      sub,
+      onChainId: sub.onChainId,
+      onChainCgId: BigInt(sub.onChainId),
+      cursor,
+      watermarkBefore: cursor.watermark,
+    };
+  }
 
-    const deps: ChainReconcilerDeps = {
-      getKCCount: async (cg) => Number(await this.chain.getContextGraphKCCount!(cg)),
+  createVmReconcileDeps(this: DKGAgent, localCgId: string): ChainReconcilerDeps {
+    return {
+      getKCCount: async (cg) => {
+        const head = Number(await this.chain.getContextGraphKCCount!(cg));
+        if (!Number.isSafeInteger(head) || head < 0) {
+          throw new Error(`Invalid on-chain KC count for context graph "${localCgId}": ${head}`);
+        }
+        return head;
+      },
       getHeadBlock: async () => {
-        // Capability-absent chains return undefined and disable the reorg gate;
-        // transient RPC failures must throw so the reconciler holds the
-        // watermark instead of advancing on an unobserved head.
+        // Capability-absent chains disable the reorg gate; transient RPC
+        // failures still throw so the durable watermark cannot advance.
         if (typeof this.chain.getBlockNumber !== 'function') return undefined;
         return await this.chain.getBlockNumber();
       },
       reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
         this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock),
       persistWatermark: (lcg, watermark) => {
-        const s = this.subscribedContextGraphs.get(lcg);
-        if (!s) return;
-        const previous = s.lastReconciledOrdinal ?? 0;
-        s.lastReconciledOrdinal = watermark;
+        const sub = this.subscribedContextGraphs.get(lcg);
+        if (!sub) return;
+        const previous = sub.lastReconciledOrdinal ?? 0;
+        sub.lastReconciledOrdinal = watermark;
         this.persistContextGraphSubscription(lcg);
         this.emitReplication({
           contextGraphId: lcg,
-          onChainCgId: s.onChainId,
+          onChainCgId: sub.onChainId,
           action: 'cursor-advance',
           fromWatermark: previous,
           toWatermark: watermark,
@@ -2689,12 +2806,53 @@ export class SwmHostModeMethods extends DKGAgentBase {
       confirmationDepth: DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH,
       log: (msg) => this.log.info(createOperationContext('system'), msg),
     };
+  }
 
-    const result = await reconcileContextGraph(deps, cursor, localCgId, onChainCgId);
+  toContextGraphReconcileResult(
+    this: DKGAgent,
+    localCgId: string,
+    source: VmReconcileSource,
+    target: VmReconcileTarget,
+    result: VmReconcileEngineResult,
+  ): ContextGraphReconcileResult {
+    const status: ContextGraphReconcileResult['status'] = target.watermarkBefore > result.head
+      ? 'watermark-ahead'
+      : result.watermark >= result.head
+        ? 'current'
+        : result.reconciled > 0
+          ? 'progress'
+          : 'pending';
+    return {
+      contextGraphId: localCgId,
+      onChainId: target.onChainId,
+      source,
+      status,
+      attempted: target.watermarkBefore < result.head,
+      headOrdinal: result.head,
+      watermarkBefore: target.watermarkBefore,
+      watermarkAfter: result.watermark,
+      reconciledOrdinals: result.reconciled,
+      unresolvedOrdinals: result.pending,
+    };
+  }
+
+  emitVmReconcileTelemetry(
+    this: DKGAgent,
+    localCgId: string,
+    target: VmReconcileTarget,
+    result: VmReconcileEngineResult,
+    status: ContextGraphReconcileResult['status'],
+  ): void {
+    if (status === 'watermark-ahead') {
+      this.log.warn(
+        createOperationContext('system'),
+        `VM reconcile evidence mismatch for "${localCgId}": watermark=${target.watermarkBefore} head=${result.head}`,
+      );
+    }
     if (result.reconciled > 0 || result.pending > 0) {
       this.emitReplication({
         contextGraphId: localCgId,
-        onChainCgId: sub.onChainId,
+        onChainCgId: target.onChainId,
         action: 'sweep',
         head: result.head,
         toWatermark: result.watermark,
@@ -2702,13 +2860,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         pending: result.pending,
       });
     }
-    // Phase D — a host-only (non-member) reconcile that actually promoted KAs
-    // is a Core filling its own gap. Distinct telemetry so operators can see
-    // the Core-to-Core fill path working (success-criteria metric).
-    if (result.reconciled > 0 && sub.coreHosted && !sub.subscribed) {
+    if (result.reconciled > 0 && target.sub.coreHosted && !target.sub.subscribed) {
       this.emitReplication({
         contextGraphId: localCgId,
-        onChainCgId: sub.onChainId,
+        onChainCgId: target.onChainId,
         action: 'core-fill',
         head: result.head,
         toWatermark: result.watermark,
