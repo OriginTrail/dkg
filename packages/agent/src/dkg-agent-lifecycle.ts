@@ -2063,12 +2063,63 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               );
               return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
             }
+            const approvedSubscription: ContextGraphSub = {
+              ...this.subscribedContextGraphs.get(contextGraphId),
+              subscribed: true,
+              pendingMeta: true,
+              metaSynced: false,
+              // Approval begins a new authoritative bootstrap attempt. Any
+              // completion flags recorded before `_meta` was available are
+              // untrusted (an unrelated peer may have returned clean-empty),
+              // so they cannot survive into the approved state.
+              synced: false,
+              sharedMemorySynced: false,
+            };
+            const approvedMembership: ContextGraphMembershipRecord = {
+              contextGraphId,
+              principalType: 'agent',
+              principalId: approvedAddr,
+              role: 'participant',
+              status: 'active',
+              source: 'join-approved',
+              metadata: { curatorPeerId: peerId.toString() },
+            };
+            // Commit the restart contract before changing live subscription
+            // state. The two stores do not expose a shared transaction, so the
+            // helper snapshots both rows and compensates the first write if the
+            // second fails. This also keeps a failed Messenger delivery fully
+            // retryable: no gossip wiring, readiness flags, event, or sync kick
+            // escapes before both configured stores accept the approval.
+            try {
+              await this.persistJoinApprovalStateStrict(
+                contextGraphId,
+                approvedMembership,
+                approvedSubscription,
+              );
+            } catch (error) {
+              try {
+                await this.restoreRequesterJoinDecisionAfterFailedApply(
+                  contextGraphId,
+                  approvedAddr,
+                  requestGeneration,
+                  'approved',
+                );
+              } catch (rollbackError) {
+                const originalMessage = error instanceof Error ? error.message : String(error);
+                const rollbackMessage = rollbackError instanceof Error
+                  ? rollbackError.message
+                  : String(rollbackError);
+                throw new AggregateError(
+                  [error, rollbackError],
+                  `${originalMessage}; requester decision rollback failed: ${rollbackMessage}`,
+                );
+              }
+              throw error;
+            }
             this.preferredSyncPeers.set(contextGraphId, peerId.toString());
-            // Curator just confirmed `approvedAddr` is the principal —
-            // record it BEFORE auto-subscribe / sync kick in, so the
-            // first post-approval `buildSyncRequest` claims the right
-            // agent (the curator's `_meta` graph hasn't been synced
-            // yet at this point on multi-agent nodes).
+            // Curator just confirmed `approvedAddr` is the principal — record
+            // it before the sync kick so the first post-approval request claims
+            // the right agent on multi-agent nodes.
             this.localApprovedAgentByCG.set(contextGraphId, approvedAddr.toLowerCase());
             this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
             // Defer the SWM gossip subscribe specifically: the curator's
@@ -2080,7 +2131,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // once the allowlist is locally visible — clean self-heal,
             // no spurious denial. Other gossip topics (publish/app/
             // update/finalization) wire up immediately as before.
-            this.subscribeToContextGraph(contextGraphId, { deferSharedMemoryGossipSubscribe: true });
+            this.subscribeToContextGraph(contextGraphId, {
+              deferSharedMemoryGossipSubscribe: true,
+              // The exact approval snapshot was committed above. Scheduling
+              // the ordinary background persistence here would reintroduce
+              // untracked writes around the compensating transaction.
+              persist: false,
+            });
             // Mark the subscription as "expecting meta" so listContextGraphs
             // surfaces it in the UI immediately (with synced=false) instead
             // of filtering it out as a phantom subscription until meta-sync
@@ -2098,31 +2155,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // SWM write or inbound gossip in that window then gets inferred
             // as a public CG locally, which is the exact corruption these
             // guards exist to prevent. Lex review on PR #517 round 2 + Codex.
-            this.markContextGraphSubscriptionState(contextGraphId, {
-              pendingMeta: true,
-              metaSynced: false,
-              // Approval begins a new authoritative bootstrap attempt. Any
-              // completion flags recorded before `_meta` was available are
-              // untrusted (an unrelated peer may have returned clean-empty),
-              // so they cannot survive into the approved state.
-              synced: false,
-              sharedMemorySynced: false,
-            });
-            // Persist both halves of the restart contract before ACKing. The
-            // ordinary persistence helpers intentionally log-and-continue for
-            // background callers; join approval is different because reporting
-            // success without these rows can restore a false-ready subscription
-            // (or lose the approved signer) after a crash.
-            await this.upsertContextGraphMember({
+            this.setContextGraphSubscription(
               contextGraphId,
-              principalType: 'agent',
-              principalId: approvedAddr,
-              role: 'participant',
-              status: 'active',
-              source: 'join-approved',
-              metadata: { curatorPeerId: peerId.toString() },
-            }, { strict: true });
-            await this.persistContextGraphSubscriptionStrict(contextGraphId);
+              approvedSubscription,
+              { persist: false },
+            );
             this.joinRequestAcceptedBy.delete(this.joinRequestTrackingKey(
               contextGraphId,
               approvedAddr,
@@ -4991,6 +5028,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const curatorShort = curatorPeerId.slice(-8);
     let curatorTargetSucceeded = false;
+    const approvedAgentAddress = this.localApprovedAgentByCG.get(contextGraphId);
+    if (!approvedAgentAddress) {
+      throw new Error(
+        `Post-approval sync for "${contextGraphId}" has no approved local agent binding`,
+      );
+    }
+    let expectedDelegateeOpKey: string | undefined;
+    try {
+      expectedDelegateeOpKey = await inferAdapterPublisherAddress(this.chain);
+    } catch {
+      // The signed join flow always binds the current libp2p peer, so an
+      // adapter that cannot expose its op-key still has a usable proof.
+    }
+    const curatorMetaRefreshOptions = {
+      trustedCuratorPeerId: curatorPeerId,
+      force: true,
+      memberProof: {
+        approvedAgentAddress,
+        expectedDelegateePeerId: this.peerId,
+        expectedDelegateeOpKey,
+      },
+    } as const;
 
     // Curator-direct attempt. Any throw here (relay reservation gone,
     // dial timeout, AbortSignal, transient `Remote closed connection
@@ -5018,10 +5077,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // The peer override is safe here because the join-approved handler
           // authenticated this exact notification sender for this CG before
           // scheduling this method.
-          await this.refreshMetaFromCurator(contextGraphId, {
-            trustedCuratorPeerId: curatorPeerId,
-            force: true,
-          });
+          await this.refreshMetaFromCurator(contextGraphId, curatorMetaRefreshOptions);
           const result = await this.runCatchupOverPeers(contextGraphId, true, [curatorRemote]);
           // A transient first meta read must not turn a successful payload/SWM
           // transfer into a false-ready subscription. Retry once after the
@@ -5030,10 +5086,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           let hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
             .catch(() => false);
           if (!hasAuthoritativeMeta) {
-            await this.refreshMetaFromCurator(contextGraphId, {
-              trustedCuratorPeerId: curatorPeerId,
-              force: true,
-            });
+            await this.refreshMetaFromCurator(contextGraphId, curatorMetaRefreshOptions);
             hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
               .catch(() => false);
           }
@@ -5444,15 +5497,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
   }
 
-  async persistContextGraphSubscriptionStrict(this: DKGAgent, contextGraphId: string): Promise<void> {
+  async persistContextGraphSubscriptionStrict(this: DKGAgent,
+    contextGraphId: string,
+    subscription?: ContextGraphSub,
+    syncScoped?: boolean,
+  ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) {
-      throw new Error(
-        `Cannot acknowledge join approval for "${contextGraphId}": ` +
-        'context-graph subscription persistence is not configured',
-      );
+      // The library API has always allowed storeless agents. "Strict" means a
+      // configured store failure is surfaced and retried before ACK; absence
+      // retains the backward-compatible in-memory approval path.
+      return;
     }
-    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    const sub = subscription ?? this.subscribedContextGraphs.get(contextGraphId);
     if (!sub?.subscribed) {
       throw new Error(
         `Cannot acknowledge join approval for "${contextGraphId}": active subscription state is missing`,
@@ -5469,7 +5526,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onChainHash: sub.onChainHash,
       lastReconciledOrdinal: sub.lastReconciledOrdinal,
       coreHosted: sub.coreHosted,
-      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+      syncScoped: syncScoped ?? (this.config.syncContextGraphs ?? []).includes(contextGraphId),
     };
     // Queue behind any fire-and-forget writes scheduled by subscribe/mark so
     // this final authoritative snapshot is the last write before the ACK.
@@ -5477,6 +5534,105 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       () => store.save(record),
     );
+  }
+
+  /**
+   * Persist the two durable halves of a requester-side join approval.
+   *
+   * Membership and subscription stores are deliberately separate extension
+   * interfaces and cannot share a database transaction. Snapshot the affected
+   * rows before writing and compensate in reverse order when either write
+   * fails. Storeless agents retain the historical in-memory path; a configured
+   * store failure escapes so Messenger leaves the notification retryable.
+   */
+  async persistJoinApprovalStateStrict(this: DKGAgent,
+    contextGraphId: string,
+    membership: ContextGraphMembershipRecord,
+    subscription: ContextGraphSub,
+  ): Promise<void> {
+    const membershipStore = this.config.contextGraphMembershipStore;
+    const subscriptionStore = this.config.contextGraphSubscriptionStore;
+    const normalizedPrincipalId = this.normalizeMembershipPrincipal(
+      membership.principalType,
+      membership.principalId,
+    );
+
+    let previousMembership: (ContextGraphMembershipRecord & {
+      firstSeenAt?: number;
+      updatedAt: number;
+    }) | null = null;
+    if (membershipStore?.loadAll) {
+      const rows = await membershipStore.loadAll();
+      previousMembership = rows.find((row) =>
+        row.contextGraphId === contextGraphId &&
+        row.principalType === membership.principalType &&
+        this.normalizeMembershipPrincipal(row.principalType, row.principalId) === normalizedPrincipalId
+      ) ?? null;
+    }
+
+    let previousSubscription: ContextGraphSubscriptionRecord | null = null;
+    if (subscriptionStore) {
+      previousSubscription = subscriptionStore.load
+        ? await subscriptionStore.load(contextGraphId)
+        : (await subscriptionStore.loadAll()).find((row) => row.id === contextGraphId) ?? null;
+    }
+
+    let membershipAttempted = false;
+    let subscriptionAttempted = false;
+    try {
+      if (membershipStore) membershipAttempted = true;
+      await this.upsertContextGraphMember(membership, { strict: true });
+      if (subscriptionStore) subscriptionAttempted = true;
+      await this.persistContextGraphSubscriptionStrict(
+        contextGraphId,
+        subscription,
+        true,
+      );
+    } catch (error) {
+      const rollbackFailures: unknown[] = [];
+      // A store may reject after applying a write, so compensate every
+      // attempted operation, including the one that surfaced the failure.
+      if (subscriptionAttempted && subscriptionStore) {
+        try {
+          await this.enqueueContextGraphSubscriptionPersistWrite(
+            contextGraphId,
+            () => previousSubscription
+              ? subscriptionStore.save(previousSubscription)
+              : subscriptionStore.delete(contextGraphId),
+          );
+        } catch (rollbackError) {
+          rollbackFailures.push(rollbackError);
+        }
+      }
+      if (membershipAttempted && membershipStore) {
+        try {
+          if (previousMembership) {
+            await membershipStore.upsert(previousMembership);
+          } else {
+            await membershipStore.delete(
+              contextGraphId,
+              membership.principalType,
+              normalizedPrincipalId,
+            );
+          }
+        } catch (rollbackError) {
+          rollbackFailures.push(rollbackError);
+        }
+      }
+      if (rollbackFailures.length > 0) {
+        const originalMessage = error instanceof Error ? error.message : String(error);
+        const rollbackMessage = rollbackFailures
+          .map((rollbackError) => rollbackError instanceof Error
+            ? rollbackError.message
+            : String(rollbackError))
+          .join('; ');
+        throw new AggregateError(
+          [error, ...rollbackFailures],
+          `${originalMessage}; join-approval rollback failed: ${rollbackMessage}`,
+        );
+      }
+      throw error;
+    }
   }
 
   async assertAlreadyMemberDelegationRefresh(this: DKGAgent,
@@ -5564,12 +5720,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<void> {
     const store = this.config.contextGraphMembershipStore;
     if (!store) {
-      if (options?.strict === true) {
-        return Promise.reject(new Error(
-          `Cannot persist context-graph membership for "${record.contextGraphId}": ` +
-          'membership persistence is not configured',
-        ));
-      }
       return Promise.resolve();
     }
     const normalizedRecord = {
@@ -6000,8 +6150,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // `_meta`: type + private policy + creator peer DID + curator wallet DID.
     // Requiring both identities prevents an incidental/provenance type triple
     // (or a lone allowlist/policy write) from making bootstrap look complete.
+    const approvedAgentAddress = this.localApprovedAgentByCG.get(contextGraphId);
+    let expectedDelegateeOpKey: string | undefined;
+    if (approvedAgentAddress) {
+      try {
+        expectedDelegateeOpKey = await inferAdapterPublisherAddress(this.chain);
+      } catch {
+        // The libp2p peer binding remains sufficient when no op-key is exposed.
+      }
+    }
     const authoritativeDefinitionResult = await this.store.query(
-      buildAuthoritativePrivateMetaAskQuery(contextGraphId),
+      buildAuthoritativePrivateMetaAskQuery(
+        contextGraphId,
+        approvedAgentAddress
+          ? {
+              approvedAgentAddress,
+              expectedDelegateePeerId: this.peerId,
+              expectedDelegateeOpKey,
+            }
+          : undefined,
+      ),
     );
     if (
       authoritativeDefinitionResult.type === 'boolean' &&

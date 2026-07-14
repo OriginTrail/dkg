@@ -21,7 +21,7 @@
 #
 # `broken` passes only after observing the exact false-ready state:
 # synced=1, shared_memory_synced=1, meta_synced!=1, no local CG data, and at
-# least one clean empty response from an unrelated peer. Post-approval recovery
+# clean empty responses from all four unrelated core peers. Post-approval recovery
 # is still exercised and recorded, but is not required: the invariant breach is
 # already the regression witness.
 #
@@ -42,6 +42,7 @@ API_PORT_BASE="${API_PORT_BASE:-9201}"
 CURATOR_NODE="${CURATOR_NODE:-5}"
 JOINER_NODE="${JOINER_NODE:-6}"
 NUM_NODES="${NUM_NODES:-6}"
+EXPECTED_UNRELATED_RESPONDERS=4
 SUB_GRAPH_NAME="${SUB_GRAPH_NAME:-ai-tools}"
 ROOT_TRIPLES="${ROOT_TRIPLES:-3}"
 SUB_GRAPH_TRIPLES="${SUB_GRAPH_TRIPLES:-5}"
@@ -712,10 +713,17 @@ INSERTED_TRIPLES="$(json_inserted_triple_count "$CATCHUP_RESPONSE")"
 RESULT_DATA_SYNCED="$(json_get "$CATCHUP_RESPONSE" result.dataSynced)"
 RESULT_SWM_SYNCED="$(json_get "$CATCHUP_RESPONSE" result.sharedMemorySynced)"
 SYNC_CAPABLE_PEERS="$(json_get "$CATCHUP_RESPONSE" result.syncCapablePeers)"
-[ "$EMPTY_RESPONSES" -ge 1 ] 2>/dev/null \
-  || fail "catch-up had no empty response; the unrelated-peer reproduction precondition was not reached: $CATCHUP_RESPONSE"
-[ -n "$SYNC_CAPABLE_PEERS" ] && [ "$SYNC_CAPABLE_PEERS" -ge 1 ] 2>/dev/null \
-  || fail "catch-up had no sync-capable responder; the curator-offline topology was not exercised: $CATCHUP_RESPONSE"
+PEERS_RESPONDED="$(json_get "$CATCHUP_RESPONSE" result.peersResponded)"
+DURABLE_EMPTY_PEERS="$(json_get "$CATCHUP_RESPONSE" result.cleanPlaneCompletions.durable.emptyPeers)"
+SHARED_MEMORY_EMPTY_PEERS="$(json_get "$CATCHUP_RESPONSE" result.cleanPlaneCompletions.sharedMemory.emptyPeers)"
+[ -n "$PEERS_RESPONDED" ] && [ "$PEERS_RESPONDED" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null \
+  || fail "catch-up received replies from only ${PEERS_RESPONDED:-0}/$EXPECTED_UNRELATED_RESPONDERS unrelated peers: $CATCHUP_RESPONSE"
+[ -n "$DURABLE_EMPTY_PEERS" ] && [ "$DURABLE_EMPTY_PEERS" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null \
+  || fail "durable catch-up completed empty with only ${DURABLE_EMPTY_PEERS:-0}/$EXPECTED_UNRELATED_RESPONDERS unrelated peers: $CATCHUP_RESPONSE"
+[ -n "$SHARED_MEMORY_EMPTY_PEERS" ] && [ "$SHARED_MEMORY_EMPTY_PEERS" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null \
+  || fail "shared-memory catch-up completed empty with only ${SHARED_MEMORY_EMPTY_PEERS:-0}/$EXPECTED_UNRELATED_RESPONDERS unrelated peers: $CATCHUP_RESPONSE"
+[ -n "$SYNC_CAPABLE_PEERS" ] && [ "$SYNC_CAPABLE_PEERS" -ge "$EXPECTED_UNRELATED_RESPONDERS" ] 2>/dev/null \
+  || fail "catch-up reached only ${SYNC_CAPABLE_PEERS:-0}/$EXPECTED_UNRELATED_RESPONDERS sync-capable unrelated peers: $CATCHUP_RESPONSE"
 [ "$INSERTED_TRIPLES" = "0" ] \
   && [ "$RESULT_DATA_SYNCED" = "0" ] \
   && [ "$RESULT_SWM_SYNCED" = "0" ] \

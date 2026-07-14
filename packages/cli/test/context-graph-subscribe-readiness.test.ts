@@ -119,6 +119,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
   async function subscribe(opts: {
     initial?: Record<string, unknown>;
     hasConfirmedMeta: boolean;
+    hasConfirmedMetaAfterCatchup?: boolean;
     isPrivate?: boolean;
     result?: CatchupJobResult;
     includeSharedMemory?: boolean;
@@ -145,6 +146,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       latestByContextGraph: new Map<string, string>(),
     };
     let runCalls = 0;
+    let confirmedMetaChecks = 0;
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
@@ -170,7 +172,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         patches.push({ ...patch });
         state.set(id, { ...state.get(id), ...patch });
       },
-      hasConfirmedMetaState: async () => opts.hasConfirmedMeta,
+      hasConfirmedMetaState: async () => {
+        confirmedMetaChecks += 1;
+        return confirmedMetaChecks > 1
+          ? opts.hasConfirmedMetaAfterCatchup ?? opts.hasConfirmedMeta
+          : opts.hasConfirmedMeta;
+      },
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
@@ -325,6 +332,52 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       sharedMemorySynced: false,
       metaSynced: false,
       pendingMeta: true,
+    });
+  });
+
+  it('does not restore stale true provenance after metadata arrives during an unclean catch-up', async () => {
+    const metadataOnlyUnclean = privateMetaOnlyResult();
+    if (!metadataOnlyUnclean.diagnostics?.durable ||
+      !metadataOnlyUnclean.diagnostics.sharedMemory ||
+      !metadataOnlyUnclean.cleanPlaneCompletions) {
+      throw new Error('catch-up diagnostics missing');
+    }
+    metadataOnlyUnclean.diagnostics.durable.timedOutPhases = 1;
+    metadataOnlyUnclean.diagnostics.sharedMemory.emptyResponses = 0;
+    metadataOnlyUnclean.cleanPlaneCompletions.sharedMemory.emptyPeers = 0;
+
+    const result = await subscribe({
+      hasConfirmedMeta: false,
+      hasConfirmedMetaAfterCatchup: true,
+      isPrivate: true,
+      includeSharedMemory: false,
+      result: metadataOnlyUnclean,
+      readiness: {
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: true,
+      },
+      initial: {
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('queued');
+    expect(result.runCalls).toBe(1);
+    expect(result.job.status).toBe('unreachable');
+    expect(result.state).toMatchObject({
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: true,
+      pendingMeta: false,
+    });
+    expect(result.readiness).toMatchObject({
+      version: 1,
+      durableVerified: false,
+      sharedMemoryVerified: false,
     });
   });
 

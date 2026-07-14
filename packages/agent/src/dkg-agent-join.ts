@@ -708,6 +708,36 @@ export class JoinRequestMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Return a just-applied decision to pending when the notification handler
+   * could not commit its downstream durable state. The generation/status
+   * guard prevents compensation from overwriting a newer request or a
+   * concurrent conflicting decision.
+   */
+  async restoreRequesterJoinDecisionAfterFailedApply(
+    this: DKGAgent,
+    contextGraphId: string,
+    agentAddress: string,
+    requestGeneration: string,
+    appliedStatus: 'approved' | 'rejected',
+  ): Promise<void> {
+    const key = requesterJoinStateKey(contextGraphId, agentAddress);
+    await withRequesterJoinStateLock(this, key, async () => {
+      const current = await this.readRequesterJoinRequestState(contextGraphId, agentAddress);
+      if (
+        !current ||
+        current.requestGeneration !== requestGeneration ||
+        current.status !== appliedStatus
+      ) {
+        return;
+      }
+      await this.writeRequesterJoinRequestState(contextGraphId, agentAddress, {
+        ...current,
+        status: 'pending',
+      });
+    });
+  }
+
   async restoreRequesterJoinStateAfterFailedForward(
     this: DKGAgent,
     contextGraphId: string,

@@ -139,21 +139,47 @@ describe('legacy context-graph readiness provenance migration', () => {
     });
   });
 
-  it('seeds provenance from a durable active join-approved membership marker', async () => {
+  it('fails closed for a remote join-approved private row with legacy true flags', async () => {
     const f = fixture({ confirmedMeta: true, privateGraph: true, chainAccessPolicy: 1 });
 
     await migrateLegacyContextGraphReadiness({
       agent: f.agent,
       store: f.store,
       log: vi.fn(),
-      durableJoinApprovedContextGraphIds: new Set([f.contextGraphId]),
     });
 
-    expect(f.markContextGraphSubscriptionState).not.toHaveBeenCalled();
+    expect(f.subscriptions.get(f.contextGraphId)).toMatchObject({
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: true,
+      pendingMeta: false,
+    });
     expect(f.getProvenance()).toMatchObject({
       version: 1,
-      durableVerified: true,
-      sharedMemoryVerified: true,
+      durableVerified: false,
+      sharedMemoryVerified: false,
+    });
+  });
+
+  it('fails closed for an unconfirmed remote public shadow with legacy true flags', async () => {
+    const f = fixture({ confirmedMeta: false, privateGraph: false, chainAccessPolicy: 0 });
+
+    await migrateLegacyContextGraphReadiness({
+      agent: f.agent,
+      store: f.store,
+      log: vi.fn(),
+    });
+
+    expect(f.subscriptions.get(f.contextGraphId)).toMatchObject({
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    });
+    expect(f.getProvenance()).toMatchObject({
+      version: 1,
+      durableVerified: false,
+      sharedMemoryVerified: false,
     });
   });
 

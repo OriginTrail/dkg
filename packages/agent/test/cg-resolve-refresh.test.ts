@@ -50,6 +50,57 @@ function authoritativePrivateMetaQuads(contextGraphId: string): Quad[] {
   ];
 }
 
+function activeMemberMetaQuads(
+  contextGraphId: string,
+  approvedAgentAddress: string,
+  peerId: string,
+  opKey: string,
+  nowMs: number,
+): Quad[] {
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const normalizedAgent = approvedAgentAddress.toLowerCase();
+  const delegation = `did:dkg:agent-delegation:${contextGraphId}:${normalizedAgent}`;
+  return [
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `"${normalizedAgent}"`,
+      graph: metaGraph,
+    },
+    {
+      subject: delegation,
+      predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT,
+      object: `"${normalizedAgent}"`,
+      graph: metaGraph,
+    },
+    {
+      subject: delegation,
+      predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT,
+      object: `"${nowMs - 1_000}"`,
+      graph: metaGraph,
+    },
+    {
+      subject: delegation,
+      predicate: DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT,
+      object: `"${nowMs + 60_000}"`,
+      graph: metaGraph,
+    },
+    {
+      subject: delegation,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
+      object: `"${peerId}"`,
+      graph: metaGraph,
+    },
+    {
+      subject: delegation,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY,
+      object: `"${opKey.toLowerCase()}"`,
+      graph: metaGraph,
+    },
+  ];
+}
+
 describe('authoritative private metadata proof', () => {
   it('keeps fetched-quad evaluation and the generated store query in lockstep', async () => {
     const cases = [
@@ -110,6 +161,130 @@ describe('authoritative private metadata proof', () => {
           proofCase.name,
         ).toBe(proofCase.expected);
         expect(queryResult.value, proofCase.name).toBe(proofCase.expected);
+      } finally {
+        await store.close();
+      }
+    }
+  });
+
+  it('requires a current approved member delegation matching this peer or operational key', async () => {
+    const approvedAgentAddress = '0x00000000000000000000000000000000000000A1';
+    const expectedPeerId = '12D3KooWCurrentApprovedMemberPeer';
+    const expectedOpKey = '0x00000000000000000000000000000000000000B2';
+    const nowMs = 1_784_000_000_000;
+    const cases = [
+      {
+        name: 'active peer and key binding',
+        mutate: (quads: Quad[]) => quads,
+        expected: true,
+      },
+      {
+        name: 'peer binding alone is sufficient',
+        mutate: (quads: Quad[]) => quads.filter(
+          (quad) => quad.predicate !== DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY,
+        ),
+        expected: true,
+      },
+      {
+        name: 'operational-key binding alone is sufficient',
+        mutate: (quads: Quad[]) => quads.filter(
+          (quad) => quad.predicate !== DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
+        ),
+        expected: true,
+      },
+      {
+        name: 'agent is not approved',
+        mutate: (quads: Quad[]) => quads.filter(
+          (quad) => quad.predicate !== DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        ),
+        expected: false,
+      },
+      {
+        name: 'agent is revoked',
+        mutate: (quads: Quad[]) => [...quads, {
+          subject: contextGraphDataGraphUri('private/member-proof-4'),
+          predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT,
+          object: `"${approvedAgentAddress.toLowerCase()}"`,
+          graph: contextGraphMetaGraphUri('private/member-proof-4'),
+        }],
+        expected: false,
+      },
+      {
+        name: 'delegation is expired',
+        mutate: (quads: Quad[]) => quads.map((quad) => (
+          quad.predicate === DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT
+            ? { ...quad, object: `"${nowMs}"` }
+            : quad
+        )),
+        expected: false,
+      },
+      {
+        name: 'delegation is not active yet',
+        mutate: (quads: Quad[]) => quads.map((quad) => (
+          quad.predicate === DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT
+            ? { ...quad, object: `"${nowMs + 1}"` }
+            : quad
+        )),
+        expected: false,
+      },
+      {
+        name: 'delegation belongs to another agent',
+        mutate: (quads: Quad[]) => quads.map((quad) => (
+          quad.predicate === DKG_ONTOLOGY.DKG_DELEGATION_AGENT
+            ? { ...quad, object: '"0x00000000000000000000000000000000000000ff"' }
+            : quad
+        )),
+        expected: false,
+      },
+      {
+        name: 'delegation matches neither local credential',
+        mutate: (quads: Quad[]) => quads.map((quad) => {
+          if (quad.predicate === DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER) {
+            return { ...quad, object: '"12D3KooWAnotherPeer"' };
+          }
+          if (quad.predicate === DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY) {
+            return {
+              ...quad,
+              object: '"0x00000000000000000000000000000000000000ff"',
+            };
+          }
+          return quad;
+        }),
+        expected: false,
+      },
+    ];
+
+    for (const [index, proofCase] of cases.entries()) {
+      const contextGraphId = `private/member-proof-${index}`;
+      const quads = proofCase.mutate([
+        ...authoritativePrivateMetaQuads(contextGraphId),
+        ...activeMemberMetaQuads(
+          contextGraphId,
+          approvedAgentAddress,
+          expectedPeerId,
+          expectedOpKey,
+          nowMs,
+        ),
+      ]);
+      const memberProof = {
+        approvedAgentAddress,
+        expectedDelegateePeerId: expectedPeerId,
+        expectedDelegateeOpKey: expectedOpKey,
+        nowMs,
+      };
+      const store = new OxigraphStore();
+      try {
+        await store.insert(quads);
+        const result = await store.query(
+          buildAuthoritativePrivateMetaAskQuery(contextGraphId, memberProof),
+        );
+        expect(result.type, proofCase.name).toBe('boolean');
+        if (result.type !== 'boolean') throw new Error('expected boolean ASK result');
+        expect(
+          hasAuthoritativePrivateMetaDefinition(contextGraphId, quads, memberProof),
+          proofCase.name,
+        ).toBe(proofCase.expected);
+        expect(result.value, proofCase.name).toBe(proofCase.expected);
       } finally {
         await store.close();
       }
@@ -531,6 +706,8 @@ describe('refreshMetaFromCurator', () => {
     const revokedAgent = '0x0000000000000000000000000000000000000033';
     const staleDelegation = `did:dkg:agent-delegation:${contextGraphId}:${staleAgent}`;
     const freshDelegation = `did:dkg:agent-delegation:${contextGraphId}:${freshAgent}`;
+    const pendingJoinRequest = `did:dkg:join-request:${contextGraphId}:${freshAgent}`;
+    const localDraftLifecycle = `urn:dkg:lifecycle:draft:${contextGraphId}:42`;
     const store = new OxigraphStore();
     try {
       await store.insert([
@@ -538,6 +715,8 @@ describe('refreshMetaFromCurator', () => {
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${staleAgent}"`, graph: metaGraph },
         { subject: staleDelegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: '"stale-peer"', graph: metaGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT, object: `"${revokedAgent}"`, graph: metaGraph },
+        { subject: pendingJoinRequest, predicate: 'https://dkg.network/ontology#requestStatus', object: '"pending"', graph: metaGraph },
+        { subject: localDraftLifecycle, predicate: 'https://dkg.network/ontology#kaNumber', object: '"42"', graph: metaGraph },
       ]);
       const freshSnapshot: Quad[] = [
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
@@ -596,6 +775,16 @@ describe('refreshMetaFromCurator', () => {
       expect(rows.some((row) => row.o === staleCurator || row.o === `"${staleAgent}"`)).toBe(false);
       expect(rows.some((row) => row.s === staleDelegation)).toBe(false);
       expect(rows.some((row) => row.s === freshDelegation && row.o === '"fresh-peer"')).toBe(true);
+      expect(rows).toContainEqual({
+        s: pendingJoinRequest,
+        p: 'https://dkg.network/ontology#requestStatus',
+        o: '"pending"',
+      });
+      expect(rows).toContainEqual({
+        s: localDraftLifecycle,
+        p: 'https://dkg.network/ontology#kaNumber',
+        o: '"42"',
+      });
       expect(invalidations).toBe(2);
       expect(projectionInvalidations).toBe(2);
     } finally {

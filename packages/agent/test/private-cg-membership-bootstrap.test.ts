@@ -208,6 +208,9 @@ describe('private CG membership bootstrap recovery', () => {
       contextGraphId,
       agent.getDefaultAgentAddress()?.toLowerCase(),
     );
+    const approvedAgentAddress = agent.getDefaultAgentAddress()!.toLowerCase();
+    const delegationSubject =
+      `did:dkg:agent-delegation:${contextGraphId}:${approvedAgentAddress}`;
     await (agent as any).store.insert([{
       subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.RDF_TYPE,
@@ -233,6 +236,26 @@ describe('private CG membership bootstrap recovery', () => {
       subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_CURATOR,
       object: `did:dkg:agent:${agent.getDefaultAgentAddress()}`,
+      graph: contextGraphMetaGraphUri(contextGraphId),
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `"${approvedAgentAddress}"`,
+      graph: contextGraphMetaGraphUri(contextGraphId),
+    }, {
+      subject: delegationSubject,
+      predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT,
+      object: `"${approvedAgentAddress}"`,
+      graph: contextGraphMetaGraphUri(contextGraphId),
+    }, {
+      subject: delegationSubject,
+      predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT,
+      object: `"${Date.now() - 1_000}"`,
+      graph: contextGraphMetaGraphUri(contextGraphId),
+    }, {
+      subject: delegationSubject,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
+      object: `"${agent.peerId}"`,
       graph: contextGraphMetaGraphUri(contextGraphId),
     }]);
 
@@ -802,6 +825,138 @@ describe('private CG membership bootstrap recovery', () => {
       contextGraphId,
       '12D3KooWPrivateBootstrapCurator',
     );
+  });
+
+  it('ACKs join-approved without optional persistence stores and starts bootstrap once', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapStoreless'));
+    const contextGraphId = 'private-bootstrap-storeless';
+    const approvedAddress = agent.getDefaultAgentAddress();
+    const curatorPeerId = '12D3KooWPrivateBootstrapStorelessCurator';
+    const requestGeneration = `0x${'3'.repeat(64)}`;
+    (agent as any).config.contextGraphMembershipStore = undefined;
+    (agent as any).config.contextGraphSubscriptionStore = undefined;
+    (agent as any).isTrustedJoinDecisionSender = async () => true;
+    const immediateSync = vi.fn(async () => {});
+    const onApproved = vi.fn();
+    (agent as any).runImmediatePostApprovalSync = immediateSync;
+    (agent as any).eventBus.on(DKGEvent.JOIN_APPROVED, onApproved);
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      approvedAddress!,
+      requestGeneration,
+      curatorPeerId,
+    );
+
+    const response = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({
+        type: 'join-approved',
+        contextGraphId,
+        agentAddress: approvedAddress,
+        requestGeneration,
+      })),
+      curatorPeerId,
+    )));
+
+    expect(response).toEqual({ ok: true });
+    expect((agent as any).subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    });
+    expect(immediateSync).toHaveBeenCalledTimes(1);
+    expect(immediateSync).toHaveBeenCalledWith(contextGraphId, curatorPeerId);
+    expect(onApproved).toHaveBeenCalledTimes(1);
+  });
+
+  it('compensates a failed subscription write and applies its retry exactly once', async () => {
+    ({ agent } = await createAgent('PrivateBootstrapAtomicRetry'));
+    const contextGraphId = 'private-bootstrap-atomic-retry';
+    const approvedAddress = agent.getDefaultAgentAddress()!;
+    const curatorPeerId = '12D3KooWPrivateBootstrapAtomicCurator';
+    const requestGeneration = `0x${'4'.repeat(64)}`;
+    const membershipRows = new Map<string, any>();
+    const subscriptionRows = new Map<string, any>();
+    let failSubscriptionWrite = true;
+    const membershipKey = (record: any) =>
+      `${record.contextGraphId}:${record.principalType}:${record.principalId.toLowerCase()}`;
+    (agent as any).config.contextGraphMembershipStore = {
+      loadAll: async () => [...membershipRows.values()],
+      upsert: async (record: any) => {
+        membershipRows.set(membershipKey(record), { ...record });
+      },
+      delete: async (cgId: string, principalType: string, principalId: string) => {
+        membershipRows.delete(`${cgId}:${principalType}:${principalId.toLowerCase()}`);
+      },
+    };
+    (agent as any).config.contextGraphSubscriptionStore = {
+      loadAll: async () => [...subscriptionRows.values()],
+      load: async (cgId: string) => subscriptionRows.get(cgId) ?? null,
+      save: async (record: any) => {
+        // Model a backend that reports failure after applying the write. The
+        // compensation must remove both this row and the membership written
+        // immediately before it.
+        subscriptionRows.set(record.id, { ...record });
+        if (failSubscriptionWrite) {
+          failSubscriptionWrite = false;
+          throw new Error('subscription persistence failed after write');
+        }
+      },
+      delete: async (cgId: string) => { subscriptionRows.delete(cgId); },
+    };
+    (agent as any).isTrustedJoinDecisionSender = async () => true;
+    const immediateSync = vi.fn(async () => {});
+    const onApproved = vi.fn();
+    (agent as any).runImmediatePostApprovalSync = immediateSync;
+    (agent as any).eventBus.on(DKGEvent.JOIN_APPROVED, onApproved);
+    await agent.setRequesterJoinRequestPending(
+      contextGraphId,
+      approvedAddress,
+      requestGeneration,
+      curatorPeerId,
+    );
+    const notification = encoder.encode(JSON.stringify({
+      type: 'join-approved',
+      contextGraphId,
+      agentAddress: approvedAddress,
+      requestGeneration,
+    }));
+
+    await expect(joinRequestHandler(agent)(notification, curatorPeerId))
+      .rejects.toThrow('subscription persistence failed after write');
+    expect(membershipRows.size).toBe(0);
+    expect(subscriptionRows.size).toBe(0);
+    expect(await agent.getJoinRequestStatus(contextGraphId, approvedAddress)).toBe('pending');
+    expect((agent as any).subscribedContextGraphs.has(contextGraphId)).toBe(false);
+    expect((agent as any).localApprovedAgentByCG.has(contextGraphId)).toBe(false);
+    expect((agent as any).preferredSyncPeers.has(contextGraphId)).toBe(false);
+    expect((agent as any).config.syncContextGraphs ?? []).not.toContain(contextGraphId);
+    expect(immediateSync).not.toHaveBeenCalled();
+    expect(onApproved).not.toHaveBeenCalled();
+
+    const response = JSON.parse(decoder.decode(
+      await joinRequestHandler(agent)(notification, curatorPeerId),
+    ));
+    expect(response).toEqual({ ok: true });
+    expect(membershipRows.size).toBe(1);
+    expect(subscriptionRows.get(contextGraphId)).toMatchObject({
+      id: contextGraphId,
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      syncScoped: true,
+    });
+    expect((agent as any).subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    });
+    expect(immediateSync).toHaveBeenCalledTimes(1);
+    expect(onApproved).toHaveBeenCalledTimes(1);
   });
 
   it.each(['membership', 'subscription'] as const)(

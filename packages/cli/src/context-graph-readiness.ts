@@ -369,7 +369,6 @@ export async function migrateLegacyContextGraphReadiness(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
   log: (message: string) => void;
-  durableJoinApprovedContextGraphIds?: ReadonlySet<string>;
 }): Promise<void> {
   const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 
@@ -378,23 +377,20 @@ export async function migrateLegacyContextGraphReadiness(input: {
     const stored = readContextGraphReadiness(input.store, contextGraphId);
     if (stored.version >= CONTEXT_GRAPH_READINESS_VERSION) continue;
 
-    // Locally curated graphs and memberships admitted by the new durable
-    // join-approved flow have an authoritative source for their persisted
-    // readiness bits. Resetting either class would strand a curator's own
-    // private graph, or throw away a clean post-approval recovery merely
-    // because the daemon restarted before the HTTP route could observe it.
+    // A locally curated graph is authoritative on this node, so its existing
+    // flags can seed provenance. Remote membership proves authorization, not
+    // that either data plane completed cleanly, and therefore cannot preserve
+    // legacy readiness bits.
     const locallyCurated = typeof input.agent.isCuratorOf === 'function'
       ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
       : false;
-    const durablyJoinApproved = input.durableJoinApprovedContextGraphIds?.has(contextGraphId) === true;
-    if (locallyCurated || durablyJoinApproved) {
+    if (locallyCurated) {
       writeContextGraphReadiness(input.store, contextGraphId, {
         durableVerified: subscription.synced === true,
         sharedMemoryVerified: subscription.sharedMemorySynced === true,
       });
       input.log(
-        `Preserved ${locallyCurated ? 'locally curated' : 'durably join-approved'} ` +
-        `context-graph readiness during provenance migration: ${contextGraphId}`,
+        `Preserved locally curated context-graph readiness during provenance migration: ${contextGraphId}`,
       );
       continue;
     }

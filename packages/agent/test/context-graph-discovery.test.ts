@@ -2901,7 +2901,13 @@ describe('runImmediatePostApprovalSync', () => {
     const calls = {
       ensureAdmittedCalls: [] as string[],
       ensurePeerConnectedCalls: [] as string[],
-      refreshMetaCalls: [] as Array<{ cg: string; peer?: string; force?: boolean }>,
+      refreshMetaCalls: [] as Array<{
+        cg: string;
+        peer?: string;
+        force?: boolean;
+        approvedAgentAddress?: string;
+        expectedDelegateePeerId?: string;
+      }>,
       runCatchupCalls: [] as Array<{ cg: string; includeSwm: boolean; peers: string[] }>,
       broadcastCalls: [] as Array<{ cg: string; includeSwm: boolean }>,
     };
@@ -2920,12 +2926,21 @@ describe('runImmediatePostApprovalSync', () => {
     let metaConfirmed = false;
     (a as any).refreshMetaFromCurator = async (
       cg: string,
-      refreshOpts?: { trustedCuratorPeerId?: string; force?: boolean },
+      refreshOpts?: {
+        trustedCuratorPeerId?: string;
+        force?: boolean;
+        memberProof?: {
+          approvedAgentAddress: string;
+          expectedDelegateePeerId?: string;
+        };
+      },
     ) => {
       calls.refreshMetaCalls.push({
         cg,
         peer: refreshOpts?.trustedCuratorPeerId,
         force: refreshOpts?.force,
+        approvedAgentAddress: refreshOpts?.memberProof?.approvedAgentAddress,
+        expectedDelegateePeerId: refreshOpts?.memberProof?.expectedDelegateePeerId,
       });
       metaConfirmed = true;
       return true;
@@ -2974,6 +2989,11 @@ describe('runImmediatePostApprovalSync', () => {
       runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
     });
 
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-success',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
     await (agent as any).runImmediatePostApprovalSync('test-cg-success', CURATOR_PEER);
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
@@ -2982,6 +3002,8 @@ describe('runImmediatePostApprovalSync', () => {
       cg: 'test-cg-success',
       peer: CURATOR_PEER,
       force: true,
+      approvedAgentAddress: agent.getDefaultAgentAddress()?.toLowerCase(),
+      expectedDelegateePeerId: agent.peerId,
     }]);
     expect(calls.runCatchupCalls).toHaveLength(1);
     expect(calls.runCatchupCalls[0]).toMatchObject({
@@ -3000,6 +3022,11 @@ describe('runImmediatePostApprovalSync', () => {
     const calls = installStubs(agent, {
       connectedPeers: [],
     });
+
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-missing-peer',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
 
     await (agent as any).runImmediatePostApprovalSync('test-cg-missing-peer', CURATOR_PEER);
 
@@ -3058,6 +3085,11 @@ describe('runImmediatePostApprovalSync', () => {
       runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
     });
 
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-admission-denied',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
     await (agent as any).runImmediatePostApprovalSync('test-cg-admission-denied', CURATOR_PEER);
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
@@ -3081,6 +3113,11 @@ describe('runImmediatePostApprovalSync', () => {
       },
       connectedPeers: [CURATOR_PEER],
     });
+
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-throw',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
 
     await (agent as any).runImmediatePostApprovalSync('test-cg-throw', CURATOR_PEER);
 

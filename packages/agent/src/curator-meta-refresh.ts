@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   assertSafeIri,
+  contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
   createOperationContext,
   DKG_ONTOLOGY,
@@ -15,7 +16,10 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { META_REFRESH_COOLDOWN_MS } from './dkg-agent-constants.js';
-import { hasAuthoritativePrivateMetaDefinition } from './context-graph-private-meta-proof.js';
+import {
+  hasAuthoritativePrivateMetaDefinition,
+  type AuthoritativePrivateMetaMemberProof,
+} from './context-graph-private-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
 import type { SyncPageResult } from './sync/requester/page-fetch.js';
@@ -31,6 +35,8 @@ export interface CuratorMetaRefreshOptions {
   trustedCuratorPeerId?: string;
   /** Bypass the normal auth-probe cooldown for an explicit recovery event. */
   force?: boolean;
+  /** Require the fetched snapshot to make this approved local member usable. */
+  memberProof?: AuthoritativePrivateMetaMemberProof;
 }
 
 interface CuratorConnection {
@@ -223,7 +229,7 @@ async function fetchAuthoritativeMetaSnapshot(
   agent: CuratorMetaRefreshAgent,
   contextGraphId: string,
   curatorPeerId: string,
-  signal: AbortSignal | undefined,
+  options: CuratorMetaRefreshOptions,
   ctx: OperationContext,
 ): Promise<AuthoritativeMetaSnapshot | undefined> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -247,26 +253,35 @@ async function fetchAuthoritativeMetaSnapshot(
     Date.now() + 10_000,
     undefined,
     undefined,
-    signal,
+    options.signal,
     undefined,
     true,
   );
-  throwIfCuratorMetaRefreshAborted(signal);
+  throwIfCuratorMetaRefreshAborted(options.signal);
 
   // The shared N-Quads parser admits any graph under the CG prefix. This
   // trusted-control path retains only the exact requested root `_meta` graph.
-  const controlMetaQuads = result.quads.filter((quad) => quad.graph === metaGraph);
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
+  const controlMetaQuads = result.quads.filter((quad) => (
+    quad.graph === metaGraph &&
+    (quad.subject === contextGraphUri || quad.subject.startsWith(delegationPrefix))
+  ));
   if (!result.completed || result.resumedFromOffset !== 0) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
     return undefined;
   }
-  if (!hasAuthoritativePrivateMetaDefinition(contextGraphId, controlMetaQuads)) {
+  if (!hasAuthoritativePrivateMetaDefinition(
+    contextGraphId,
+    controlMetaQuads,
+    options.memberProof,
+  )) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
     agent.log.warn(
       ctx,
-      `Rejected curator metadata snapshot for "${contextGraphId}": missing the complete private type/policy/creator/curator definition`,
+      `Rejected curator metadata snapshot for "${contextGraphId}": missing the complete private definition or approved-member delegation proof`,
     );
     return undefined;
   }
@@ -277,7 +292,13 @@ async function fetchAuthoritativeMetaSnapshot(
  * Replace only the curator-replicated portion of a CG's root `_meta` graph.
  * `dkg:revokedAgent` is deliberately retained as a node-local tombstone.
  */
-function replaceCuratorMetaProjectionSparql(metaGraph: string, stagingGraph: string): string {
+function replaceCuratorMetaProjectionSparql(
+  contextGraphId: string,
+  metaGraph: string,
+  stagingGraph: string,
+): string {
+  const contextGraphUri = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
+  const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
   assertSafeIri(metaGraph);
   assertSafeIri(stagingGraph);
   return `DELETE {
@@ -290,7 +311,13 @@ function replaceCuratorMetaProjectionSparql(metaGraph: string, stagingGraph: str
     {
       GRAPH <${metaGraph}> {
         ?staleSubject ?stalePredicate ?staleObject .
-        FILTER (?stalePredicate != <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}>)
+        FILTER (
+          (
+            ?staleSubject = <${contextGraphUri}> &&
+            ?stalePredicate != <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}>
+          ) ||
+          STRSTARTS(STR(?staleSubject), ${JSON.stringify(delegationPrefix)})
+        )
       }
     }
     UNION
@@ -336,7 +363,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     try {
       replaced = await tryUpdateWithTouchedGraphs(
         agent.store,
-        replaceCuratorMetaProjectionSparql(metaGraph, stagingGraph),
+        replaceCuratorMetaProjectionSparql(contextGraphId, metaGraph, stagingGraph),
         [metaGraph],
         { source: 'agent.metaRefresh.replace' },
       );
@@ -383,7 +410,7 @@ async function executeCuratorMetaRefresh(
       agent,
       contextGraphId,
       curatorPeerId,
-      options.signal,
+      options,
       ctx,
     );
     if (!snapshot) return false;

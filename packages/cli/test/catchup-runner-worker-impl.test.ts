@@ -312,4 +312,59 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       emptyPeers: 0,
     });
   });
+
+  it('records each distinct responder that cleanly completes both planes empty', async () => {
+    const peerIds = ['peer-empty-1', 'peer-empty-2', 'peer-empty-3', 'peer-empty-4'];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-empty-public', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: undefined,
+              isPrivateContextGraph: false,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return {
+              ...durableResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              completedPhases: 2,
+              emptyResponses: 2,
+            };
+          case 'syncSharedMemory':
+            return {
+              ...sharedResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              completedPhases: 2,
+              emptyResponses: 2,
+            };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result).toMatchObject({
+      peersResponded: peerIds.length,
+      peersSucceeded: peerIds.length,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+    });
+    expect(result.cleanPlaneCompletions).toEqual({
+      durable: { verifiedDataPeers: 0, emptyPeers: peerIds.length },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: peerIds.length },
+    });
+  });
 });

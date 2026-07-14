@@ -1553,7 +1553,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const existingSub = subMap?.get(contextGraphId);
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
-    const readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
@@ -1618,6 +1618,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           existingReadiness.readinessPatch,
         );
       }
+      // The existing-state classifier may have just invalidated stale v1
+      // provenance because authoritative metadata was missing. Carry the
+      // corrected value into the queued catch-up so a later metadata-only or
+      // incomplete response cannot resurrect the pre-reset true bits.
+      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
     }
 
     console.log(`[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory}`);

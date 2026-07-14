@@ -1958,32 +1958,27 @@ export async function runDaemonInner(
 
   await agent.start();
 
+  // Classify configured graphs before migrating legacy readiness. Explicit
+  // local-bootstrap targets receive current provenance here; configured
+  // remote targets are subscribed fail-closed so migration cannot mistake a
+  // durable membership record for proof that catch-up completed.
+  await bootstrapConfiguredContextGraphs({
+    agent,
+    configuredContextGraphIds: resolveContextGraphs(config),
+    networkDefaultContextGraphIds: resolveNetworkDefaultContextGraphs(network),
+    localBootstrapContextGraphIds: config.localBootstrapContextGraphs,
+    readinessStore: dashDb,
+    log,
+  });
+
   // Rows written before per-plane provenance existed cannot distinguish a
   // complete catch-up from v10.0.6's clean-empty false-ready state. Migrate
   // once before the API becomes available: private/unconfirmed rows retry,
   // while confirmed public rows retain their historical empty-CG semantics.
-  const durableJoinApprovedContextGraphIds = new Set<string>();
-  try {
-    for (const row of dashDb.listContextGraphMembers()) {
-      if (
-        row.principal_type === 'agent' &&
-        row.status === 'active' &&
-        row.source === 'join-approved'
-      ) {
-        durableJoinApprovedContextGraphIds.add(row.context_graph_id);
-      }
-    }
-  } catch (err) {
-    log(
-      `Could not inspect durable join-approved memberships during readiness migration: ` +
-      `${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
   await migrateLegacyContextGraphReadiness({
     agent,
     store: dashDb,
     log,
-    durableJoinApprovedContextGraphIds,
   });
 
   // Core-only post-start checks (PR-5 NAT-status watcher + PR-3 relay
@@ -2196,21 +2191,6 @@ export async function runDaemonInner(
       });
   }, 0);
   if (relayRegistryTimer.unref) relayRegistryTimer.unref();
-
-  // Namespaced configured graphs are remote sync targets. Unknown ones must
-  // remain pending until their authoritative `_meta` arrives; creating a local
-  // definition here would fabricate a public graph and suppress the
-  // authenticated bootstrap required by curated graphs. Local creation must
-  // come from a network default or explicit localBootstrapContextGraphs input;
-  // bare IDs are valid private CG identifiers and imply no ownership.
-  await bootstrapConfiguredContextGraphs({
-    agent,
-    configuredContextGraphIds: resolveContextGraphs(config),
-    networkDefaultContextGraphIds: resolveNetworkDefaultContextGraphs(network),
-    localBootstrapContextGraphIds: config.localBootstrapContextGraphs,
-    readinessStore: dashDb,
-    log,
-  });
 
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
