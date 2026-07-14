@@ -269,7 +269,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, VmReconcileScheduler, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -2790,17 +2790,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catches up late subscribers (the "Monday Fun Facts" case). Only armed when
     // the chain adapter exposes the per-CG registration-ordinal reads.
     if (this.vmReconcileEnabled()) {
-      this.vmReconcileScheduler = new VmReconcileScheduler(
-        async (localCgId, source) => {
-          await this.runVmReconcileForCg(localCgId, source);
-        },
-        (localCgId, err) => {
-          this.log.warn(
-            ctx,
-            `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
-      );
+      this.ensureVmReconcileDispatcher();
       const runSweep = (): void => {
         this.runVmReconcileSweep().catch((err: unknown) => {
           this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);

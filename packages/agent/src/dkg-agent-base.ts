@@ -239,7 +239,14 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, VmReconcileScheduler, VmReconcileWorkQueue, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import {
+  reconcileContextGraph,
+  VmReconcileDispatcher,
+  RecentUalSet,
+  type ChainReconcilerDeps,
+  type ContextGraphReconcileResult,
+  type OrdinalOutcome,
+} from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -830,6 +837,12 @@ export class DKGAgentBase {
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_QUEUE_MAX_PENDING']) || 256);
+  static readonly VM_RECONCILE_MAX_FOREGROUND_BURST =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_MAX_FOREGROUND_BURST']) || 8);
+  static readonly VM_RECONCILE_SHUTDOWN_TIMEOUT_MS =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS']) || 5_000);
   static readonly CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS =
     Math.max(1, Number(process.env['DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS']) || 5_000);
   /**
@@ -858,14 +871,8 @@ export class DKGAgentBase {
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
-  /** Phase B — per-CG scheduler separating live nudges from periodic retries. */
-  protected vmReconcileScheduler?: VmReconcileScheduler;
-  /**
-   * Phase B — node-wide admission lane. Per-CG scheduling prevents duplicate
-   * work for one graph; this prevents an all-CG sweep from running every
-   * graph's store-heavy reconciliation at the same time.
-   */
-  protected readonly vmReconcileWorkQueue = new VmReconcileWorkQueue(1);
+  /** Phase B — unified per-CG coalescing and node-wide admission policy. */
+  protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */

@@ -50,6 +50,8 @@ export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './goss
 export { FinalizationHandler } from './finalization-handler.js';
 export {
   ContextGraphOnChainIdUnresolvedError,
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
   VmReconcileUnavailableError,
   type ContextGraphReconcileResult,
   type ContextGraphReconcileStatus,

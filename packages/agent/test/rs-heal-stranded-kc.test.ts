@@ -234,14 +234,23 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
       },
     ]]);
     agentLike.reconcileCursors = new Map();
-    agentLike.vmReconcileWorkQueue = {
-      enqueue: async <T>(priority: string, run: () => Promise<T>): Promise<T> => {
-        priorities.push(priority);
-        return run();
+    agentLike.vmReconcileDispatcher = {
+      dispatch: async <T>(_key: string, source: string): Promise<T> => {
+        priorities.push(source === 'periodic' ? 'background' : 'foreground');
+        return SwmHostModeMethods.prototype.executeVmReconcileForCg.call(
+          agentLike,
+          TEST_CG,
+          source,
+        ) as Promise<T>;
       },
     };
     agentLike.vmReconcileEnabled = () => true;
     agentLike.chain = { getContextGraphKCCount: async () => 0n };
+    agentLike.ensureVmReconcileDispatcher = SwmHostModeMethods.prototype.ensureVmReconcileDispatcher;
+    agentLike.resolveVmReconcileTarget = SwmHostModeMethods.prototype.resolveVmReconcileTarget;
+    agentLike.createVmReconcileDeps = SwmHostModeMethods.prototype.createVmReconcileDeps;
+    agentLike.toContextGraphReconcileResult = SwmHostModeMethods.prototype.toContextGraphReconcileResult;
+    agentLike.emitVmReconcileTelemetry = SwmHostModeMethods.prototype.emitVmReconcileTelemetry;
     agentLike.healStrandedScopedKCs = SwmHostModeMethods.prototype.healStrandedScopedKCs;
     agentLike.reconcileChainOrdinal = async (_lcg: string, _ocg: bigint, ordinal: number) => {
       ordinalAttempts.push(ordinal);

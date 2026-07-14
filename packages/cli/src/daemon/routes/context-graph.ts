@@ -61,6 +61,8 @@ import {
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
   loadOpWallets,
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
   VmReconcileUnavailableError,
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -1599,6 +1601,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
       if (err instanceof ContextGraphOnChainIdUnresolvedError) {
         return jsonResponse(res, 409, { error: message });
+      }
+      if (err instanceof VmReconcileQueueFullError) {
+        return jsonResponse(res, 429, { error: message });
+      }
+      if (err instanceof VmReconcileQueueClosedError) {
+        return jsonResponse(res, 503, { error: message });
       }
       if (err instanceof VmReconcileUnavailableError) {
         return jsonResponse(res, 503, { error: message });

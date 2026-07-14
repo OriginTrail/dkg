@@ -3,6 +3,8 @@ import { createServer, type Server } from 'node:http';
 import {
   ContextGraphNotFoundError,
   ContextGraphOnChainIdUnresolvedError,
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
   VmReconcileUnavailableError,
 } from '@origintrail-official/dkg-agent';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
@@ -140,6 +142,24 @@ describe('context graph targeted reconcile route', () => {
 
     expect(result.status).toBe(503);
     expect(result.body.error).toContain('unavailable');
+  });
+
+  it('returns 429 when the bounded reconcile dispatcher is full', async () => {
+    const result = await request(async () => {
+      throw new VmReconcileQueueFullError(256);
+    }, { contextGraphId: 'target-cg' });
+
+    expect(result.status).toBe(429);
+    expect(result.body.error).toContain('queue is full');
+  });
+
+  it('returns 503 once reconcile admission closes for shutdown', async () => {
+    const result = await request(async () => {
+      throw new VmReconcileQueueClosedError();
+    }, { contextGraphId: 'target-cg' });
+
+    expect(result.status).toBe(503);
+    expect(result.body.error).toContain('closed');
   });
 
   it('rejects an agent-scoped token before exposing or enqueueing node-wide graph work', async () => {

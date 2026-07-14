@@ -61,9 +61,10 @@ interface AgentInternals {
   }>;
   runVmReconcileSweep(): Promise<void>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
-  vmReconcileScheduler: {
+  vmReconcileDispatcher: {
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
+    dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
   } | null;
   store: TripleStore;
   chain: MockChainAdapter & {
@@ -1646,7 +1647,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const liveTriggered: string[] = [];
     const periodicTriggered: string[] = [];
-    internals.vmReconcileScheduler = {
+    internals.vmReconcileDispatcher = {
       triggerLive: (cg: string) => { liveTriggered.push(cg); },
       triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
     };
@@ -1688,7 +1689,36 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(reconcileOrdinal.calls).toEqual([]);
   });
 
-  it('maps periodic work to background and live/manual work to foreground admission', async () => {
+  it('reports a durable watermark ahead of the chain head without ordinal work', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkAhead', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    internals.subscribedContextGraphs.set('evidence-ahead', {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '323',
+      lastReconciledOrdinal: 5,
+    });
+    chain.getContextGraphKCCount = async () => 3n;
+    const reconcileOrdinal = recorder(async () => {
+      throw new Error('watermark-ahead evidence must not enter ordinal reconciliation');
+    });
+    (internals as any).reconcileChainOrdinal = reconcileOrdinal;
+
+    const result = await internals.runVmReconcileForCg('evidence-ahead', 'manual');
+
+    expect(result).toMatchObject({
+      status: 'watermark-ahead',
+      attempted: false,
+      headOrdinal: 3,
+      watermarkBefore: 5,
+      watermarkAfter: 5,
+    });
+    expect(reconcileOrdinal.calls).toEqual([]);
+  });
+
+  it('routes periodic, live, and manual work through the unified dispatcher', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'CoreFillAdmissionPriority', chainAdapter: chain });
     stubNode(agent);
@@ -1701,20 +1731,19 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     chain.getContextGraphKCCount = async () => 0n;
 
-    const priorities: string[] = [];
-    (internals as any).vmReconcileWorkQueue = {
-      enqueue: async <T>(priority: string, run: () => Promise<T>): Promise<T> => {
-        priorities.push(priority);
-        return run();
+    const sources: string[] = [];
+    (internals as any).vmReconcileDispatcher = {
+      dispatch: async (_key: string, source: string) => {
+        sources.push(source);
+        return {};
       },
     };
-    (internals as any).healStrandedScopedKCs = async () => undefined;
 
     await internals.runVmReconcileForCg('priority-current', 'periodic');
     await internals.runVmReconcileForCg('priority-current', 'live');
     await internals.runVmReconcileForCg('priority-current', 'manual');
 
-    expect(priorities).toEqual(['background', 'foreground', 'foreground']);
+    expect(sources).toEqual(['periodic', 'live', 'manual']);
   });
 
   it('a host-only reconcile promotes the missed KA to VM and emits core-fill', async () => {

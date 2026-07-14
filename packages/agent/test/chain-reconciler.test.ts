@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   reconcileContextGraph,
-  VmReconcileScheduler,
-  VmReconcileWorkQueue,
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+  VmReconcileDispatcher,
   RecentUalSet,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
@@ -164,10 +165,10 @@ describe('reconcileContextGraph — sweep', () => {
   });
 });
 
-describe('VmReconcileScheduler', () => {
+describe('VmReconcileDispatcher scheduling', () => {
   it('passes the trigger source to the scheduled run', async () => {
     const observed: string[] = [];
-    const scheduler = new VmReconcileScheduler(
+    const scheduler = new VmReconcileDispatcher(
       async (_key, source) => { observed.push(source); },
       () => undefined,
     );
@@ -181,7 +182,7 @@ describe('VmReconcileScheduler', () => {
   it('collapses a successful live burst into one run plus one trailing run', async () => {
     let runs = 0;
     let resolveCurrent!: () => void;
-    const scheduler = new VmReconcileScheduler(
+    const scheduler = new VmReconcileDispatcher(
       async () => {
         runs += 1;
         await new Promise<void>((resolve) => {
@@ -192,10 +193,13 @@ describe('VmReconcileScheduler', () => {
     );
 
     const first = scheduler.triggerLive('cg');
-    void scheduler.triggerLive('cg');
-    void scheduler.triggerLive('cg');
-    void scheduler.triggerLive('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runs).toBe(1);
+    const trailing = [
+      scheduler.triggerLive('cg'),
+      scheduler.triggerLive('cg'),
+      scheduler.triggerLive('cg'),
+    ];
 
     resolveCurrent();
     await first;
@@ -203,7 +207,8 @@ describe('VmReconcileScheduler', () => {
     expect(runs).toBe(2);
 
     resolveCurrent();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.all(trailing);
+    await scheduler.waitForIdle();
     expect(runs).toBe(2);
     expect(scheduler.isInFlight('cg')).toBe(false);
   });
@@ -213,7 +218,7 @@ describe('VmReconcileScheduler', () => {
     const failures: Array<{ key: string; error: unknown }> = [];
     let resolveCurrent!: () => void;
     let rejectCurrent!: (error: Error) => void;
-    const scheduler = new VmReconcileScheduler(
+    const scheduler = new VmReconcileDispatcher(
       async () => {
         runs += 1;
         await new Promise<void>((resolve, reject) => {
@@ -226,6 +231,7 @@ describe('VmReconcileScheduler', () => {
 
     const failure = new Error('store deadline exceeded');
     const first = scheduler.triggerLive('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
     void scheduler.triggerLive('cg'); // queues one trailing pass while active
     rejectCurrent(failure);
     await first;
@@ -237,11 +243,13 @@ describe('VmReconcileScheduler', () => {
     expect(runs).toBe(1); // live nudge during the failure hold is ignored
 
     const retry = scheduler.triggerPeriodic('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runs).toBe(2); // the periodic reliability path retries normally
     resolveCurrent();
     await retry;
 
     const resumedLive = scheduler.triggerLive('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runs).toBe(3); // successful periodic recovery releases the live hold
     resolveCurrent();
     await resumedLive;
@@ -251,7 +259,7 @@ describe('VmReconcileScheduler', () => {
     let runs = 0;
     let resolveCurrent!: () => void;
     let rejectCurrent!: (error: Error) => void;
-    const scheduler = new VmReconcileScheduler(
+    const scheduler = new VmReconcileDispatcher(
       async () => {
         runs += 1;
         await new Promise<void>((resolve, reject) => {
@@ -263,9 +271,11 @@ describe('VmReconcileScheduler', () => {
     );
 
     const first = scheduler.triggerLive('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
     void scheduler.triggerPeriodic('cg');
     rejectCurrent(new Error('store deadline exceeded'));
     await first;
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(runs).toBe(2); // queued periodic pass starts despite the live failure hold
     resolveCurrent();
@@ -276,7 +286,7 @@ describe('VmReconcileScheduler', () => {
   it('isolates the live failure hold per context graph', async () => {
     const ran: string[] = [];
     const failures: string[] = [];
-    const scheduler = new VmReconcileScheduler(
+    const scheduler = new VmReconcileDispatcher(
       async (key) => {
         ran.push(key);
         if (key === 'cg-a') throw new Error('cg-a unavailable');
@@ -293,42 +303,168 @@ describe('VmReconcileScheduler', () => {
   });
 });
 
-describe('VmReconcileWorkQueue', () => {
+describe('VmReconcileDispatcher admission', () => {
   it('serializes cross-CG work and lets foreground work pass periodic backlog', async () => {
-    const queue = new VmReconcileWorkQueue(1);
     const order: string[] = [];
     let releaseFirst!: () => void;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'first') {
+        order.push('first:start');
+        await new Promise<void>((resolve) => { releaseFirst = resolve; });
+        order.push('first:end');
+      } else {
+        order.push(key);
+      }
+    }, () => undefined, { concurrency: 1 });
 
-    const first = queue.enqueue('background', async () => {
-      order.push('first:start');
-      await new Promise<void>((resolve) => { releaseFirst = resolve; });
-      order.push('first:end');
-    });
-    const second = queue.enqueue('background', async () => {
-      order.push('second');
-    });
-    const foreground = queue.enqueue('foreground', async () => {
-      order.push('foreground');
-    });
+    const first = dispatcher.dispatch('first', 'periodic');
+    const second = dispatcher.dispatch('second', 'periodic');
+    const foreground = dispatcher.dispatch('foreground', 'live');
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(queue.snapshot()).toEqual({ active: 1, queued: 2 });
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 2, closed: false });
     releaseFirst();
     await Promise.all([first, second, foreground]);
 
     expect(order).toEqual(['first:start', 'first:end', 'foreground', 'second']);
-    expect(queue.snapshot()).toEqual({ active: 0, queued: 0 });
+    expect(dispatcher.snapshot()).toEqual({ active: 0, queued: 0, closed: false });
   });
 
   it('keeps draining after a failed reconciliation job', async () => {
-    const queue = new VmReconcileWorkQueue(1);
     const failure = new Error('store unavailable');
-    const first = queue.enqueue('background', async () => { throw failure; });
-    const second = queue.enqueue('background', async () => 'recovered');
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'first') throw failure;
+      return 'recovered';
+    }, () => undefined, { concurrency: 1 });
+    const first = dispatcher.dispatch('first', 'periodic');
+    const second = dispatcher.dispatch('second', 'periodic');
 
     await expect(first).rejects.toBe(failure);
     await expect(second).resolves.toBe('recovered');
-    expect(queue.snapshot()).toEqual({ active: 0, queued: 0 });
+    expect(dispatcher.snapshot()).toEqual({ active: 0, queued: 0, closed: false });
+  });
+
+  it('upgrades a queued periodic CG to live priority in place', async () => {
+    const order: string[] = [];
+    let releaseBlocker!: () => void;
+    const dispatcher = new VmReconcileDispatcher(
+      async (key, source) => {
+        if (key === 'blocker') {
+          await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+          return;
+        }
+        order.push(`${key}:${source}`);
+      },
+      () => undefined,
+      { concurrency: 1 },
+    );
+    const blocker = dispatcher.dispatch('blocker', 'periodic');
+
+    const periodicA = dispatcher.triggerPeriodic('a');
+    const periodicB = dispatcher.triggerPeriodic('b');
+    const liveB = dispatcher.triggerLive('b');
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatcher.pendingSource('b')).toBe('live');
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 2, closed: false });
+    releaseBlocker();
+    await Promise.all([blocker, periodicA, periodicB, liveB]);
+
+    expect(order).toEqual(['b:live', 'a:periodic']);
+  });
+
+  it('coalesces repeated manual requests for one queued context graph', async () => {
+    let releaseBlocker!: () => void;
+    let manualRuns = 0;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'blocker') {
+        await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        return 'blocker';
+      }
+      if (key === 'manual-cg') {
+        manualRuns += 1;
+        return 'done';
+      }
+      return key;
+    }, () => undefined, { concurrency: 1, maxPending: 2 });
+    const blocker = dispatcher.dispatch('blocker', 'periodic');
+    const requests = Array.from({ length: 20 }, () => dispatcher.triggerManual('manual-cg'));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(new Set(requests).size).toBe(1);
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
+    releaseBlocker();
+    await blocker;
+    await expect(Promise.all(requests)).resolves.toEqual(Array(20).fill('done'));
+    expect(manualRuns).toBe(1);
+  });
+
+  it('rejects excess distinct work with a typed overload error', async () => {
+    let releaseBlocker!: () => void;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'blocker') await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    }, () => undefined, { concurrency: 1, maxPending: 1 });
+    const blocker = dispatcher.dispatch('blocker', 'periodic');
+    const admitted = dispatcher.triggerManual('admitted');
+
+    await expect(dispatcher.triggerManual('over-limit'))
+      .rejects.toBeInstanceOf(VmReconcileQueueFullError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseBlocker();
+    await Promise.all([blocker, admitted]);
+  });
+
+  it('admits periodic work within a bounded foreground burst', async () => {
+    const order: string[] = [];
+    let releaseBlocker!: () => void;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'blocker') {
+        await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        return;
+      }
+      order.push(key);
+    }, () => undefined, { concurrency: 1, maxForegroundBurst: 2 });
+    const blocker = dispatcher.dispatch('blocker', 'periodic');
+    const periodic = dispatcher.dispatch('periodic', 'periodic');
+    const foreground = Array.from({ length: 5 }, (_, index) =>
+      dispatcher.triggerManual(`manual-${index}`));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseBlocker();
+    await Promise.all([blocker, periodic, ...foreground]);
+
+    expect(order.slice(0, 3)).toEqual(['manual-0', 'manual-1', 'periodic']);
+  });
+
+  it('cancels pending work and never starts it after the dispatcher closes', async () => {
+    let releaseActive!: () => void;
+    let queuedStarted = false;
+    const dispatcher = new VmReconcileDispatcher(async (key) => {
+      if (key === 'active') {
+        await new Promise<void>((resolve) => { releaseActive = resolve; });
+      } else if (key === 'queued') {
+        queuedStarted = true;
+      }
+    }, () => undefined, { concurrency: 1 });
+    const active = dispatcher.triggerManual('active');
+    const queued = dispatcher.triggerManual('queued');
+    const queuedOutcome = queued.catch((error) => error);
+
+    const closing = dispatcher.close();
+    let closed = false;
+    void closing.then(() => { closed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(await queuedOutcome).toBeInstanceOf(VmReconcileQueueClosedError);
+    await expect(dispatcher.triggerManual('late'))
+      .rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+    expect(queuedStarted).toBe(false);
+    expect(closed).toBe(false);
+
+    releaseActive();
+    await Promise.all([active, closing]);
+    expect(queuedStarted).toBe(false);
+    expect(dispatcher.snapshot()).toEqual({ active: 0, queued: 0, closed: true });
   });
 });
 
