@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   reconcileContextGraph,
-  ReconcileCoalescer,
+  VmReconcileScheduler,
   RecentUalSet,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
@@ -12,7 +12,7 @@ import { createCursorState } from '../src/reconcile-cursor.js';
  * Phase B — sweep + cursor orchestration (B.2/B.4). The cursor math itself is
  * covered by reconcile-cursor.test.ts; here we pin the sweep driver:
  * gap-fill, watermark-persist-only-on-move, reorg depth, pending-retry, plus
- * the coalescer and UAL dedupe.
+ * the VM scheduler and UAL dedupe.
  */
 
 function makeDeps(overrides: Partial<ChainReconcilerDeps> = {}): {
@@ -152,41 +152,119 @@ describe('reconcileContextGraph — sweep', () => {
   });
 });
 
-describe('ReconcileCoalescer', () => {
-  it('collapses a burst into one run plus a single trailing run', async () => {
+describe('VmReconcileScheduler', () => {
+  it('collapses a successful live burst into one run plus one trailing run', async () => {
     let runs = 0;
     let resolveCurrent!: () => void;
-    const coalescer = new ReconcileCoalescer(async () => {
-      runs += 1;
-      await new Promise<void>((r) => { resolveCurrent = r; });
-    });
+    const scheduler = new VmReconcileScheduler(
+      async () => {
+        runs += 1;
+        await new Promise<void>((resolve) => {
+          resolveCurrent = resolve;
+        });
+      },
+      () => undefined,
+    );
 
-    // First trigger starts a run (now in flight, awaiting resolveCurrent).
-    void coalescer.trigger('cg');
-    // 4 more triggers while in flight → mark "again", do NOT start new runs.
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
-    void coalescer.trigger('cg');
+    const first = scheduler.triggerLive('cg');
+    void scheduler.triggerLive('cg');
+    void scheduler.triggerLive('cg');
+    void scheduler.triggerLive('cg');
     expect(runs).toBe(1);
 
-    // Finish the first run → exactly one trailing run starts.
-    const r1 = resolveCurrent;
-    r1();
-    await new Promise((r) => setTimeout(r, 0));
+    resolveCurrent();
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runs).toBe(2);
 
-    // Finish the trailing run → no further runs (no triggers landed during it).
     resolveCurrent();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runs).toBe(2);
+    expect(scheduler.isInFlight('cg')).toBe(false);
   });
 
-  it('runs independently per key', async () => {
+  it('suppresses queued/live retries after failure but retries on the periodic path', async () => {
+    let runs = 0;
+    const failures: Array<{ key: string; error: unknown }> = [];
+    let resolveCurrent!: () => void;
+    let rejectCurrent!: (error: Error) => void;
+    const scheduler = new VmReconcileScheduler(
+      async () => {
+        runs += 1;
+        await new Promise<void>((resolve, reject) => {
+          resolveCurrent = resolve;
+          rejectCurrent = reject;
+        });
+      },
+      (key, error) => failures.push({ key, error }),
+    );
+
+    const failure = new Error('store deadline exceeded');
+    const first = scheduler.triggerLive('cg');
+    void scheduler.triggerLive('cg'); // queues one trailing pass while active
+    rejectCurrent(failure);
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(1); // failed pass does not immediately run the queued pass
+    expect(failures).toEqual([{ key: 'cg', error: failure }]);
+
+    await scheduler.triggerLive('cg');
+    expect(runs).toBe(1); // live nudge during the failure hold is ignored
+
+    const retry = scheduler.triggerPeriodic('cg');
+    expect(runs).toBe(2); // the periodic reliability path retries normally
+    resolveCurrent();
+    await retry;
+
+    const resumedLive = scheduler.triggerLive('cg');
+    expect(runs).toBe(3); // successful periodic recovery releases the live hold
+    resolveCurrent();
+    await resumedLive;
+  });
+
+  it('preserves a periodic retry queued behind a failing live pass', async () => {
+    let runs = 0;
+    let resolveCurrent!: () => void;
+    let rejectCurrent!: (error: Error) => void;
+    const scheduler = new VmReconcileScheduler(
+      async () => {
+        runs += 1;
+        await new Promise<void>((resolve, reject) => {
+          resolveCurrent = resolve;
+          rejectCurrent = reject;
+        });
+      },
+      () => undefined,
+    );
+
+    const first = scheduler.triggerLive('cg');
+    void scheduler.triggerPeriodic('cg');
+    rejectCurrent(new Error('store deadline exceeded'));
+    await first;
+
+    expect(runs).toBe(2); // queued periodic pass starts despite the live failure hold
+    resolveCurrent();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scheduler.isInFlight('cg')).toBe(false);
+  });
+
+  it('isolates the live failure hold per context graph', async () => {
     const ran: string[] = [];
-    const coalescer = new ReconcileCoalescer(async (key) => { ran.push(key); });
-    await Promise.all([coalescer.trigger('a'), coalescer.trigger('b')]);
-    expect(ran.sort()).toEqual(['a', 'b']);
+    const failures: string[] = [];
+    const scheduler = new VmReconcileScheduler(
+      async (key) => {
+        ran.push(key);
+        if (key === 'cg-a') throw new Error('cg-a unavailable');
+      },
+      (key) => failures.push(key),
+    );
+
+    await scheduler.triggerLive('cg-a');
+    await scheduler.triggerLive('cg-a'); // held after failure
+    await scheduler.triggerLive('cg-b'); // unrelated CG still runs immediately
+
+    expect(ran).toEqual(['cg-a', 'cg-b']);
+    expect(failures).toEqual(['cg-a']);
   });
 });
 

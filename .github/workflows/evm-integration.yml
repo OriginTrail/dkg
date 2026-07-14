@@ -3,30 +3,14 @@ name: EVM Integration Tests
 on:
   push:
     branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
-    paths:
-      - 'packages/chain/**'
-      - 'packages/publisher/**'
-      - 'packages/agent/**'
-      - 'packages/core/**'
-      - 'packages/evm-module/contracts/**'
-      - 'packages/evm-module/deploy/**'
-      - 'scripts/test-evm-integration.sh'
-      - '.github/workflows/evm-integration.yml'
   pull_request:
     branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
-    paths:
-      - 'packages/chain/**'
-      - 'packages/publisher/**'
-      - 'packages/agent/**'
-      - 'packages/core/**'
-      - 'packages/evm-module/contracts/**'
-      - 'packages/evm-module/deploy/**'
-      - 'scripts/test-evm-integration.sh'
-      - '.github/workflows/evm-integration.yml'
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
   workflow_dispatch:
 
 concurrency:
-  group: evm-integration-${{ github.ref }}
+  group: evm-integration-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 # Minimum-needed token scope (see ci.yml header for rationale).
@@ -34,19 +18,90 @@ permissions:
   contents: read
 
 jobs:
+  plan:
+    name: Plan EVM delta
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      evm_matrix: ${{ steps.plan.outputs.evm_matrix }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
+    steps:
+      # The merge candidate is untrusted input: use it only to calculate the
+      # changed-file set, and never execute its CI planner or validator here.
+      - name: Checkout merge candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          path: candidate
+      # Keep CI policy outside the merge candidate and pin it to an immutable,
+      # reviewed commit. Policy updates deliberately rotate this SHA.
+      - name: Checkout trusted CI controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: OriginTrail/dkg
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          persist-credentials: false
+          path: trusted-ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/lib
+          sparse-checkout-cone-mode: false
+      - name: Compute fail-closed EVM plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_SHA: ${{ github.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
+          DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && github.base_ref == 'main' }}
+        run: |
+          set -euo pipefail
+          CHANGES_FILE="${RUNNER_TEMP}/ci-name-status.z"
+          : > "${CHANGES_FILE}"
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            if [[ -z "${MERGE_SHA}" ]]; then
+              echo "::error::Missing pull-request merge SHA"
+              exit 1
+            fi
+            git -C candidate cat-file -e "${MERGE_SHA}^{commit}"
+            # First parent of the synthetic merge = the CURRENT base tip; the
+            # event's pull_request.base.sha is a stale snapshot that misroutes
+            # PRs to full CI after unrelated merges to base (see ci.yml).
+            BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"
+            git -C candidate diff --name-status -z \
+              "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
+          fi
+
+          PLAN_EVENT="${EVENT_NAME}"
+          if [[ "${EVENT_NAME}" == "pull_request" && "${DELTA_ENABLED}" != "true" ]]; then
+            PLAN_EVENT="pull_request_delta_disabled"
+          fi
+
+          node trusted-ci/scripts/ci/plan-ci.mjs \
+            --event "${PLAN_EVENT}" \
+            --changes-z "${CHANGES_FILE}" \
+            --labels-json "${PR_LABELS:-[]}" \
+            --sample-key "${SAMPLE_KEY}" \
+            --github-output "${GITHUB_OUTPUT}" \
+            --summary "${GITHUB_STEP_SUMMARY}"
+
   # All three matrix scopes (chain, publisher, agent) are TORNADO-tier per
   # `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1 — this workflow drives
   # them against a real Hardhat node to catch EVM-side regressions the
   # unit-test lanes in `ci.yml` can't reach.
   evm-integration:
     name: "Tornado EVM integration: ${{ matrix.scope }}"
+    needs: plan
+    if: needs.plan.outputs.evm_matrix != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     strategy:
       fail-fast: false
       matrix:
-        scope: [chain, publisher, agent]
+        scope: ${{ fromJSON(needs.plan.outputs.evm_matrix) }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -76,5 +131,32 @@ jobs:
       - name: Build packages
         run: pnpm run build:packages
 
-      - name: Run EVM integration tests (${{ matrix.scope }})
-        run: ./scripts/test-evm-integration.sh ${{ matrix.scope }}
+      - name: Run selected EVM integration scope
+        env:
+          EVM_SCOPE: ${{ matrix.scope }}
+        run: ./scripts/test-evm-integration.sh "${EVM_SCOPE}"
+
+  evm-gate:
+    name: EVM integration gate
+    if: always()
+    needs: [plan, evm-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout trusted CI controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: OriginTrail/dkg
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          persist-credentials: false
+          path: trusted-ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/lib
+          sparse-checkout-cone-mode: false
+      - name: Verify selected EVM scopes completed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLAN_JSON: ${{ needs.plan.outputs.plan_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node trusted-ci/scripts/ci/assert-ci-results.mjs --workflow evm

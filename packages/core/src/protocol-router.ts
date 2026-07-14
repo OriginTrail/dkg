@@ -148,6 +148,15 @@ export interface ProtocolRouterOptions {
   admissionExemptProtocols?: Iterable<string>;
 }
 
+/** Per-protocol overrides applied to an inbound registration. */
+export interface ProtocolRegistrationOptions {
+  /**
+   * Maximum request bytes buffered before the inbound stream is aborted.
+   * Defaults to the router-wide {@link ProtocolRouter.maxReadBytes} value.
+   */
+  maxReadBytes?: number;
+}
+
 export class QuietRetryableHandlerError extends Error {
   constructor(message: string) {
     super(message);
@@ -412,11 +421,15 @@ export class ProtocolRouter {
     }
   }
 
-  register(protocolId: string, handler: DKGStreamHandler): void {
+  register(
+    protocolId: string,
+    handler: DKGStreamHandler,
+    options?: ProtocolRegistrationOptions,
+  ): void {
     this.handlers.set(protocolId, handler);
     const libp2p = this.node.libp2p;
 
-    const limit = this.maxReadBytes;
+    const limit = options?.maxReadBytes ?? this.maxReadBytes;
     libp2p.handle(protocolId, async (stream: Stream, connection) => {
       // Codex (#669#discussion_r3302188320): cache the stopSignal once at
       // handler entry and reuse it for every step of the inbound lifecycle.

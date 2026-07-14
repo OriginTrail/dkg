@@ -3,7 +3,11 @@ import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
-import { runSyncOnConnect, SyncOnConnectPostSyncError } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  runSyncOnConnect,
+  SyncOnConnectPostSyncError,
+  type SyncOnConnectPeerOutcome,
+} from '../src/sync/on-connect/sync-on-connect.js';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -93,6 +97,70 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: SyncOnConnectPeerOutcome[] = [];
+    let sharedRuns = 0;
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['first', 'second'],
+      syncFromPeer: async () => ({
+        insertedTriples: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
+        deferredBackpressure: 1,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => {
+        sharedRuns += 1;
+        return 0;
+      },
+      logInfo: noopLog,
+      onPeerSynced: (_peerId, accounting) => {
+        if (accounting) synced.push(accounting);
+      },
+    });
+
+    expect(outcome).toBe('deferred-backpressure');
+    expect(synced).toEqual([]);
+    expect(sharedRuns).toBe(0);
+  });
+
+  it('records partial progress but not freshness when the remaining batch is deferred', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: SyncOnConnectPeerOutcome[] = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['first', 'second'],
+      syncFromPeer: async () => ({
+        insertedTriples: 1,
+        insertedDataTriples: 1,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+        deferredBackpressure: 1,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+      onPeerSynced: (_peerId, accounting) => {
+        if (accounting) synced.push(accounting);
+      },
+    });
+
+    expect(outcome).toBe('deferred-backpressure');
+    expect(synced).toEqual([{ fresh: false, progress: true }]);
+  });
+
   it('accepts omitted knownCorePeerIdsV2 for backwards-compatible call sites', async () => {
     const remotePeer = freshPeerIdString();
     const knownCorePeerIds = new Set<string>();

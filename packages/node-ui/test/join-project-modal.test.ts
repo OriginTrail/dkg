@@ -3,8 +3,17 @@ import {
   parseInviteCode,
   validateInvite,
   formatJoinRequestError,
+  joinRequestWasApproved,
 } from '../src/ui/components/Modals/JoinProjectModal.js';
 import { HttpError } from '../src/ui/api.js';
+
+describe('JoinProjectModal join outcome', () => {
+  it('treats automatic and already-member responses as immediately approved', () => {
+    expect(joinRequestWasApproved({ status: 'approved', autoApproved: true })).toBe(true);
+    expect(joinRequestWasApproved({ status: 'already-member', alreadyMember: true })).toBe(true);
+    expect(joinRequestWasApproved({ status: 'pending' })).toBe(false);
+  });
+});
 
 describe('JoinProjectModal invite parsing', () => {
   describe('V10 peer-id invites', () => {

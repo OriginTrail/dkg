@@ -1,5 +1,6 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { registerSyncHandler } from '../../src/sync/responder/sync-handler.js';
 import type { SyncResponderSnapshotBudgetOptions } from '../../src/sync/responder/snapshot-budget.js';
 import type { SyncRequestEnvelope } from '../../src/sync/auth/request-build.js';
@@ -43,6 +44,8 @@ export function registerTestSyncHandler(
     syncPageSize?: number;
     snapshotBudget?: SyncResponderSnapshotBudgetOptions;
     authorize?: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
+    logDebug?: (ctx: OperationContext, message: string) => void;
+    publicSnapshotStore?: WorkspacePublicSnapshotStore;
   } = {},
 ): CapturedSyncHandler {
   const cap = captureSyncHandler();
@@ -53,11 +56,12 @@ export function registerTestSyncHandler(
     syncPageSize: options.syncPageSize ?? 5000,
     sharedMemoryTtlMs: options.sharedMemoryTtlMs ?? 0,
     store,
+    publicSnapshotStore: options.publicSnapshotStore,
     peerId: 'self-peer',
     parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
     authorizeSyncRequest: options.authorize ?? (async () => true),
     logWarn: noopLog,
-    logDebug: noopLog,
+    logDebug: options.logDebug ?? noopLog,
     snapshotBudget: options.snapshotBudget,
   });
   return cap;

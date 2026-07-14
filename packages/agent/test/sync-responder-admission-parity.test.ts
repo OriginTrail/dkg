@@ -229,6 +229,9 @@ describe('sync responder graph admission planner', () => {
       q(cgMeta, `${cgPrefix}/context`, SCHEMA_NAME, '"context"'),
       q(cgMeta, 'did:dkg:activity:1', 'http://schema.org/name', '"activity"'),
       q(cgMeta, 'did:dkg:join-request:1', 'http://schema.org/name', '"join"'),
+      // Even a malformed moderation row that also matches a normally admitted
+      // lifecycle branch must remain curator-local.
+      q(cgMeta, 'did:dkg:join-request:1', `${DKG_NS}memoryLayer`, `"${MemoryLayer.VerifiableMemory}"`),
       q(cgMeta, 'urn:lifecycle:vm', `${DKG_NS}memoryLayer`, `"${MemoryLayer.VerifiableMemory}"`),
       q(cgMeta, 'urn:lifecycle:vm', `${DKG_NS}assertionGraph`, vmAssertion),
       q(cgMeta, 'urn:lifecycle:vm', `${DKG_NS}assertionName`, '"final"'),
@@ -255,7 +258,7 @@ describe('sync responder graph admission planner', () => {
     expect(out).toContain(`${DKG_NS}SubGraph`);
     expect(out).toContain(SCHEMA_NAME);
     expect(out).toContain('did:dkg:activity:1');
-    expect(out).toContain('did:dkg:join-request:1');
+    expect(out).not.toContain('did:dkg:join-request:1');
     expect(out).toContain('urn:lifecycle:vm');
     expect(out).toContain(vmAssertion);
     expect(out).toContain('urn:event:vm');
