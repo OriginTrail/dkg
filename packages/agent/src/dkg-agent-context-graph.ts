@@ -1819,8 +1819,6 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
-    this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
-
     if (curatorAgentAddress) {
       this.upsertContextGraphMember({
         contextGraphId,
