@@ -1,8 +1,38 @@
 import { join } from 'node:path';
+import { ethers } from 'ethers';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import {
+  EVMChainAdapter,
+  NoChainAdapter,
+  buildKnowledgeAssetUal,
+  mergeRpcUsageWindows,
+  type ChainAdapter,
+  type OnChainPublishResult,
+  type RpcUsageWindow,
+} from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  ACKCollector,
+  AsyncLiftRunner,
+  DKGPublisher,
+  FileWorkspacePublicSnapshotStore,
+  TripleStoreAsyncLiftPublisher,
+  wrapAsRpcPreconditionIfApplicable,
+  type ACKTransport,
+  type ACKTransportFactory,
+  type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  type AsyncKnowledgeAssetVmPublishRecoveryResolver,
+  type AsyncLiftPublishExecutionInput,
+  type AsyncLiftPublisher,
+  type AsyncLiftPublisherConfig,
+  type AsyncLiftPublisherRecoveryResult,
+  type LiftJobBroadcast,
+  type LiftJobHex,
+  type LiftJobIncluded,
+  type PublishOptions,
+  type V10ACKProviderParams,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, loadResolvedNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import {
@@ -145,8 +175,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   log: (message: string) => void;
   ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
-  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
-  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -164,8 +193,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       config: args.config,
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
-      knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
-      knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
+      knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
     });
     await runtime.runner.start();
     logPublisherWalletAttribution(runtime.wallets, args.log);
@@ -270,8 +298,7 @@ interface PublisherRuntimeBaseArgs {
   ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
-  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
-  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
 }
@@ -354,8 +381,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
-  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
-  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -368,11 +394,36 @@ export async function createPublisherRuntimeFromAgent(args: {
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
-    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
-    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
+    knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
     publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
+}
+
+/**
+ * Bind every named-KA queue lifecycle callback to the wallet that owns the
+ * claimed job. Keeping this as one handler prevents execution, preflight, and
+ * recovery from accidentally selecting different publisher instances.
+ */
+export function scopeKnowledgeAssetVmPublishHandler(
+  publishers: Map<string, DKGPublisher>,
+  handler: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'],
+): AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'] {
+  if (!handler) return undefined;
+  const publisherFor = (walletId: string): DKGPublisher => {
+    const publisher = publishers.get(walletId);
+    if (!publisher) throw new Error(`No publisher configured for wallet ${walletId}`);
+    return publisher;
+  };
+  return {
+    execute: (input) => handler.execute({ ...input, publisher: publisherFor(input.walletId) }),
+    preflight: handler.preflight
+      ? (input) => handler.preflight!({ ...input, publisher: publisherFor(input.walletId) })
+      : undefined,
+    finalizeRecovered: handler.finalizeRecovered
+      ? (input) => handler.finalizeRecovered!({ ...input, publisher: publisherFor(input.walletId) })
+      : undefined,
+  };
 }
 
 async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): Promise<PublisherRuntime> {
@@ -411,28 +462,18 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     return typeof chain?.resolvePublishByTxHash === 'function';
   });
 
+  const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
+    publishers,
+    args.knowledgeAssetVmPublishHandler,
+  );
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
     chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
+    knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
+      ? createKnowledgeAssetVmPublishRecoveryResolver(publishers)
+      : undefined,
     maxRetries: args.maxRetries,
     publicSnapshotStore: args.publicSnapshotStore,
-    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight
-      ? async (input) => {
-          const publisher = publishers.get(input.walletId);
-          if (!publisher) {
-            throw new Error(`No publisher configured for wallet ${input.walletId}`);
-          }
-          return args.knowledgeAssetVmPublishPreflight!({ ...input, publisher });
-        }
-      : undefined,
-    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor
-      ? async (input) => {
-          const publisher = publishers.get(input.walletId);
-          if (!publisher) {
-            throw new Error(`No publisher configured for wallet ${input.walletId}`);
-          }
-          return args.knowledgeAssetVmPublishExecutor!({ ...input, publisher });
-        }
-      : undefined,
+    knowledgeAssetVmPublishHandler: scopedKnowledgeAssetVmPublishHandler,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {
@@ -649,40 +690,125 @@ function createV10ACKProviderForPublisher(
   };
 }
 
-function createChainRecoveryResolver(
+export function createChainRecoveryResolver(
   publishers: Map<string, DKGPublisher>,
 ): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftPublisherRecoveryResult | null> {
   return async (job) => {
-    const publisher = publishers.get(job.broadcast.walletId);
-    if (!publisher) return null;
-    const chain = (publisher as unknown as { chain?: { resolvePublishByTxHash?: (txHash: string) => Promise<any> } }).chain;
-    if (!chain?.resolvePublishByTxHash) return null;
-    let result: any;
+    const recovered = await resolveOnChainPublish(job, publishers);
+    return recovered
+      ? mapOnChainPublishResultToLiftRecovery(
+          recovered.result,
+          recovered.chain.chainId,
+          recovered.knowledgeAssetsContract,
+        )
+      : null;
+  };
+}
+
+export function createKnowledgeAssetVmPublishRecoveryResolver(
+  publishers: Map<string, DKGPublisher>,
+): AsyncKnowledgeAssetVmPublishRecoveryResolver {
+  return async (job) => {
+    const recovered = await resolveOnChainPublish(job, publishers);
+    return recovered
+      ? mapOnChainPublishResultToKnowledgeAssetVmRecovery(
+          recovered.result,
+          recovered.chain.chainId,
+          recovered.knowledgeAssetsContract,
+        )
+      : null;
+  };
+}
+
+function asLiftJobHex(value: string): LiftJobHex | null {
+  return ethers.isHexString(value) ? value as LiftJobHex : null;
+}
+
+function asLiftJobBigInt(value: bigint | undefined): `${bigint}` | undefined {
+  return value?.toString() as `${bigint}` | undefined;
+}
+
+export function mapOnChainPublishResultToLiftRecovery(
+  result: OnChainPublishResult,
+  chainId: string,
+  knowledgeAssetsContract: string,
+): AsyncLiftPublisherRecoveryResult | null {
+  const txHash = asLiftJobHex(result.txHash);
+  const publisherAddress = asLiftJobHex(result.publisherAddress);
+  if (!txHash || !publisherAddress) return null;
+
+  const recoveredKaId = result.kaId ?? result.startKAId ?? result.batchId;
+  return {
+    inclusion: {
+      txHash,
+      blockNumber: result.blockNumber,
+      blockTimestamp: result.blockTimestamp,
+    },
+    finalization: {
+      mode: 'published',
+      txHash,
+      ual: buildKnowledgeAssetUal(chainId, knowledgeAssetsContract, recoveredKaId),
+      batchId: result.batchId.toString() as `${bigint}`,
+      startKAId: asLiftJobBigInt(result.startKAId),
+      endKAId: asLiftJobBigInt(result.endKAId),
+      publisherAddress,
+    },
+  };
+}
+
+export function mapOnChainPublishResultToKnowledgeAssetVmRecovery(
+  result: OnChainPublishResult,
+  chainId: string,
+  knowledgeAssetsContract: string,
+): AsyncKnowledgeAssetVmPublishRecoveryEvidence | null {
+  const recovery = mapOnChainPublishResultToLiftRecovery(
+    result,
+    chainId,
+    knowledgeAssetsContract,
+  );
+  if (!recovery || !result.merkleRoot || !result.authorAddress) return null;
+
+  const merkleRoot = asLiftJobHex(ethers.hexlify(result.merkleRoot));
+  const authorAddress = asLiftJobHex(result.authorAddress);
+  if (!merkleRoot || !authorAddress) return null;
+  return {
+    ...recovery,
+    publishProof: { merkleRoot, authorAddress },
+  };
+}
+
+async function resolveOnChainPublish(
+  job: LiftJobBroadcast | LiftJobIncluded,
+  publishers: Map<string, DKGPublisher>,
+): Promise<{
+  result: OnChainPublishResult;
+  chain: ChainAdapter;
+  knowledgeAssetsContract: string;
+} | null> {
+  const publisher = publishers.get(job.broadcast.walletId);
+  if (!publisher) return null;
+  const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
+  if (!chain?.resolvePublishByTxHash) return null;
+
+  let result: OnChainPublishResult | null;
+  try {
+    result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
+  } catch {
+    // Transient RPC/provider errors — treat as inconclusive (null) so the
+    // recovery timeout mechanism handles it rather than crashing the daemon.
+    return null;
+  }
+  if (!result) return null;
+
+  let knowledgeAssetsContract = result.knowledgeAssetsContract;
+  if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {
     try {
-      result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
+      knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
     } catch {
-      // Transient RPC/provider errors — treat as inconclusive (null) so the
-      // recovery timeout mechanism handles it rather than crashing the daemon.
       return null;
     }
-    if (!result) return null;
-
-    return {
-      inclusion: {
-        txHash: result.txHash as `0x${string}`,
-        blockNumber: result.blockNumber,
-        blockTimestamp: result.blockTimestamp,
-      },
-      finalization: {
-        mode: 'published',
-        txHash: result.txHash as `0x${string}`,
-        batchId: result.batchId.toString() as `${bigint}`,
-        startKAId: result.startKAId?.toString() as `${bigint}` | undefined,
-        endKAId: result.endKAId?.toString() as `${bigint}` | undefined,
-        publisherAddress: result.publisherAddress as `0x${string}`,
-      },
-    };
-  };
+  }
+  return knowledgeAssetsContract ? { result, chain, knowledgeAssetsContract } : null;
 }
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {

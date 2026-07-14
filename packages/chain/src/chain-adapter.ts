@@ -171,6 +171,8 @@ export interface OnChainPublishResult {
   batchId: bigint;
   /** Greenfield: equals `batchId` when tokenId == kaId. */
   kaId?: bigint;
+  /** Merkle root emitted by the exact publish transaction being resolved. */
+  merkleRoot?: Uint8Array;
   /** `DKGKnowledgeAssets` contract address used in the UAL path segment. */
   knowledgeAssetsContract?: string;
   /** Absent for updates (no new KAs minted). */

@@ -488,9 +488,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const calls: unknown[] = [];
     const publisher = createPublisher({
       config: {
-        knowledgeAssetVmPublishExecutor: async (input) => {
-          calls.push(input);
-          return confirmedPublishResult();
+        knowledgeAssetVmPublishHandler: {
+          execute: async (input) => {
+            calls.push(input);
+            return confirmedPublishResult();
+          },
         },
       },
     });
@@ -567,13 +569,15 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const preflightCalls: unknown[] = [];
     const publisher = createPublisher({
       config: {
-        knowledgeAssetVmPublishPreflight: async (input) => {
-          preflightCalls.push(input);
-          return { action: 'noop', reason: 'already-published' };
-        },
-        knowledgeAssetVmPublishExecutor: async () => {
-          executorCalls++;
-          throw new Error('executor should not run for preflight no-op');
+        knowledgeAssetVmPublishHandler: {
+          preflight: async (input) => {
+            preflightCalls.push(input);
+            return { action: 'noop', reason: 'already-published' };
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run for preflight no-op');
+          },
         },
       },
     });
@@ -608,15 +612,17 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     let executorCalls = 0;
     const publisher = createPublisher({
       config: {
-        knowledgeAssetVmPublishPreflight: async () => {
-          throw Object.assign(
-            new Error('queued VM publish intent is stale'),
-            { code: 'PUBLISH_INTENT_STALE' },
-          );
-        },
-        knowledgeAssetVmPublishExecutor: async () => {
-          executorCalls++;
-          throw new Error('executor should not run for stale preflight');
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            throw Object.assign(
+              new Error('queued VM publish intent is stale'),
+              { code: 'PUBLISH_INTENT_STALE' },
+            );
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run for stale preflight');
+          },
         },
       },
     });
