@@ -424,7 +424,7 @@ export interface SwmSliceSourceTags {
 export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
   sources: SwmSliceSourceTags;
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>;
-  queryOptions?: QueryOptions;
+  queryOptions?: Omit<QueryOptions, 'source'>;
 }
 
 /**
