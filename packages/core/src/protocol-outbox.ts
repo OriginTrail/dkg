@@ -164,12 +164,15 @@ function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOut
     pendingFor: legacy.pendingFor.bind(legacy),
   };
   if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
+  if (legacy.dropExpiredMetadata) {
+    normalized.dropExpiredMetadata = legacy.dropExpiredMetadata.bind(legacy);
+  }
+  if (legacy.listMetadata) normalized.listMetadata = legacy.listMetadata.bind(legacy);
   return normalized;
 }
 
 export class ProtocolOutbox {
   private readonly store: ProtocolOutboxStore;
-  private readonly metadataStore: Partial<ProtocolOutboxMetadataStore>;
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
@@ -198,7 +201,6 @@ export class ProtocolOutbox {
       maxAgeMs: options.maxAgeMs ?? DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
       backoffFor: (attempts) => this.backoffFor(attempts),
     });
-    this.metadataStore = store;
     this.store = normalizeOutboxStore(store);
   }
 
@@ -309,7 +311,7 @@ export class ProtocolOutbox {
 
   /** Metadata-only expiration, with a compatibility fallback for legacy stores. */
   dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    const dropped = this.metadataStore.dropExpiredMetadata?.(now) ?? this.store.dropExpired(now);
+    const dropped = this.store.dropExpiredMetadata?.(now) ?? this.store.dropExpired(now);
     return dropped.map(cloneOutboxMetadata);
   }
 
@@ -329,7 +331,7 @@ export class ProtocolOutbox {
 
   /** Metadata-only diagnostics snapshot, with a compatibility fallback. */
   listMetadata(): ProtocolOutboxMetadata[] {
-    const entries = this.metadataStore.listMetadata?.() ?? this.store.list();
+    const entries = this.store.listMetadata?.() ?? this.store.list();
     return entries.map(cloneOutboxMetadata);
   }
 
