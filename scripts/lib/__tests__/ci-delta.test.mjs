@@ -284,6 +284,20 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes("github.base_ref == 'main'"));
   assert.ok(workflow.includes('git diff --name-status -z "${BASE_SHA}" "${MERGE_SHA}"'));
   assert.equal(workflow.includes('git diff --name-status -z "${BASE_SHA}" "${HEAD_SHA}"'), false);
+  assert.match(workflow, /^  evm-node-test-artifacts:/m);
+  assert.match(workflow, /^  evm-devnet-test-artifacts:/m);
+  assert.ok(workflow.includes('plan-vitest-shard.mjs chain "$SHARD_ID"'));
+  assert.ok(workflow.includes('plan-vitest-shard.mjs cli "$SHARD_ID"'));
+  assert.equal(
+    workflow.includes('@origintrail-official/dkg-chain exec vitest run --shard='),
+    false,
+  );
+  assert.equal(
+    workflow.includes('@origintrail-official/dkg exec vitest run --shard='),
+    false,
+  );
+  assert.ok(workflow.includes('shard: [1, 2, 3, 4, 5, 6, 7]'));
+  assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
   for (const packageName of [
     '@origintrail-official/dkg-rdf-utils',
@@ -330,6 +344,8 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
     solidity: { result: 'skipped' },
     'solidity-coverage': { result: 'skipped' },
     'tornado-static-analysis': { result: 'skipped' },
+    'evm-node-test-artifacts': { result: 'skipped' },
+    'evm-devnet-test-artifacts': { result: 'skipped' },
     ...Object.fromEntries(Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'skipped' }])),
   };
   needs['kosava-supporting'].result = 'success';
@@ -362,8 +378,24 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
     solidity: { result: 'skipped' },
     'solidity-coverage': { result: 'success' },
     'tornado-static-analysis': { result: 'success' },
+    'evm-node-test-artifacts': { result: 'success' },
+    'evm-devnet-test-artifacts': { result: 'success' },
   };
   assert.deepEqual(validatePrimaryResults({ eventName: 'push', plan: full, needs: fullNeeds }), []);
+
+  const missingNodeArtifacts = structuredClone(fullNeeds);
+  missingNodeArtifacts['evm-node-test-artifacts'].result = 'skipped';
+  assert.match(
+    validatePrimaryResults({ eventName: 'push', plan: full, needs: missingNodeArtifacts }).join('\n'),
+    /evm-node-test-artifacts was selected but ended with skipped/,
+  );
+
+  const missingDevnetArtifacts = structuredClone(fullNeeds);
+  missingDevnetArtifacts['evm-devnet-test-artifacts'].result = 'skipped';
+  assert.match(
+    validatePrimaryResults({ eventName: 'push', plan: full, needs: missingDevnetArtifacts }).join('\n'),
+    /evm-devnet-test-artifacts was selected but ended with skipped/,
+  );
 
   const mergeNeeds = structuredClone(fullNeeds);
   mergeNeeds.solidity.result = 'success';
@@ -388,6 +420,8 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
     solidity: { result: 'skipped' },
     'solidity-coverage': { result: 'skipped' },
     'tornado-static-analysis': { result: 'skipped' },
+    'evm-node-test-artifacts': { result: 'skipped' },
+    'evm-devnet-test-artifacts': { result: 'skipped' },
   };
   assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan: docs, needs: docsNeeds }), []);
   assert.deepEqual(validateEvmResults({

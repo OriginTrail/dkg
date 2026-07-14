@@ -76,6 +76,19 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
   requireSuccess(needs, 'changes', true, errors);
   requireSuccess(needs, 'build', plan.runNode, errors);
 
+  const needsNodeTestArtifacts = Boolean(
+    plan.lanes?.tornado_core
+    || plan.lanes?.bura_cli
+    || plan.lanes?.kosava_hardhat_plugins
+  );
+  requireSuccess(needs, 'evm-node-test-artifacts', needsNodeTestArtifacts, errors);
+  requireSuccess(
+    needs,
+    'evm-devnet-test-artifacts',
+    Boolean(plan.lanes?.kosava_node_ui_e2e),
+    errors,
+  );
+
   for (const [lane, job] of Object.entries(PRIMARY_LANE_JOBS)) {
     requireSuccess(needs, job, Boolean(plan.lanes?.[lane]), errors);
   }

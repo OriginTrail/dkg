@@ -274,15 +274,95 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------------------
-  # Tornado core lane: core + storage + chain unit tests. These are all
-  # sub-minute suites so we keep them bundled on one runner.
+  # Compile each EVM flavor ONCE, in parallel with the shared Node build.
+  # Several downstream jobs previously repeated the same 65-90 second
+  # compile on every runner. The immutable workflow artifact lets all shards
+  # consume byte-for-byte identical outputs without putting Solidity compile
+  # time on their critical path.
+  # ------------------------------------------------------------------
+  evm-node-test-artifacts:
+    name: Compile EVM test artifacts (0.8.20/london)
+    needs: changes
+    if: needs.changes.outputs.tornado_core == 'true' || needs.changes.outputs.bura_cli == 'true' || needs.changes.outputs.kosava_hardhat_plugins == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Compile EVM contracts for shared Hardhat harnesses
+        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.node.config.ts
+      - name: Package EVM test artifacts
+        run: tar -czf /tmp/evm-node-test-artifacts.tgz packages/evm-module/artifacts packages/evm-module/cache
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp/evm-node-test-artifacts.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  evm-devnet-test-artifacts:
+    name: Compile devnet EVM artifacts (0.8.24/cancun)
+    needs: changes
+    if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Compile EVM contracts for the real-node devnet
+        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.devnet.config.ts
+      - name: Package devnet EVM artifacts
+        run: tar -czf /tmp/evm-devnet-test-artifacts.tgz packages/evm-module/artifacts-devnet packages/evm-module/cache-devnet
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evm-devnet-test-artifacts
+          path: /tmp/evm-devnet-test-artifacts.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Tornado core lane. Pure core/RDF/storage tests share one runner; the
+  # serial real-Hardhat chain suite is split across isolated runners. Every
+  # chain shard gets its own node and test context, so no state is shared.
   # ------------------------------------------------------------------
   tornado-core:
-    name: "Tornado: core + storage + chain"
-    needs: [changes, build]
+    name: "Tornado: ${{ matrix.label }}"
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_core == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: core + RDF + storage
+            suite: core
+            shard: 0
+          - label: chain [1/3]
+            suite: chain
+            shard: 1
+          - label: chain [2/3]
+            suite: chain
+            shard: 2
+          - label: chain [3/3]
+            suite: chain
+            shard: 3
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -300,15 +380,30 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.suite == 'chain'
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp
+      - name: Restore EVM test artifacts
+        if: matrix.suite == 'chain'
+        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
 
-      - name: "Core (442 tests)"
-        run: pnpm --filter @origintrail-official/dkg-core test
-      - name: "RDF utilities"
-        run: pnpm --filter @origintrail-official/dkg-rdf-utils test
-      - name: "Storage (78 tests)"
-        run: pnpm --filter @origintrail-official/dkg-storage test
-      - name: "Chain unit (46 tests)"
-        run: pnpm --filter @origintrail-official/dkg-chain test
+      - name: Core, RDF utilities, and storage tests
+        if: matrix.suite == 'core'
+        run: |
+          pnpm --filter @origintrail-official/dkg-core test
+          pnpm --filter @origintrail-official/dkg-rdf-utils test
+          pnpm --filter @origintrail-official/dkg-storage test
+      - name: "Chain tests (shard ${{ matrix.shard }}/3)"
+        if: matrix.suite == 'chain'
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs chain "$SHARD_ID")
+          test "${#SHARD_FILES[@]}" -gt 0
+          pnpm --filter @origintrail-official/dkg-chain exec vitest run "${SHARD_FILES[@]}"
 
   # ------------------------------------------------------------------
   # Tornado Blazegraph integration lane — runs the storage adapter's
@@ -495,19 +590,25 @@ jobs:
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
-  # auth, keystore, migration, indexer) so it owns a runner. The
-  # remaining BURA package (`query`) runs on its own runner.
+  # auth, keystore, migration, indexer). It is intentionally configured with
+  # one Vitest worker because every file shares a real Hardhat harness, so we
+  # parallelize safely across isolated CI runners instead. The remaining BURA
+  # package (`query`) runs on its own runner.
   #
   # Tier: BURA — `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1. Packages
   # on the critical path for users/operators; auth & quorum bugs here
   # degrade service but do not threaten protocol consensus.
   # ------------------------------------------------------------------
   bura-cli:
-    name: "Bura: cli"
-    needs: [changes, build]
+    name: "Bura: cli [${{ matrix.shard }}/4]"
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.bura_cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -525,10 +626,23 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp
+      - name: Restore EVM test artifacts
+        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
       - name: "Verify provisioned Blazegraph image contract"
+        if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
-      - name: "CLI tests"
-        run: pnpm --filter @origintrail-official/dkg test
+      - name: "CLI tests (shard ${{ matrix.shard }}/4)"
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs cli "$SHARD_ID")
+          test "${#SHARD_FILES[@]}" -gt 0
+          pnpm --filter @origintrail-official/dkg exec vitest run "${SHARD_FILES[@]}"
 
   bura-blazegraph-arm64:
     name: "Bura: Blazegraph arm64 image (native)"
@@ -606,12 +720,14 @@ jobs:
       - name: "node-ui tests"
         run: pnpm --filter @origintrail-official/dkg-node-ui test
 
-  # node-ui Playwright e2e — REAL NODE, NO MOCKS. The suite boots a live
-  # 4-node devnet (Hardhat + four DKG daemons) via Playwright's `webServer`
-  # (see `e2e/bootstrap-devnet.ts`, chained `bootstrap && pnpm dev:ui`),
-  # drives the real UI against node 1's live `/api`, and tears the devnet
-  # down in `e2e/global-teardown.ts` when the run finishes. There is no
-  # route-mock lane anymore: every test exercises real daemon round-trips.
+  # node-ui Playwright e2e — REAL NODE, NO MOCKS. Each shard boots its OWN
+  # isolated 4-node devnet (Hardhat + four DKG daemons) via Playwright's
+  # `webServer` (see `e2e/bootstrap-devnet.ts`, chained `bootstrap && pnpm
+  # dev:ui`), drives the real UI against node 1's live `/api`, and tears that
+  # devnet down in `e2e/global-teardown.ts`. There is no route-mock lane:
+  # every test still exercises real daemon round-trips. Sharding across
+  # runners preserves the one-worker-per-devnet contention guard in
+  # playwright.config.ts while removing the 326-test serial wall-clock tail.
   #
   # Why 4 nodes: VM publishing needs StorageACK quorum, and scripts/devnet.sh
   # pins `minimumRequiredSignatures = 3` (the real mainnet 3-of-N quorum — DO
@@ -624,15 +740,18 @@ jobs:
   # Channel is pinned to bundled chromium in playwright.config.ts under CI
   # (see `ciChromium`) since we only `playwright install chromium`.
   kosava-node-ui-e2e:
-    name: "Kosava: node-ui e2e (Playwright real-node devnet)"
-    needs: [changes, build]
+    name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
+    needs: [changes, build, evm-devnet-test-artifacts]
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
     runs-on: ubuntu-latest
-    # Cold devnet boot (Solidity compile + 2-node bring-up + on-chain
-    # staking/CG registration) + the full real-node suite at 1 worker with
-    # retries. Generous so a slow runner or a publish retry never flakes the
-    # whole lane on a timeout.
+    # Cold 4-node bring-up + on-chain staking/CG registration + one seventh of
+    # the real-node suite at one worker, with retries. Generous so a slow
+    # runner or a publish retry never flakes the whole lane on a timeout.
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -650,30 +769,23 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      # The shared `build` artifact skips the Solidity compile (DKG_SKIP_EVM_BUILD=1),
-      # so the EVM artifacts/typechain bindings the devnet's `hardhat node` +
-      # `hardhat deploy` need aren't present. Compile them HERE — in a dedicated,
-      # observable step — so the devnet boot inside Playwright's `webServer`
-      # reuses cached artifacts and stays well inside the webServer timeout
-      # (and a compile failure is localised to this step, not buried in a
-      # webServer timeout). devnet.sh now compiles + boots with the DEVNET
-      # hardhat config (`--config hardhat.devnet.config.ts`: solc 0.8.24 +
-      # cancun), so warm the SAME config here — otherwise this step compiles the
-      # default 0.8.20/london bytecode and the real devnet-config compile moves
-      # back into the webServer boot (otReviewAgent #1403 P2).
-      - name: Compile EVM contracts (for the devnet boot)
-        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.devnet.config.ts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: evm-devnet-test-artifacts
+          path: /tmp
+      - name: Restore devnet EVM artifacts
+        run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
       - name: Install Playwright Chromium
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
-      - name: "node-ui real-node Playwright e2e (boots + tears down a live devnet)"
-        run: pnpm --filter @origintrail-official/dkg-node-ui test:e2e
+      - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
+        run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
       # Upload the HTML report + traces so intermittent browser/devnet failures
       # are diagnosable from the Actions UI (Codex review on PR #832).
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: node-ui-playwright-report
+          name: node-ui-playwright-report-${{ matrix.shard }}-of-7
           path: |
             packages/node-ui/playwright-report/
             packages/node-ui/test-results/
@@ -687,7 +799,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: node-ui-devnet-logs
+          name: node-ui-devnet-logs-${{ matrix.shard }}-of-7
           path: |
             .devnet/node*/daemon.log
             .devnet/hardhat/node.log
@@ -761,13 +873,13 @@ jobs:
   # node via the shared `../chain/test/hardhat-global-setup.ts`
   # (hardhat-harness deploys with `hardhat.node.config.ts`) on every
   # vitest run — that needs the Solidity artifacts the shared `build`
-  # deliberately skips (DKG_SKIP_EVM_BUILD=1). So they get their own
-  # lane with an explicit compile step, mirroring the node-ui e2e lane.
+  # deliberately skips (DKG_SKIP_EVM_BUILD=1). The parallel EVM artifact
+  # producer above compiles them once for this and the other harness users.
   # No mocks: real contracts, real chain.
   # ------------------------------------------------------------------
   kosava-hardhat-plugins:
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
-    needs: [changes, build]
+    needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.kosava_hardhat_plugins == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -788,14 +900,12 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      # The shared build skips the Solidity compile (DKG_SKIP_EVM_BUILD=1),
-      # so the artifacts the Hardhat globalSetup's `hardhat deploy` needs
-      # aren't present. Compile them HERE — same config the harness deploys
-      # with — in a dedicated, observable step so the globalSetup reuses
-      # cached artifacts and a compile failure is localised here rather
-      # than buried inside a test timeout.
-      - name: Compile EVM contracts (for the Hardhat globalSetup)
-        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.node.config.ts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp
+      - name: Restore EVM test artifacts
+        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
       - name: "random-sampling tests (real Hardhat, no mocks)"
         run: pnpm --filter @origintrail-official/dkg-random-sampling test
       - name: "kafka-plugin tests (real Hardhat, no mocks)"
@@ -1239,6 +1349,8 @@ jobs:
     needs:
       - changes
       - build
+      - evm-node-test-artifacts
+      - evm-devnet-test-artifacts
       - tornado-core
       - tornado-blazegraph
       - tornado-publisher
