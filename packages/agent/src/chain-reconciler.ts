@@ -164,7 +164,7 @@ export async function reconcileContextGraph(
  * This is the single owner of per-key coalescing semantics: a burst produces at
  * most one trailing pass, with periodic work taking priority over live nudges.
  */
-type VmReconcileTriggerSource = 'live' | 'periodic';
+export type VmReconcileTriggerSource = 'live' | 'periodic';
 type VmReconcileHold = 'ready' | 'live-blocked';
 
 interface VmReconcileScheduleState {
@@ -177,7 +177,7 @@ export class VmReconcileScheduler {
   private readonly states = new Map<string, VmReconcileScheduleState>();
 
   constructor(
-    private readonly run: (key: string) => Promise<void>,
+    private readonly run: (key: string, source: VmReconcileTriggerSource) => Promise<void>,
     private readonly onFailure: (key: string, error: unknown) => void,
   ) {}
 
@@ -219,16 +219,17 @@ export class VmReconcileScheduler {
       return state.inFlight;
     }
     if (source === 'periodic') state.hold = 'ready';
-    return this.start(key, state);
+    return this.start(key, state, source);
   }
 
   private start(
     key: string,
     state: VmReconcileScheduleState,
+    source: VmReconcileTriggerSource,
   ): Promise<void> {
     const promise = (async () => {
       try {
-        await this.run(key);
+        await this.run(key, source);
         state.hold = 'ready';
       } catch (error) {
         state.hold = 'live-blocked';
@@ -252,6 +253,78 @@ export class VmReconcileScheduler {
     });
     state.inFlight = promise;
     return promise;
+  }
+}
+
+export type VmReconcileWorkPriority = 'foreground' | 'background';
+
+interface QueuedVmReconcileWork {
+  priority: VmReconcileWorkPriority;
+  sequence: number;
+  run: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+}
+
+/**
+ * Node-wide admission lane for chain-driven VM reconciliation.
+ *
+ * The per-CG {@link VmReconcileScheduler} coalesces duplicate triggers for one
+ * graph, but a startup sweep can legitimately trigger dozens of different
+ * graphs at once. Those jobs all used to enter the triple store concurrently,
+ * multiplying SWM-slice reads and peer catch-up work. This queue bounds that
+ * cross-CG fan-out while allowing live/manual work to move ahead of periodic
+ * sweep backlog. It deliberately does not cancel the active job; cancellation
+ * at this layer could strand a partially applied reconciliation pass.
+ */
+export class VmReconcileWorkQueue {
+  private active = 0;
+  private sequence = 0;
+  private readonly pending: QueuedVmReconcileWork[] = [];
+
+  constructor(private readonly concurrency = 1) {
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+      throw new Error(`VM reconcile concurrency must be a positive safe integer, got ${concurrency}`);
+    }
+  }
+
+  enqueue<T>(
+    priority: VmReconcileWorkPriority,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.pending.push({
+        priority,
+        sequence: this.sequence++,
+        run,
+        resolve: (value) => resolve(value as T),
+        reject,
+      });
+      this.pending.sort((a, b) => {
+        const priorityDelta = (a.priority === 'foreground' ? 0 : 1)
+          - (b.priority === 'foreground' ? 0 : 1);
+        return priorityDelta || a.sequence - b.sequence;
+      });
+      this.drain();
+    });
+  }
+
+  snapshot(): { active: number; queued: number } {
+    return { active: this.active, queued: this.pending.length };
+  }
+
+  private drain(): void {
+    while (this.active < this.concurrency && this.pending.length > 0) {
+      const work = this.pending.shift()!;
+      this.active += 1;
+      void Promise.resolve()
+        .then(work.run)
+        .then(work.resolve, work.reject)
+        .finally(() => {
+          this.active -= 1;
+          this.drain();
+        });
+    }
   }
 }
 

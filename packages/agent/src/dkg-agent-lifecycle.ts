@@ -2791,7 +2791,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // the chain adapter exposes the per-CG registration-ordinal reads.
     if (this.vmReconcileEnabled()) {
       this.vmReconcileScheduler = new VmReconcileScheduler(
-        (localCgId) => this.runVmReconcileForCg(localCgId),
+        async (localCgId, source) => {
+          await this.reconcileContextGraphIfBehind(localCgId, source);
+        },
         (localCgId, err) => {
           this.log.warn(
             ctx,

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   reconcileContextGraph,
   VmReconcileScheduler,
+  VmReconcileWorkQueue,
   RecentUalSet,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
@@ -153,6 +154,19 @@ describe('reconcileContextGraph — sweep', () => {
 });
 
 describe('VmReconcileScheduler', () => {
+  it('passes the trigger source to the scheduled run', async () => {
+    const observed: string[] = [];
+    const scheduler = new VmReconcileScheduler(
+      async (_key, source) => { observed.push(source); },
+      () => undefined,
+    );
+
+    await scheduler.triggerLive('cg');
+    await scheduler.triggerPeriodic('cg');
+
+    expect(observed).toEqual(['live', 'periodic']);
+  });
+
   it('collapses a successful live burst into one run plus one trailing run', async () => {
     let runs = 0;
     let resolveCurrent!: () => void;
@@ -265,6 +279,45 @@ describe('VmReconcileScheduler', () => {
 
     expect(ran).toEqual(['cg-a', 'cg-b']);
     expect(failures).toEqual(['cg-a']);
+  });
+});
+
+describe('VmReconcileWorkQueue', () => {
+  it('serializes cross-CG work and lets foreground work pass periodic backlog', async () => {
+    const queue = new VmReconcileWorkQueue(1);
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+
+    const first = queue.enqueue('background', async () => {
+      order.push('first:start');
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      order.push('first:end');
+    });
+    const second = queue.enqueue('background', async () => {
+      order.push('second');
+    });
+    const foreground = queue.enqueue('foreground', async () => {
+      order.push('foreground');
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(queue.snapshot()).toEqual({ active: 1, queued: 2 });
+    releaseFirst();
+    await Promise.all([first, second, foreground]);
+
+    expect(order).toEqual(['first:start', 'first:end', 'foreground', 'second']);
+    expect(queue.snapshot()).toEqual({ active: 0, queued: 0 });
+  });
+
+  it('keeps draining after a failed reconciliation job', async () => {
+    const queue = new VmReconcileWorkQueue(1);
+    const failure = new Error('store unavailable');
+    const first = queue.enqueue('background', async () => { throw failure; });
+    const second = queue.enqueue('background', async () => 'recovered');
+
+    await expect(first).rejects.toBe(failure);
+    await expect(second).resolves.toBe('recovered');
+    expect(queue.snapshot()).toEqual({ active: 0, queued: 0 });
   });
 });
 

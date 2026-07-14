@@ -52,7 +52,14 @@ interface AgentInternals {
   recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
   reconcileChainOrdinal(localCgId: string, onChainCgId: bigint, ordinal: number, headBlock: number | undefined): Promise<{ status: string }>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
-  runVmReconcileForCg(localCgId: string): Promise<void>;
+  runVmReconcileForCg(localCgId: string): Promise<unknown>;
+  reconcileContextGraphIfBehind(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
+    status: string;
+    attempted: boolean;
+    headOrdinal: number;
+    watermarkBefore: number;
+    watermarkAfter: number;
+  }>;
   runVmReconcileSweep(): Promise<void>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   vmReconcileScheduler: {
@@ -1650,6 +1657,36 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(periodicTriggered).toContain('100');     // hosted → swept
     expect(periodicTriggered).not.toContain('200'); // neither → skipped
     expect(liveTriggered).toEqual([]);
+  });
+
+  it('skips store-heavy reconciliation when the durable watermark equals chain head', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillEvidenceGate', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const onChainCgId = 321n;
+    internals.subscribedContextGraphs.set('evidence-current', {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: onChainCgId.toString(),
+      lastReconciledOrdinal: 2,
+    });
+    chain.getContextGraphKCCount = async () => 2n;
+    const run = recorder(async () => {
+      throw new Error('must not enter VM reconciliation when evidence is current');
+    });
+    (internals as any).runVmReconcileForCg = run;
+
+    const result = await internals.reconcileContextGraphIfBehind('evidence-current', 'manual');
+
+    expect(result).toMatchObject({
+      status: 'current',
+      attempted: false,
+      headOrdinal: 2,
+      watermarkBefore: 2,
+      watermarkAfter: 2,
+    });
+    expect(run.calls).toEqual([]);
   });
 
   it('a host-only reconcile promotes the missed KA to VM and emits core-fill', async () => {

@@ -1416,6 +1416,25 @@ export class ApiClient {
     return this.post('/api/context-graph/subscribe', { contextGraphId, includeWorkspace: options?.includeSharedMemory });
   }
 
+  /**
+   * Reconcile one context graph against its on-chain registration watermark.
+   * A current graph returns without starting VM-slice or peer catch-up work.
+   */
+  async reconcileContextGraph(contextGraphId: string): Promise<{
+    contextGraphId: string;
+    onChainId: string;
+    source: 'manual';
+    status: 'current' | 'progress' | 'pending' | 'watermark-ahead';
+    attempted: boolean;
+    headOrdinal: number;
+    watermarkBefore: number;
+    watermarkAfter: number;
+    reconciledOrdinals: number;
+    unresolvedOrdinals: number;
+  }> {
+    return this.post('/api/context-graph/reconcile', { contextGraphId });
+  }
+
   /** @deprecated Use subscribeToContextGraph */
   async subscribe(contextGraphId: string, options?: { includeWorkspace?: boolean }): Promise<{
     subscribed: string;

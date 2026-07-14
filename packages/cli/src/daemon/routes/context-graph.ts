@@ -56,7 +56,7 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { ContextGraphNotFoundError, DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -1556,6 +1556,43 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 500, { error: `manifest install failed: ${msg}` });
+    }
+  }
+
+  // POST /api/context-graph/reconcile
+  //
+  // Explicit, one-CG chain reconciliation. This is intentionally not a blanket
+  // network resync: the agent first compares the durable contiguous VM
+  // watermark with the on-chain KC count and performs VM-slice / peer catch-up
+  // only when that evidence shows a gap. Manual work uses the foreground
+  // VM-reconcile lane, ahead of the periodic all-CG safety sweep.
+  if (req.method === "POST" && path === "/api/context-graph/reconcile") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(body || '{}') as Record<string, unknown>;
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const contextGraphId = parsed.contextGraphId ?? parsed.id;
+    if (typeof contextGraphId !== 'string' || contextGraphId.length === 0) {
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
+    }
+    try {
+      const result = await agent.reconcileContextGraphIfBehind(contextGraphId, 'manual');
+      return jsonResponse(res, 200, result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof ContextGraphNotFoundError) {
+        return jsonResponse(res, 404, { error: message });
+      }
+      if (message.includes('no resolved on-chain id')) {
+        return jsonResponse(res, 409, { error: message });
+      }
+      if (message.includes('reconciliation is unavailable')) {
+        return jsonResponse(res, 503, { error: message });
+      }
+      return jsonResponse(res, 500, { error: message });
     }
   }
 
