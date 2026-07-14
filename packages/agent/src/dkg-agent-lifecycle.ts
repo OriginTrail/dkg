@@ -152,6 +152,7 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
   NetworkAdmissionCoordinator,
@@ -4299,13 +4300,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // ~2.9 GB node-ui.db bloat — see PROTOCOL_SYNC declaration). Sync
       // RPC is synchronous-by-contract (the caller needs the page bytes
       // back NOW to advance pagination); `sendToPeer` returns the
-      // response bytes directly, and sync's own `withRetry`
-      // (sync-transport.ts) handles retry + backoff. The per-attempt
-      // `messageId` minted by sync-transport.ts is now unused by this
-      // adapter — harmless, left in place to keep the transport surface
-      // stable (reverts rc.9 PR-E for sync only).
-      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId, sendSignal) =>
-        this.messenger.sendToPeer(peerId, protocolId, data, { timeoutMs: sendTimeoutMs, signal: sendSignal }),
+      // response bytes directly, and sync's own transport handles fresh-envelope
+      // retry + backoff. The named factory owns the single-use router policy so
+      // lifecycle code cannot accidentally configure authenticated sync bytes as
+      // reusable.
+      send: createSingleUseSyncSender(this.messenger),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),

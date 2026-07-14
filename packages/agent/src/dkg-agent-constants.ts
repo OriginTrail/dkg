@@ -18,7 +18,7 @@ export const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 export const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 /** Per-page timeout for sync when we have budget (relay links can be slow). */
 export const SYNC_PAGE_TIMEOUT_MS = 45_000;
-/** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
+/** Fresh signed request attempts; each envelope is marked single-use at the ProtocolRouter boundary. */
 export const SYNC_ROUTER_ATTEMPTS = 3;
 export const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 export const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
