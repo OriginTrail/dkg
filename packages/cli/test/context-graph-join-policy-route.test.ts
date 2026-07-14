@@ -51,12 +51,14 @@ describe('GET/PUT /api/context-graph/{id}/join-policy', () => {
         memberCount: 1,
       }),
     );
+    const resolveAgentByToken = (token?: string) => {
+      if (token === 'owner-token') return OWNER_ADDRESS;
+      if (token === 'other-token') return OTHER_ADDRESS;
+      return undefined;
+    };
     const agent: Record<string, any> = {
-      resolveAgentByToken: (token?: string) => {
-        if (token === 'owner-token') return OWNER_ADDRESS;
-        if (token === 'other-token') return OTHER_ADDRESS;
-        return undefined;
-      },
+      resolveAgentByToken,
+      resolveAgentAddress: (token?: string) => resolveAgentByToken(token) ?? OWNER_ADDRESS,
       probeContextGraphWritePreflight: vi.fn().mockResolvedValue(ACCEPT_WRITE_PREFLIGHT),
       listContextGraphs: vi.fn().mockRejectedValue(new Error('write preflight should fast-accept')),
       getContextGraphJoinPolicy,
@@ -93,14 +95,14 @@ describe('GET/PUT /api/context-graph/{id}/join-policy', () => {
         assertionImportLocks: new Map(),
         vectorStore: {},
         embeddingProvider: null,
-        validTokens: new Set(['owner-token', 'other-token']),
+        validTokens: new Set(['owner-token', 'other-token', 'node-token']),
         apiHost: '127.0.0.1',
         apiPortRef: { value: 0 },
         routePlugins: [],
         url,
         path: url.pathname,
         requestToken,
-        requestAgentAddress: agent.resolveAgentByToken(requestToken),
+        requestAgentAddress: agent.resolveAgentAddress(requestToken),
       } as any);
       if (!res.writableEnded) {
         res.writeHead(404, { 'content-type': 'application/json' });
@@ -191,6 +193,50 @@ describe('GET/PUT /api/context-graph/{id}/join-policy', () => {
     expect(probeContextGraphWritePreflight).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
       callerAgentAddress: OWNER_ADDRESS,
     });
+    expect(setContextGraphJoinPolicy).toHaveBeenCalledWith(
+      CONTEXT_GRAPH_ID,
+      {
+        mode: 'open',
+        maxMembers: 25,
+        maxApprovalsPerHour: 4,
+        acknowledgeOpenEnrollment: true,
+      },
+      OWNER_ADDRESS,
+    );
+  });
+
+  it('uses the default owner for node-admin preflight without listing every context graph', async () => {
+    const setContextGraphJoinPolicy = vi.fn().mockResolvedValue({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      mode: 'open',
+      maxMembers: 25,
+      maxApprovalsPerHour: 4,
+    });
+    const probeContextGraphWritePreflight = vi.fn().mockResolvedValue(ACCEPT_WRITE_PREFLIGHT);
+    const listContextGraphs = vi.fn().mockRejectedValue(
+      new Error('global context graph listing must not run'),
+    );
+    const result = await requestJoinPolicy({
+      method: 'PUT',
+      token: 'node-token',
+      body: {
+        mode: 'open',
+        maxMembers: 25,
+        maxApprovalsPerHour: 4,
+        acknowledgeOpenEnrollment: true,
+      },
+      agentOverrides: {
+        setContextGraphJoinPolicy,
+        probeContextGraphWritePreflight,
+        listContextGraphs,
+      },
+    });
+
+    expect(result.status).toBe(200);
+    expect(probeContextGraphWritePreflight).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: OWNER_ADDRESS,
+    });
+    expect(listContextGraphs).not.toHaveBeenCalled();
     expect(setContextGraphJoinPolicy).toHaveBeenCalledWith(
       CONTEXT_GRAPH_ID,
       {
