@@ -7,6 +7,7 @@ import {
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
   type LegacyProtocolOutboxStore,
+  type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
   type ProtocolRouter,
   type StreamHandler,
@@ -407,7 +408,35 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
   });
 });
 
-describe('Messenger outbox diagnostics', () => {
+describe('Messenger outbox snapshots', () => {
+  it('preserves payloads for existing listOutbox callers', () => {
+    const outboxStore = new InMemoryProtocolOutboxStore();
+    const expected: ProtocolOutboxEntry = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: FIXED_MSG_ID,
+      payload: new Uint8Array([0xde, 0xad]),
+      attempts: 2,
+      firstFailureAt: 1_000,
+      lastAttemptAt: 2_000,
+      nextAttemptAt: 7_000,
+      lastError: 'offline',
+    };
+    Object.assign(outboxStore, {
+      list: () => [expected],
+      listMetadata: () => {
+        throw new Error('listOutbox dropped payloads');
+      },
+    });
+    const messenger = new Messenger({
+      router: makeRouter() as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+    });
+
+    expect(messenger.listOutbox()).toEqual([expected]);
+  });
+
   it('reads metadata without asking the store for payload-bearing entries', () => {
     const outboxStore = new InMemoryProtocolOutboxStore();
     const expected: ProtocolOutboxMetadata = {
@@ -433,7 +462,7 @@ describe('Messenger outbox diagnostics', () => {
       outboxStore,
     });
 
-    expect(messenger.listOutbox()).toEqual([expected]);
+    expect(messenger.listOutboxMetadata()).toEqual([expected]);
     expect(listMetadata.calls).toHaveLength(1);
   });
 

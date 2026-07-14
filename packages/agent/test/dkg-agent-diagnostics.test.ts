@@ -18,7 +18,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { PROTOCOL_MESSAGE, PROTOCOL_SYNC, type ProtocolOutboxEntry } from '@origintrail-official/dkg-core';
+import { PROTOCOL_MESSAGE, PROTOCOL_SYNC, type ProtocolOutboxMetadata } from '@origintrail-official/dkg-core';
 
 /**
  * Hand-rolled call recorder used in place of behaviour mocks. Records
@@ -52,7 +52,7 @@ interface StubOutboxEntry {
 /**
  * Minimal substrate-outbox fixture for diagnostics tests. The
  * production `Messenger` uses a SQLite-backed `ProtocolOutboxStore`;
- * the diagnostics surface only reads `listOutbox()`, so a flat
+ * the diagnostics surface only reads `listOutboxMetadata()`, so a flat
  * array of entries is all we need to exercise the snapshot logic.
  *
  * rc.9 PR-3: replaces the chat-specific `MessageOutbox` fixture
@@ -61,7 +61,8 @@ interface StubOutboxEntry {
  */
 function makeOutboxStub(entries: StubOutboxEntry[]) {
   return {
-    listOutbox: recorder((): ProtocolOutboxEntry[] => entries.map((e) => ({ ...e }))),
+    listOutboxMetadata: recorder((): ProtocolOutboxMetadata[] =>
+      entries.map(({ payload: _payload, ...entry }) => entry)),
   };
 }
 

@@ -1067,12 +1067,15 @@ export class Messenger {
   }
 
   /**
-   * Metadata-only snapshot of every entry currently in the outbox. Used by the
-   * `/api/chat/outbox` route + the MCP `dkg_outbox_status` tool so
-   * operators can see what's pending after a long recipient outage without
-   * copying retry payloads into RAM. Empty array when no outbox is wired.
+   * Snapshot of every payload-bearing entry currently in the outbox.
+   * Empty array when no outbox is wired.
    */
-  listOutbox(): ProtocolOutboxMetadata[] {
+  listOutbox(): ProtocolOutboxEntry[] {
+    return this.outbox?.list() ?? [];
+  }
+
+  /** Metadata-only snapshot for diagnostics that do not need retry payloads. */
+  listOutboxMetadata(): ProtocolOutboxMetadata[] {
     return this.outbox?.listMetadata() ?? [];
   }
 
