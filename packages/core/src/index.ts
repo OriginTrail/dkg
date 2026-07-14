@@ -295,5 +295,6 @@ export {
   buildAssertionSealQuads,
   buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads,
+  type AssertionSealBuildArgs,
   type AssertionSeal,
 } from './assertion-seal.js';

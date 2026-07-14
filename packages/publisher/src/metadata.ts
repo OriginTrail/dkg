@@ -13,6 +13,8 @@ import {
   ASSERTION_STATE_TO_LAYER,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
 import type { AssertionState } from '@origintrail-official/dkg-core';
 
@@ -87,6 +89,14 @@ export interface OnChainProvenance {
   publisherAddress: string;
   batchId: bigint;
   chainId: string;
+}
+
+export interface GraphKnowledgeAssetMetadata extends KCMetadata {
+  assertionVersion: string | number | bigint;
+  publicTripleCount: number;
+  privateTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  assertionGraph: string;
 }
 
 function assertSafeContextGraphIdForSparql(contextGraphId: string): void {
@@ -296,6 +306,59 @@ export function generateConfirmedFullMetadata(
     ...generateKCMetadata(meta, kaEntries),
     ...generateConfirmedMetadata(meta.ual, meta.contextGraphId, provenance),
   ];
+}
+
+/**
+ * Constant-size VM metadata for one graph-scoped KA. RDF subjects in the KA
+ * payload never become membership, token, ownership, or trust rows here.
+ */
+export function generateGraphKnowledgeAssetMetadata(
+  meta: GraphKnowledgeAssetMetadata,
+  status: 'tentative' | 'confirmed',
+  provenance?: OnChainProvenance,
+): Quad[] {
+  const scope = createGraphKnowledgeAssetScope(meta.ual, meta.assertionVersion);
+  if (!Number.isSafeInteger(meta.publicTripleCount) || meta.publicTripleCount < 0) {
+    throw new Error(`Invalid graph-scoped KA public triple count: ${meta.publicTripleCount}`);
+  }
+  const privateTripleCount = meta.privateTripleCount ?? 0;
+  if (!Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0) {
+    throw new Error(`Invalid graph-scoped KA private triple count: ${privateTripleCount}`);
+  }
+  if (privateTripleCount > 0 && meta.privateMerkleRoot?.length !== 32) {
+    throw new Error('Graph-scoped KA private content requires one 32-byte private Merkle root');
+  }
+  if (privateTripleCount === 0 && meta.privateMerkleRoot !== undefined) {
+    throw new Error('Graph-scoped KA private Merkle root requires a positive private triple count');
+  }
+  if (meta.publicTripleCount === 0 && privateTripleCount === 0) {
+    throw new Error('Graph-scoped KA metadata cannot describe an empty asset');
+  }
+  assertSafeGraphIriForSparql(meta.assertionGraph);
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const quads = [
+    ...generateKCMetadata({ ...meta, ual: scope.ual }, []),
+    mq(scope.ual, `${DKG}contentScopeVersion`, intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), metaGraph),
+    mq(scope.ual, `${DKG}kaUal`, scope.ual, metaGraph),
+    mq(scope.ual, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), metaGraph),
+    mq(scope.ual, `${DKG}publicTripleCount`, intLit(meta.publicTripleCount), metaGraph),
+    mq(scope.ual, `${DKG}privateTripleCount`, intLit(privateTripleCount), metaGraph),
+    mq(scope.ual, `${DKG}assertionGraph`, meta.assertionGraph, metaGraph),
+  ];
+  if (meta.privateMerkleRoot) {
+    quads.push(
+      mq(scope.ual, `${DKG}privateMerkleRoot`, lit(toHex(meta.privateMerkleRoot)), metaGraph),
+    );
+  }
+  if (status === 'confirmed') {
+    if (!provenance) {
+      throw new Error('Confirmed graph-scoped KA metadata requires on-chain provenance');
+    }
+    quads.push(...generateConfirmedMetadata(scope.ual, meta.contextGraphId, provenance));
+  } else {
+    quads.push(mq(scope.ual, `${DKG}status`, lit('tentative'), metaGraph));
+  }
+  return quads;
 }
 
 /**
@@ -516,6 +579,82 @@ export function generateShareMetadata(
 
 /** @deprecated Use generateShareMetadata */
 export const generateWorkspaceMetadata = generateShareMetadata;
+
+/** Metadata for one atomic graph-scoped KA share operation. */
+export interface KnowledgeAssetShareMetadata {
+  shareOperationId: string;
+  contextGraphId: string;
+  kaUal: string;
+  assertionVersion: string | number | bigint;
+  publicTripleCount: number;
+  /** One KA-level private commitment. Empty/undefined when the KA is public-only. */
+  privateMerkleRoot?: Uint8Array;
+  /** Number of private triples committed by privateMerkleRoot. */
+  privateTripleCount?: number;
+  publisherPeerId: string;
+  agentAddress?: string;
+  timestamp: Date;
+  subGraphName?: string;
+}
+
+/**
+ * Emit constant-size metadata for a complete KA graph.
+ *
+ * There are intentionally no entity membership or ownership rows. RDF
+ * subjects remain data in the per-KA graph and never become control-plane
+ * records.
+ */
+export function generateKnowledgeAssetShareMetadata(
+  meta: KnowledgeAssetShareMetadata,
+  swmMetaGraph: string,
+): Quad[] {
+  const scope = createGraphKnowledgeAssetScope(meta.kaUal, meta.assertionVersion);
+  if (!Number.isSafeInteger(meta.publicTripleCount) || meta.publicTripleCount < 0) {
+    throw new Error(`Invalid graph-scoped KA public triple count: ${meta.publicTripleCount}`);
+  }
+  const privateTripleCount = meta.privateTripleCount ?? 0;
+  if (!Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0) {
+    throw new Error(`Invalid graph-scoped KA private triple count: ${privateTripleCount}`);
+  }
+  const privateMerkleRoot = meta.privateMerkleRoot;
+  if (privateTripleCount > 0 && privateMerkleRoot?.length !== 32) {
+    throw new Error('Graph-scoped KA private content requires one 32-byte private Merkle root');
+  }
+  if (privateTripleCount === 0 && (privateMerkleRoot?.length ?? 0) > 0) {
+    throw new Error('Graph-scoped KA private Merkle root requires a positive private triple count');
+  }
+  if (meta.publicTripleCount === 0 && privateTripleCount === 0) {
+    throw new Error('Graph-scoped KA share cannot contain zero public and zero private triples');
+  }
+  const subject = `urn:dkg:share:${meta.contextGraphId}:${meta.shareOperationId}`;
+  const quads = [
+    mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
+    mq(subject, `${DKG}contextGraphId`, lit(meta.contextGraphId), swmMetaGraph),
+    mq(subject, `${DKG}shareOperationId`, lit(meta.shareOperationId), swmMetaGraph),
+    mq(subject, `${DKG}contentScopeVersion`, intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), swmMetaGraph),
+    mq(subject, `${DKG}kaUal`, scope.ual, swmMetaGraph),
+    mq(subject, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), swmMetaGraph),
+    mq(subject, `${DKG}publicQuadsCount`, intLit(meta.publicTripleCount), swmMetaGraph),
+    mq(subject, `${DKG}privateTripleCount`, intLit(privateTripleCount), swmMetaGraph),
+    mq(subject, `${DKG}publisherPeerId`, lit(meta.publisherPeerId), swmMetaGraph),
+    mq(
+      subject,
+      `${PROV}wasAttributedTo`,
+      meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
+      swmMetaGraph,
+    ),
+    mq(subject, `${DKG}publishedAt`, dateLit(meta.timestamp), swmMetaGraph),
+  ];
+  if (privateMerkleRoot?.length === 32) {
+    quads.push(
+      mq(subject, `${DKG}privateMerkleRoot`, lit(`0x${toHex(privateMerkleRoot)}`), swmMetaGraph),
+    );
+  }
+  if (meta.subGraphName) {
+    quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), swmMetaGraph));
+  }
+  return quads;
+}
 
 /**
  * Generate ownership triples for shared memory root entities.

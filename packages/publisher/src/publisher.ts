@@ -191,6 +191,22 @@ export interface PublishOptions {
   contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
+  /**
+   * Content-scope discriminator for the rootless KA model. Supplying any of
+   * the graph-scope fields requires version 2; legacy root-scoped KAs are
+   * deliberately read-only and cannot enter publish/update mutation paths.
+   */
+  contentScopeVersion?: number;
+  /** Canonical deterministic `did:dkg:<chain>/<author>/<number>` identity. */
+  kaUal?: string;
+  /** One-based assertion/Merkle-root version for this exact KA graph. */
+  assertionVersion?: string | number | bigint;
+  /** Exact public triple count committed by the graph-scoped envelope. */
+  publicTripleCount?: number;
+  /** Optional expected single KA-level private commitment. */
+  privateMerkleRoot?: Uint8Array;
+  /** Exact private triple count committed by `privateMerkleRoot`. */
+  privateTripleCount?: number;
   /** Publisher peer ID used for KC ownership/access metadata. */
   publisherPeerId?: string;
   /** KC-level private access policy metadata. */

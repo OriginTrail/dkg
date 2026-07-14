@@ -1,4 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { assertSafeRdfTerm, isSafeIri } from '@origintrail-official/dkg-core';
 import type { KAManifestEntry } from './publisher.js';
 import { isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 import {
@@ -24,6 +25,70 @@ export interface ValidationOptions {
    * without a manifest root. This is not a generic metadata bypass.
    */
   trustedNonManifestCatalogTriples?: TrustedCatalogTripleKeys;
+}
+
+/**
+ * Validate one complete graph-scoped KA payload.
+ *
+ * Unlike {@link validatePublishRequest}, RDF subjects are ordinary KA data:
+ * they do not define storage ownership or membership. The control-plane
+ * identity is the UAL plus assertion version carried by the v2 envelope.
+ */
+export function validateKnowledgeAssetPublishRequest(
+  nquads: readonly Quad[],
+  expectedGraph: string,
+  publicTripleCount: number,
+): ValidationResult {
+  const errors: string[] = [];
+
+  if (!Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0) {
+    errors.push(
+      `Graph-scoped KA publicTripleCount must be a non-negative safe integer, got ${publicTripleCount}`,
+    );
+  } else if (nquads.length !== publicTripleCount) {
+    errors.push(
+      `Graph-scoped KA public triple count mismatch: envelope=${publicTripleCount}, parsed=${nquads.length}`,
+    );
+  }
+
+  if (!isSafeIri(expectedGraph)) {
+    errors.push(`Graph-scoped KA expected graph is not a safe IRI: ${expectedGraph}`);
+  }
+
+  for (const [index, quad] of nquads.entries()) {
+    if (quad.graph !== expectedGraph) {
+      errors.push(
+        `Graph-scoped KA quad ${index} graph "${quad.graph}" does not match expected graph "${expectedGraph}"`,
+      );
+    }
+    if (isBlankNode(quad.subject)) {
+      errors.push(
+        `Graph-scoped KA quad ${index} has blank-node subject "${quad.subject}"; ` +
+        'the sender must canonicalize blank nodes before transmission',
+      );
+    } else if (!isSafeIri(quad.subject)) {
+      errors.push(`Graph-scoped KA quad ${index} has an unsafe subject IRI`);
+    }
+    if (!isSafeIri(quad.predicate)) {
+      errors.push(`Graph-scoped KA quad ${index} has an unsafe predicate IRI`);
+    }
+    if (isBlankNode(quad.object)) {
+      errors.push(
+        `Graph-scoped KA quad ${index} has blank-node object "${quad.object}"; ` +
+        'the sender must canonicalize blank nodes before transmission',
+      );
+    } else {
+      try {
+        assertSafeRdfTerm(
+          quad.object.startsWith('"') ? quad.object : `<${quad.object}>`,
+        );
+      } catch {
+        errors.push(`Graph-scoped KA quad ${index} has an unsafe RDF object`);
+      }
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
 }
 
 /**
