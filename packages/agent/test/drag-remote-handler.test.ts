@@ -149,6 +149,51 @@ describe('createDragRemoteHandler', () => {
     expect(globalDeps.answerLocal).toHaveBeenCalledOnce();
   });
 
+  it('degrades an over-budget answer to a citation subset instead of shipping unbounded bytes', async () => {
+    const bigLiteral = 'x'.repeat(400);
+    const citations = Array.from({ length: 8 }, (_, i) => ({ id: i, content: bigLiteral }));
+    const facts = citations.map((_, i) => ({ source: i }));
+    const { deps } = makeDeps({
+      answerLocal: vi.fn(async () => ({ answer: 'grounded', citations, facts })),
+    });
+    const handler = createDragRemoteHandler(deps, { maxResponseBytes: 2_048 });
+
+    const response = decode(await handler(encode(VALID_REQUEST), 'peer-a'));
+
+    expect(response.error).toBeUndefined();
+    const kept = response.citations as unknown[];
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(citations.length);
+    expect((response.facts as unknown[]).length).toBe(kept.length); // facts stay parallel
+    expect(JSON.stringify(response).length).toBeLessThanOrEqual(2_048);
+  });
+
+  it('drops all citations when none fit, and refuses only when the envelope itself is over budget', async () => {
+    // One giant citation, small envelope: degrade to an empty (still valid) citation set.
+    const giantCitation = makeDeps({
+      answerLocal: vi.fn(async () => ({
+        answer: 'grounded',
+        citations: [{ content: 'y'.repeat(4_096) }],
+        facts: [{ source: 0 }],
+      })),
+    });
+    const giantCitationHandler = createDragRemoteHandler(giantCitation.deps, { maxResponseBytes: 1_024 });
+    const degraded = decode(await giantCitationHandler(encode(VALID_REQUEST), 'peer-a'));
+    expect(degraded).toEqual({ answer: 'grounded', citations: [], facts: [] });
+
+    // Envelope (answer prose) alone exceeds the budget: nothing left to shed — refuse.
+    const giantAnswer = makeDeps({
+      answerLocal: vi.fn(async () => ({
+        answer: 'y'.repeat(4_096),
+        citations: [{ content: 'z'.repeat(2_048) }],
+        facts: [{ source: 0 }],
+      })),
+    });
+    const giantAnswerHandler = createDragRemoteHandler(giantAnswer.deps, { maxResponseBytes: 1_024 });
+    const refused = decode(await giantAnswerHandler(encode(VALID_REQUEST), 'peer-a'));
+    expect(refused).toEqual({ error: 'dRAG: answer exceeds the responder response-size budget' });
+  });
+
   it('returns busy while the configured concurrency slot is occupied', async () => {
     const visibility = deferred<boolean>();
     const { deps, isContextGraphPublic, answerLocal } = makeDeps({

@@ -70,32 +70,10 @@ export class LocalAgentApiError extends Error {
 
 // ── dRAG answering (OT-RFC-55) ──────────────────────────────────────────────
 
-export interface DragCitation {
-  kaId: string;
-  contextGraphId: string;
-  servingNode: string;
-  ual: string;
-  triple: { subject: string; predicate: string; object: string };
-  proof: {
-    content: string;
-    leaf: string;
-    siblings: string[];
-    chunkId: number;
-    leafCount: number;
-  };
-  onChain: { merkleRoot: string; author: string; chainId: string };
-  seal?: {
-    merkleRoot: string;
-    authorAddress: string;
-    r: string;
-    vs: string;
-    schemeVersion: number;
-    chainId: string;
-    kav10Address: string;
-    reservedKaId: string;
-  };
-  checks: { merkle: boolean; onChain: boolean | null; authorSig: boolean | null; verified: boolean };
-}
+// The citation wire shape is owned by dkg-core (VerifiableCitation); alias it
+// instead of mirroring so proof/seal/checks changes cannot drift out of sync.
+// Type-only import — erased at compile time, nothing enters the browser bundle.
+export type DragCitation = import('@origintrail-official/dkg-core').VerifiableCitation;
 
 export interface DragPerNode { peerId: string; factsCited: number; verified: number; error?: string }
 
@@ -1502,7 +1480,7 @@ export async function listAssertions(
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
     if (subGraph === 'meta') continue;
-    const key = `${subGraph ?? ''} ${name}`;
+    const key = `${subGraph ?? ''}\u0000${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const cnt = countByGraph.get(g);

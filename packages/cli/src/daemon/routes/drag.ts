@@ -335,7 +335,17 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
     if (rawEmbedder === 'keyword' || retrievalMode === 'keyword') {
       forceKeyword = true;
     } else if (rawEmbedder) {
-      retriever = retrieverFor(buildEmbedder(rawEmbedder, config), ctx);
+      const explicit = buildEmbedder(rawEmbedder, config);
+      if (!explicit) {
+        // An EXPLICIT override must never silently answer with the node default —
+        // in an A/B run that would silently attribute default results to the
+        // requested provider.
+        jsonResponse(res, 400, {
+          error: `experimental embedder "${rawEmbedder}" is not available on this node (missing credentials or baseURL)`,
+        });
+        return;
+      }
+      retriever = retrieverFor(explicit, ctx);
     } else if (retrievalMode === 'semantic') {
       retriever = retrieverFor(resolveSemanticEmbedder(config), ctx);
     } // else "default"/undefined → the agent's attached default (config.drag.embedder)

@@ -20,6 +20,7 @@ export interface DragRemoteHandlerOptions {
   maxCitations?: number;
   maxQuestionChars?: number;
   maxPayloadBytes?: number;
+  maxResponseBytes?: number;
   maxPerPeerPerMinute?: number;
   maxGlobalPerMinute?: number;
   maxConcurrent?: number;
@@ -42,6 +43,9 @@ export function createDragRemoteHandler(
   const maxCitations = options.maxCitations ?? 15;
   const maxQuestionChars = options.maxQuestionChars ?? 2_000;
   const maxPayloadBytes = options.maxPayloadBytes ?? 16 * 1024;
+  // Mirrors the asker's MAX_REMOTE_RESPONSE_BYTES: anything larger would be
+  // rejected on arrival anyway, so shipping it is pure wasted responder work.
+  const maxResponseBytes = options.maxResponseBytes ?? 2 * 1024 * 1024;
   const maxConcurrent = options.maxConcurrent ?? 2;
   const perPeer = new RateLimiter({
     maxPerWindow: options.maxPerPeerPerMinute ?? 30,
@@ -103,7 +107,28 @@ export function createDragRemoteHandler(
         },
         { forceKeyword: true },
       );
-      return encode(result);
+      // Output-side budget: citation COUNT is capped above, but a public CG can
+      // hold arbitrarily large literals, so per-citation SIZE is not. A citation
+      // subset is still a valid, independently re-verifiable answer — degrade by
+      // halving before giving up, and never serialize unbounded bytes to a peer.
+      let payload = encode(result);
+      if (payload.byteLength > maxResponseBytes) {
+        const shaped = result as { citations?: unknown[]; facts?: unknown[] };
+        while (
+          payload.byteLength > maxResponseBytes &&
+          Array.isArray(shaped?.citations) &&
+          shaped.citations.length > 0
+        ) {
+          const keep = Math.floor(shaped.citations.length / 2);
+          shaped.citations = shaped.citations.slice(0, keep);
+          if (Array.isArray(shaped.facts)) shaped.facts = shaped.facts.slice(0, keep);
+          payload = encode(shaped);
+        }
+        if (payload.byteLength > maxResponseBytes) {
+          return encode({ error: 'dRAG: answer exceeds the responder response-size budget' });
+        }
+      }
+      return payload;
     } catch (error) {
       return encode({ error: error instanceof Error ? error.message : String(error) });
     } finally {

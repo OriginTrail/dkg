@@ -195,6 +195,37 @@ describe('POST /api/answer authorization and validation', () => {
     expect(result.agent.dragAnswerLocal).not.toHaveBeenCalled();
   });
 
+  it('forces keyword retrieval on a private graph DEFAULT request — the node-wide semantic retriever must not be inherited', async () => {
+    const result = await postAnswer({
+      question: 'Which suppliers were flagged?',
+      contextGraphId: CONTEXT_GRAPH_ID,
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.agent.dragAnswerLocal).toHaveBeenCalledWith(
+      {
+        question: 'Which suppliers were flagged?',
+        contextGraphId: CONTEXT_GRAPH_ID,
+        maxCitations: undefined,
+        maxKas: undefined,
+      },
+      { retriever: undefined, forceKeyword: true },
+    );
+  });
+
+  it('rejects an explicit experimental embedder that cannot run instead of silently answering with the default', async () => {
+    const agent = createAgent({ isPrivateContextGraph: vi.fn(async () => false) });
+
+    const result = await postAnswer(
+      { question: 'Which suppliers were flagged?', contextGraphId: CONTEXT_GRAPH_ID, embedder: 'openai' },
+      { agent, config: { drag: { experimentalOverrides: true } } },
+    );
+
+    expect(result.status).toBe(400);
+    expect(result.body.error).toMatch(/embedder "openai" is not available/);
+    expect(agent.dragAnswerLocal).not.toHaveBeenCalled();
+  });
+
   it('reports that reasoning is disabled without gathering the graph', async () => {
     const result = await postAnswer({
       question: 'Which suppliers violated policy?',

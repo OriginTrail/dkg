@@ -170,12 +170,16 @@ Two invariants make this trustworthy:
    of chain-verified evidence. It is not claimed to be an exact or minimal EYE
    derivation proof; re-run the rule when that stronger property is required.
 
-**Rules are verifiable too.** A rule is N3; publish it as a KA whose object is the
-rule body under predicate `…/drag/reasoning#ruleN3`, and dRAG auto-discovers it.
-Now **verified facts + verified rules → conclusions with verified supporting
-evidence**. The response identifies the rule and a bounded, rule-scoped evidence
-set; it does not claim that set is the exact or minimal derivation. Rules may also
-be passed per-request (`"rules": "<n3>"`).
+**Rules are verifiable too — and managed.** A rule is N3; publish it as a KA whose
+object is the rule body under predicate `…/drag/reasoning#ruleN3` (typically into a
+dedicated `rules` sub-graph), and dRAG auto-discovers it. Now **verified facts +
+verified rules → conclusions with verified supporting evidence**. Rules are managed
+objects: a rule whose `…/drag/reasoning#ruleStatus` is `"disabled"` never fires, and
+`config.drag.reasoningRuleAuthors` (an allowlist of `0x` author addresses) restricts
+auto-discovery to rules whose chain-verified author you trust — governance for public
+CGs where any publisher could plant a rule. The response identifies the rule and a
+bounded, rule-scoped evidence set; it does not claim that set is the exact or minimal
+derivation. Rules may also be passed per-request (`"rules": "<n3>"`).
 
 **Closed-world caveat.** Negation-as-failure means "no senior review *in the
 facts EYE saw*." The route refuses to run EYE if its KA/fact bounds were hit or
@@ -189,12 +193,14 @@ multi-agent code-graph example (a change that violates the review policy, derive
 with negation + transitivity and accompanied by verified evidence).
 
 **Known limitations (V1).**
-- **Untrusted rules + compute.** Auto-discovered rule-KAs are author-untrusted (any
-  publisher to a public CG can plant one), and EYE runs **in-process** — an
-  in-process timeout cannot interrupt the blocking WASM. The fact/rule/derived sets
-  are hard-capped, but an adversarial rule's *runtime* is not bounded. **Until EYE
-  runs in a worker-thread with a hard timeout, set `config.drag.reasoning: false`
-  on nodes that expose the API beyond loopback or reason over untrusted public CGs.**
+- **Untrusted rules + compute.** Auto-discovered rule-KAs are author-untrusted by
+  default (any publisher to a public CG can plant one), and EYE runs **in-process** —
+  an in-process timeout cannot interrupt the blocking WASM. The fact/rule/derived sets
+  are hard-capped and `config.drag.reasoningRuleAuthors` confines auto-discovery to
+  allow-listed chain-verified authors, but an adversarial rule's *runtime* is not
+  bounded. **Until EYE runs in a worker-thread with a hard timeout, set
+  `config.drag.reasoning: false` on nodes that expose the API beyond loopback, and set
+  `reasoningRuleAuthors` wherever reasoning runs over a public CG.**
 - **Evidence attribution is best-effort.** `support` is a set of verified facts in the
   conclusion's rule-scoped neighbourhood — every leaf is a real chain-verified
   citation (never fabricated), but the *set* may include a sibling-branch fact or
