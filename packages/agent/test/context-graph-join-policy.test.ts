@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { PROTOCOL_JOIN_REQUEST } from '@origintrail-official/dkg-core';
 import {
   DKGAgent,
   signAgentDelegation,
@@ -9,6 +10,18 @@ import {
   type ContextGraphJoinPolicyStore,
 } from '../src/index.js';
 import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
+
+type JoinRequestHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+function joinRequestHandler(agent: DKGAgent): JoinRequestHandler {
+  const handlers = (agent as any).messenger.handlers as Map<string, JoinRequestHandler>;
+  const handler = handlers.get(PROTOCOL_JOIN_REQUEST);
+  if (!handler) throw new Error('join-request handler was not registered');
+  return handler;
+}
 
 class MemoryJoinPolicyStore implements ContextGraphJoinPolicyStore {
   readonly records = new Map<string, ContextGraphJoinPolicyRecord>();
@@ -328,6 +341,92 @@ describe('context graph open enrollment policy', () => {
       .not.toContain(secondJoiner.agentAddress.toLowerCase());
   }, 30_000);
 
+  it('refreshes already-member credentials without allowing carrier swaps or rollback', async () => {
+    const { agent, owner, chain } = await boot();
+    const contextGraphId = 'private-policy-member-refresh';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+
+    const member = ethers.Wallet.createRandom();
+    await agent.inviteAgentToContextGraph(contextGraphId, member.address, owner.agentAddress);
+    const delegateePeerId = '12D3KooWOpenEnrollmentMemberPeer';
+    const delegateeOpKey = ethers.Wallet.createRandom().address;
+    const issuedAtMs = Date.now();
+    const expiresAtMs = issuedAtMs + 60_000;
+    const delegation = await signAgentDelegation({
+      agentAddress: member.address,
+      scope: joinDelegationScope(chain.deploymentId, contextGraphId),
+      issuedAtMs,
+      expiresAtMs,
+      delegateePeerId,
+      delegateeOpKey,
+      agentPrivateKey: member.privateKey,
+    });
+
+    const firstResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({ contextGraphId, delegation })),
+      delegateePeerId,
+    )));
+    expect(firstResponse).toMatchObject({ ok: true, alreadyMember: true });
+    expect((await (agent as any).getContextGraphAllowedDelegateePeers(contextGraphId))
+      .get(member.address.toLowerCase())).toContain(delegateePeerId);
+    expect((await (agent as any).getContextGraphAllowedDelegateeKeys(contextGraphId))
+      .get(member.address.toLowerCase())).toContain(delegateeOpKey.toLowerCase());
+
+    const carrierMismatch = await signAgentDelegation({
+      agentAddress: member.address,
+      scope: joinDelegationScope(chain.deploymentId, contextGraphId),
+      issuedAtMs: issuedAtMs + 1,
+      expiresAtMs,
+      delegateePeerId: '12D3KooWSignedButNotCarrier',
+      delegateeOpKey: ethers.Wallet.createRandom().address,
+      agentPrivateKey: member.privateKey,
+    });
+    const mismatchResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({ contextGraphId, delegation: carrierMismatch })),
+      '12D3KooWDifferentCarrier',
+    )));
+    expect(mismatchResponse.ok).toBe(false);
+    expect(mismatchResponse.error).toMatch(/carrier mismatch/i);
+
+    const staleDelegation = await signAgentDelegation({
+      agentAddress: member.address,
+      scope: joinDelegationScope(chain.deploymentId, contextGraphId),
+      issuedAtMs: issuedAtMs - 1,
+      expiresAtMs,
+      delegateePeerId,
+      delegateeOpKey,
+      agentPrivateKey: member.privateKey,
+    });
+    const staleResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({ contextGraphId, delegation: staleDelegation })),
+      delegateePeerId,
+    )));
+    expect(staleResponse.ok).toBe(false);
+    expect(staleResponse.error).toMatch(/stale already-member delegation refresh/i);
+
+    const conflictingDelegation = await signAgentDelegation({
+      agentAddress: member.address,
+      scope: joinDelegationScope(chain.deploymentId, contextGraphId),
+      issuedAtMs,
+      expiresAtMs,
+      delegateePeerId,
+      delegateeOpKey: ethers.Wallet.createRandom().address,
+      agentPrivateKey: member.privateKey,
+    });
+    const conflictResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({ contextGraphId, delegation: conflictingDelegation })),
+      delegateePeerId,
+    )));
+    expect(conflictResponse.ok).toBe(false);
+    expect(conflictResponse.error).toMatch(/conflicting already-member delegation refresh/i);
+
+    const replayResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({ contextGraphId, delegation })),
+      delegateePeerId,
+    )));
+    expect(replayResponse).toMatchObject({ ok: true, alreadyMember: true });
+  }, 30_000);
+
   it('does not report durable approval until membership flush succeeds and repairs on retry', async () => {
     const { agent, owner } = await boot();
     const contextGraphId = 'private-policy-durable-approval';
@@ -609,6 +708,50 @@ describe('context graph open enrollment policy', () => {
       'peer-overflow',
     )).toThrow(/queue.*busy/i);
     for (const release of releases) release();
+  }, 30_000);
+
+  it('rate-limits the P2P handler before CG lookups and cleans rejected return paths', async () => {
+    const { agent, owner, chain } = await boot();
+    const contextGraphId = 'private-policy-ingress-cleanup';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+
+    const invalidAgent = ethers.Wallet.createRandom().address;
+    const invalidPeer = '12D3KooWInvalidJoinCarrier';
+    const invalidResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+      encoder.encode(JSON.stringify({
+        contextGraphId,
+        delegation: {
+          agentAddress: invalidAgent,
+          scope: joinDelegationScope(chain.deploymentId, contextGraphId),
+          issuedAtMs: Date.now(),
+          expiresAtMs: Date.now() + 60_000,
+          delegateePeerId: invalidPeer,
+          signature: '0x01',
+        },
+      })),
+      invalidPeer,
+    )));
+    expect(invalidResponse.ok).toBe(false);
+    expect((agent as any).joinRequestOriginPeers.has(
+      `${contextGraphId}::${invalidAgent.toLowerCase()}`,
+    )).toBe(false);
+
+    const getOwner = vi.spyOn(agent, 'getContextGraphOwner');
+    const floodPeer = '12D3KooWBoundedJoinFloodPeer';
+    let lastResponse: any;
+    for (let index = 0; index < 21; index += 1) {
+      const address = `0x${(index + 1).toString(16).padStart(40, '0')}`;
+      lastResponse = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+        encoder.encode(JSON.stringify({
+          contextGraphId: `unknown-flood-cg-${index}`,
+          delegation: { agentAddress: address, signature: '0x01' },
+        })),
+        floodPeer,
+      )));
+    }
+    expect(getOwner).toHaveBeenCalledTimes(20);
+    expect(lastResponse).toMatchObject({ ok: false });
+    expect(lastResponse.error).toMatch(/peer rate limit/i);
   }, 30_000);
 
   it('does not let a rejected request bypass a full pending queue', async () => {

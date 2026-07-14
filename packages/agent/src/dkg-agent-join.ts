@@ -800,6 +800,81 @@ export class JoinRequestMethods extends DKGAgentBase {
   }
 
   /**
+   * An idempotent retry from an already-admitted member may refresh its
+   * transport credential, but it must not roll that credential backwards or
+   * swap the signed peer/key at the same issuance timestamp.
+   */
+  async assertAlreadyMemberDelegationRefresh(
+    this: DKGAgent,
+    contextGraphId: string,
+    delegation: SignedAgentDelegation,
+    carrierPeerId: string,
+  ): Promise<void> {
+    const signedPeerId = delegation.delegateePeerId;
+    if (!signedPeerId || signedPeerId !== carrierPeerId) {
+      throw new Error(
+        'Already-member delegation refresh carrier mismatch: ' +
+        `signed delegateePeerId=${signedPeerId || '<missing>'}, carrier=${carrierPeerId}`,
+      );
+    }
+    if (!Number.isSafeInteger(delegation.issuedAtMs) || delegation.issuedAtMs < 0) {
+      throw new Error('Already-member delegation refresh has an invalid issuedAtMs');
+    }
+    const incomingExpiresAtMs = delegation.expiresAtMs ?? 0;
+    if (!Number.isSafeInteger(incomingExpiresAtMs) || incomingExpiresAtMs < 0) {
+      throw new Error('Already-member delegation refresh has an invalid expiresAtMs');
+    }
+
+    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const delegationUri = assertSafeIri(
+      `did:dkg:agent-delegation:${contextGraphId}:${delegation.agentAddress.toLowerCase()}`,
+    );
+    const result = await this.store.query(
+      `SELECT ?issuedAt ?expiresAt ?peer ?opKey WHERE {
+        GRAPH <${metaGraph}> {
+          <${delegationUri}> <${DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT}> ?issuedAt .
+          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
+          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer }
+          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?opKey }
+        }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return;
+
+    const row = result.bindings[0] as Record<string, string>;
+    const currentIssuedAtMs = Number(stripLiteral(row['issuedAt'] ?? ''));
+    const currentExpiresAtMs = row['expiresAt'] == null
+      ? 0
+      : Number(stripLiteral(row['expiresAt']));
+    if (
+      !Number.isSafeInteger(currentIssuedAtMs) || currentIssuedAtMs < 0 ||
+      !Number.isSafeInteger(currentExpiresAtMs) || currentExpiresAtMs < 0
+    ) {
+      throw new Error('Stored already-member delegation has an invalid validity timestamp');
+    }
+    if (delegation.issuedAtMs < currentIssuedAtMs) {
+      throw new Error(
+        `Stale already-member delegation refresh: issuedAtMs ${delegation.issuedAtMs} ` +
+        `is older than active credential ${currentIssuedAtMs}`,
+      );
+    }
+    if (delegation.issuedAtMs > currentIssuedAtMs) return;
+
+    const currentPeerId = row['peer'] == null ? '' : stripLiteral(row['peer']);
+    const currentOpKey = row['opKey'] == null ? '' : stripLiteral(row['opKey']).toLowerCase();
+    const incomingOpKey = delegation.delegateeOpKey?.toLowerCase() ?? '';
+    if (
+      signedPeerId !== currentPeerId ||
+      incomingOpKey !== currentOpKey ||
+      incomingExpiresAtMs !== currentExpiresAtMs
+    ) {
+      throw new Error(
+        `Conflicting already-member delegation refresh at issuedAtMs ${delegation.issuedAtMs}`,
+      );
+    }
+  }
+
+  /**
    * Persist an incoming request and, when every open-enrollment gate passes,
    * commit approval under the same lock used by policy changes. A failed
    * automatic decision is deliberately converted back into the ordinary
