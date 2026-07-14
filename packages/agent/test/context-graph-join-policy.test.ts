@@ -754,6 +754,57 @@ describe('context graph open enrollment policy', () => {
     expect(lastResponse.error).toMatch(/peer rate limit/i);
   }, 30_000);
 
+  it('does not trust or broadcast to a curator peer whose join request failed', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'failed-invite-curator';
+    const failedPeer = '12D3KooWFailedInviteCurator';
+    const delegation = await agent.signJoinRequest(contextGraphId, owner.agentAddress);
+    const sendReliable = vi.spyOn((agent as any).messenger, 'sendReliable');
+
+    sendReliable.mockResolvedValueOnce({
+      delivered: true,
+      response: encoder.encode(JSON.stringify({ ok: false, error: 'not curator' })),
+      attempts: 1,
+      messageId: 'join-non-ok',
+    });
+    await expect(agent.forwardJoinRequest(
+      contextGraphId,
+      delegation,
+      owner.name,
+      failedPeer,
+    )).resolves.toMatchObject({ delivered: 0 });
+
+    const acceptedKey = `${contextGraphId}::${owner.agentAddress.toLowerCase()}`;
+    expect((agent as any).joinRequestAcceptedBy.has(acceptedKey)).toBe(false);
+    expect(sendReliable).toHaveBeenCalledTimes(1);
+    expect(sendReliable.mock.calls[0][0]).toBe(failedPeer);
+    expect(sendReliable.mock.calls[0][1]).toBe(PROTOCOL_JOIN_REQUEST);
+
+    for (const type of ['join-approved', 'join-rejected']) {
+      const forged = JSON.parse(decoder.decode(await joinRequestHandler(agent)(
+        encoder.encode(JSON.stringify({
+          type,
+          contextGraphId,
+          agentAddress: owner.agentAddress,
+        })),
+        failedPeer,
+      )));
+      expect(forged).toMatchObject({ ok: true, skipped: true });
+    }
+    expect(await agent.getJoinRequestStatus(contextGraphId, owner.agentAddress)).toBeNull();
+
+    sendReliable.mockRejectedValueOnce(new Error('dial failed'));
+    await expect(agent.forwardJoinRequest(
+      contextGraphId,
+      delegation,
+      owner.name,
+      failedPeer,
+    )).resolves.toMatchObject({ delivered: 0 });
+    expect((agent as any).joinRequestAcceptedBy.has(acceptedKey)).toBe(false);
+    expect(sendReliable).toHaveBeenCalledTimes(2);
+    expect(sendReliable.mock.calls[1][0]).toBe(failedPeer);
+  }, 30_000);
+
   it('does not let a rejected request bypass a full pending queue', async () => {
     const { agent, owner } = await boot();
     const contextGraphId = 'private-policy-full-pending-queue';

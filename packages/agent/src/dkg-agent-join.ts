@@ -2158,15 +2158,21 @@ export class JoinRequestMethods extends DKGAgentBase {
       set.add(remotePeerId);
     };
 
+    const forgetAcceptedBy = (remotePeerId: string): void => {
+      const set = this.joinRequestAcceptedBy.get(acceptedKey);
+      if (!set) return;
+      set.delete(remotePeerId);
+      if (set.size === 0) this.joinRequestAcceptedBy.delete(acceptedKey);
+    };
+
     // Open enrollment may approve and notify before the request-response
     // round-trip has returned. Trust the explicit invite-supplied curator
     // before sending so that immediate `join-approved` cannot lose a race
     // against the old post-response cache write. This is not a trust
     // expansion: the requester already selected this exact peer from the
     // curator's invite and sends the signed delegation only to it first.
-    recordAcceptedBy(curatorPeerId);
-
     if (curatorPeerId !== this.peerId) {
+      recordAcceptedBy(curatorPeerId);
       try {
         // rc.9 PR-10: substrate send. queued surfaces as a throw
         // (matches the legacy sendToPeer ergonomics so the existing
@@ -2202,6 +2208,7 @@ export class JoinRequestMethods extends DKGAgentBase {
         // Curator was reachable but rejected the request. Log + record
         // the reason so the joiner can see WHY (e.g. "unknown CG"
         // implies the cgId in the invite text is wrong).
+        forgetAcceptedBy(curatorPeerId);
         const rejectReason = response.error ?? 'unknown';
         this.log.warn(
           ctx,
@@ -2222,6 +2229,7 @@ export class JoinRequestMethods extends DKGAgentBase {
         // delivery). Return the rejection now.
         return { delivered: 0, errors };
       } catch (dialErr) {
+        forgetAcceptedBy(curatorPeerId);
         const msg = dialErr instanceof Error ? dialErr.message : String(dialErr);
         this.log.warn(
           ctx,
