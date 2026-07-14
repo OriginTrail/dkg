@@ -12,3 +12,8 @@ for (const entry of agent.listMessageOutbox()) {
 const metadataEntries: Array<{ protocol: string; attempts: number }> =
   agent.listMessageOutboxMetadata();
 void metadataEntries;
+
+for (const entry of agent.listMessageOutboxMetadata()) {
+  // @ts-expect-error Metadata diagnostics must never expose retry payload bytes.
+  void entry.payload;
+}
