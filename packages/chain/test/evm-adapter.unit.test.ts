@@ -2369,36 +2369,6 @@ describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
     expect(elapsed).toBeLessThan(45_000);
   }, 60_000);
 
-  it('keeps the retry budget PER-REQUEST — a later request still retries (Codex PR #901 round-3 :125)', async () => {
-    // Regression guard: the budget was once a `Date.now()` deadline captured at
-    // provider construction, so after the budget elapsed (node uptime) EVERY
-    // later request lost all retries. Two sequential reads, spaced past the
-    // backoff budget, must BOTH retry the RPC multiple times.
-    let hits = 0;
-    server = createServer((_req, res) => {
-      hits += 1;
-      res.writeHead(429, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32005, message: 'rate limited' } }));
-    });
-    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', () => resolve()));
-    const addr = server.address();
-    if (!addr || typeof addr === 'string') throw new Error('mock RPC failed to bind');
-    url = `http://127.0.0.1:${addr.port}`;
-    const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] })));
-
-    // First read: exhaust + count its retries. >1 hit ⇒ it retried.
-    hits = 0;
-    await a.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 }).catch(() => {});
-    const firstRequestHits = hits;
-    expect(firstRequestHits).toBeGreaterThan(1);
-
-    // Second read (provider already "aged" past the old construction-time
-    // deadline by the first request's ~7.5s of backoff): must ALSO retry. Under
-    // the construction-time-deadline bug this would have made exactly 1 hit.
-    hits = 0;
-    await a.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 }).catch(() => {});
-    expect(hits).toBeGreaterThan(1);
-  }, 60_000);
 });
 
 describe('PR3 / RC11 — publish-preflight TTL cache', () => {

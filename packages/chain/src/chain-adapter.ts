@@ -171,6 +171,8 @@ export interface OnChainPublishResult {
   batchId: bigint;
   /** Greenfield: equals `batchId` when tokenId == kaId. */
   kaId?: bigint;
+  /** Merkle root emitted by the exact publish transaction being resolved. */
+  merkleRoot?: Uint8Array;
   /** `DKGKnowledgeAssets` contract address used in the UAL path segment. */
   knowledgeAssetsContract?: string;
   /** Absent for updates (no new KAs minted). */
@@ -1010,9 +1012,10 @@ export interface ChainAdapter {
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
-   * Used by the daemon's curated-CG registration preflight to enforce
-   * `local curator == ownerOf(pcaAccountId)` so an agent wallet cannot
-   * impersonate ownership when tying a CG to a PCA.
+   * Used by the daemon's curated-CG registration preflight to populate the
+   * coherence-required publishAuthority. Registration authorization is then
+   * checked separately: the tx signer must be this owner or an agent registered
+   * to the exact PCA.
    */
   getPublishingConvictionAccountOwner?(accountId: bigint): Promise<string>;
 

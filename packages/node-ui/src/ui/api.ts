@@ -524,8 +524,7 @@ export const signJoinRequest = (contextGraphId: string) =>
  * Daemon's `/request-join` returns `delivered` describing how the
  * signed delegation was routed:
  *  - `'local'`  — local node IS the curator; stored locally, no P2P
- *  - `number`   — count of remote curator peers that returned `ok` for
- *                 the broadcast/targeted forward (typically `1`)
+ *  - `number`   — count of explicit curator peers that returned `ok`
  * The 502 path (no curator reachable) throws here via `post()`, so a
  * resolved response always implies at least one delivery destination.
  */
@@ -533,7 +532,13 @@ export const submitJoinRequest = (
   contextGraphId: string,
   req: { delegation: SignedAgentDelegation; agentName?: string; curatorPeerId?: string },
 ) =>
-  post<{ ok: boolean; status: string; delivered: number | 'local'; alreadyMember?: boolean }>(
+  post<{
+    ok: boolean;
+    status: string;
+    delivered: number | 'local';
+    alreadyMember?: boolean;
+    autoApproved?: boolean;
+  }>(
     `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
     req,
   );

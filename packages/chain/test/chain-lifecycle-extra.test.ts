@@ -244,6 +244,8 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       expect(resolved!.startKAId).toBeGreaterThan(0n);
       expect(resolved!.endKAId).toBe(resolved!.startKAId);
       expect(resolved!.publisherAddress.toLowerCase()).toBe(adapter.getSignerAddress().toLowerCase());
+      expect(ethers.hexlify(resolved!.merkleRoot!)).toBe(ethers.hexlify(originalRoot));
+      expect(resolved!.authorAddress?.toLowerCase()).toBe(adapter.getSignerAddress().toLowerCase());
 
       // --- updateKnowledgeCollectionV10 (publisher ACK + owner EIP-712 seal) ---
       const newMerkleRoot = ethers.getBytes(

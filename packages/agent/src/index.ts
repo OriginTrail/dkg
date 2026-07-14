@@ -48,6 +48,18 @@ export {
 } from './p2p/multiaddr-peer-target.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
+export {
+  VmReconcileDispatcher,
+} from './chain-reconciler.js';
+export {
+  ContextGraphOnChainIdUnresolvedError,
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+  VmReconcileUnavailableError,
+  type ContextGraphReconcileResult,
+  type ContextGraphReconcileStatus,
+  type VmReconcileSource,
+} from './vm-reconcile-service.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,
@@ -83,6 +95,18 @@ export {
 export { DKGAgent } from './dkg-agent.js';
 export type { EntityRetriever, EntityRetrievalResult, RetrievedAnchor } from './drag/retriever.js';
 export type { DragFact, DragAnswerResult, DragNetworkAnswerResult, DragPerNode } from './dkg-agent-drag.js';
+export {
+  contextGraphPriority,
+  countSyncPriorityClasses,
+  normalizeSyncContextGraphPriorities,
+  orderContextGraphIdsByPriority,
+  syncPriorityClass,
+  validateSyncResponderSnapshotLimitsConfig,
+  type SyncContextGraphPriorityConfig,
+  type SyncPriorityClass,
+  type SyncResponderSnapshotLimitsConfig,
+  type SyncSchedulerLane,
+} from './sync/policy.js';
 export type { PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 export {
   verifyBatch,
@@ -132,6 +156,8 @@ export {
   type DKGAgentConfig,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
+  type ContextGraphDiscoveryMetadata,
+  type ContextGraphDiscoveryOptions,
   type PublishOpts,
   type PublishAsyncContent,
   type PublishAsyncOpts,
@@ -140,6 +166,12 @@ export {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type ContextGraphJoinPolicyMode,
+  type ContextGraphJoinPolicyRecord,
+  type ContextGraphJoinPolicyAuditEventType,
+  type ContextGraphJoinPolicyAuditEvent,
+  type ContextGraphJoinPolicyRateReservation,
+  type ContextGraphJoinPolicyStore,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,

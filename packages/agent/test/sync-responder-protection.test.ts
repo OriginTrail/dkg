@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
+import {
+  registerSyncHandler,
+  SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT,
+} from '../src/sync/responder/sync-handler.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { QueryOptions, QueryResult, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
@@ -83,6 +86,7 @@ function captureHandler(
     ) => Promise<boolean>;
     logWarn?: (ctx: OperationContext, message: string) => void;
     publicSnapshotStore?: WorkspacePublicSnapshotStore;
+    contextGraphPriorities?: Record<string, number>;
   } = {},
 ) {
   let captured: ((
@@ -104,6 +108,7 @@ function captureHandler(
     authorizeSyncRequest: options.authorizeSyncRequest ?? (async () => true),
     logWarn: options.logWarn ?? noopLog,
     logDebug: noopLog,
+    contextGraphPriorities: options.contextGraphPriorities,
   });
 
   return {
@@ -115,6 +120,217 @@ function captureHandler(
 }
 
 describe('sync responder protection', () => {
+  it.each([
+    ['omitted priorities', undefined],
+    ['all-zero priorities', { 'sync-protection': 0 }],
+  ])('preserves one continuous same-peer admission with %s', async (_label, priorities) => {
+    const queryGates: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    let authStarted = 0;
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
+      query: async () => {
+        const gate = deferred<QueryResult>();
+        queryGates.push(gate);
+        return gate.promise;
+      },
+    }), {
+      contextGraphPriorities: priorities,
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        return true;
+      },
+    });
+
+    const first = cap.invoke(makeEnvelope(), REMOTE_A);
+    while (queryGates.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    const second = cap.invoke(makeEnvelope(), REMOTE_A);
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authStarted).toBe(1);
+
+    queryGates.shift()?.resolve({ type: 'bindings', bindings: [] });
+    await first;
+    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    while (queryGates.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    queryGates.shift()?.resolve({ type: 'bindings', bindings: [] });
+    await second;
+  });
+
+  it('prioritizes only authorized responder work while keeping pre-authorization FIFO', async () => {
+    const queryGates: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    const queryOrder: string[] = [];
+    const authOrder: string[] = [];
+    const store = baseStore({
+      listGraphs: async () => [
+        'did:dkg:context-graph:block-a',
+        'did:dkg:context-graph:block-b',
+        'did:dkg:context-graph:block-c',
+        'did:dkg:context-graph:low',
+        'did:dkg:context-graph:high',
+      ],
+      query: async (sparql: string) => {
+        const contextGraphId = ['block-a', 'block-b', 'block-c', 'low', 'high']
+          .find((id) => sparql.includes(`context-graph:${id}`)) ?? 'unknown';
+        queryOrder.push(contextGraphId);
+        const gate = deferred<QueryResult>();
+        queryGates.push(gate);
+        return gate.promise;
+      },
+    });
+    const cap = captureHandler(store, {
+      contextGraphPriorities: { high: 100, low: -10 },
+      authorizeSyncRequest: async (request) => {
+        authOrder.push(request.contextGraphId);
+        return true;
+      },
+    });
+    const request = (contextGraphId: string, peerId: string) => cap.invoke({
+      ...makeEnvelope(),
+      contextGraphId,
+    }, peerId);
+
+    const blockers = [
+      request('block-a', REMOTE_A),
+      request('block-b', REMOTE_B),
+      request('block-c', REMOTE_C),
+    ];
+    for (let i = 0; i < 100 && queryGates.length < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryGates).toHaveLength(3);
+    const low = request('low', REMOTE_D);
+    const high = request('high', '12D3KooWResponderCapPeerE');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authOrder.slice(0, 3)).toEqual(['block-a', 'block-b', 'block-c']);
+
+    queryGates.shift()?.resolve({ type: 'bindings', bindings: [] });
+    for (let i = 0; i < 100 && !queryOrder.includes('high'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryOrder).toContain('high');
+    expect(queryOrder).not.toContain('low');
+
+    for (const gate of queryGates.splice(0)) gate.resolve({ type: 'bindings', bindings: [] });
+    for (let i = 0; i < 100 && !queryOrder.includes('low'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryOrder).toContain('low');
+    for (const gate of queryGates.splice(0)) gate.resolve({ type: 'bindings', bindings: [] });
+    await Promise.all([...blockers, low, high]);
+  });
+
+  it('does not give an unauthorized elevated-CG claim priority before authorization', async () => {
+    const authOrder: string[] = [];
+    const queryOrder: string[] = [];
+    const queryGates = new Map<string, ReturnType<typeof deferred<QueryResult>>>();
+    const graphIds = ['block-a', 'block-b', 'block-c', 'default', 'elevated'];
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => graphIds.map((id) => `did:dkg:context-graph:${id}`),
+      query: async (sparql: string) => {
+        const contextGraphId = graphIds.find((id) => sparql.includes(`context-graph:${id}`)) ?? 'unknown';
+        queryOrder.push(contextGraphId);
+        const gate = deferred<QueryResult>();
+        queryGates.set(contextGraphId, gate);
+        return gate.promise;
+      },
+    }), {
+      contextGraphPriorities: { elevated: 1_000 },
+      authorizeSyncRequest: async (request) => {
+        authOrder.push(request.contextGraphId);
+        return request.contextGraphId !== 'elevated';
+      },
+    });
+
+    const invoke = (contextGraphId: string, peerId: string) => cap.invoke({
+      ...makeEnvelope(),
+      contextGraphId,
+    }, peerId);
+    const blockers = [
+      invoke('block-a', REMOTE_A),
+      invoke('block-b', REMOTE_B),
+      invoke('block-c', REMOTE_C),
+    ];
+    for (let i = 0; i < 100 && queryGates.size < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryGates.size).toBe(3);
+
+    const defaultRequest = invoke('default', REMOTE_D);
+    const elevatedClaim = invoke('elevated', '12D3KooWResponderCapPeerE');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authOrder).toEqual(['block-a', 'block-b', 'block-c']);
+
+    queryGates.get('block-a')?.resolve({ type: 'bindings', bindings: [] });
+    for (let i = 0; i < 100 && !queryOrder.includes('default'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(authOrder).toContain('default');
+    expect(authOrder).not.toContain('elevated');
+    expect(queryOrder).toContain('default');
+
+    queryGates.get('block-b')?.resolve({ type: 'bindings', bindings: [] });
+    for (let i = 0; i < 100 && !authOrder.includes('elevated'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const denied = await elevatedClaim;
+    expect(authOrder.slice(-2)).toEqual(['default', 'elevated']);
+    expect(queryOrder).not.toContain('elevated');
+    expect(new TextDecoder().decode(denied)).toBe('sync-denied');
+
+    queryGates.get('block-c')?.resolve({ type: 'bindings', bindings: [] });
+    queryGates.get('default')?.resolve({ type: 'bindings', bindings: [] });
+    await Promise.all([...blockers, defaultRequest]);
+  });
+
+  // A request whose Context Graph carries a non-default priority is admitted in
+  // two stages, and the authorized stage reserves its queue slot up front —
+  // that reservation counts against the per-peer queue limit. So a reservation
+  // left behind by a request that never reaches the authorized stage is not a
+  // leak the peer can wait out: once SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT of
+  // them pile up, every later request from that peer is refused as "peer queue
+  // full" while its queue is in fact empty, and the peer never recovers.
+  //
+  // Both cases below short-circuit before the authorized stage. Drive more of
+  // them than the per-peer limit through ONE responder — a fresh handler would
+  // get a fresh limiter and hide the leak — then prove the peer is still served.
+  it.each([
+    ['denied before the authorized stage', false],
+    ['whose authorization throws', true],
+  ])('releases the handoff reservation for a request %s', async (_label, authorizationThrows) => {
+    const shortCircuitedRequests = SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT + 1;
+    let authCalls = 0;
+    let served = 0;
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
+      query: async () => {
+        served += 1;
+        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+      },
+    }), {
+      contextGraphPriorities: { 'sync-protection': 5 },
+      authorizeSyncRequest: async () => {
+        authCalls += 1;
+        if (authCalls > shortCircuitedRequests) return true;
+        if (authorizationThrows) throw new Error('authorization exploded');
+        return false;
+      },
+    });
+
+    for (let i = 0; i < shortCircuitedRequests; i++) {
+      const response = await cap.invoke(makeEnvelope(), REMOTE_A)
+        .catch((error: unknown) => error);
+      // Capacity is never the reason these fail: a busy rejection here would
+      // mean the previous requests never gave their reserved slots back.
+      expect(String(response instanceof Error ? response.message : ''))
+        .not.toMatch(/queue full/);
+      if (!authorizationThrows) {
+        expect(new TextDecoder().decode(response as Uint8Array)).toBe('sync-denied');
+      }
+    }
+
+    await expect(cap.invoke(makeEnvelope(), REMOTE_A)).resolves.toBeInstanceOf(Uint8Array);
+    expect(served).toBe(1);
+  });
+
   it('caps durable page computation at three globally and one per peer', async () => {
     const releases: Array<() => void> = [];
     let completed = 0;

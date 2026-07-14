@@ -354,7 +354,8 @@ function LocalDataRetentionSection() {
         )}
         {pendingRetention == null && (
           <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
-            Operations, logs, and metric snapshots older than this are pruned automatically.
+            Operations and metric snapshots older than this are pruned automatically. Warning and error logs
+            keep this window; high-volume routine logs also have a size safety cap.
           </div>
         )}
         <div aria-live="polite">

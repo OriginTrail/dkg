@@ -19,7 +19,18 @@ export interface SyncRowListMemo {
   get(
     key: string,
     loadRows: () => Promise<readonly SyncRow[]>,
-    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+    options?: {
+      refresh?: boolean;
+      /**
+       * Server-validated responder-session generation. A new generation must
+       * wait for, then reload after, an older in-flight snapshot. The cache key
+       * itself stays server-derived so attacker-controlled tokens cannot grow
+       * the retained-entry set.
+       */
+      refreshGeneration?: string;
+      requireExisting?: boolean;
+      signal?: AbortSignal;
+    },
   ): Promise<readonly SyncRow[] | null>;
   release(key: string, options?: { graceMs?: number }): void;
 }
@@ -35,11 +46,18 @@ interface CachedSnapshot {
   cleanupTimer: ReturnType<typeof setTimeout>;
   budgetEntryId?: symbol;
   released: boolean;
+  refreshGeneration?: string;
 }
 
 interface RejectedSnapshot {
   error: SyncRowSnapshotBudgetError;
   cleanupTimer: ReturnType<typeof setTimeout>;
+  refreshGeneration?: string;
+}
+
+interface ExpiredSnapshot {
+  cleanupTimer: ReturnType<typeof setTimeout>;
+  refreshGeneration?: string;
 }
 
 export class SyncRowSnapshotLimitError extends Error {
@@ -108,9 +126,12 @@ export function createResponderSyncRowListMemo(
   memoOptions: SyncRowListMemoOptions = { phase: 'durable_data' },
 ): SyncRowListMemo {
   const cached = new Map<string, CachedSnapshot>();
-  const expired = new Map<string, ReturnType<typeof setTimeout>>();
+  const expired = new Map<string, ExpiredSnapshot>();
   const rejected = new Map<string, RejectedSnapshot>();
-  const inflight = new Map<string, Promise<readonly SyncRow[]>>();
+  const inflight = new Map<string, {
+    promise: Promise<readonly SyncRow[]>;
+    refreshGeneration?: string;
+  }>();
 
   const deleteCached = (key: string, reason: 'expired' | 'released' | 'replaced' = 'released') => {
     const existing = cached.get(key);
@@ -120,8 +141,8 @@ export function createResponderSyncRowListMemo(
   };
 
   const deleteExpired = (key: string) => {
-    const timer = expired.get(key);
-    if (timer) clearTimeout(timer);
+    const entry = expired.get(key);
+    if (entry) clearTimeout(entry.cleanupTimer);
     expired.delete(key);
   };
 
@@ -131,23 +152,28 @@ export function createResponderSyncRowListMemo(
     rejected.delete(key);
   };
 
-  const rememberExpired = (key: string) => {
+  const rememberExpired = (key: string, refreshGeneration?: string) => {
     deleteExpired(key);
     const timer = setTimeout(() => expired.delete(key), ttlMs);
     (timer as { unref?: () => void }).unref?.();
-    expired.set(key, timer);
+    expired.set(key, { cleanupTimer: timer, refreshGeneration });
   };
 
-  const rememberRejected = (key: string, error: SyncRowSnapshotBudgetError) => {
+  const rememberRejected = (
+    key: string,
+    error: SyncRowSnapshotBudgetError,
+    refreshGeneration?: string,
+  ) => {
     deleteRejected(key);
     const cleanupTimer = setTimeout(() => rejected.delete(key), ttlMs);
     (cleanupTimer as { unref?: () => void }).unref?.();
-    rejected.set(key, { error, cleanupTimer });
+    rejected.set(key, { error, cleanupTimer, refreshGeneration });
   };
 
   const markExpired = (key: string) => {
+    const refreshGeneration = cached.get(key)?.refreshGeneration;
     deleteCached(key, 'expired');
-    rememberExpired(key);
+    rememberExpired(key, refreshGeneration);
   };
 
   const pruneExpired = (now = Date.now()) => {
@@ -156,10 +182,13 @@ export function createResponderSyncRowListMemo(
     }
   };
 
-  const scheduleCleanup = (key: string, cachedAt: number) => {
+  const scheduleCleanup = (key: string, cachedAt: number, refreshGeneration?: string) => {
     const timer = setTimeout(() => {
       const existing = cached.get(key);
-      if (existing?.cachedAt === cachedAt) markExpired(key);
+      if (
+        existing?.cachedAt === cachedAt &&
+        existing.refreshGeneration === refreshGeneration
+      ) markExpired(key);
     }, ttlMs);
     (timer as { unref?: () => void }).unref?.();
     return timer;
@@ -172,7 +201,11 @@ export function createResponderSyncRowListMemo(
     return true;
   };
 
-  const storeCached = (key: string, value: readonly SyncRow[]) => {
+  const storeCached = (
+    key: string,
+    value: readonly SyncRow[],
+    refreshGeneration?: string,
+  ) => {
     const now = Date.now();
     pruneExpired(now);
     deleteExpired(key);
@@ -228,7 +261,7 @@ export function createResponderSyncRowListMemo(
           // transient and is NOT remembered — a retry re-attempts admission and
           // succeeds once other sessions drain (and the drop above eases pressure).
           if (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes') {
-            rememberRejected(key, error);
+            rememberRejected(key, error, refreshGeneration);
           }
         }
         throw error;
@@ -239,37 +272,86 @@ export function createResponderSyncRowListMemo(
     cached.set(key, {
       value,
       cachedAt: now,
-      cleanupTimer: scheduleCleanup(key, now),
+      cleanupTimer: scheduleCleanup(key, now, refreshGeneration),
       budgetEntryId,
       released: false,
+      refreshGeneration,
     });
   };
 
   return {
     async get(key, loadRows, options) {
       throwIfAborted(options?.signal);
+      // A page-zero request carrying a new responder-session token is an
+      // explicit snapshot refresh. If the prior session is still loading,
+      // coalescing onto that in-flight promise would return the OLD row set to
+      // the new session (the private-CG approval race can then omit the freshly
+      // written delegation). Wait for older loads to settle, then issue a new
+      // store read. Re-check in a loop so concurrent refreshes serialize rather
+      // than racing two writers against the same cache key.
+      while (true) {
+        const pending = inflight.get(key);
+        if (!pending) break;
+        const supersedesPending = options?.refreshGeneration !== undefined &&
+          options.refreshGeneration !== pending.refreshGeneration;
+        if (!supersedesPending) {
+          return raceAgainstAbort(pending.promise, options?.signal);
+        }
+        try {
+          await raceAgainstAbort(pending.promise, options?.signal);
+        } catch {
+          // A new session owns an independent attempt. An older session's
+          // query/budget failure must not be inherited, but caller abort still
+          // takes precedence.
+          throwIfAborted(options?.signal);
+        }
+      }
+
       const now = Date.now();
       pruneExpired(now);
-      const pending = inflight.get(key);
-      if (pending) return raceAgainstAbort(pending, options?.signal);
-      if (expired.has(key)) {
-        if (options?.refresh) deleteExpired(key);
+      const requestedGeneration = options?.refreshGeneration;
+      const priorExpiry = expired.get(key);
+      if (priorExpiry) {
+        if (
+          options?.refresh ||
+          (requestedGeneration !== undefined &&
+            priorExpiry.refreshGeneration !== requestedGeneration)
+        ) deleteExpired(key);
         else throw new Error('Durable data sync session snapshot expired before page completion');
       }
       const priorRejection = rejected.get(key);
       if (priorRejection) {
-        if (options?.refresh) deleteRejected(key);
+        if (
+          options?.refresh ||
+          (requestedGeneration !== undefined &&
+            priorRejection.refreshGeneration !== requestedGeneration)
+        ) deleteRejected(key);
         else throw priorRejection.error;
       }
 
-      const existing = cached.get(key);
+      let existing = cached.get(key);
+      if (
+        existing &&
+        requestedGeneration !== undefined &&
+        existing.refreshGeneration !== requestedGeneration
+      ) {
+        // prepareResponderSession installs a new token before its page-zero
+        // snapshot finishes. If that request aborts while waiting for an older
+        // generation, or its own refresh load fails, the older snapshot can
+        // remain retained. A same-token retry has refresh=false, so generation
+        // validation must also happen on cache hits rather than only while an
+        // in-flight load exists.
+        deleteCached(key, 'replaced');
+        existing = undefined;
+      }
       if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) {
         const refreshed: CachedSnapshot = {
           value: existing.value,
           cachedAt: now,
-          cleanupTimer: scheduleCleanup(key, now),
+          cleanupTimer: scheduleCleanup(key, now, existing.refreshGeneration),
           budgetEntryId: existing.budgetEntryId,
           released: false,
+          refreshGeneration: existing.refreshGeneration,
         };
         clearTimeout(existing.cleanupTimer);
         cached.delete(key);
@@ -294,7 +376,7 @@ export function createResponderSyncRowListMemo(
         .then((rows) => {
           // Loads are owner-independent and may finish after the first waiter
           // aborts. Cache the complete result for surviving/coalesced waiters.
-          storeCached(key, rows);
+          storeCached(key, rows, options?.refreshGeneration);
           return rows;
         })
         .catch((error) => {
@@ -307,9 +389,12 @@ export function createResponderSyncRowListMemo(
             { phase: memoOptions.phase, outcome: loadOutcome },
           );
           recordSyncMemoryCheckpoint(memoOptions.phase, 'responder_snapshot_after_load');
-          if (inflight.get(key) === load) inflight.delete(key);
+          if (inflight.get(key)?.promise === load) inflight.delete(key);
+        });
+      inflight.set(key, {
+        promise: load,
+        refreshGeneration: options?.refreshGeneration,
       });
-      inflight.set(key, load);
       const rows = await load;
       if (options?.signal?.aborted) {
         const completed = cached.get(key);
@@ -334,7 +419,7 @@ export function createResponderSyncRowListMemo(
       cached.set(key, {
         ...existing,
         cachedAt,
-        cleanupTimer: scheduleCleanup(key, cachedAt),
+        cleanupTimer: scheduleCleanup(key, cachedAt, existing.refreshGeneration),
         released: true,
       });
       if (existing.budgetEntryId) memoOptions.budget?.release(existing.budgetEntryId);

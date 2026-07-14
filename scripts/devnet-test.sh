@@ -3022,6 +3022,11 @@ else
     fail "PROTOCOL_SYNC unreadable from packages/core/src/constants.ts — cannot verify sync protocol advertisement"
     PROTOCOL_SYNC_EXPECTED="__MISSING_PROTOCOL_SYNC__"
   fi
+  PROTOCOL_JOIN_REQUEST_EXPECTED="$(protocol_const PROTOCOL_JOIN_REQUEST)"
+  if [[ -z "$PROTOCOL_JOIN_REQUEST_EXPECTED" ]]; then
+    fail "PROTOCOL_JOIN_REQUEST unreadable from packages/core/src/constants.ts — cannot verify join-request protocol advertisement"
+    PROTOCOL_JOIN_REQUEST_EXPECTED="__MISSING_PROTOCOL_JOIN_REQUEST__"
+  fi
   EXPECTED_UNIVERSAL=(
     "/dkg/10.0.1/message"
     "$PROTOCOL_SYNC_EXPECTED"
@@ -3029,7 +3034,7 @@ else
     "/dkg/10.0.1/swm-share-ack"
     "/dkg/10.0.1/swm-sender-key"
     "/dkg/10.0.1/verify-proposal"
-    "/dkg/10.0.1/join-request"
+    "$PROTOCOL_JOIN_REQUEST_EXPECTED"
     "/dkg/10.0.1/query-remote"
     "/dkg/10.0.1/private-access"
   )

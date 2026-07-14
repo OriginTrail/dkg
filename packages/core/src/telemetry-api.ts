@@ -181,6 +181,10 @@ export interface DkgMetrics {
   storeSchedulerRejectionsTotal: Counter;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
+  /** ms; lane and priority_class are bounded sync scheduler enums */
+  syncSchedulerQueueWaitMs: Histogram;
+  /** lane, priority_class, outcome={started|rejected|displaced|aged|aborted} */
+  syncSchedulerDecisionsTotal: Counter;
   /** currently retained responder snapshots; phase is a bounded enum */
   syncResponderSnapshots: UpDownCounter;
   /** currently retained responder snapshot rows; phase is a bounded enum */
@@ -281,6 +285,14 @@ function buildMetrics(): DkgMetrics {
     }),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
+    }),
+    syncSchedulerQueueWaitMs: meter.createHistogram('dkg.sync.scheduler.queue_wait_ms', {
+      unit: 'ms',
+      description: 'Process-local sync scheduler queue wait by bounded lane and priority class',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    syncSchedulerDecisionsTotal: meter.createCounter('dkg.sync.scheduler.decisions_total', {
+      description: 'Process-local sync scheduler outcomes by bounded lane and priority class',
     }),
     syncResponderSnapshots: meter.createUpDownCounter('dkg.sync.responder.snapshots', {
       description: 'Currently retained sync responder snapshots',

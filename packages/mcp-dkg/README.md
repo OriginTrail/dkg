@@ -138,7 +138,7 @@ autoShare: true
 
 `.dkg/` is gitignored repo-wide so this file stays local to each operator. The `tokenFile` path is resolved relative to the YAML; default of `~/.dkg/auth.token` matches what `dkg start` writes on first boot.
 
-## Tool surface (29 tools)
+## Tool surface (30 tools)
 
 All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into seven categories tracking how a session typically uses memory: check health, discover the graph, set it up, drive the knowledge-asset lifecycle (create → write → finalize → share → publish), recall from it, query it, and message other agents.
 
@@ -166,6 +166,7 @@ All tools are available the moment `dkg mcp setup` registers the MCP with your c
 | Tool | What it does |
 |---|---|
 | `dkg_context_graph_create` | Create a context graph (called "projects" in the DKG node UI). The `id` slug is auto-derived from `name` when omitted. Idempotent — pre-existing CGs are returned unchanged. |
+| `dkg_context_graph_register` | Register an existing context graph on-chain. Supports policy overrides and PCA-backed registration by the PCA owner or a wallet registered to that exact PCA. An eligible PCA uses a quota-backed registration-deposit waiver. |
 | `dkg_subscribe` | Subscribe to a context graph so its data syncs locally from peers. Defaults to also syncing Shared Working Memory; pass `includeSharedMemory: false` to skip SWM. |
 | `dkg_sub_graph_create` | Create a named sub-graph inside a context graph (e.g. `code`, `tasks`, `meta`). Idempotent — pre-existing sub-graphs are silently reused. |
 
@@ -289,12 +290,12 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 | File | Purpose |
 |---|---|
-| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 29 tools. |
+| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 30 tools. |
 | `src/tools.ts` | Read tools (`dkg_list_context_graphs`, `dkg_sub_graph_list`, `dkg_query`, `dkg_get_entity`, `dkg_get_entity_sources`, `dkg_list_activity`, `dkg_get_agent`). |
 | `src/tools/assertions.ts` | Knowledge-asset lifecycle (`dkg_knowledge_asset_*` × 13: create/write/finalize/share/publish/pull_from/discard/query/history/import_file + import_artifact_resolve/read_markdown + semantic_enrichment_write). |
 | `src/tools/health.ts` | `dkg_status`, `dkg_peer_info`, `dkg_wallet_balances`. |
 | `src/tools/memory-search.ts` | `dkg_memory_search` with WM/SWM/VM fan-out and trust-weighted ranking. |
-| `src/tools/setup.ts` | `dkg_context_graph_create`, `dkg_subscribe`, `dkg_sub_graph_create`. |
+| `src/tools/setup.ts` | `dkg_context_graph_create`, `dkg_context_graph_register`, `dkg_subscribe`, `dkg_sub_graph_create`. |
 | `src/tools/chat.ts` | `dkg_send_message`, `dkg_check_inbox`. |
 | `src/client.ts` | `DkgClient` HTTP wrapper. Re-exported as `@origintrail-official/dkg-mcp/client`. |
 | `src/manifest/{publish,fetch,install}.ts` | Project manifest publish/install pipeline. Re-exported as `@origintrail-official/dkg-mcp/manifest/*` and consumed by the umbrella CLI's daemon routes. |

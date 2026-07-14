@@ -3,7 +3,11 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
+import type {
+  DKGAgentConfig,
+  SyncContextGraphPriorityConfig,
+  SyncResponderSnapshotLimitsConfig,
+} from '@origintrail-official/dkg-agent';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
@@ -621,6 +625,13 @@ export interface DkgConfig {
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
+  /**
+   * Explicitly trusted context graphs that daemon startup may create locally
+   * instead of treating as remote subscription targets. Intended for local
+   * development/bootstrap environments; production networks should normally
+   * express their built-ins through network.defaultContextGraphs.
+   */
+  localBootstrapContextGraphs?: string[];
   /** Local daemon logging controls. */
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
@@ -674,6 +685,10 @@ export interface DkgConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Retained sync responder snapshot limits (rows and estimated bytes). */
+  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** Local sync scheduling priority by Context Graph ID. */
+  syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**

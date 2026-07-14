@@ -21,10 +21,16 @@ export {
   catalogTripleKey,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
+  appendMissingGeneratedPrivateCatalogFloor,
+  prepareGeneratedPrivateCatalogFloor,
+  replaceCatalogPartitionWithGeneratedPrivateFloor,
+  replaceGeneratedPrivateCatalogFloor,
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
   type TrustedCatalogTripleKeys,
   type TrustedCatalogRootSplit,
+  type PrepareGeneratedPrivateCatalogFloorOptions,
+  type PreparedGeneratedPrivateCatalogFloor,
 } from './catalog-trust.js';
 export { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 export {
@@ -63,6 +69,7 @@ export {
 } from './dkg-publisher.js';
 export {
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolver,
@@ -219,8 +226,12 @@ export {
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishJobHandler,
   type AsyncKnowledgeAssetVmPublishPreflightInput,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
+  type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
+  type AsyncKnowledgeAssetVmPublishRecoveryResolver,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,

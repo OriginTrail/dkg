@@ -108,11 +108,11 @@ class PcaCuratedRegistrationChainAdapter extends AsyncSignerAddressContextGraphC
   constructor(
     private readonly accountOwners: Map<bigint, string>,
     signerAddress?: string,
+    private readonly agentAccounts: Map<string, bigint> = new Map(),
   ) {
-    // Forward an explicit signer to MockChainAdapter so tests can keep
-    // the "chain signer == PCA owner" invariant the agent enforces
-    // (Codex PR #502 round-4: msg.sender for the registration tx mints
-    // the on-chain governance NFT, so the PCA owner must control it).
+    // Forward an explicit signer to MockChainAdapter. PCA registration
+    // supports either an owner signer or a signer registered to the exact
+    // account; in both cases msg.sender owns the minted Context Graph NFT.
     super('mock:31337', signerAddress);
   }
 
@@ -122,6 +122,10 @@ class PcaCuratedRegistrationChainAdapter extends AsyncSignerAddressContextGraphC
       throw new Error(`No mock PCA owner for account ${accountId}`);
     }
     return owner;
+  }
+
+  async getConvictionAgentAccountId(agent: string): Promise<bigint> {
+    return this.agentAccounts.get(agent.toLowerCase()) ?? 0n;
   }
 }
 

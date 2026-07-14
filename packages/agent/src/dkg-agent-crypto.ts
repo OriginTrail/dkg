@@ -233,7 +233,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -531,6 +531,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<Map<string, string[]>> {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const cgEntity = contextGraphDataGraphUri(contextGraphId);
     // SELECT also returns `expiresAtMs` so we can filter expired rows in
     // JS — pushing the FILTER into SPARQL would force a string→long
     // cast that not every store backend handles uniformly.
@@ -544,6 +545,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         GRAPH <${cgMetaGraph}> {
           ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer .
+          <${cgEntity}> (<${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>|<${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>) ?memberAgent .
+          FILTER(LCASE(STR(?agent)) = LCASE(STR(?memberAgent)))
+          FILTER NOT EXISTS {
+            <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
+            FILTER(LCASE(STR(?agent)) = LCASE(STR(?revokedAgent)))
+          }
           OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
         }
       }`,
@@ -586,11 +593,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<Map<string, string[]>> {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const cgEntity = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?agent ?key ?expiresAt WHERE {
         GRAPH <${cgMetaGraph}> {
           ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?key .
+          <${cgEntity}> (<${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>|<${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>) ?memberAgent .
+          FILTER(LCASE(STR(?agent)) = LCASE(STR(?memberAgent)))
+          FILTER NOT EXISTS {
+            <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
+            FILTER(LCASE(STR(?agent)) = LCASE(STR(?revokedAgent)))
+          }
           OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
         }
       }`,

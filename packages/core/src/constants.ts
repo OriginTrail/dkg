@@ -121,7 +121,10 @@ export const PROTOCOL_SWM_HOST_CATCHUP = '/dkg/10.0.1/swm-host-catchup';
 // Universal Messenger substrate. The in-memory JoinApprovalRetryQueue
 // (rc.9 PR #510) is replaced by the substrate's durable SQLite outbox
 // — same backoff ladder semantics, persists across daemon restart.
-export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.1/join-request';
+// 10.0.2 binds decisions to the signed request generation. Keep this distinct
+// from 10.0.1 so mixed-version peers fail negotiation instead of ACK-dropping
+// generation-less approval/rejection messages and stranding the requester.
+export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.2/join-request';
 
 // rc.9 PR-11: bumped from /dkg/10.0.0/* to opt into the Universal
 // Messenger substrate. ACKCollector + VerifyCollector keep their

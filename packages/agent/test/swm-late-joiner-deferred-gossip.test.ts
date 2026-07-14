@@ -127,6 +127,18 @@ async function insertCgMetaWithAllowlist(
     },
     {
       subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CREATOR,
+      object: `did:dkg:agent:${LOCAL_PEER_ID}`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: `did:dkg:agent:${agentAddress}`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
       object: `"${LOCAL_PEER_ID}"`,
       graph: metaGraph,
@@ -198,8 +210,9 @@ describe('SWM late-joiner deferred gossip subscribe (#885 Codex)', () => {
 
     // Step 2: simulate `runImmediatePostApprovalSync` landing `_meta`
     // by writing the curator's CG metadata + ACL into the local store.
-    // `hasConfirmedMetaState` returns true once `_meta` has any quads,
-    // which in turn unlocks `refreshMetaSyncedFlags`'s SWM re-queue.
+    // `hasConfirmedMetaState` returns true once `_meta` has the complete
+    // private definition plus allowlist, which in turn unlocks
+    // `refreshMetaSyncedFlags`'s SWM re-queue.
     await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress);
 
     // Step 3: drive the same call site that `runCatchupOverPeers` uses

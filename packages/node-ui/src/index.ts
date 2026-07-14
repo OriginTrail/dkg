@@ -20,6 +20,7 @@ export {
 } from './chain-cursor-stores.js';
 export type {
   DashboardDBOptions,
+  LogVolumePruneResult,
   MetricSnapshotRow,
   OperationRow,
   OperationPhaseRow,
@@ -32,6 +33,14 @@ export type {
   QueryHistoryRow,
   SavedQueryRow,
   ContextGraphSubscriptionRow,
+  ContextGraphReadinessProvenance,
+  StoredContextGraphJoinPolicy,
+  ContextGraphJoinPolicyAuditInput,
+  ContextGraphJoinPolicyRateReservationInput,
+  ContextGraphJoinPolicyRateReservationResult,
+  ContextGraphAutomaticApprovalCommitInput,
+  ContextGraphAutomaticApprovalRepairInput,
+  ContextGraphAutomaticApprovalRepairRecord,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
   ContextGraphMemberRow,
