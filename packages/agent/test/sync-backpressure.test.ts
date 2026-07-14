@@ -49,11 +49,12 @@ describe('sync global backpressure', () => {
     );
     await tick();
 
-    expect(getSyncBackpressureSnapshot(policy)).toEqual({
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({
       inflight: 1,
       queued: 2,
       limit: 1,
       queueLimit: 2,
+      queuedByPriorityClass: { elevated: 0, default: 2, deprioritized: 0 },
     });
 
     events.push('storage-ack-work');
@@ -68,6 +69,101 @@ describe('sync global backpressure', () => {
       'second-start',
       'third-start',
     ]);
+  });
+
+  it('starts a later elevated CG before an earlier deprioritized queued CG', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 3 });
+    const events: string[] = [];
+    let unblock!: () => void;
+    const running = withGlobalSyncBackpressure({ policy, ctx, label: 'running' }, async () => {
+      events.push('running');
+      await new Promise<void>((resolve) => { unblock = resolve; });
+    });
+    await tick();
+    const low = withGlobalSyncBackpressure({
+      policy, ctx, label: 'low', contextGraphId: 'low', lane: 'durable',
+      priority: -10, priorityClass: 'deprioritized',
+    }, async () => { events.push('low'); });
+    const high = withGlobalSyncBackpressure({
+      policy, ctx, label: 'high', contextGraphId: 'high', lane: 'durable',
+      priority: 10, priorityClass: 'elevated',
+    }, async () => { events.push('high'); });
+    await tick();
+    expect(events).toEqual(['running']);
+    unblock();
+    await Promise.all([running, low, high]);
+    expect(events).toEqual(['running', 'high', 'low']);
+  });
+
+  it('runs the oldest aged entry before newer elevated work', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 3 });
+    const events: string[] = [];
+    let now = 0;
+    let unblock!: () => void;
+    const running = withGlobalSyncBackpressure({ policy, ctx, label: 'running', now: () => now }, async () => {
+      await new Promise<void>((resolve) => { unblock = resolve; });
+    });
+    await tick();
+    const agedLow = withGlobalSyncBackpressure({
+      policy, ctx, label: 'aged-low', priority: -1, priorityClass: 'deprioritized',
+      agingThresholdMs: 10, now: () => now,
+    }, async () => { events.push('aged-low'); });
+    now = 5;
+    const high = withGlobalSyncBackpressure({
+      policy, ctx, label: 'high', priority: 100, priorityClass: 'elevated',
+      agingThresholdMs: 10, now: () => now,
+    }, async () => { events.push('high'); });
+    now = 11;
+    unblock();
+    await Promise.all([running, agedLow, high]);
+    expect(events).toEqual(['aged-low', 'high']);
+  });
+
+  it('displaces only strictly lower-priority queued work when the queue is full', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 });
+    const events: string[] = [];
+    let unblock!: () => void;
+    const running = withGlobalSyncBackpressure({ policy, ctx, label: 'running' }, async () => {
+      await new Promise<void>((resolve) => { unblock = resolve; });
+    });
+    await tick();
+    const displaced = withGlobalSyncBackpressure({
+      policy, ctx, label: 'low', contextGraphId: 'low', priority: -1, priorityClass: 'deprioritized',
+    }, async () => { events.push('low'); }).catch((error: unknown) => error);
+    await tick();
+    const high = withGlobalSyncBackpressure({
+      policy, ctx, label: 'high', contextGraphId: 'high', priority: 1, priorityClass: 'elevated',
+    }, async () => { events.push('high'); });
+    const displacedError = await displaced;
+    expect(displacedError).toMatchObject({ name: 'SyncBackpressureBusyError', reason: 'displaced' });
+    unblock();
+    await Promise.all([running, high]);
+    expect(events).toEqual(['high']);
+  });
+
+  it('removes aborted queued work without starting it', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 });
+    let unblock!: () => void;
+    let queuedStarted = false;
+    const running = withGlobalSyncBackpressure({ policy, ctx, label: 'running' }, async () => {
+      await new Promise<void>((resolve) => { unblock = resolve; });
+    });
+    await tick();
+    const controller = new AbortController();
+    const queued = withGlobalSyncBackpressure({
+      policy, ctx, label: 'queued', signal: controller.signal,
+    }, async () => { queuedStarted = true; });
+    await tick();
+    controller.abort(new Error('stop'));
+    await expect(queued).rejects.toThrow('stop');
+    expect(getSyncBackpressureSnapshot(policy).queued).toBe(0);
+    unblock();
+    await running;
+    expect(queuedStarted).toBe(false);
   });
 
   it('rejects excess sync work instead of growing an unbounded queue', async () => {

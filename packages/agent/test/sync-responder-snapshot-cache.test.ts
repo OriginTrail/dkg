@@ -15,6 +15,7 @@ import {
   SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
   SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
   resolveSyncResponderSnapshotBudgetOptions,
+  resolveSyncResponderSnapshotPolicy,
 } from '../src/sync/responder/sync-handler.js';
 import {
   createSyncResponderSnapshotBudget,
@@ -51,20 +52,64 @@ describe('sync responder snapshot budget defaults', () => {
     expect(SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT).toBe(384 * 1024 * 1024);
     expect(SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT).toBe(250_000);
     expect(SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT).toBe(128 * 1024 * 1024);
+    expect(resolveSyncResponderSnapshotBudgetOptions(undefined, {})).toEqual({
+      maxRows: SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+      maxBytesEstimate: SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+      maxSnapshotRows: SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
+      maxSnapshotBytesEstimate: SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    });
   });
 
   it('allows operators to override every responder snapshot budget limit', () => {
     expect(resolveSyncResponderSnapshotBudgetOptions({
       DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: '101',
       DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '202',
-      DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT: '303',
-      DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '404',
+      DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT: '99',
+      DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '199',
     })).toEqual({
       maxRows: 101,
       maxBytesEstimate: 202,
-      maxSnapshotRows: 303,
-      maxSnapshotBytesEstimate: 404,
+      maxSnapshotRows: 99,
+      maxSnapshotBytesEstimate: 199,
     });
+  });
+
+  it('resolves config per leaf and lets valid environment leaves override it', () => {
+    expect(resolveSyncResponderSnapshotBudgetOptions({
+      global: { rows: 500, bytesEstimate: 600 },
+      local: { rows: 300, bytesEstimate: 400 },
+    }, {
+      DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: '450',
+      DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '350',
+    })).toEqual({
+      maxRows: 450,
+      maxBytesEstimate: 600,
+      maxSnapshotRows: 300,
+      maxSnapshotBytesEstimate: 350,
+    });
+  });
+
+  it('warns for invalid env leaves, falls through to config, and clamps local to global', () => {
+    const warnings: string[] = [];
+    const resolved = resolveSyncResponderSnapshotPolicy({
+      global: { rows: 100, bytesEstimate: 200 },
+      local: { rows: 150, bytesEstimate: 250 },
+    }, {
+      DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: 'invalid',
+      DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '',
+    }, (message) => warnings.push(message));
+    expect(resolved).toEqual({
+      budget: {
+        maxRows: 100,
+        maxBytesEstimate: 200,
+        maxSnapshotRows: 100,
+        maxSnapshotBytesEstimate: 200,
+      },
+      localRowsClamped: true,
+      localBytesEstimateClamped: true,
+    });
+    expect(warnings).toHaveLength(3);
+    expect(warnings[0]).toContain('DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT');
   });
 });
 

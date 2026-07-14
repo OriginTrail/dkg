@@ -3,7 +3,11 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
+import type {
+  DKGAgentConfig,
+  SyncContextGraphPriorityConfig,
+  SyncResponderSnapshotLimitsConfig,
+} from '@origintrail-official/dkg-agent';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
@@ -617,6 +621,10 @@ export interface DkgConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Retained sync responder snapshot limits (rows and estimated bytes). */
+  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** Local sync scheduling priority by Context Graph ID. */
+  syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**

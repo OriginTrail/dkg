@@ -213,6 +213,10 @@ import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
+import {
+  normalizeSyncContextGraphPriorities,
+  validateSyncResponderSnapshotLimitsConfig,
+} from './sync/policy.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
@@ -665,7 +669,13 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    const config = normalizeStorageAckConfig(inputConfig);
+    validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
+    const config = normalizeStorageAckConfig({
+      ...inputConfig,
+      syncContextGraphPriorities: normalizeSyncContextGraphPriorities(
+        inputConfig.syncContextGraphPriorities,
+      ),
+    });
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {

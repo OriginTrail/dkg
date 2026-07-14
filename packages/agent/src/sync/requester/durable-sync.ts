@@ -63,6 +63,12 @@ interface DurableSyncContext {
    */
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   stopOnBackoffWorthyFailure?: boolean;
+  /** Admission boundary for one complete CG sequence; queue wait precedes deadline creation. */
+  runContextGraphSync?: <T>(
+    contextGraphId: string,
+    remainingContextGraphs: number,
+    work: () => Promise<T>,
+  ) => Promise<T>;
   processDurableBatchInWorker: (dataQuads: Quad[], metaQuads: Quad[], ctx: OperationContext, acceptUnverified: boolean) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
@@ -122,6 +128,31 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     failedPhases: 0,
     backoffWorthyFailures: 0,
   };
+
+  // Keep each CG's meta/data/verify/store/checkpoint sequence atomic while
+  // releasing global admission between graphs in a multi-CG request.
+  if (context.runContextGraphSync && contextGraphIds.length > 0) {
+    for (const [index, contextGraphId] of contextGraphIds.entries()) {
+      const remaining = contextGraphIds.length - index;
+      const part = await context.runContextGraphSync(
+        contextGraphId,
+        remaining,
+        () => runDurableSync({
+          ...context,
+          contextGraphIds: [contextGraphId],
+          runContextGraphSync: undefined,
+          createContextGraphSyncDeadline: () => createContextGraphSyncDeadline(remaining),
+        }),
+      );
+      for (const key of Object.keys(summary) as Array<keyof DurableSyncSummary>) {
+        summary[key] = key === 'failedPeers'
+          ? Math.max(summary[key], part[key])
+          : summary[key] + part[key];
+      }
+      if (stopOnBackoffWorthyFailure && part.backoffWorthyFailures > 0) break;
+    }
+    return summary;
+  }
 
   const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean; countProgress?: boolean }) => {
     const countProgress = options.countProgress ?? true;

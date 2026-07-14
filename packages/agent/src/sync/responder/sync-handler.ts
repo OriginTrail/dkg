@@ -30,6 +30,15 @@ import {
   SyncRowSnapshotBudgetError,
   type SyncResponderSnapshotBudgetOptions,
 } from './snapshot-budget.js';
+import {
+  contextGraphPriority,
+  syncPriorityClass,
+  validateSyncResponderSnapshotLimitsConfig,
+  type SyncContextGraphPriorityConfig,
+  type SyncPriorityClass,
+  type SyncSchedulerLane,
+  type SyncResponderSnapshotLimitsConfig,
+} from '../policy.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -85,6 +94,8 @@ interface RegisterSyncHandlerParams {
   logDebug: (ctx: OperationContext, message: string) => void;
   /** Primarily injectable for deterministic tests; production uses the bounded defaults below. */
   snapshotBudget?: SyncResponderSnapshotBudgetOptions;
+  /** Local-only policy; consulted only after authorizeSyncRequest accepts the CG. */
+  contextGraphPriorities?: Readonly<SyncContextGraphPriorityConfig>;
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
@@ -116,37 +127,101 @@ function positiveIntegerEnv(
   env: Readonly<Record<string, string | undefined>>,
   name: string,
   fallback: number,
+  warn: (message: string) => void,
 ): number {
-  const parsed = Number(env[name]?.trim());
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  warn(`Ignoring invalid ${name}="${raw}"; expected a positive safe integer`);
+  return fallback;
 }
 
-/** Production snapshot limits, with explicit operator overrides in rows/bytes. */
-export function resolveSyncResponderSnapshotBudgetOptions(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): SyncResponderSnapshotBudgetOptions {
-  return {
-    maxRows: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxRows,
-      SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
-    ),
-    maxBytesEstimate: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxBytesEstimate,
-      SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
-    ),
-    maxSnapshotRows: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxSnapshotRows,
-      SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
-    ),
-    maxSnapshotBytesEstimate: positiveIntegerEnv(
-      env,
-      SNAPSHOT_BUDGET_ENV.maxSnapshotBytesEstimate,
-      SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
-    ),
+export interface ResolvedSyncResponderSnapshotPolicy {
+  budget: SyncResponderSnapshotBudgetOptions;
+  localRowsClamped: boolean;
+  localBytesEstimateClamped: boolean;
+}
+
+function looksLikeSnapshotEnvironment(
+  value: SyncResponderSnapshotLimitsConfig | Readonly<Record<string, string | undefined>> | undefined,
+): value is Readonly<Record<string, string | undefined>> {
+  return value !== undefined && Object.values(SNAPSHOT_BUDGET_ENV).some((name) => name in value);
+}
+
+/** Resolve each leaf independently: environment, then config, then the compatibility default. */
+export function resolveSyncResponderSnapshotPolicy(
+  configOrLegacyEnv?: SyncResponderSnapshotLimitsConfig | Readonly<Record<string, string | undefined>>,
+  explicitEnv?: Readonly<Record<string, string | undefined>>,
+  onWarning: (message: string) => void = () => {},
+): ResolvedSyncResponderSnapshotPolicy {
+  const legacyEnv = looksLikeSnapshotEnvironment(configOrLegacyEnv);
+  const config = legacyEnv ? undefined : configOrLegacyEnv as SyncResponderSnapshotLimitsConfig | undefined;
+  const env = legacyEnv ? configOrLegacyEnv : explicitEnv ?? process.env;
+  validateSyncResponderSnapshotLimitsConfig(config);
+  const warnings = new Set<string>();
+  const warnOnce = (message: string) => {
+    if (warnings.has(message)) return;
+    warnings.add(message);
+    onWarning(message);
   };
+  const maxRows = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxRows,
+    config?.global?.rows ?? SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+    warnOnce,
+  );
+  const maxBytesEstimate = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxBytesEstimate,
+    config?.global?.bytesEstimate ?? SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    warnOnce,
+  );
+  const configuredMaxSnapshotRows = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxSnapshotRows,
+    config?.local?.rows ?? SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
+    warnOnce,
+  );
+  const configuredMaxSnapshotBytesEstimate = positiveIntegerEnv(
+    env,
+    SNAPSHOT_BUDGET_ENV.maxSnapshotBytesEstimate,
+    config?.local?.bytesEstimate ?? SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    warnOnce,
+  );
+  const maxSnapshotRows = Math.min(configuredMaxSnapshotRows, maxRows);
+  const maxSnapshotBytesEstimate = Math.min(configuredMaxSnapshotBytesEstimate, maxBytesEstimate);
+  const localRowsClamped = maxSnapshotRows !== configuredMaxSnapshotRows;
+  const localBytesEstimateClamped = maxSnapshotBytesEstimate !== configuredMaxSnapshotBytesEstimate;
+  if (localRowsClamped) {
+    warnOnce(
+      `Clamped syncResponderSnapshotLimits.local.rows from ${configuredMaxSnapshotRows} to global.rows ${maxRows}`,
+    );
+  }
+  if (localBytesEstimateClamped) {
+    warnOnce(
+      `Clamped syncResponderSnapshotLimits.local.bytesEstimate from ${configuredMaxSnapshotBytesEstimate} to global.bytesEstimate ${maxBytesEstimate}`,
+    );
+  }
+  return {
+    budget: {
+      maxRows,
+      maxBytesEstimate,
+      maxSnapshotRows,
+      maxSnapshotBytesEstimate,
+    },
+    localRowsClamped,
+    localBytesEstimateClamped,
+  };
+}
+
+/** Production snapshot limits, with explicit config and environment overrides in rows/bytes. */
+export function resolveSyncResponderSnapshotBudgetOptions(
+  configOrLegacyEnv?: SyncResponderSnapshotLimitsConfig | Readonly<Record<string, string | undefined>>,
+  env?: Readonly<Record<string, string | undefined>>,
+  onWarning?: (message: string) => void,
+): SyncResponderSnapshotBudgetOptions {
+  return resolveSyncResponderSnapshotPolicy(configOrLegacyEnv, env, onWarning).budget;
 }
 
 class SyncResponderBusyError extends Error {
@@ -158,6 +233,12 @@ class SyncResponderBusyError extends Error {
 
 interface SyncResponderQueueEntry {
   peerId: string;
+  contextGraphId?: string;
+  lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
+  priority: number;
+  priorityClass: SyncPriorityClass;
+  sequence: number;
+  enqueuedAt: number;
   resolve: (release: () => void) => void;
   reject: (error: Error) => void;
   signal?: AbortSignal;
@@ -170,6 +251,7 @@ function createSyncResponderLimiter() {
   const runningByPeer = new Map<string, number>();
   const queuedByPeer = new Map<string, number>();
   const queue: SyncResponderQueueEntry[] = [];
+  let sequence = 0;
 
   const canRun = (peerId: string): boolean =>
     running < SYNC_RESPONDER_GLOBAL_CONCURRENCY &&
@@ -210,37 +292,94 @@ function createSyncResponderLimiter() {
     return true;
   };
 
-  const startQueued = (entry: SyncResponderQueueEntry): void => {
+  const startQueued = (entry: SyncResponderQueueEntry, aged: boolean): void => {
     decrementQueued(entry.peerId);
     clearTimeout(entry.timer);
     if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
+    const attributes = { lane: entry.lane, priority_class: entry.priorityClass };
+    getMetrics().syncSchedulerQueueWaitMs.record(
+      Math.max(0, Date.now() - entry.enqueuedAt),
+      attributes,
+    );
+    getMetrics().syncSchedulerDecisionsTotal.add(1, { ...attributes, outcome: 'started' });
+    if (aged) getMetrics().syncSchedulerDecisionsTotal.add(1, { ...attributes, outcome: 'aged' });
     entry.resolve(releaseFor(entry.peerId));
   };
 
   const pump = (): void => {
-    for (let i = 0; i < queue.length && running < SYNC_RESPONDER_GLOBAL_CONCURRENCY;) {
-      const entry = queue[i];
-      if (!canRun(entry.peerId)) {
-        i += 1;
-        continue;
-      }
-      queue.splice(i, 1);
-      startQueued(entry);
+    while (running < SYNC_RESPONDER_GLOBAL_CONCURRENCY) {
+      const now = Date.now();
+      const runnable = queue
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ entry }) => canRun(entry.peerId));
+      if (runnable.length === 0) return;
+      const aged = runnable
+        .filter(({ entry }) => now - entry.enqueuedAt >= SYNC_RESPONDER_MAX_QUEUE_WAIT_MS / 2)
+        .sort((a, b) => a.entry.sequence - b.entry.sequence)[0];
+      const selected = aged ?? runnable.sort((a, b) => (
+        b.entry.priority - a.entry.priority
+        || a.entry.sequence - b.entry.sequence
+      ))[0];
+      const [entry] = queue.splice(selected.index, 1);
+      startQueued(entry, Boolean(aged));
     }
   };
 
-  const acquire = (peerId: string, signal?: AbortSignal): Promise<() => void> => {
+  const acquire = (
+    peerId: string,
+    scheduling: {
+      contextGraphId?: string;
+      lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
+      priority: number;
+      priorityClass: SyncPriorityClass;
+    },
+    signal?: AbortSignal,
+    transitionFromRunning = false,
+  ): Promise<() => void> => {
     throwIfAborted(signal);
-    if (canRun(peerId)) return Promise.resolve(releaseFor(peerId));
-    if (queue.length >= SYNC_RESPONDER_QUEUE_LIMIT) {
-      throw new SyncResponderBusyError('sync responder queue full');
+    if (canRun(peerId) && queue.length === 0) {
+      getMetrics().syncSchedulerDecisionsTotal.add(1, {
+        lane: scheduling.lane,
+        priority_class: scheduling.priorityClass,
+        outcome: 'started',
+      });
+      return Promise.resolve(releaseFor(peerId));
     }
-    if ((queuedByPeer.get(peerId) ?? 0) >= SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT) {
-      throw new SyncResponderBusyError('sync responder peer queue full');
+    const globalFull = queue.length >= SYNC_RESPONDER_QUEUE_LIMIT;
+    const peerFull = (queuedByPeer.get(peerId) ?? 0) >= SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT;
+    if ((globalFull || peerFull) && !transitionFromRunning) {
+      const displaced = queue
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ entry }) => (
+          entry.priority < scheduling.priority
+          && (!peerFull || entry.peerId === peerId)
+        ))
+        .sort((a, b) => a.entry.priority - b.entry.priority || b.entry.sequence - a.entry.sequence)[0];
+      if (!displaced) {
+        getMetrics().syncSchedulerDecisionsTotal.add(1, {
+          lane: scheduling.lane,
+          priority_class: scheduling.priorityClass,
+          outcome: 'rejected',
+        });
+        throw new SyncResponderBusyError(globalFull
+          ? 'sync responder queue full'
+          : 'sync responder peer queue full');
+      }
+      const victim = displaced.entry;
+      removeQueued(victim);
+      getMetrics().syncSchedulerDecisionsTotal.add(1, {
+        lane: victim.lane,
+        priority_class: victim.priorityClass,
+        outcome: 'displaced',
+      });
+      victim.reject(new SyncResponderBusyError('sync responder queued request displaced'));
     }
     return new Promise((resolve, reject) => {
       const entry: SyncResponderQueueEntry = {
         peerId,
+        ...scheduling,
+        sequence: sequence++,
+        enqueuedAt: Date.now(),
         resolve,
         reject,
         signal,
@@ -261,13 +400,82 @@ function createSyncResponderLimiter() {
   };
 
   return {
-    async run<T>(peerId: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
-      const release = await acquire(peerId, signal);
+    async run<T>(
+      peerId: string,
+      signal: AbortSignal | undefined,
+      scheduling: {
+        contextGraphId?: string;
+        lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
+        priority: number;
+        priorityClass: SyncPriorityClass;
+      },
+      fn: () => Promise<T>,
+    ): Promise<T> {
+      const release = await acquire(peerId, scheduling, signal);
       try {
         throwIfAborted(signal);
         return await fn();
       } finally {
         release();
+      }
+    },
+    async runTwoStage<T, U>(
+      peerId: string,
+      signal: AbortSignal | undefined,
+      firstScheduling: {
+        contextGraphId?: string;
+        lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
+        priority: number;
+        priorityClass: SyncPriorityClass;
+      },
+      first: () => Promise<T>,
+      transition: (value: T) => {
+        scheduling: {
+          contextGraphId?: string;
+          lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
+          priority: number;
+          priorityClass: SyncPriorityClass;
+        };
+        work: () => Promise<U>;
+      } | undefined,
+    ): Promise<T | U> {
+      const releaseFirst = await acquire(peerId, firstScheduling, signal);
+      let value: T;
+      try {
+        throwIfAborted(signal);
+        value = await first();
+      } catch (error) {
+        releaseFirst();
+        throw error;
+      }
+      const next = transition(value);
+      if (!next) {
+        releaseFirst();
+        return value;
+      }
+
+      // Queue the authorized stage before releasing pre-authorization. That
+      // atomic hand-off lets the scheduler compare it with all queued work,
+      // while release still happens before we await the next admission.
+      let secondAdmission: Promise<() => void>;
+      try {
+        // This request already occupies one running slot. Its synchronous
+        // running->queued hand-off may transiently append one entry beyond the
+        // queue cap, but releasing the running slot pumps one entry immediately,
+        // so the observable bounded queue never grows. This preserves the
+        // existing "1 running + 4 queued per peer" contract.
+        secondAdmission = acquire(peerId, next.scheduling, signal, true);
+      } catch (error) {
+        releaseFirst();
+        throw error;
+      }
+      releaseFirst();
+      const releaseSecond = await secondAdmission;
+      try {
+        throwIfAborted(signal);
+        return await next.work();
+      } finally {
+        releaseSecond();
       }
     },
   };
@@ -308,6 +516,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logWarn,
     logDebug,
     snapshotBudget,
+    contextGraphPriorities,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
   const responderSnapshotBudget = createSyncResponderSnapshotBudget(snapshotBudget ?? {
@@ -430,7 +639,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       logDebug(createOperationContext('sync'), message());
     };
 
-    return limiter.run(peerId, signal, async () => {
+    return limiter.runTwoStage(peerId, signal, {
+      lane: 'pre_authorization',
+      priority: 0,
+      priorityClass: 'default',
+    }, async () => {
       throwIfAborted(signal);
 
       // facet open-serve. The public `_catalog` subgraph (a DCAT
@@ -452,6 +665,20 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
         return new TextEncoder().encode(syncDeniedResponse);
       }
+      return { authDurationMs };
+    }, (preAuthorization) => {
+      if (preAuthorization instanceof Uint8Array) return undefined;
+      const priority = contextGraphPriority(contextGraphPriorities, contextGraphId);
+      return {
+        scheduling: {
+          contextGraphId,
+          lane: 'responder' as const,
+          priority,
+          priorityClass: syncPriorityClass(priority),
+        },
+        work: async () => {
+      const authDurationMs = preAuthorization.authDurationMs;
+      throwIfAborted(signal);
 
       if (store.queryCancellation === 'pre-dispatch' && !warnedPreDispatchCancellation) {
         warnedPreDispatchCancellation = true;
@@ -620,7 +847,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
       return new TextEncoder().encode(nquads.join('\n'));
+        },
+      };
     }).then((res) => {
+      if (!(res instanceof Uint8Array)) {
+        throw new Error('sync responder authorized stage did not produce response bytes');
+      }
       getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
       return res;
     }).catch((err) => {
