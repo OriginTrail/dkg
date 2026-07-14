@@ -113,6 +113,7 @@ export {
   ProtocolRouter,
   QuietRetryableHandlerError,
   type AdmissionCheckOptions,
+  type ProtocolRegistrationOptions,
   type ProtocolRouterOptions,
   type SendOptions,
   DEFAULT_MAX_READ_BYTES,
