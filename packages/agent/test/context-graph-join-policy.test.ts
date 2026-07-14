@@ -1,0 +1,749 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  DKGAgent,
+  signAgentDelegation,
+  type ContextGraphJoinPolicyAuditEvent,
+  type ContextGraphJoinPolicyRecord,
+  type ContextGraphJoinPolicyStore,
+} from '../src/index.js';
+import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
+
+class MemoryJoinPolicyStore implements ContextGraphJoinPolicyStore {
+  readonly records = new Map<string, ContextGraphJoinPolicyRecord>();
+  readonly audit: ContextGraphJoinPolicyAuditEvent[] = [];
+  beforeReserve?: () => Promise<void>;
+
+  async load(contextGraphId: string): Promise<ContextGraphJoinPolicyRecord | null> {
+    return this.records.get(contextGraphId) ?? null;
+  }
+
+  async save(record: ContextGraphJoinPolicyRecord): Promise<void> {
+    this.records.set(record.contextGraphId, { ...record });
+  }
+
+  async appendAudit(event: ContextGraphJoinPolicyAuditEvent): Promise<void> {
+    this.audit.push({ ...event });
+  }
+
+  async saveWithAudit(
+    record: ContextGraphJoinPolicyRecord,
+    event: ContextGraphJoinPolicyAuditEvent,
+  ): Promise<void> {
+    this.records.set(record.contextGraphId, { ...record });
+    this.audit.push({ ...event });
+  }
+
+  async getAutomaticApprovalUsage(contextGraphId: string, timestamp: number) {
+    const since = timestamp - 60 * 60 * 1000;
+    const reservations = this.audit.filter(
+      (event) => event.eventType === 'join_auto_reservation' && event.timestamp >= since,
+    );
+    return {
+      contextGraphApprovalsLastHour: reservations.filter(
+        (event) => event.contextGraphId === contextGraphId,
+      ).length,
+      nodeApprovalsLastHour: reservations.length,
+    };
+  }
+
+  async reserveAutomaticApproval(input: {
+    contextGraphId: string;
+    timestamp: number;
+    contextGraphLimit: number;
+    nodeLimit: number;
+    actor: string;
+    agentAddress: string;
+    requestDigest: string;
+    policyVersion: number;
+    policyEpoch: number;
+  }) {
+    await this.beforeReserve?.();
+    const since = input.timestamp - 60 * 60 * 1000;
+    const reservations = this.audit.filter(
+      (event) => event.eventType === 'join_auto_reservation' && event.timestamp >= since,
+    );
+    const cgCount = reservations.filter((event) => event.contextGraphId === input.contextGraphId).length;
+    const existing = reservations.some(
+      (event) => event.contextGraphId === input.contextGraphId
+        && event.requestDigest === input.requestDigest
+        && event.details?.policyEpoch === input.policyEpoch,
+    );
+    if (existing) {
+      return {
+        allowed: true as const,
+        contextGraphApprovalsLastHour: cgCount,
+        nodeApprovalsLastHour: reservations.length,
+      };
+    }
+    if (cgCount >= input.contextGraphLimit) {
+      return {
+        allowed: false as const,
+        contextGraphApprovalsLastHour: cgCount,
+        nodeApprovalsLastHour: reservations.length,
+        reason: 'context-graph-rate-limit' as const,
+      };
+    }
+    if (reservations.length >= input.nodeLimit) {
+      return {
+        allowed: false as const,
+        contextGraphApprovalsLastHour: cgCount,
+        nodeApprovalsLastHour: reservations.length,
+        reason: 'node-rate-limit' as const,
+      };
+    }
+    this.audit.push({
+      timestamp: input.timestamp,
+      contextGraphId: input.contextGraphId,
+      eventType: 'join_auto_reservation',
+      actor: input.actor,
+      agentAddress: input.agentAddress,
+      outcome: 'reserved',
+      requestDigest: input.requestDigest,
+      policyVersion: input.policyVersion,
+      details: { policyEpoch: input.policyEpoch },
+    });
+    return {
+      allowed: true as const,
+      contextGraphApprovalsLastHour: cgCount + 1,
+      nodeApprovalsLastHour: reservations.length + 1,
+    };
+  }
+
+  async commitAutomaticApproval(input: {
+    contextGraphId: string;
+    timestamp: number;
+    actor: string;
+    agentAddress: string;
+    requestDigest: string;
+    details?: Record<string, unknown>;
+  }): Promise<boolean> {
+    let reservation: ContextGraphJoinPolicyAuditEvent | undefined;
+    for (let index = this.audit.length - 1; index >= 0; index -= 1) {
+      const candidate = this.audit[index];
+      if (
+        candidate.eventType === 'join_auto_reservation'
+        && candidate.contextGraphId === input.contextGraphId
+        && candidate.requestDigest === input.requestDigest
+      ) {
+        reservation = candidate;
+        break;
+      }
+    }
+    if (!reservation) return false;
+    const policyEpoch = reservation.details?.policyEpoch;
+    if (typeof policyEpoch !== 'number' || !Number.isFinite(policyEpoch)) {
+      throw new Error('Automatic approval reservation is missing its policy epoch.');
+    }
+    const alreadyCommitted = this.audit.some(
+      (event) => event.eventType === 'join_admission_committed'
+        && event.contextGraphId === input.contextGraphId
+        && event.requestDigest === input.requestDigest
+        && event.details?.policyEpoch === policyEpoch,
+    );
+    if (alreadyCommitted) return true;
+    this.audit.push({
+      timestamp: input.timestamp,
+      contextGraphId: input.contextGraphId,
+      eventType: 'join_admission_committed',
+      actor: reservation.actor ?? input.actor,
+      agentAddress: reservation.agentAddress ?? input.agentAddress,
+      outcome: 'approved',
+      requestDigest: input.requestDigest,
+      policyVersion: reservation.policyVersion,
+      details: {
+        ...input.details,
+        policyEpoch,
+      },
+    });
+    return true;
+  }
+}
+
+describe('context graph open enrollment policy', () => {
+  const agents: DKGAgent[] = [];
+
+  afterEach(async () => {
+    await Promise.all(agents.splice(0).map((agent) => agent.stop().catch(() => {})));
+  });
+
+  async function boot() {
+    const policyStore = new MemoryJoinPolicyStore();
+    const chain = new MockChainAdapter();
+    const agent = await DKGAgent.create({
+      name: 'JoinPolicyCurator',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: chain,
+      contextGraphJoinPolicyStore: policyStore,
+    });
+    agents.push(agent);
+    await agent.start();
+    const owner = await agent.registerAgent('owner', { framework: 'test' });
+    (agent as any).defaultAgentAddress = owner.agentAddress;
+    return { agent, chain, owner, policyStore };
+  }
+
+  async function createPrivateCg(agent: DKGAgent, contextGraphId: string, ownerAddress: string) {
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Private open-enrollment test',
+      description: '',
+      accessPolicy: 1,
+      callerAgentAddress: ownerAddress,
+    });
+  }
+
+  it('defaults to manual and lets only the exact owner enable a private CG', async () => {
+    const { agent, owner } = await boot();
+    const otherOwner = await agent.registerAgent('other-owner', { framework: 'test' });
+    const contextGraphId = 'private-policy-owner';
+    await createPrivateCg(agent, contextGraphId, otherOwner.agentAddress);
+
+    await expect(agent.getContextGraphJoinPolicy(contextGraphId, owner.agentAddress)).rejects.toThrow(/Only the context graph curator/i);
+    expect(await agent.getContextGraphJoinPolicy(contextGraphId, otherOwner.agentAddress)).toMatchObject({
+      mode: 'manual',
+      source: 'default',
+      ownerAgentAddress: otherOwner.agentAddress,
+    });
+    await expect(agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 2,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress)).rejects.toThrow(/Only the context graph curator/i);
+    await expect(agent.setContextGraphJoinPolicy(
+      contextGraphId,
+      { mode: 'manual' },
+      owner.agentAddress,
+    )).rejects.toThrow(/Only the context graph curator/i);
+    expect((agent as any).contextGraphJoinPolicyDisableIntentCounts.has(contextGraphId)).toBe(false);
+
+    const enabled = await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 2,
+      acknowledgeOpenEnrollment: true,
+    }, otherOwner.agentAddress);
+    expect(enabled).toMatchObject({ mode: 'open', maxMembers: 10, maxApprovalsPerHour: 2 });
+  });
+
+  it('rejects public CGs and requires explicit acknowledgement and bounded caps', async () => {
+    const { agent, owner } = await boot();
+    await agent.createContextGraph({
+      id: 'public-policy-target',
+      name: 'Public target',
+      description: '',
+      accessPolicy: 0,
+      callerAgentAddress: owner.agentAddress,
+    });
+    await expect(agent.setContextGraphJoinPolicy('public-policy-target', {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 2,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress)).rejects.toThrow(/explicit private access policy/i);
+
+    await createPrivateCg(agent, 'private-policy-ack', owner.agentAddress);
+    await expect(agent.setContextGraphJoinPolicy('private-policy-ack', {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 2,
+    }, owner.agentAddress)).rejects.toThrow(/explicit acknowledgement/i);
+  });
+
+  it('counts participant agents in the total private-member cap', async () => {
+    const { agent, owner } = await boot();
+    const participant = await agent.registerAgent('existing-participant', { framework: 'test' });
+    const contextGraphId = 'private-policy-participant-cap';
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Participant cap test',
+      description: '',
+      accessPolicy: 1,
+      participantAgents: [participant.agentAddress],
+      callerAgentAddress: owner.agentAddress,
+    });
+
+    const enabled = await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 2,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    expect(enabled.memberCount).toBe(2);
+
+    const joiner = await agent.registerAgent('over-participant-cap', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({
+      status: 'pending',
+      reason: 'member-cap-reached',
+    });
+  }, 30_000);
+
+  it('auto-admits a fresh carrier-bound agent with a verified encryption key, then disables live', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-admit';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+
+    const joiner = await agent.registerAgent('joiner-one', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const admitted = await agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    );
+    expect(admitted).toEqual({ status: 'approved', autoApproved: true });
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
+      .toContain(joiner.agentAddress.toLowerCase());
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+    expect(policyStore.audit.some((event) => event.eventType === 'join_admission_committed')).toBe(true);
+    expect(JSON.stringify(policyStore.audit)).not.toContain(delegation.signature);
+
+    await agent.setContextGraphJoinPolicy(contextGraphId, { mode: 'manual' }, owner.agentAddress);
+    const secondJoiner = await agent.registerAgent('joiner-two', { framework: 'test' });
+    const secondDelegation = await agent.signJoinRequest(contextGraphId, secondJoiner.agentAddress);
+    const pending = await agent.processIncomingJoinRequest(
+      contextGraphId,
+      secondDelegation,
+      secondJoiner.name,
+      agent.peerId,
+    );
+    expect(pending).toMatchObject({ status: 'pending', autoApproved: false, reason: 'manual-policy' });
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
+      .not.toContain(secondJoiner.agentAddress.toLowerCase());
+  }, 30_000);
+
+  it('does not report durable approval until membership flush succeeds and repairs on retry', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-durable-approval';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('durability-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const store = (agent as any).store as { flush: () => Promise<void> };
+    const originalFlush = store.flush.bind(store);
+    const flush = vi.spyOn(store, 'flush')
+      .mockRejectedValueOnce(new Error('simulated durable flush failure'))
+      .mockImplementation(originalFlush);
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).rejects.toMatchObject({
+      name: 'RetryableJoinAdmissionError',
+      message: expect.stringContaining('simulated durable flush failure'),
+    });
+    expect(agent.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)).toBe(true);
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({
+      status: 'approved',
+      autoApproved: true,
+      alreadyMember: true,
+    });
+    expect(flush).toHaveBeenCalledTimes(2);
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+  }, 30_000);
+
+  it('supports adapters whose awaited writes are durable without a flush method', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-no-flush-adapter';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('no-flush-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const store = (agent as any).store;
+    const originalFlush = store.flush;
+    store.flush = undefined;
+    try {
+      await expect(agent.processIncomingJoinRequest(
+        contextGraphId,
+        delegation,
+        joiner.name,
+        agent.peerId,
+      )).resolves.toMatchObject({ status: 'approved', autoApproved: true });
+    } finally {
+      store.flush = originalFlush;
+    }
+  }, 30_000);
+
+  it('repairs an interrupted approved-status write on a signed member retry', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-status-repair';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('status-repair-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const store = (agent as any).store as { update: (sparql: string, options?: unknown) => Promise<void> };
+    const originalUpdate = store.update.bind(store);
+    vi.spyOn(store, 'update')
+      .mockRejectedValueOnce(new Error('simulated atomic status update failure'))
+      .mockImplementation(originalUpdate);
+
+    // Make the initial admission consume the final per-agent ingress slot.
+    // The exact signed repair retry must bypass that just-consumed slot, while
+    // all different payloads remain rate-limited.
+    for (let index = 0; index < 5; index += 1) {
+      agent.reserveContextGraphJoinIngress(
+        contextGraphId,
+        joiner.agentAddress,
+        agent.peerId,
+      )();
+    }
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).rejects.toMatchObject({
+      name: 'RetryableJoinAdmissionError',
+      message: expect.stringContaining('atomic status update failure'),
+    });
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('pending');
+    expect(await agent.hasJoinRequestRecord(contextGraphId, joiner.agentAddress)).toBe(true);
+    expect(agent.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)).toBe(true);
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'approved', autoApproved: true, alreadyMember: true });
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+    expect(agent.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)).toBe(false);
+    expect(policyStore.audit.filter(
+      (event) => event.eventType === 'join_admission_committed',
+    )).toHaveLength(1);
+  }, 30_000);
+
+  it('leaves missing-key, carrier-mismatched, revoked, and rate-limited requests pending', async () => {
+    const { agent, chain, owner } = await boot();
+    const contextGraphId = 'private-policy-denials';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 20,
+      maxApprovalsPerHour: 1,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+
+    const noProfileWallet = ethers.Wallet.createRandom();
+    const issuedAtMs = Date.now();
+    const noKeyDelegation = await signAgentDelegation({
+      agentAddress: noProfileWallet.address,
+      scope: joinDelegationScope(chain.deploymentId, contextGraphId),
+      issuedAtMs,
+      expiresAtMs: issuedAtMs + 60 * 60 * 1000,
+      delegateePeerId: agent.peerId,
+      agentPrivateKey: noProfileWallet.privateKey,
+    });
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      noKeyDelegation,
+      'no-key',
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending', reason: 'verified-active-encryption-key-required' });
+
+    const carrierMismatch = await agent.registerAgent('carrier-mismatch', { framework: 'test' });
+    const carrierDelegation = await agent.signJoinRequest(contextGraphId, carrierMismatch.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      carrierDelegation,
+      carrierMismatch.name,
+      '12D3KooWWrongCarrier',
+    )).resolves.toMatchObject({ status: 'pending', reason: 'carrier-peer-mismatch' });
+
+    const revoked = await agent.registerAgent('revoked-agent', { framework: 'test' });
+    await agent.inviteAgentToContextGraph(contextGraphId, revoked.agentAddress, owner.agentAddress);
+    await agent.removeAgentFromContextGraph(contextGraphId, revoked.agentAddress, owner.agentAddress);
+    expect((await (agent as any).getCgMeta(contextGraphId)).revokedAgents.map((address: string) => address.toLowerCase()))
+      .toContain(revoked.agentAddress.toLowerCase());
+    const revokedDelegation = await agent.signJoinRequest(contextGraphId, revoked.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      revokedDelegation,
+      revoked.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending', reason: 'agent-revoked' });
+    await expect(agent.approveJoinRequest(
+      contextGraphId,
+      revoked.agentAddress,
+      owner.agentAddress,
+    )).rejects.toThrow(/is revoked.*clear the revocation separately/i);
+    expect(await agent.getJoinRequestStatus(contextGraphId, revoked.agentAddress)).toBe('pending');
+
+    const first = await agent.registerAgent('rate-first', { framework: 'test' });
+    const firstDelegation = await agent.signJoinRequest(contextGraphId, first.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      firstDelegation,
+      first.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'approved', autoApproved: true });
+
+    const second = await agent.registerAgent('rate-second', { framework: 'test' });
+    const secondDelegation = await agent.signJoinRequest(contextGraphId, second.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      secondDelegation,
+      second.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending', reason: 'context-graph-rate-limit' });
+  }, 30_000);
+
+  it('serializes duplicate requests so one member consumes one reservation', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-concurrent';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('duplicate-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+
+    const results = await Promise.all([
+      agent.processIncomingJoinRequest(contextGraphId, delegation, joiner.name, agent.peerId),
+      agent.processIncomingJoinRequest(contextGraphId, delegation, joiner.name, agent.peerId),
+    ]);
+    expect(results.some((result) => result.autoApproved)).toBe(true);
+    expect(results.some((result) => result.alreadyMember)).toBe(true);
+    expect(policyStore.audit.filter((event) => event.eventType === 'join_auto_reservation')).toHaveLength(1);
+  }, 30_000);
+
+  it('fails closed on a malformed persisted open policy and rejects oversized names before storage', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-corrupt';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const stored = policyStore.records.get(contextGraphId)!;
+    policyStore.records.set(contextGraphId, { ...stored, maxMembers: 1_000_000 });
+
+    const joiner = await agent.registerAgent('corrupt-policy-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending', reason: 'invalid-open-policy' });
+
+    const second = await agent.registerAgent('oversized-name-joiner', { framework: 'test' });
+    const secondDelegation = await agent.signJoinRequest(contextGraphId, second.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      secondDelegation,
+      'x'.repeat(129),
+      agent.peerId,
+    )).rejects.toThrow(/at most 128 characters/i);
+    expect(await agent.getJoinRequestStatus(contextGraphId, second.agentAddress)).toBeNull();
+  }, 30_000);
+
+  it('bounds incoming join rates and queue depth before admission work', async () => {
+    const { agent } = await boot();
+    const releases: Array<() => void> = [];
+    for (let i = 0; i < 6; i++) {
+      const release = agent.reserveContextGraphJoinIngress('cg-agent-rate', 'same-agent', 'same-peer');
+      release();
+    }
+    expect(() => agent.reserveContextGraphJoinIngress(
+      'cg-agent-rate',
+      'same-agent',
+      'same-peer',
+    )).toThrow(/agent rate limit/i);
+
+    for (let i = 0; i < 64; i++) {
+      releases.push(agent.reserveContextGraphJoinIngress(
+        'cg-queue-depth',
+        `agent-${i}`,
+        `peer-${i}`,
+      ));
+    }
+    expect(() => agent.reserveContextGraphJoinIngress(
+      'cg-queue-depth',
+      'agent-overflow',
+      'peer-overflow',
+    )).toThrow(/queue.*busy/i);
+    for (const release of releases) release();
+  }, 30_000);
+
+  it('does not let a rejected request bypass a full pending queue', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-full-pending-queue';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const joiner = await agent.registerAgent('rejected-retry', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    vi.spyOn(agent, 'getJoinRequestStatus').mockResolvedValue('rejected');
+    vi.spyOn(agent, 'countPendingJoinRequests').mockResolvedValue(1_000);
+    const storePending = vi.spyOn(agent, 'storePendingJoinRequest');
+
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).rejects.toThrow(/queue.*full/i);
+    expect(storePending).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it('gives a manual-policy request priority over queued automatic admissions', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-disable-priority';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+
+    let releaseReservation!: () => void;
+    let reservationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { reservationStarted = resolve; });
+    const blocked = new Promise<void>((resolve) => { releaseReservation = resolve; });
+    policyStore.beforeReserve = async () => {
+      reservationStarted();
+      await blocked;
+    };
+
+    const first = await agent.registerAgent('disable-first', { framework: 'test' });
+    const second = await agent.registerAgent('disable-second', { framework: 'test' });
+    const firstDelegation = await agent.signJoinRequest(contextGraphId, first.agentAddress);
+    const secondDelegation = await agent.signJoinRequest(contextGraphId, second.agentAddress);
+    const firstDecision = agent.processIncomingJoinRequest(
+      contextGraphId,
+      firstDelegation,
+      first.name,
+      agent.peerId,
+    );
+    await started;
+    const secondDecision = agent.processIncomingJoinRequest(
+      contextGraphId,
+      secondDelegation,
+      second.name,
+      agent.peerId,
+    );
+    const disable = agent.setContextGraphJoinPolicy(
+      contextGraphId,
+      { mode: 'manual' },
+      owner.agentAddress,
+    );
+    // The intent becomes authoritative only after the exact owner preflight
+    // succeeds; publishing it before then would let any local non-owner token
+    // transiently suppress admissions. Hold the in-flight reservation until
+    // that authenticated boundary is visible.
+    await vi.waitFor(() => {
+      expect((agent as any).contextGraphJoinPolicyDisableIntentCounts.get(contextGraphId)).toBe(1);
+    });
+    releaseReservation();
+
+    await expect(firstDecision).resolves.toMatchObject({ status: 'pending', autoApproved: false });
+    await expect(secondDecision).resolves.toMatchObject({
+      status: 'pending',
+      autoApproved: false,
+      reason: 'manual-policy-requested',
+    });
+    await expect(disable).resolves.toMatchObject({ mode: 'manual' });
+    const allowed = (await agent.getContextGraphAllowedAgents(contextGraphId))
+      .map((address) => address.toLowerCase());
+    expect(allowed).not.toContain(first.agentAddress.toLowerCase());
+    expect(allowed).not.toContain(second.agentAddress.toLowerCase());
+  }, 30_000);
+
+  it('rechecks a manual-mode intent at the final membership mutation boundary', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-disable-at-mutation';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('disable-at-mutation', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+
+    const originalParticipants = agent.getPrivateContextGraphParticipants.bind(agent);
+    let reachedMutationPreflight!: () => void;
+    let releaseMutationPreflight!: () => void;
+    const reached = new Promise<void>((resolve) => { reachedMutationPreflight = resolve; });
+    const blocked = new Promise<void>((resolve) => { releaseMutationPreflight = resolve; });
+    let shouldBlock = true;
+    vi.spyOn(agent, 'getPrivateContextGraphParticipants').mockImplementation(async (id) => {
+      const participants = await originalParticipants(id);
+      if (shouldBlock && id === contextGraphId) {
+        shouldBlock = false;
+        reachedMutationPreflight();
+        await blocked;
+      }
+      return participants;
+    });
+
+    const admission = agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    );
+    await reached;
+    const disable = agent.setContextGraphJoinPolicy(
+      contextGraphId,
+      { mode: 'manual' },
+      owner.agentAddress,
+    );
+    await vi.waitFor(() => {
+      expect((agent as any).contextGraphJoinPolicyDisableIntentCounts.get(contextGraphId)).toBe(1);
+    });
+    releaseMutationPreflight();
+
+    await expect(admission).resolves.toMatchObject({ status: 'pending', autoApproved: false });
+    await expect(disable).resolves.toMatchObject({ mode: 'manual' });
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((a) => a.toLowerCase()))
+      .not.toContain(joiner.agentAddress.toLowerCase());
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('pending');
+  }, 30_000);
+});

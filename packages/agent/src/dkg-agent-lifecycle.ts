@@ -1969,6 +1969,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.messenger.register(PROTOCOL_JOIN_REQUEST, async (data, peerIdStr) => {
       const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
       try {
+        if (data.byteLength > 64 * 1024) {
+          return new TextEncoder().encode(JSON.stringify({
+            ok: false,
+            error: 'join-request payload exceeds 64 KiB',
+          }));
+        }
         const payload = JSON.parse(new TextDecoder().decode(data));
 
         // Handle "join-approved" notifications from curator → requester.
@@ -2158,75 +2164,98 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'missing fields' }));
         }
-        // Only store if this node is the curator (creator) of the CG
-        const owner = await this.getContextGraphOwner(contextGraphId);
-        if (!owner) {
-          this.log.warn(
-            requestCtx,
-            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": rejected — unknown CG`,
+        // Reserve before any attacker-controlled CG lookup or signature work.
+        // The shared processing lane is told that this reservation is already
+        // held, while local HTTP callers continue to reserve inside it.
+        const releaseIngress = this.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)
+          ? () => {}
+          : this.reserveContextGraphJoinIngress(
+              contextGraphId,
+              delegation.agentAddress,
+              peerId.toString(),
+            );
+        try {
+          // Only store if this node is the curator (creator) of the CG
+          const owner = await this.getContextGraphOwner(contextGraphId);
+          if (!owner) {
+            this.log.warn(
+              requestCtx,
+              `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": rejected — unknown CG`,
+            );
+            return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'unknown CG' }));
+          }
+          // Compare on normalised DIDs (see `normalizeAgentDid`): EVM
+          // address suffixes are lowered (case-insensitive on-wire), peer-ID
+          // suffixes pass through (case-sensitive base58).
+          const ownerNorm = normalizeAgentDid(owner);
+          const selfDid = `did:dkg:agent:${this.peerId}`;
+          const selfAgentDid = this.defaultAgentAddress
+            ? normalizeAgentDid(`did:dkg:agent:${this.defaultAgentAddress}`)
+            : null;
+          const ownerLocalAgentAddress = [...this.localAgents.keys()].find(
+            (addr) => ownerNorm === normalizeAgentDid(`did:dkg:agent:${addr}`),
           );
-          return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'unknown CG' }));
-        }
-        // Compare on normalised DIDs (see `normalizeAgentDid`): EVM
-        // address suffixes are lowered (case-insensitive on-wire), peer-ID
-        // suffixes pass through (case-sensitive base58). The cgId-derived
-        // owner DID (`deriveCuratorDidFromCgId`) preserves whatever case
-        // the cgId shipped with, while the locally-stored agent address
-        // is typically `ethers.getAddress`'d to checksummed form — both
-        // collapse to the same string here.
-        const ownerNorm = normalizeAgentDid(owner);
-        const selfDid = `did:dkg:agent:${this.peerId}`;
-        const selfAgentDid = this.defaultAgentAddress
-          ? normalizeAgentDid(`did:dkg:agent:${this.defaultAgentAddress}`)
-          : null;
-        const isCurator = ownerNorm === selfDid ||
-          (selfAgentDid !== null && ownerNorm === selfAgentDid) ||
-          [...this.localAgents.keys()].some((addr) => ownerNorm === normalizeAgentDid(`did:dkg:agent:${addr}`));
-        if (!isCurator) {
-          this.log.warn(
-            requestCtx,
-            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": rejected — not curator (owner=${owner})`,
-          );
-          return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'not curator' }));
-        }
-        this.log.info(
-          requestCtx,
-          `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": accepted, verifying delegation for ${delegation.agentAddress}`,
-        );
-        this.verifyJoinRequest(contextGraphId, delegation);
-
-        // Remember which peer actually delivered this request so we can
-        // send approval/rejection back to the same peer later, even if
-        // the agent registry hasn't indexed them yet.
-        const originKey = `${contextGraphId}::${delegation.agentAddress.toLowerCase()}`;
-        this.joinRequestOriginPeers.set(originKey, peerId.toString());
-
-        // Already-member short-circuit: if the requester is already in
-        // the allowlist (e.g. they were added directly via add-agent,
-        // or are re-pasting an old invite), skip the pending-request
-        // dance and immediately fire `join-approved` so their UI flips
-        // to success without curator action. Safe to disclose because
-        // `verifyJoinRequest` already proved the requester owns the
-        // private key for `agentAddress` — only the legitimate owner
-        // learns "you're already a member".
-        const allowed = await this.getContextGraphAllowedAgents(contextGraphId);
-        const addrLower = delegation.agentAddress.toLowerCase();
-        const alreadyMember = allowed.some((a) => a.toLowerCase() === addrLower);
-        if (alreadyMember) {
+          const isCurator = ownerNorm === selfDid ||
+            (selfAgentDid !== null && ownerNorm === selfAgentDid) ||
+            ownerLocalAgentAddress !== undefined;
+          if (!isCurator) {
+            this.log.warn(
+              requestCtx,
+              `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": rejected — not curator (owner=${owner})`,
+            );
+            return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'not curator' }));
+          }
           this.log.info(
             requestCtx,
-            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": already-member short-circuit for ${delegation.agentAddress}`,
+            `PROTOCOL_JOIN_REQUEST from ${peerTag} for "${contextGraphId}": accepted, verifying delegation for ${delegation.agentAddress}`,
           );
-          this.notifyJoinApproval(contextGraphId, delegation.agentAddress).catch(() => {});
-          return new TextEncoder().encode(JSON.stringify({ ok: true, alreadyMember: true }));
-        }
 
-        await this.storePendingJoinRequest(contextGraphId, delegation, agentName);
-        // Note: `storePendingJoinRequest` itself now emits JOIN_REQUEST_RECEIVED.
-        // No duplicate emit here.
-        return new TextEncoder().encode(JSON.stringify({ ok: true }));
+          const addrLower = delegation.agentAddress.toLowerCase();
+          // Install the return-path before processing because automatic
+          // approval may notify immediately. Restore the previous path when
+          // processing rejects so invalid/over-cap unique addresses cannot
+          // grow this map without bound.
+          const originKey = `${contextGraphId}::${addrLower}`;
+          const previousOriginPeer = this.joinRequestOriginPeers.get(originKey);
+          this.joinRequestOriginPeers.set(originKey, peerId.toString());
+          let decision: Awaited<ReturnType<DKGAgent['processIncomingJoinRequest']>>;
+          try {
+            decision = await this.processIncomingJoinRequest(
+              contextGraphId,
+              delegation,
+              agentName,
+              peerId.toString(),
+              { ingressReserved: true },
+            );
+          } catch (error) {
+            if (this.joinRequestOriginPeers.get(originKey) === peerId.toString()) {
+              if (previousOriginPeer === undefined) this.joinRequestOriginPeers.delete(originKey);
+              else this.joinRequestOriginPeers.set(originKey, previousOriginPeer);
+            }
+            throw error;
+          }
+          return new TextEncoder().encode(JSON.stringify({
+            ok: true,
+            ...(!decision.alreadyMember ? { status: decision.status } : {}),
+            ...(decision.alreadyMember ? { alreadyMember: true } : {}),
+            ...(decision.autoApproved ? { autoApproved: true } : {}),
+          }));
+        } finally {
+          releaseIngress();
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        if (err instanceof Error && err.name === 'RetryableJoinAdmissionError') {
+          // Do not turn a post-membership partial failure into an application
+          // ACK. Let the reliable messenger observe a transport failure so it
+          // keeps the envelope in its durable outbox; the idempotent member
+          // branch repairs status/audit on the retry.
+          this.log.warn(
+            createOperationContext('system'),
+            `PROTOCOL_JOIN_REQUEST admission incomplete; retrying via messenger outbox: ${msg}`,
+          );
+          throw err;
+        }
         // Mirror the per-rejection-path warns above. The most common
         // throw-site is `verifyJoinRequest` (signature/scope/expiry
         // failure); without this log the curator silently NACKs and the
@@ -2237,6 +2266,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         return new TextEncoder().encode(JSON.stringify({ ok: false, error: msg }));
       }
+    }, {
+      // ReliableEnvelope overhead sits outside the 64 KiB application body.
+      // Reject oversized frames in ProtocolRouter before buffering/decoding.
+      maxWireBytes: 80 * 1024,
     });
 
     // Subscribe to both system context graph GossipSub topics

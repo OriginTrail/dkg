@@ -1616,6 +1616,23 @@ export class ContextGraphMethods extends DKGAgentBase {
     callerAgentAddress?: string,
     delegation?: SignedAgentDelegation,
   ): Promise<void> {
+    return this.withContextGraphJoinAdmissionLock(contextGraphId, () =>
+      this.commitInviteAgentToContextGraph(
+        contextGraphId,
+        agentAddress,
+        callerAgentAddress,
+        delegation,
+      ));
+  }
+
+  /** Internal agent-membership mutation; caller must hold the CG admission lock. */
+  async commitInviteAgentToContextGraph(this: DKGAgent,
+    contextGraphId: string,
+    agentAddress: string,
+    callerAgentAddress?: string,
+    delegation?: SignedAgentDelegation,
+    beforeMutation?: () => void,
+  ): Promise<void> {
     const ctx = createOperationContext('system');
     const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
     if (!ethAddrRe.test(agentAddress)) {
@@ -1704,6 +1721,12 @@ export class ContextGraphMethods extends DKGAgentBase {
     //
     // Each (cg, agent) pair gets ONE delegation node — re-approving
     // the same agent overwrites the prior delegation.
+    //
+    // Automatic admission supplies a synchronous final guard here, after
+    // every awaited ownership/member preflight and immediately before the
+    // first store mutation. This is its linearization point against an
+    // authenticated switch back to manual mode.
+    beforeMutation?.();
     if (delegation) {
       const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
       const DKG = 'https://dkg.network/ontology#';
@@ -1768,6 +1791,12 @@ export class ContextGraphMethods extends DKGAgentBase {
    * Remove an agent from a context graph's allowlist.
    */
   async removeAgentFromContextGraph(this: DKGAgent, contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
+    return this.withContextGraphJoinAdmissionLock(contextGraphId, () =>
+      this.commitRemoveAgentFromContextGraph(contextGraphId, agentAddress, callerAgentAddress));
+  }
+
+  /** Internal agent-membership removal; caller must hold the CG admission lock. */
+  async commitRemoveAgentFromContextGraph(this: DKGAgent, contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
     const ctx = createOperationContext('system');
     const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
     if (!ethAddrRe.test(agentAddress)) {

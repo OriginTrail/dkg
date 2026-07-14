@@ -765,6 +765,105 @@ export interface ContextGraphMembershipStore {
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }
 
+/**
+ * Curator-controlled admission policy for a single private context graph.
+ *
+ * `manual` is the fail-closed default. `open` means that a valid incoming
+ * join request may be admitted without a human click, subject to the owner,
+ * privacy, revocation, encryption-key, capacity, and rate checks enforced by
+ * the agent at decision time.
+ */
+export type ContextGraphJoinPolicyMode = 'manual' | 'open';
+
+export interface ContextGraphJoinPolicyRecord {
+  version: 1;
+  contextGraphId: string;
+  mode: ContextGraphJoinPolicyMode;
+  /** Exact curator DID at the time the policy was written. */
+  ownerDid: string;
+  /** Required for `open`; counts active allowed agents, including the curator. */
+  maxMembers?: number;
+  /** Required for `open`; rolling per-CG one-hour admission ceiling. */
+  maxApprovalsPerHour?: number;
+  updatedAt: number;
+}
+
+export type ContextGraphJoinPolicyAuditEventType =
+  | 'join_policy_changed'
+  | 'join_auto_reservation'
+  | 'join_auto_decision'
+  | 'join_admission_committed'
+  | 'join_admission_throttled'
+  | 'join_admission_failed';
+
+export interface ContextGraphJoinPolicyAuditEvent {
+  timestamp: number;
+  contextGraphId: string;
+  eventType: ContextGraphJoinPolicyAuditEventType;
+  actor?: string;
+  agentAddress?: string;
+  outcome: string;
+  reason?: string;
+  /** SHA-256 digest of the signed request; the raw signature is never logged. */
+  requestDigest?: string;
+  policyVersion?: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ContextGraphJoinPolicyRateReservation {
+  allowed: boolean;
+  contextGraphApprovalsLastHour: number;
+  nodeApprovalsLastHour: number;
+  reason?: 'context-graph-rate-limit' | 'node-rate-limit';
+}
+
+/**
+ * Durable policy + audit adapter. Production backs this with node-ui.db.
+ * The rate reservation must atomically count and, when allowed, append the
+ * reservation row so concurrent admissions cannot overrun either ceiling.
+ */
+export interface ContextGraphJoinPolicyStore {
+  load(contextGraphId: string): Promise<ContextGraphJoinPolicyRecord | null>;
+  save(record: ContextGraphJoinPolicyRecord): Promise<void>;
+  appendAudit(event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
+  /** Atomically persist a policy transition and its security audit event. */
+  saveWithAudit(
+    record: ContextGraphJoinPolicyRecord,
+    event: ContextGraphJoinPolicyAuditEvent,
+  ): Promise<void>;
+  getAutomaticApprovalUsage(
+    contextGraphId: string,
+    timestamp: number,
+  ): Promise<{
+    contextGraphApprovalsLastHour: number;
+    nodeApprovalsLastHour: number;
+  }>;
+  reserveAutomaticApproval(input: {
+    contextGraphId: string;
+    timestamp: number;
+    contextGraphLimit: number;
+    nodeLimit: number;
+    actor: string;
+    agentAddress: string;
+    requestDigest: string;
+    policyVersion: number;
+    /** Monotonic generation of the exact policy that authorized this request. */
+    policyEpoch: number;
+  }): Promise<ContextGraphJoinPolicyRateReservation>;
+  /**
+   * Idempotently record the durable admission authorized by the newest
+   * matching reservation. Returns false when no reservation exists.
+   */
+  commitAutomaticApproval(input: {
+    contextGraphId: string;
+    timestamp: number;
+    actor: string;
+    agentAddress: string;
+    requestDigest: string;
+    details?: Record<string, unknown>;
+  }): Promise<boolean>;
+}
+
 // ── Sync diagnostics ────────────────────────────────────────────────
 
 export interface DurableSyncDiagnostics {
@@ -1220,6 +1319,8 @@ export interface DKGAgentConfig {
   maxRehydratedContextGraphSubscriptions?: number;
   /** Durable local cache for nodes/agents known to be members of a context graph. */
   contextGraphMembershipStore?: ContextGraphMembershipStore;
+  /** Durable, fail-closed per-CG curator join policy and admission audit store. */
+  contextGraphJoinPolicyStore?: ContextGraphJoinPolicyStore;
   /**
    * Universal Messenger substrate stores (rc.9 plan PR-2). When
    * supplied, the `Messenger` instance gets durable receiver-side

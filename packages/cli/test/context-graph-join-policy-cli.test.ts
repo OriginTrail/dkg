@@ -162,4 +162,54 @@ describe('context-graph join-policy CLI', () => {
     expect(setContextGraphJoinPolicy).toHaveBeenCalledWith('owner/private-cg', { mode: 'manual' });
     expect(logLines.join('\n')).toMatch(/disabling open enrollment does not revoke existing members/i);
   });
+
+  it('reports an automatically approved join as complete', async () => {
+    const signJoinRequest = vi.fn().mockResolvedValue({ delegation: { signature: '0xsigned' } });
+    const requestJoin = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 'approved',
+      autoApproved: true,
+      delivered: 1,
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({
+      signJoinRequest,
+      requestJoin,
+    } as unknown as ApiClient);
+
+    await commandProgram().parseAsync([
+      'node',
+      'dkg',
+      'context-graph',
+      'request-join',
+      'owner/private-cg',
+      '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
+    ]);
+
+    expect(logLines.join('\n')).toContain('Join approved for "owner/private-cg"');
+    expect(logLines.join('\n')).not.toContain('Waiting for curator approval');
+  });
+
+  it('keeps the waiting message for a manual-policy join request', async () => {
+    const signJoinRequest = vi.fn().mockResolvedValue({ delegation: { signature: '0xsigned' } });
+    const requestJoin = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 'pending',
+      delivered: 1,
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({
+      signJoinRequest,
+      requestJoin,
+    } as unknown as ApiClient);
+
+    await commandProgram().parseAsync([
+      'node',
+      'dkg',
+      'context-graph',
+      'request-join',
+      'owner/private-cg',
+      '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
+    ]);
+
+    expect(logLines.join('\n')).toContain('Waiting for curator approval');
+  });
 });

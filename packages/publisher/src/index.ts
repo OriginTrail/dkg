@@ -69,6 +69,7 @@ export {
 } from './dkg-publisher.js';
 export {
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolver,

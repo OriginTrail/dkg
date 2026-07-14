@@ -47,7 +47,7 @@ describe('V12 migration', () => {
     // the substrate store fixtures are created against the
     // current SCHEMA_VERSION (now 24 after the OT-RFC-59 changelog_cursors
     // and changelog_era tables were added).
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(25);
   });
 });
 

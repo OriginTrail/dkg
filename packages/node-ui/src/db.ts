@@ -15,7 +15,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 24;
+const SCHEMA_VERSION = 25;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -119,6 +119,57 @@ export interface DashboardDBOptions {
 export interface LogVolumePruneResult {
   deleted: number;
   status: 'more' | 'reclaim-pending' | 'done' | 'done-compacted';
+}
+
+export interface StoredContextGraphJoinPolicy {
+  version: 1;
+  contextGraphId: string;
+  mode: 'manual' | 'open';
+  ownerDid: string;
+  maxMembers?: number;
+  maxApprovalsPerHour?: number;
+  updatedAt: number;
+}
+
+export interface ContextGraphJoinPolicyAuditInput {
+  timestamp: number;
+  contextGraphId: string;
+  eventType: string;
+  actor?: string;
+  agentAddress?: string;
+  outcome: string;
+  reason?: string;
+  requestDigest?: string;
+  policyVersion?: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ContextGraphJoinPolicyRateReservationInput {
+  contextGraphId: string;
+  timestamp: number;
+  contextGraphLimit: number;
+  nodeLimit: number;
+  actor: string;
+  agentAddress: string;
+  requestDigest: string;
+  policyVersion: number;
+  policyEpoch: number;
+}
+
+export interface ContextGraphJoinPolicyRateReservationResult {
+  allowed: boolean;
+  contextGraphApprovalsLastHour: number;
+  nodeApprovalsLastHour: number;
+  reason?: 'context-graph-rate-limit' | 'node-rate-limit';
+}
+
+export interface ContextGraphAutomaticApprovalCommitInput {
+  contextGraphId: string;
+  timestamp: number;
+  actor: string;
+  agentAddress: string;
+  requestDigest: string;
+  details?: Record<string, unknown>;
 }
 
 /**
@@ -869,6 +920,50 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 25) {
+      // Durable security audit for private-CG open enrollment. Rate-limit
+      // reservations live in the same table so the count+reserve transaction
+      // remains atomic across concurrent join requests and daemon restarts.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_join_policy_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          context_graph_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          actor TEXT,
+          agent_address TEXT,
+          outcome TEXT NOT NULL,
+          reason TEXT,
+          request_digest TEXT,
+          policy_version INTEGER,
+          details TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_ts
+          ON context_graph_join_policy_audit(ts);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_cg_ts
+          ON context_graph_join_policy_audit(context_graph_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_event_ts
+          ON context_graph_join_policy_audit(event_type, ts);
+      `);
+    }
+
+    // Keep the append-only security trail bounded even under a signed-wallet
+    // request flood. This is outside the version gate so development builds or
+    // restored DBs that already report schema 25 still acquire the trigger.
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS cap_cg_join_policy_audit_rows
+      AFTER INSERT ON context_graph_join_policy_audit
+      BEGIN
+        DELETE FROM context_graph_join_policy_audit
+        WHERE id <= NEW.id - 100000
+          AND NOT (
+            event_type = 'join_auto_reservation'
+            AND outcome = 'reserved'
+            AND ts >= (CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 3600000)
+          );
+      END;
+    `);
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -905,6 +1000,7 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM chat_persistence_jobs WHERE updated_at < ${cutoff} AND status IN ('stored', 'failed')`);
     this.db.exec(`DELETE FROM notifications WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM replication_events WHERE ts < ${cutoff}`);
+    this.db.exec(`DELETE FROM context_graph_join_policy_audit WHERE ts < ${cutoff}`);
     this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(Date.now());
     // Universal Messenger idempotency table. Shorter TTL than the
     // operator retention: no realistic dedup window extends beyond
@@ -1205,6 +1301,286 @@ export class DashboardDB {
 
   deleteContextGraphSubscription(contextGraphId: string): void {
     this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
+  }
+
+  // --- Private context-graph join policy + audit ---
+
+  getContextGraphJoinPolicy(contextGraphId: string): StoredContextGraphJoinPolicy | null {
+    const row = this.stmt(
+      'getContextGraphJoinPolicy',
+      'SELECT value FROM settings WHERE key = ?',
+    ).get(this.contextGraphJoinPolicyKey(contextGraphId)) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as Partial<StoredContextGraphJoinPolicy>;
+      if (
+        parsed.version !== 1 ||
+        parsed.contextGraphId !== contextGraphId ||
+        (parsed.mode !== 'manual' && parsed.mode !== 'open') ||
+        typeof parsed.ownerDid !== 'string' ||
+        !parsed.ownerDid ||
+        typeof parsed.updatedAt !== 'number' ||
+        !Number.isFinite(parsed.updatedAt)
+      ) {
+        return null;
+      }
+      if (parsed.mode === 'open' && (
+        !Number.isInteger(parsed.maxMembers) ||
+        (parsed.maxMembers ?? 0) <= 0 ||
+        (parsed.maxMembers ?? 0) > 10_000 ||
+        !Number.isInteger(parsed.maxApprovalsPerHour) ||
+        (parsed.maxApprovalsPerHour ?? 0) <= 0 ||
+        (parsed.maxApprovalsPerHour ?? 0) > 1_000
+      )) {
+        return null;
+      }
+      return {
+        version: 1,
+        contextGraphId,
+        mode: parsed.mode,
+        ownerDid: parsed.ownerDid,
+        ...(parsed.mode === 'open'
+          ? {
+              maxMembers: parsed.maxMembers!,
+              maxApprovalsPerHour: parsed.maxApprovalsPerHour!,
+            }
+          : {}),
+        updatedAt: parsed.updatedAt,
+      };
+    } catch {
+      // Corrupt policy state is indistinguishable from no policy. The agent's
+      // default is manual, so this is intentionally fail-closed.
+      return null;
+    }
+  }
+
+  setContextGraphJoinPolicy(record: StoredContextGraphJoinPolicy): void {
+    this.stmt(
+      'setContextGraphJoinPolicy',
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+    ).run(this.contextGraphJoinPolicyKey(record.contextGraphId), JSON.stringify(record));
+  }
+
+  setContextGraphJoinPolicyWithAudit(
+    record: StoredContextGraphJoinPolicy,
+    event: ContextGraphJoinPolicyAuditInput,
+  ): void {
+    const transition = this.db.transaction(() => {
+      this.setContextGraphJoinPolicy(record);
+      this.appendContextGraphJoinPolicyAudit(event);
+    });
+    transition();
+  }
+
+  appendContextGraphJoinPolicyAudit(event: ContextGraphJoinPolicyAuditInput): void {
+    this.stmt('appendContextGraphJoinPolicyAudit', `
+      INSERT INTO context_graph_join_policy_audit (
+        ts, context_graph_id, event_type, actor, agent_address, outcome,
+        reason, request_digest, policy_version, details
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      event.timestamp,
+      event.contextGraphId,
+      event.eventType,
+      event.actor ?? null,
+      event.agentAddress ?? null,
+      event.outcome,
+      event.reason ?? null,
+      event.requestDigest ?? null,
+      event.policyVersion ?? null,
+      event.details ? JSON.stringify(event.details) : null,
+    );
+  }
+
+  reserveContextGraphAutomaticApproval(
+    input: ContextGraphJoinPolicyRateReservationInput,
+  ): ContextGraphJoinPolicyRateReservationResult {
+    const reserve = this.db.transaction((): ContextGraphJoinPolicyRateReservationResult => {
+      const since = input.timestamp - 60 * 60 * 1000;
+      const cgRow = this.stmt('countContextGraphAutomaticApprovalReservations', `
+        SELECT COUNT(*) AS count
+        FROM context_graph_join_policy_audit
+        WHERE event_type = 'join_auto_reservation'
+          AND outcome = 'reserved'
+          AND context_graph_id = ?
+          AND ts >= ?
+      `).get(input.contextGraphId, since) as { count: number };
+      const nodeRow = this.stmt('countNodeAutomaticApprovalReservations', `
+        SELECT COUNT(*) AS count
+        FROM context_graph_join_policy_audit
+        WHERE event_type = 'join_auto_reservation'
+          AND outcome = 'reserved'
+          AND ts >= ?
+      `).get(since) as { count: number };
+      const contextGraphCount = Number(cgRow?.count ?? 0);
+      const nodeCount = Number(nodeRow?.count ?? 0);
+      const existing = this.stmt('findContextGraphAutomaticApprovalReservation', `
+        SELECT 1 AS found
+        FROM context_graph_join_policy_audit
+        WHERE event_type = 'join_auto_reservation'
+          AND outcome = 'reserved'
+          AND context_graph_id = ?
+          AND request_digest = ?
+          AND CAST(json_extract(details, '$.policyEpoch') AS INTEGER) = ?
+          AND ts >= ?
+        LIMIT 1
+      `).get(
+        input.contextGraphId,
+        input.requestDigest,
+        input.policyEpoch,
+        since,
+      ) as { found: number } | undefined;
+      if (existing) {
+        return {
+          allowed: true,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+        };
+      }
+      if (contextGraphCount >= input.contextGraphLimit) {
+        return {
+          allowed: false,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+          reason: 'context-graph-rate-limit',
+        };
+      }
+      if (nodeCount >= input.nodeLimit) {
+        return {
+          allowed: false,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+          reason: 'node-rate-limit',
+        };
+      }
+      this.appendContextGraphJoinPolicyAudit({
+        timestamp: input.timestamp,
+        contextGraphId: input.contextGraphId,
+        eventType: 'join_auto_reservation',
+        actor: input.actor,
+        agentAddress: input.agentAddress,
+        outcome: 'reserved',
+        requestDigest: input.requestDigest,
+        policyVersion: input.policyVersion,
+        details: {
+          contextGraphLimit: input.contextGraphLimit,
+          nodeLimit: input.nodeLimit,
+          policyEpoch: input.policyEpoch,
+        },
+      });
+      return {
+        allowed: true,
+        contextGraphApprovalsLastHour: contextGraphCount + 1,
+        nodeApprovalsLastHour: nodeCount + 1,
+      };
+    });
+    return reserve();
+  }
+
+  commitContextGraphAutomaticApproval(
+    input: ContextGraphAutomaticApprovalCommitInput,
+  ): boolean {
+    const commit = this.db.transaction((): boolean => {
+      const reservation = this.stmt('findLatestContextGraphAutomaticApprovalReservation', `
+        SELECT actor, agent_address, policy_version, details
+        FROM context_graph_join_policy_audit
+        WHERE event_type = 'join_auto_reservation'
+          AND outcome = 'reserved'
+          AND context_graph_id = ?
+          AND request_digest = ?
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(input.contextGraphId, input.requestDigest) as {
+        actor: string | null;
+        agent_address: string | null;
+        policy_version: number | null;
+        details: string | null;
+      } | undefined;
+      if (!reservation) return false;
+
+      let reservationDetails: Record<string, unknown>;
+      try {
+        reservationDetails = reservation.details
+          ? JSON.parse(reservation.details) as Record<string, unknown>
+          : {};
+      } catch {
+        throw new Error('Automatic approval reservation contains invalid audit details.');
+      }
+      const policyEpoch = reservationDetails.policyEpoch;
+      if (typeof policyEpoch !== 'number' || !Number.isFinite(policyEpoch)) {
+        throw new Error('Automatic approval reservation is missing its policy epoch.');
+      }
+
+      const existing = this.stmt('findCommittedContextGraphAutomaticApproval', `
+        SELECT 1 AS found
+        FROM context_graph_join_policy_audit
+        WHERE event_type = 'join_admission_committed'
+          AND outcome = 'approved'
+          AND context_graph_id = ?
+          AND request_digest = ?
+          AND CAST(json_extract(details, '$.policyEpoch') AS INTEGER) = ?
+        LIMIT 1
+      `).get(
+        input.contextGraphId,
+        input.requestDigest,
+        policyEpoch,
+      ) as { found: number } | undefined;
+      if (existing) return true;
+
+      this.appendContextGraphJoinPolicyAudit({
+        timestamp: input.timestamp,
+        contextGraphId: input.contextGraphId,
+        eventType: 'join_admission_committed',
+        actor: reservation.actor ?? input.actor,
+        agentAddress: reservation.agent_address ?? input.agentAddress,
+        outcome: 'approved',
+        requestDigest: input.requestDigest,
+        policyVersion: reservation.policy_version ?? undefined,
+        details: {
+          ...input.details,
+          policyEpoch,
+        },
+      });
+      return true;
+    });
+    return commit();
+  }
+
+  getContextGraphAutomaticApprovalUsage(
+    contextGraphId: string,
+    timestamp: number,
+  ): { contextGraphApprovalsLastHour: number; nodeApprovalsLastHour: number } {
+    const since = timestamp - 60 * 60 * 1000;
+    const contextGraphApprovalsLastHour = Number((this.stmt('getContextGraphAutomaticApprovalUsage', `
+      SELECT COUNT(*) AS count
+      FROM context_graph_join_policy_audit
+      WHERE event_type = 'join_auto_reservation'
+        AND outcome = 'reserved'
+        AND context_graph_id = ?
+        AND ts >= ?
+    `).get(contextGraphId, since) as { count: number } | undefined)?.count ?? 0);
+    const nodeApprovalsLastHour = Number((this.stmt('getNodeAutomaticApprovalUsage', `
+      SELECT COUNT(*) AS count
+      FROM context_graph_join_policy_audit
+      WHERE event_type = 'join_auto_reservation'
+        AND outcome = 'reserved'
+        AND ts >= ?
+    `).get(since) as { count: number } | undefined)?.count ?? 0);
+    return { contextGraphApprovalsLastHour, nodeApprovalsLastHour };
+  }
+
+  listContextGraphJoinPolicyAudit(contextGraphId: string): Array<Record<string, unknown>> {
+    return this.stmt('listContextGraphJoinPolicyAudit', `
+      SELECT id, ts, context_graph_id, event_type, actor, agent_address,
+             outcome, reason, request_digest, policy_version, details
+      FROM context_graph_join_policy_audit
+      WHERE context_graph_id = ?
+      ORDER BY id ASC
+    `).all(contextGraphId) as Array<Record<string, unknown>>;
+  }
+
+  private contextGraphJoinPolicyKey(contextGraphId: string): string {
+    return `contextGraphJoinPolicy:${contextGraphId}`;
   }
 
   // --- Phase F: chain-driven VM reconciliation telemetry ---
