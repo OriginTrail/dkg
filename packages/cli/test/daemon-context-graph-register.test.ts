@@ -158,4 +158,51 @@ describe('POST /api/context-graph/register — effective publishPolicy resolutio
       warnSpy.mockRestore();
     }
   });
+
+  it('maps an exact-PCA agent authorization failure to 403', async () => {
+    const { status, json } = await runRegisterRouteCaptureOpts(
+      { id: 'wrong-pca-agent-cg', publishPolicy: 0, pcaAccountId: '8' },
+      {
+        registerContextGraph: async () => {
+          throw new Error(
+            'Context graph "wrong-pca-agent-cg" cannot be PCA-registered: chain signer ' +
+            '0x0000000000000000000000000000000000000002 is not a registered agent of PCA account 8 ' +
+            '(registered account: 9).',
+          );
+        },
+      },
+    );
+    expect(status).toBe(403);
+    expect(json.error).toMatch(/not a registered agent of PCA account 8/);
+  });
+
+  it('maps missing PCA agent lookup support to 501', async () => {
+    const { status, json } = await runRegisterRouteCaptureOpts(
+      { id: 'unsupported-pca-agent-cg', publishPolicy: 0, pcaAccountId: '8' },
+      {
+        registerContextGraph: async () => {
+          throw new Error(
+            'PCA curated context graph registration by an agent requires chain adapter PCA agent lookup support.',
+          );
+        },
+      },
+    );
+    expect(status).toBe(501);
+    expect(json.error).toMatch(/PCA agent lookup support/);
+  });
+
+  it('maps unavailable PCA contract support to 503', async () => {
+    const { status, json } = await runRegisterRouteCaptureOpts(
+      { id: 'unavailable-pca-cg', publishPolicy: 0, pcaAccountId: '8' },
+      {
+        registerContextGraph: async () => {
+          const err = new Error('DKGPublishingConvictionNFT not deployed on this Hub.');
+          Object.assign(err, { code: 'PCA_UNAVAILABLE' });
+          throw err;
+        },
+      },
+    );
+    expect(status).toBe(503);
+    expect(json.error).toMatch(/not deployed on this Hub/);
+  });
 });

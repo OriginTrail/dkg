@@ -55,7 +55,7 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
@@ -352,6 +352,9 @@ function classifyRegisterContextGraphError(err: unknown): { status: number; body
     : err && typeof err === 'object' && 'message' in err
       ? String((err as { message?: unknown }).message ?? '')
       : '';
+  if (isPcaUnavailableError(err) || /DKGPublishingConvictionNFT (?:is )?not deployed on this Hub/i.test(msg)) {
+    return { status: 503, body: { error: msg || 'PCA support is unavailable on this network.' } };
+  }
   if (msg.includes('already registered')) return { status: 409, body: { error: msg } };
   if (msg.includes('does not exist')) return { status: 404, body: { error: msg } };
   if (msg.includes('no known creator')) return { status: 503, body: { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' } };
@@ -364,12 +367,19 @@ function classifyRegisterContextGraphError(err: unknown): { status: number; body
   }
   if (msg.includes('PCA account id must be a positive integer')) return { status: 400, body: { error: msg } };
   if (msg.includes('requires chain adapter PCA owner lookup support')) return { status: 501, body: { error: msg } };
+  if (msg.includes('requires chain adapter PCA agent lookup support')) return { status: 501, body: { error: msg } };
   if (/PCA account \d+ does not exist or cannot be looked up/.test(msg)) return { status: 404, body: { error: msg } };
   if (/PCA account \d+ is owned by/.test(msg)) return { status: 403, body: { error: msg } };
-  // PCA chain-signer / signer-introspection invariants (Codex round-4/5/8):
+  // PCA signer authorization and local/on-chain ownership alignment.
+  if (msg.includes('is not a registered agent of PCA account')) return { status: 403, body: { error: msg } };
+  if (msg.includes('local curator') && msg.includes('differs from registration chain signer')) {
+    return { status: 403, body: { error: msg } };
+  }
+  // Compatibility with pre-#1366 owner-only agent errors.
   if (msg.includes('chain signer') && msg.includes('differs from PCA owner')) return { status: 403, body: { error: msg } };
   if (msg.includes('does not expose its registration-tx signer')
-    || msg.includes('invariant cannot be verified')) {
+    || msg.includes('invariant cannot be verified')
+    || msg.includes('owner/agent authorization cannot be verified')) {
     return { status: 501, body: { error: msg } };
   }
   return undefined;
