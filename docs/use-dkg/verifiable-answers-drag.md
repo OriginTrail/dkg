@@ -171,8 +171,9 @@ Two invariants make this trustworthy:
    derivation proof; re-run the rule when that stronger property is required.
 
 **Rules are verifiable too — and managed.** A rule is N3; publish it as a KA whose
-object is the rule body under predicate `…/drag/reasoning#ruleN3` (typically into a
-dedicated `rules` sub-graph), and dRAG auto-discovers it. Now **verified facts +
+object is the rule body under predicate `…/drag/reasoning#ruleN3` (to the CG **root**
+— fact/rule discovery is root-scoped in V1; a dedicated `rules` sub-graph awaits
+sub-graph-aware proof extraction), and dRAG auto-discovers it. Now **verified facts +
 verified rules → conclusions with verified supporting evidence**. Rules are managed
 objects: a rule whose `…/drag/reasoning#ruleStatus` is `"disabled"` never fires, and
 `config.drag.reasoningRuleAuthors` (an allowlist of `0x` author addresses) restricts

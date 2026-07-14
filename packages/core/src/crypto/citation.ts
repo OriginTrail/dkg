@@ -133,6 +133,61 @@ export interface VerifiableCitation {
   checks: CitationChecks;
 }
 
+// ── wire-shape guard ─────────────────────────────────────────────────────────
+
+const MAX_UINT256 = (1n << 256n) - 1n;
+
+/**
+ * Bounded runtime guard for the {@link VerifiableCitation} WIRE SHAPE — the
+ * canonical decoder consumers should use instead of re-declaring the shape.
+ * Lives next to the interface so a field change and its validation change in
+ * the same file (the type and the guard cannot drift apart silently).
+ *
+ * This checks structure and DoS bounds (field length caps, sibling-count cap,
+ * uint256 ranges) — it does NOT verify the proof; use `verifyCitationProof`
+ * (and a chain re-anchor) for that. Designed for untrusted inputs such as a
+ * remote peer's dRAG response.
+ */
+export function isVerifiableCitationShape(c: unknown): c is VerifiableCitation {
+  if (!c || typeof c !== 'object') return false;
+  const x = c as Record<string, unknown>;
+  const t = x.triple as Record<string, unknown> | undefined;
+  const p = x.proof as Record<string, unknown> | undefined;
+  const oc = x.onChain as Record<string, unknown> | undefined;
+  const checks = x.checks as Record<string, unknown> | undefined;
+  const seal = x.seal as Record<string, unknown> | undefined;
+  const bounded = (value: unknown, max: number): value is string => typeof value === 'string' && value.length <= max;
+  const decimal = (value: unknown): value is string => {
+    if (!bounded(value, 78) || !/^\d+$/.test(value)) return false;
+    try {
+      return BigInt(value) <= MAX_UINT256;
+    } catch {
+      return false;
+    }
+  };
+  const hex32 = (value: unknown): value is string => bounded(value, 66) && /^0x[0-9a-fA-F]{64}$/.test(value);
+  const address = (value: unknown): value is string => bounded(value, 42) && /^0x[0-9a-fA-F]{40}$/.test(value);
+  const validSeal =
+    seal === undefined ||
+    (
+      hex32(seal.merkleRoot) && address(seal.authorAddress) && hex32(seal.r) && hex32(seal.vs) &&
+      typeof seal.schemeVersion === 'number' && Number.isSafeInteger(seal.schemeVersion) && seal.schemeVersion >= 0 &&
+      decimal(seal.chainId) && address(seal.kav10Address) && decimal(seal.reservedKaId)
+    );
+  return (
+    decimal(x.kaId) && bounded(x.ual, 2_048) && bounded(x.contextGraphId, 128) && bounded(x.servingNode, 256) &&
+    !!t && bounded(t.subject, 65_536) && bounded(t.predicate, 65_536) && bounded(t.object, 65_536) &&
+    !!p && bounded(p.content, 262_144) && hex32(p.leaf) && Array.isArray(p.siblings) && p.siblings.length <= 64 &&
+    p.siblings.every(hex32) && typeof p.chunkId === 'number' && Number.isSafeInteger(p.chunkId) && p.chunkId >= 0 &&
+    typeof p.leafCount === 'number' && Number.isSafeInteger(p.leafCount) && p.leafCount > p.chunkId &&
+    !!oc && hex32(oc.merkleRoot) && address(oc.author) && decimal(oc.chainId) &&
+    !!checks && typeof checks.merkle === 'boolean' &&
+    (typeof checks.onChain === 'boolean' || checks.onChain === null) &&
+    (typeof checks.authorSig === 'boolean' || checks.authorSig === null) &&
+    typeof checks.verified === 'boolean' && validSeal
+  );
+}
+
 // ── hex codecs ──────────────────────────────────────────────────────────────
 
 /** Encode bytes as a `0x`-prefixed lowercase hex string. */

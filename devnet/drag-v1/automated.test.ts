@@ -78,6 +78,17 @@ const entitiesOf = (a: Json): string[] => [...new Set((a.facts ?? []).map((f: Js
 let n1Peer = '';
 let n2Peer = '';
 let localModelAvailable = false;
+// Release-gate strictness: with DKG_DRAG_REQUIRE_SEMANTIC=1 the semantic cases
+// FAIL (instead of skip) when no embedding model is reachable — a validation
+// environment must not report green while the semantic path went unexercised.
+// Default (unset) keeps skip-with-report for ad-hoc runs without the optional
+// local model / OpenAI-compatible credentials.
+const requireSemantic = process.env.DKG_DRAG_REQUIRE_SEMANTIC === '1';
+function semanticGate(ctx: { skip: () => void }): void {
+  if (localModelAvailable) return;
+  expect(requireSemantic, 'DKG_DRAG_REQUIRE_SEMANTIC=1 but no embedding model is reachable — provision one for the release gate').toBe(false);
+  ctx.skip(); // reports SKIPPED, not a silent pass
+}
 
 beforeAll(async () => {
   await Promise.all([waitId(N(1)), waitId(N(2)), waitId(N(3))]);
@@ -100,12 +111,18 @@ beforeAll(async () => {
     ['urn:supplier:globex', 'http://ex/note', '"consistently on-time delivery; preferred partner"'],
   ]);
 
-  // node2 subscribes so it serves the CG for the cross-node test.
+  // node2 subscribes so it serves the CG for the cross-node test. The fan-out
+  // test below REQUIRES both peers to answer, so readiness is asserted, not
+  // best-effort: a node2 that never synced would otherwise let a single-peer
+  // dial masquerade as proven multi-peer aggregation.
   await post(N(2), '/api/context-graph/subscribe', { contextGraphId: CG, includeSharedMemory: true });
+  let node2Facts = 0;
   for (let i = 0; i < 12; i++) {
-    if (((await answer(N(2), { question: 'flagged audit' })).stats?.factsCited ?? 0) > 0) break;
+    node2Facts = (await answer(N(2), { question: 'flagged audit' })).stats?.factsCited ?? 0;
+    if (node2Facts > 0) break;
     await sleep(4000);
   }
+  expect(node2Facts, 'node2 must hold synced CG facts before the fan-out test').toBeGreaterThan(0);
 
   // Detect whether a semantic embedder is reachable on this node (the optional
   // local model, or a configured OpenAI-compatible one).
@@ -145,7 +162,13 @@ describe('dRAG P3 — cross-node fan-out, re-verified by an asker that holds not
     })).b;
     expect(net.citations.length).toBeGreaterThan(0);
     expect(net.citations.every((c: VerifiableCitation) => c.checks.verified)).toBe(true);
-    expect((net.perNode ?? []).filter((p: Json) => !p.error && p.verified > 0).length).toBeGreaterThanOrEqual(1);
+    // BOTH explicit serving peers must answer with asker-verified citations —
+    // a single responder would not prove multi-peer fan-out or aggregation.
+    const verifiedPeers = (net.perNode ?? [])
+      .filter((p: Json) => !p.error && p.verified > 0)
+      .map((p: Json) => p.peerId);
+    expect(verifiedPeers).toContain(n1Peer);
+    expect(verifiedPeers).toContain(n2Peer);
   });
 });
 
@@ -187,14 +210,14 @@ describe('dRAG Phase 1 — semantic retrieval finds what keyword misses', () => 
   });
 
   it('the semantic path retrieves entities by embedding ANN, not a substring scan', async (ctx) => {
-    if (!localModelAvailable) ctx.skip(); // reports SKIPPED, not a silent pass
+    semanticGate(ctx);
     const sem = await answer(N(1), { question: 'which suppliers were flagged in the audit?', retrieval: 'semantic' });
     expect(String(sem.stats.retrieval)).toContain('vector:');
     expect(sem.stats.factsCited).toBeGreaterThan(0);
   });
 
   it('semantic reaches the paraphrase supplier keyword cannot [requires an embedding model]', async (ctx) => {
-    if (!localModelAvailable) ctx.skip(); // reports SKIPPED, not a silent pass
+    semanticGate(ctx);
     const sem = await answer(N(1), { question: 'which suppliers were flagged in the audit?', retrieval: 'semantic' });
     expect(entitiesOf(sem)).toContain('initech');
   });

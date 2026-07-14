@@ -96,6 +96,17 @@ beforeAll(async () => {
   ]), 'publish decision-d2').toBe(true);
   const ruleOk = await publish('policy-rules', [[NS + 'policyRules', RULE_PRED, escLit(RULES_N3)]]);
 
+  // A MANAGED rule-KA published DISABLED: typed drag:ReasoningRule whose
+  // drag:ruleStatus gates it off. It would flag EVERY change if it fired, so
+  // any `flagged` derivation below is proof the status gate leaked.
+  const R = 'https://ontology.origintrail.io/drag/reasoning#';
+  const FLAG_ALL_N3 = `@prefix code: <${NS}>. { ?c a code:Change } => { ?c code:flagged "true" } .`;
+  expect(await publish('rule-flag-all', [
+    ['urn:rule:flag-all', A, R + 'ReasoningRule'],
+    ['urn:rule:flag-all', R + 'ruleStatus', '"disabled"'],
+    ['urn:rule:flag-all', RULE_PRED, escLit(FLAG_ALL_N3)],
+  ]), 'publish disabled managed rule').toBe(true);
+
   // Poll until reasoning derives (anchoring + the rule-KA must settle); fall back
   // to request-supplied rules if the rule-KA blipped.
   const reqRules = ruleOk ? undefined : RULES_N3;
@@ -134,5 +145,11 @@ describe('dRAG reasoning — EYE derives governance conclusions with verified ev
     if (!reasoningAvailable) ctx.skip();
     const affected = subjectsFor('affectedBy');
     expect(affected).toEqual(expect.arrayContaining([NS + 'validateToken', NS + 'handleAuth', NS + 'apiGateway']));
+  });
+
+  it('a managed rule published with drag:ruleStatus "disabled" never fires', (ctx) => {
+    if (!reasoningAvailable) ctx.skip();
+    // The disabled flag-all rule would have derived `flagged` for D1 AND D2.
+    expect(subjectsFor('flagged')).toEqual([]);
   });
 });

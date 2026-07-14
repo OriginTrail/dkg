@@ -9,6 +9,7 @@ import {
   hex0xToBytes,
   verifyCitationProof,
   citationProofToMaterial,
+  isVerifiableCitationShape,
   type CitationTriple,
   type VerifiableCitation,
 } from '../src/index.js';
@@ -142,5 +143,77 @@ describe('verifiable citation — pure Merkle proof', () => {
     const single = [TRIPLES[0]];
     const c = synthCitation(single, 0);
     expect(verifyCitationProof(c)).toBe(true);
+  });
+});
+
+describe('isVerifiableCitationShape — canonical bounded wire-shape guard', () => {
+  const valid = () => synthCitation(TRIPLES, 1);
+
+  it('accepts a real producer-shaped citation (with and without a seal)', () => {
+    expect(isVerifiableCitationShape(valid())).toBe(true);
+    const sealed: VerifiableCitation = {
+      ...valid(),
+      seal: {
+        merkleRoot: `0x${'ab'.repeat(32)}`,
+        authorAddress: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+        r: `0x${'cd'.repeat(32)}`,
+        vs: `0x${'ef'.repeat(32)}`,
+        schemeVersion: 1,
+        chainId: '31337',
+        kav10Address: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+        reservedKaId: '1',
+      },
+    };
+    expect(isVerifiableCitationShape(sealed)).toBe(true);
+  });
+
+  it('rejects non-objects and missing sections', () => {
+    expect(isVerifiableCitationShape(null)).toBe(false);
+    expect(isVerifiableCitationShape('citation')).toBe(false);
+    for (const section of ['triple', 'proof', 'onChain', 'checks'] as const) {
+      const c = valid() as unknown as Record<string, unknown>;
+      delete c[section];
+      expect(isVerifiableCitationShape(c), `missing ${section}`).toBe(false);
+    }
+  });
+
+  it('enforces uint256 range and decimal format on ids', () => {
+    expect(isVerifiableCitationShape({ ...valid(), kaId: '-1' })).toBe(false);
+    expect(isVerifiableCitationShape({ ...valid(), kaId: '0x10' })).toBe(false);
+    const overUint256 = (2n ** 256n).toString();
+    expect(isVerifiableCitationShape({ ...valid(), kaId: overUint256 })).toBe(false);
+  });
+
+  it('enforces the DoS bounds a remote peer could abuse', () => {
+    const c = valid();
+    expect(
+      isVerifiableCitationShape({ ...c, proof: { ...c.proof, siblings: Array(65).fill(`0x${'11'.repeat(32)}`) } }),
+      'sibling-count cap',
+    ).toBe(false);
+    expect(
+      isVerifiableCitationShape({ ...c, triple: { ...c.triple, object: `"${'x'.repeat(70_000)}"` } }),
+      'triple field length cap',
+    ).toBe(false);
+    expect(
+      isVerifiableCitationShape({ ...c, proof: { ...c.proof, leafCount: c.proof.chunkId } }),
+      'leafCount must exceed chunkId',
+    ).toBe(false);
+  });
+
+  it('rejects a malformed seal instead of ignoring it', () => {
+    const c: VerifiableCitation = {
+      ...valid(),
+      seal: {
+        merkleRoot: 'not-hex',
+        authorAddress: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+        r: `0x${'cd'.repeat(32)}`,
+        vs: `0x${'ef'.repeat(32)}`,
+        schemeVersion: 1,
+        chainId: '31337',
+        kav10Address: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+        reservedKaId: '1',
+      },
+    };
+    expect(isVerifiableCitationShape(c)).toBe(false);
   });
 });

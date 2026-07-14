@@ -21,10 +21,12 @@
 import { tripleContentV10, type CitationTriple, type VerifiableCitation } from '@origintrail-official/dkg-core';
 
 /**
- * Reasoning-rule vocabulary. A RULE is a verifiable KA (typically published into
- * a CG's `rules` sub-graph) that carries its N3 body as a literal — so rules are
- * themselves chain-published ("verifiable facts + verifiable rules → verifiable
- * derivations"). They are managed objects: typed, status-gated, governable.
+ * Reasoning-rule vocabulary. A RULE is a verifiable KA that carries its N3 body
+ * as a literal — so rules are themselves chain-published ("verifiable facts +
+ * verifiable rules → verifiable derivations"). They are managed objects: typed,
+ * status-gated, governable. Publish rule-KAs to the CG ROOT: fact/rule discovery
+ * is root-scoped in V1 (sub-graph VM graphs are not scanned — sub-graph-aware
+ * proof extraction is the follow-up).
  *
  *   <rule>  a            drag:ReasoningRule ;
  *           drag:ruleN3  "{ … } => { … } ." ;   # the body (DRAG_RULE_PREDICATE)

@@ -3,12 +3,15 @@
  * dRAG REASONING demo — retrieve → verify → REASON → prove (OT-RFC-55 + EYE).
  *
  * A multi-agent CODE context graph: agents publish on-chain decision/code/review
- * traces (in the graph root), and the team's POLICY lives as managed, verifiable
- * rules in a dedicated `rules` sub-graph. EYE reasons over the COMPLETE graph
- * (root + sub-graphs) and DERIVES a governance conclusion nobody published —
- * "which change violates the review policy" — using NEGATION + TRANSITIVITY, with
- * every proof leaf a chain-verified citation. A second, DISABLED rule shows that
- * rules are managed (a disabled rule never fires).
+ * traces, and the team's POLICY lives as MANAGED, verifiable rule-KAs (typed
+ * drag:ReasoningRule, status-gated) in the same graph. EYE DERIVES a governance
+ * conclusion nobody published — "which change violates the review policy" —
+ * using NEGATION + TRANSITIVITY, with every proof leaf a chain-verified
+ * citation. A second, DISABLED rule shows that rules are managed (a disabled
+ * rule never fires). NOTE: rule-KAs are published to the graph ROOT — proof
+ * extraction (and therefore fact/rule discovery) is root-scoped in V1; a
+ * dedicated `rules` sub-graph is the follow-up gated on sub-graph-aware
+ * extraction.
  *
  * Prereq:  ./scripts/devnet.sh start 4   AND   (cd packages/cli && pnpm i eyereasoner)
  * Run:     node scripts/drag-reason-demo.mjs
@@ -80,13 +83,12 @@ const rule = (id, n3, status) => [
 ];
 
 (async () => {
-  console.log(c.b('\n  dRAG reasoning — rules live in a managed `rules` sub-graph; EYE reasons over the whole context graph\n'));
+  console.log(c.b('\n  dRAG reasoning — POLICY as managed, verifiable rule-KAs; EYE derives what nobody published\n'));
   for (let i = 0; i < 30; i++) { try { if ((await (await fetch(N1 + '/api/identity', { headers: { Authorization: `Bearer ${TOKEN}` } })).json()).hasIdentity) break; } catch {} await sleep(2000); }
 
-  hr('SETUP — code/decision/review facts (graph root) + POLICY rules (a `rules` sub-graph)');
+  hr('SETUP — code/decision/review facts + MANAGED policy rule-KAs (typed, status-gated)');
   await post('/api/context-graph/create', { id: CG, name: 'multi-agent code graph', accessPolicy: 0, publishPolicy: 0, register: true });
   await sleep(2000);
-  await post('/api/sub-graph/create', { contextGraphId: CG, subGraphName: 'rules' });
 
   const ok = {};
   ok.code = await pub('code-map', [
@@ -102,16 +104,16 @@ const rule = (id, n3, status) => [
     T('D2', A, ref('Change')), T('D2', 'author', ref('agentB')), T('D2', 'changes', ref('sessionStore')), T('D2', 'status', '"active"'),
     T('D2', 'reviewedBy', ref('R2')), T('R2', 'reviewer', ref('agentV')), T('agentV', 'clearance', '"senior"'),
   ]);
-  // rules → the `rules` sub-graph: one active policy, one DISABLED rule.
-  ok.policy = await pub('rule-senior-review', rule('senior-review', POLICY_N3, 'active'), 'rules');
-  ok.flag = await pub('rule-flag-all', rule('flag-all', FLAG_ALL_N3, 'disabled'), 'rules');
+  // rules → managed rule-KAs: one active policy, one DISABLED rule.
+  ok.policy = await pub('rule-senior-review', rule('senior-review', POLICY_N3, 'active'));
+  ok.flag = await pub('rule-flag-all', rule('flag-all', FLAG_ALL_N3, 'disabled'));
 
   const allOk = Object.values(ok).every(Boolean);
-  console.log(`  ${allOk ? c.g('✓') : c.r('✗')} facts → ${c.c(CG)} (root) · rules → ${c.c(CG + '/rules')} sub-graph`);
+  console.log(`  ${allOk ? c.g('✓') : c.r('✗')} facts + managed rule-KAs → ${c.c(CG)}`);
   console.log(c.d('  rules: ') + c.g('senior-review [active]') + c.d(' — critical change needs a senior review · ') + c.r('flag-all [disabled]') + c.d(' — would flag every change'));
   console.log(c.d('  D1 (agentA) changes validateToken (critical), reviewed at STANDARD · D2 (agentB) changes sessionStore (critical), reviewed at SENIOR'));
 
-  hr('REASON — POST /api/answer { reason: true } → EYE over the COMPLETE graph (root + rules sub-graph)');
+  hr('REASON — POST /api/answer { reason: true } → EYE over the graph\'s VERIFIED facts + managed rules');
   let res;
   for (let i = 0; i < 15; i++) {
     res = (await post('/api/answer', { contextGraphId: CG, question: 'which changes violate the review policy?', reason: true })).b;
@@ -141,7 +143,7 @@ const rule = (id, n3, status) => [
   for (const [chg, fns] of Object.entries(by)) console.log(`  ${c.b(chg)} affects → ${c.y(fns.join(', '))}`);
 
   hr('🛠  RULE MANAGEMENT — rules are first-class, verifiable, status-gated KAs');
-  for (const rc of res.reasoning.rules ?? []) console.log(`  ${c.g('✓ applied')} ${c.d('rule KA ' + String(rc.kaId).slice(0, 10) + '… (from the rules sub-graph, verifiable)')}`);
+  for (const rc of res.reasoning.rules ?? []) console.log(`  ${c.g('✓ applied')} ${c.d('rule KA ' + String(rc.kaId).slice(0, 10) + '… (managed rule-KA, chain-verifiable)')}`);
   console.log(`  ${c.r('∅ skipped')} ${c.d('flag-all — drag:ruleStatus "disabled" → never fires (' + (flagged.length ? c.r('LEAKED ' + flagged.length) : 'no `flagged` derived ✓') + ')')}`);
 
   console.log(c.b(`\n${c.c('━'.repeat(76))}`));

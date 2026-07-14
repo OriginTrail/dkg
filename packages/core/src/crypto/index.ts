@@ -134,6 +134,7 @@ export {
   hex0xToBytes,
   citationProofToMaterial,
   verifyCitationProof,
+  isVerifiableCitationShape,
   type CitationTriple,
   type CitationProof,
   type CitationSeal,
