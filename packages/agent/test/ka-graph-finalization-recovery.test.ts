@@ -383,6 +383,57 @@ describe('graph-scoped assertion finalization recovery', () => {
     }
   }, 60_000);
 
+  it('recovers a promotion that fails between the SWM swap and its durable writes', async () => {
+    const agent = await createAgent();
+    const contextGraphId = `rootless-promote-recovery-${Date.now()}`;
+    await agent.createContextGraph({ id: contextGraphId, name: 'Rootless promote recovery' });
+    const name = 'promote-crash';
+    await agent.assertion.create(contextGraphId, name);
+    await agent.assertion.write(contextGraphId, name, [
+      { subject: 'urn:promote:crash', predicate: 'urn:predicate:value', object: '"promoted"' },
+    ]);
+    const finalized = await agent.assertion.finalize(contextGraphId, name) as never as {
+      kaUal: string; assertionVersion: string; publicTripleCount: number;
+    };
+    const scope = createGraphKnowledgeAssetScope(finalized.kaUal, finalized.assertionVersion);
+    const wmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.WorkingMemory, scope);
+    const swmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.SharedWorkingMemory, scope);
+    expect(await agent.store.countQuads(wmGraph)).toBe(1);
+
+    // Crash inside the post-swap tail: the memory-layer meta rewrite is the
+    // first durable write after the SWM replacement.
+    const realInsert = agent.store.insert.bind(agent.store);
+    let crashed = false;
+    agent.store.insert = async (quads, options) => {
+      if (
+        !crashed
+        && quads.some((quad) =>
+          quad.predicate === 'http://dkg.io/ontology/memoryLayer' && quad.object === '"SWM"')
+      ) {
+        crashed = true;
+        throw new Error('injected post-swap promote failure');
+      }
+      return realInsert(quads, options);
+    };
+    try {
+      await expect(agent.assertion.promote(contextGraphId, name)).rejects.toThrow(
+        'injected post-swap promote failure',
+      );
+    } finally {
+      agent.store.insert = realInsert;
+    }
+
+    // The WM source must survive the failed tail: dropping it before the
+    // durable writes strands the promotion — a retry then reads empty working
+    // memory and aborts instead of converging.
+    expect(await agent.store.countQuads(wmGraph)).toBe(1);
+
+    const retried = await agent.assertion.promote(contextGraphId, name);
+    expect(retried).toMatchObject({ promotedCount: 1 });
+    expect(await agent.store.countQuads(swmGraph)).toBe(1);
+    expect(await agent.store.countQuads(wmGraph)).toBe(0);
+  }, 60_000);
+
   it('commits, promotes, and republishes a fully private KA without a synthetic public root', async () => {
     const agent = await createAgent();
     const contextGraphId = `rootless-private-only-${Date.now()}`;
