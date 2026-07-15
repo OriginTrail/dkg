@@ -1190,6 +1190,44 @@ describe('publishJsonLd', () => {
     expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
+  it('async publish rejects invalid access envelopes before lifecycle mutation or enqueue', async () => {
+    const { agent, store } = await createAgent('AsyncInvalidAccessEnvelopeBot');
+    await agent.createContextGraph({
+      id: 'async-invalid-access-envelope',
+      name: 'AsyncInvalidAccessEnvelope',
+      description: '',
+    });
+    await agent.registerContextGraph('async-invalid-access-envelope');
+    const content = {
+      public: {
+        '@context': 'http://schema.org/',
+        '@id': 'http://example.org/InvalidAccessEnvelope',
+        '@type': 'Thing',
+        'name': 'Invalid access envelope',
+      },
+    };
+    const metadataBefore = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <did:dkg:context-graph:async-invalid-access-envelope/_meta> { ?s ?p ?o } }',
+    );
+
+    await expect(agent.publishAsync(
+      'did:dkg:context-graph:async-invalid-access-envelope',
+      content,
+      { localOnly: true, accessPolicy: 'allowList' },
+    )).rejects.toThrow(/allowList policy requires allowedPeers/);
+    await expect(agent.publishAsync(
+      'did:dkg:context-graph:async-invalid-access-envelope',
+      content,
+      { localOnly: true, accessPolicy: 'public', allowedPeers: ['peer-a'] },
+    )).rejects.toThrow(/allowedPeers requires allowList policy/);
+
+    const metadataAfter = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <did:dkg:context-graph:async-invalid-access-envelope/_meta> { ?s ?p ?o } }',
+    );
+    expect(metadataAfter).toEqual(metadataBefore);
+    expect(await new TripleStoreAsyncLiftPublisher(store).list()).toEqual([]);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
+
   it('async publish rejects unsupported graph-scoped entity proofs before enqueue', async () => {
     const { agent, store } = await createAgent('AsyncEntityProofsBot');
     await agent.createContextGraph({ id: 'async-entity-proofs', name: 'AsyncEntityProofs', description: '' });
