@@ -320,19 +320,20 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
   });
 });
 
-/** Assert the durable-data fallback issued a bounded ORDER BY/OFFSET/LIMIT page query. */
+/** Assert the durable-data fallback addressed one exact graph per bounded page query. */
 function watchBoundedDataPageQuery(store: OxigraphStore, graph: string) {
   const originalQuery = store.query.bind(store);
   let observed = 0;
   store.query = (async (sparql: string) => {
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     if (
-      /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`<${graph}>`) &&
-      normalized.includes('ORDER BY ?g ?s ?p ?o') &&
+      /^SELECT \?s \?p \?o WHERE \{/.test(normalized) &&
+      normalized.includes(`GRAPH <${graph}>`) &&
+      normalized.includes('ORDER BY ?s ?p ?o') &&
       /OFFSET \d+/.test(normalized) &&
       /LIMIT \d+/.test(normalized)
     ) {
+      expect(normalized).not.toContain('VALUES ?g');
       observed += 1;
     }
     return originalQuery(sparql);
@@ -360,16 +361,17 @@ function watchBoundedMetaPageQuery(store: OxigraphStore, metaGraph: string) {
   return { assertObserved: () => expect(observed).toBeGreaterThan(0) };
 }
 
-/** Assert the SWM-data fallback issued a bounded, EXISTS-filtered paged query. */
+/** Assert the SWM-data fallback issued a concrete-graph, mapped-root paged query. */
 function watchBoundedSwmDataPageQuery(store: OxigraphStore) {
   const originalQuery = store.query.bind(store);
   let observed = 0;
   store.query = (async (sparql: string) => {
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     if (
-      /^SELECT DISTINCT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes('FILTER EXISTS') &&
-      normalized.includes('ORDER BY ?g ?s ?p ?o') &&
+      /^SELECT DISTINCT \?s \?p \?o WHERE \{/.test(normalized) &&
+      normalized.includes('VALUES ?root') &&
+      normalized.includes('GRAPH <') &&
+      normalized.includes('ORDER BY ?s ?p ?o') &&
       /OFFSET \d+/.test(normalized) &&
       /LIMIT \d+/.test(normalized)
     ) {

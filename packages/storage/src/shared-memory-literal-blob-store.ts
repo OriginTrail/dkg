@@ -85,6 +85,23 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return removed;
   }
 
+  async replaceGraph(
+    graphUri: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraph !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraph',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    const externalized = await Promise.all(
+      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    );
+    await this.inner.replaceGraph(graphUri, externalized, options);
+  }
+
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('update', 'SharedMemoryLiteralBlobStore');
@@ -306,7 +323,12 @@ function shouldExternalizeLiteral(quad: Quad, thresholdBytes: number): boolean {
 }
 
 function isSharedMemoryGraph(graph: string | undefined): boolean {
-  return Boolean(graph && graph.endsWith(SHARED_MEMORY_GRAPH_SUFFIX));
+  return Boolean(
+    graph && (
+      graph.endsWith(SHARED_MEMORY_GRAPH_SUFFIX) ||
+      graph.includes(`${SHARED_MEMORY_GRAPH_SUFFIX}/`)
+    ),
+  );
 }
 
 function serializedTermByteLength(term: string): number {

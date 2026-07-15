@@ -4,13 +4,28 @@ import {
   isSafeIri, assertSafeIri, validateSubGraphName, validateContextGraphId,
   contextGraphSubGraphUri,
   contextGraphMetaGraphUri, contextGraphDataGraphUri,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  tryReplaceGraphAtomically,
+  type TripleStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
+  generateGraphKnowledgeAssetMetadata,
+  resolveKnowledgeAssetWorkspaceHead,
+  workspacePublicQuadsDigest,
+  shouldApplyMaterialization,
+  withMaterializationLock,
+  writeMaterializedVersion,
   validatePublishRequest, parseSimpleNQuads, generateSubGraphRegistration,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
@@ -19,6 +34,99 @@ import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js'
 import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from './dkg-agent-types.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
+
+interface GraphScopedPublishRequest {
+  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  publicTripleCount: number;
+  privateTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers: string[];
+}
+
+function resolveGraphScopedPublishRequest(
+  request: ReturnType<typeof decodePublishRequest>,
+): GraphScopedPublishRequest | undefined {
+  const privateMerkleRoot = request.privateMerkleRoot?.length
+    ? new Uint8Array(request.privateMerkleRoot)
+    : undefined;
+  const hasGraphField =
+    (request.contentScopeVersion ?? 0) !== 0
+    || Boolean(request.assertionVersion)
+    || (request.publicTripleCount ?? 0) > 0
+    || privateMerkleRoot !== undefined
+    || (request.privateTripleCount ?? 0) > 0
+    || Boolean(request.accessPolicy)
+    || (request.allowedPeers?.length ?? 0) > 0;
+  if (!hasGraphField) return undefined;
+  if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(
+      `Graph-scoped gossip requires contentScopeVersion=${GRAPH_KA_CONTENT_SCOPE_VERSION}`,
+    );
+  }
+  if (!request.ual) {
+    throw new Error('Graph-scoped gossip requires a UAL');
+  }
+  if (!request.assertionVersion || request.kas.length !== 0) {
+    throw new Error('Graph-scoped gossip requires assertionVersion and no legacy KA manifest');
+  }
+  const scope = createGraphKnowledgeAssetScope(request.ual, request.assertionVersion);
+  if (
+    scope.ual !== request.ual
+    || scope.assertionVersion !== '1'
+    || !request.chainId
+    || scope.chainId !== request.chainId
+  ) {
+    throw new Error('Graph-scoped gossip has a non-canonical initial KA scope');
+  }
+  const kaNumber = BigInt(scope.kaNumber);
+  if (kaNumber >= (1n << 96n)) {
+    throw new Error('Graph-scoped gossip KA number exceeds the 96-bit author namespace');
+  }
+  const packedKaId = (BigInt(scope.agentAddress) << 96n) | kaNumber;
+  const startKAId = protoToBigInt(request.startKAId ?? 0);
+  const endKAId = protoToBigInt(request.endKAId ?? 0);
+  if (startKAId !== packedKaId || endKAId !== packedKaId) {
+    throw new Error(
+      `Graph-scoped gossip UAL-derived kaId ${packedKaId} does not match ` +
+        `published range ${startKAId}..${endKAId}`,
+    );
+  }
+  const publicTripleCount = request.publicTripleCount ?? 0;
+  const privateTripleCount = request.privateTripleCount ?? 0;
+  if (
+    !Number.isSafeInteger(publicTripleCount)
+    || publicTripleCount < 0
+    || !Number.isSafeInteger(privateTripleCount)
+    || privateTripleCount < 0
+    || (publicTripleCount === 0 && privateTripleCount === 0)
+    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
+    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+  ) {
+    throw new Error('Graph-scoped gossip has an invalid content envelope');
+  }
+  const accessPolicy = request.accessPolicy;
+  if (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList') {
+    throw new Error(`Graph-scoped gossip has invalid accessPolicy: ${accessPolicy || '(empty)'}`);
+  }
+  const rawAllowedPeers = request.allowedPeers ?? [];
+  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
+  if (
+    allowedPeers.length !== rawAllowedPeers.length
+    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+  ) {
+    throw new Error('Graph-scoped gossip has an invalid access-policy peer envelope');
+  }
+  return {
+    scope,
+    publicTripleCount,
+    privateTripleCount,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+    accessPolicy,
+    allowedPeers,
+  };
+}
 
 export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
@@ -44,6 +152,8 @@ export interface GossipPublishHandlerCallbacks {
    */
   hasConfirmedMetaState?: (id: string) => Promise<boolean>;
   getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
+  /** Resolve the topic Context Graph to its authoritative on-chain id. */
+  getContextGraphOnChainId?: (id: string) => Promise<string | null>;
   markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
@@ -151,6 +261,7 @@ export class GossipPublishHandler {
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
       const quads = parseSimpleNQuads(nquadsStr);
+      const graphPublish = resolveGraphScopedPublishRequest(request);
 
       if (quads.length === 0 && !request.ual) {
         this.log.warn(ctx, 'Gossip: empty broadcast with no UAL, ignoring');
@@ -173,19 +284,42 @@ export class GossipPublishHandler {
         await graphManager.ensureSubGraph(request.contextGraphId, subGraphName);
       }
 
-      const dataGraph = subGraphName
-        ? contextGraphSubGraphUri(request.contextGraphId, subGraphName)
-        : graphManager.dataGraphUri(request.contextGraphId);
+      const dataGraph = graphPublish
+        ? knowledgeAssetLayerGraphUri(
+            request.contextGraphId,
+            MemoryLayer.VerifiableMemory,
+            graphPublish.scope,
+            subGraphName,
+          )
+        : subGraphName
+          ? contextGraphSubGraphUri(request.contextGraphId, subGraphName)
+          : graphManager.dataGraphUri(request.contextGraphId);
       // Drop any _meta quads from gossip — _meta state (allowlists, registration
       // status, curator) is security-critical and must only propagate via the
       // authenticated sync protocol, not unauthenticated gossip.
       // Match both raw `/_meta` suffix and common percent-encoded variants.
       // Avoid decodeURIComponent which throws on malformed encoding.
-      const filteredQuads = quads.filter(q => {
-        const g = q.graph;
-        return !g.endsWith('/_meta') && !g.endsWith('%2F_meta') && !g.endsWith('%2f_meta');
-      });
-      let normalized = filteredQuads.map(q => ({ ...q, graph: dataGraph }));
+      let normalized: Quad[];
+      if (graphPublish) {
+        if (quads.some((quad) => quad.graph !== dataGraph)) {
+          throw new Error(
+            `Graph-scoped gossip payload must target only its UAL-derived VM graph ${dataGraph}`,
+          );
+        }
+        if (quads.length !== graphPublish.publicTripleCount) {
+          throw new Error(
+            `Graph-scoped gossip public triple count mismatch ` +
+              `(wire=${graphPublish.publicTripleCount}, parsed=${quads.length})`,
+          );
+        }
+        normalized = quads.map((quad) => ({ ...quad, graph: dataGraph }));
+      } else {
+        const filteredQuads = quads.filter(q => {
+          const g = q.graph;
+          return !g.endsWith('/_meta') && !g.endsWith('%2F_meta') && !g.endsWith('%2f_meta');
+        });
+        normalized = filteredQuads.map(q => ({ ...q, graph: dataGraph }));
+      }
 
       // When receiving ontology-topic broadcasts, skip context graph definition
       // triples for context graphs we already have locally. This prevents duplicate
@@ -296,7 +430,7 @@ export class GossipPublishHandler {
       // broadcasts (no UAL or no KAs) bypass validation.
       phase?.('validate', 'start');
       let isReplay = false;
-      if (request.ual && request.kas?.length > 0) {
+      if (!graphPublish && request.ual && request.kas?.length > 0) {
         const manifest = request.kas.map(ka => ({
           tokenId: 0n,
           rootEntity: ka.rootEntity,
@@ -353,6 +487,194 @@ export class GossipPublishHandler {
           this.callbacks.markCgMetaDirtyFromQuads?.(regQuads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.contextGraphId}" from gossip`);
         }
+      }
+
+      if (graphPublish) {
+        phase?.('store', 'start');
+        const privateRoots = graphPublish.privateMerkleRoot
+          ? [graphPublish.privateMerkleRoot]
+          : [];
+        const merkleRoot = computeFlatKCRoot(normalized, privateRoots);
+        const txHash = request.txHash ?? '';
+        const blockNumber = protoToNumber(request.blockNumber ?? 0);
+        const startKAId = protoToBigInt(request.startKAId ?? 0);
+        const endKAId = protoToBigInt(request.endKAId ?? 0);
+        const graphManager = new GraphManager(this.store);
+        let workspaceHead;
+        try {
+          workspaceHead = await resolveKnowledgeAssetWorkspaceHead({
+            store: this.store,
+            graphManager,
+            contextGraphId: request.contextGraphId,
+            kaUal: graphPublish.scope.ual,
+            subGraphName,
+          });
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `Gossip rejected corrupt graph-scoped SWM head for ${graphPublish.scope.ual}: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+          return;
+        }
+        const privateMerkleRoot = graphPublish.privateMerkleRoot
+          ? ethers.hexlify(graphPublish.privateMerkleRoot).toLowerCase()
+          : undefined;
+        const publicDigest = workspacePublicQuadsDigest(
+          normalized.map((quad) => ({ ...quad, graph: '' })),
+        );
+        if (
+          !workspaceHead
+          || workspaceHead.assertionVersion !== graphPublish.scope.assertionVersion
+          || workspaceHead.publicTripleCount !== graphPublish.publicTripleCount
+          || workspaceHead.publicQuadsDigest !== publicDigest
+          || workspaceHead.privateTripleCount !== graphPublish.privateTripleCount
+          || workspaceHead.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
+          || workspaceHead.accessPolicy === undefined
+        ) {
+          this.log.warn(
+            ctx,
+            `Gossip deferred graph-scoped publish ${graphPublish.scope.ual}: ` +
+              'no matching durable StorageACK workspace head',
+          );
+          return;
+        }
+        if (
+          graphPublish.accessPolicy !== workspaceHead.accessPolicy
+          || graphPublish.allowedPeers.join('\0') !== workspaceHead.allowedPeers.join('\0')
+          || (fromPeerId !== undefined && fromPeerId !== workspaceHead.publisherPeerId)
+        ) {
+          this.log.warn(
+            ctx,
+            `Gossip ignored untrusted graph-scoped access provenance for ${graphPublish.scope.ual}`,
+          );
+        }
+        let verified = false;
+        if (txHash && blockNumber > 0 && request.publisherAddress) {
+          phase?.('chain-verify', 'start');
+          verified = await this.verifyGossipOnChain(
+            txHash,
+            blockNumber,
+            merkleRoot,
+            request.publisherAddress,
+            startKAId,
+            endKAId,
+            ctx,
+            request.contextGraphId,
+          );
+          phase?.('chain-verify', 'end');
+        }
+
+        const metadata = generateGraphKnowledgeAssetMetadata(
+          {
+            ual: graphPublish.scope.ual,
+            contextGraphId: request.contextGraphId,
+            merkleRoot,
+            publisherPeerId: workspaceHead.publisherPeerId,
+            accessPolicy: workspaceHead.accessPolicy,
+            ...(workspaceHead.accessPolicy === 'allowList'
+              ? { allowedPeers: workspaceHead.allowedPeers }
+              : {}),
+            timestamp: new Date(),
+            subGraphName,
+            authorAddress: graphPublish.scope.agentAddress,
+            assertionVersion: graphPublish.scope.assertionVersion,
+            publicTripleCount: graphPublish.publicTripleCount,
+            privateTripleCount: graphPublish.privateTripleCount,
+            ...(graphPublish.privateMerkleRoot
+              ? { privateMerkleRoot: graphPublish.privateMerkleRoot }
+              : {}),
+            assertionGraph: dataGraph,
+          },
+          verified ? 'confirmed' : 'tentative',
+          verified
+            ? {
+                txHash,
+                blockNumber,
+                blockTimestamp: Math.floor(Date.now() / 1000),
+                publisherAddress: request.publisherAddress,
+                batchId: startKAId,
+                chainId: request.chainId,
+              }
+            : undefined,
+        );
+        const metaGraph = contextGraphMetaGraphUri(request.contextGraphId);
+        const incomingVersion = {
+          blockNumber: verified ? blockNumber : 0,
+          txIndex: 0,
+        };
+        const outcome = await withMaterializationLock(
+          metaGraph,
+          graphPublish.scope.ual,
+          async () => {
+            if (!verified) {
+              const confirmed = await this.store.query(
+                `ASK { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+                  `<${assertSafeIri(graphPublish.scope.ual)}> ` +
+                  `<http://dkg.io/ontology/status> "confirmed" } }`,
+              );
+              if (confirmed.type === 'boolean' && confirmed.value) {
+                return 'stale' as const;
+              }
+            }
+            if (!(await shouldApplyMaterialization(
+              this.store,
+              metaGraph,
+              graphPublish.scope.ual,
+              incomingVersion,
+            ))) {
+              return 'stale' as const;
+            }
+            const replaced = await tryReplaceGraphAtomically(
+              this.store,
+              dataGraph,
+              normalized,
+              { source: 'agent.gossipPublish.graphScopedReplace' },
+            );
+            if (!replaced) {
+              throw Object.assign(
+                new Error('Graph-scoped gossip requires atomic TripleStore.replaceGraph support'),
+                { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+              );
+            }
+            await this.store.deleteByPattern({
+              graph: metaGraph,
+              subject: graphPublish.scope.ual,
+            });
+            await this.store.insert(metadata);
+            await writeMaterializedVersion(
+              this.store,
+              metaGraph,
+              graphPublish.scope.ual,
+              incomingVersion,
+            );
+            if (verified) {
+              const swmGraph = knowledgeAssetLayerGraphUri(
+                request.contextGraphId,
+                MemoryLayer.SharedWorkingMemory,
+                graphPublish.scope,
+                subGraphName,
+              );
+              await this.store.dropGraph(swmGraph);
+            }
+            return 'applied' as const;
+          },
+        );
+        phase?.('store', 'end');
+        if (outcome === 'stale') {
+          this.log.info(
+            ctx,
+            `Skipped stale graph-scoped publish gossip for ${graphPublish.scope.ual}`,
+          );
+          return;
+        }
+        this.callbacks.markCgMetaDirtyFromQuads?.(metadata);
+        this.log.info(
+          ctx,
+          `Graph-scoped publish ${graphPublish.scope.ual} stored as ` +
+            `${verified ? 'confirmed' : 'tentative'} (${normalized.length} public triples)`,
+        );
+        return;
       }
 
       phase?.('store', 'start');
@@ -466,6 +788,7 @@ export class GossipPublishHandler {
     expectedStartKAId: bigint,
     expectedEndKAId: bigint,
     ctx: OperationContext,
+    expectedContextGraphId?: string,
   ): Promise<boolean> {
     if (!this.chain || this.chain.chainId === 'none') return false;
 
@@ -475,6 +798,31 @@ export class GossipPublishHandler {
     }
 
     try {
+      if (expectedContextGraphId !== undefined) {
+        if (
+          typeof this.chain.getKAContextGraphId !== 'function'
+          || !this.callbacks.getContextGraphOnChainId
+        ) {
+          this.log.warn(ctx, 'Gossip verification rejected: Context Graph binding oracle unavailable');
+          return false;
+        }
+        const expectedOnChainId = await this.callbacks.getContextGraphOnChainId(
+          expectedContextGraphId,
+        );
+        if (expectedOnChainId === null) {
+          this.log.warn(ctx, `Gossip verification rejected: Context Graph ${expectedContextGraphId} is not registered`);
+          return false;
+        }
+        const actualOnChainId = await this.chain.getKAContextGraphId(expectedStartKAId);
+        if (actualOnChainId !== BigInt(expectedOnChainId)) {
+          this.log.warn(
+            ctx,
+            `Gossip verification rejected: KA ${expectedStartKAId} belongs to Context Graph ` +
+              `${actualOnChainId}, not ${expectedOnChainId}`,
+          );
+          return false;
+        }
+      }
       const filter: EventFilter = {
         eventTypes: ['KnowledgeBatchCreated', 'KCCreated'],
         fromBlock: blockNumber,

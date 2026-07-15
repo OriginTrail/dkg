@@ -36,7 +36,7 @@
  *    on stdout.
  * 2. CANONICAL DKG OPS. Writes go through the existing
  *    `POST /api/knowledge-assets/<name>/wm/write` (JSON triples) and
- *    promotes through `POST /api/knowledge-assets/<name>/swm/share`,
+ *    shares atomically through `POST /api/knowledge-assets/<name>/swm/share`,
  *    matching every other seeding script in the repo.
  * 3. NO PROMPT INJECTION. Per the V10 retirement of sugared writes
  *    (#18) and the dropped agent-instruction protocol (#21), this hook
@@ -418,11 +418,10 @@ async function writeTriples(cfg, triples, assertionName = cfg.assertion) {
   });
 }
 
-async function promoteEntities(cfg, entities, assertionName = cfg.assertion) {
+export async function shareAssertionAtomically(cfg, assertionName = cfg.assertion) {
   return postJson(cfg.api, `/api/knowledge-assets/${encodeURIComponent(assertionName)}/swm/share`, cfg.token, {
     contextGraphId: cfg.project,
     subGraphName: cfg.subGraph,
-    entities,
   });
 }
 
@@ -610,10 +609,9 @@ async function handleAfterAgentResponse(cfg, payload) {
     state.pendingTurnIndex = null;
     if (bootstrapSession) state.sessionWritten = true;
     if (await shouldPromote(cfg, state)) {
-      // Promote both the session and the individual turn so the team
-      // sees the turn immediately and the aggregate Session is kept
-      // in SWM.
-      await promoteEntities(cfg, [turn, state.sessionUri], turnAssertion).catch((e) => log(`promote turn: ${e.message}`));
+      // Each assertion contains the complete turn and session payload, so share
+      // that Knowledge Asset atomically; entity arrays are a retired subset mode.
+      await shareAssertionAtomically(cfg, turnAssertion).catch((e) => log(`share turn: ${e.message}`));
     } else if (cfg.autoShare) {
       log(`auto-share skipped: session ${sessionKey} is private`);
     }

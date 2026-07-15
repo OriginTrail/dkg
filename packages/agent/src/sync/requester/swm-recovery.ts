@@ -1,13 +1,24 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
+import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import {
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from './page-fetch.js';
+import type { SyncPhase } from '../auth/request-build.js';
 import { applySwmRecovery, type SwmRecoveryStore } from './swm-recovery-apply.js';
-import { sharedMemoryOwnershipKeyFromGraph } from './shared-memory-sync.js';
+import {
+  sharedMemoryOwnershipKeyFromGraph,
+  syncPublicSnapshotsForMeta,
+} from './shared-memory-sync.js';
 import { appendInPlace } from '../append-in-place.js';
+import {
+  discoverSwmRecoverySubGraphNames,
+  materializeGraphScopedSwmRecoveryAsset,
+  parseGraphScopedSwmRecoveryDescriptors,
+  type GraphScopedSwmRecoveryDescriptor,
+} from '../graph-scoped-swm-recovery.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -16,9 +27,13 @@ import { appendInPlace } from '../append-in-place.js';
  * sync path's blind union (which corrupts a non-empty store — see
  * {@link applySwmRecovery}).
  *
- * It fetches the COMPLETE state across pages (each `fetchSyncPages` call loops
- * internally to completion-or-deadline), verifies it, then replaces each root
- * exactly once.
+ * It fetches the COMPLETE metadata state across pages, verifies it, then uses
+ * the narrowest safe recovery path:
+ *
+ * - graph-scoped KAs backed by immutable public snapshots are fetched and
+ *   verified one KA at a time, without scanning the aggregate SWM data graph;
+ * - legacy root-scoped KAs and graph-backed legacy snapshots retain the full
+ *   data-phase recovery below.
  *
  * A partial fetch (deadline) is NOT safe to apply, and is deliberately NOT
  * applied. Pagination is row-based, so a single root's rows (the root + its
@@ -58,9 +73,10 @@ export interface RecoverContextGraphSwmDeps {
     remotePeerId: string,
     contextGraphId: string,
     includeSharedMemory: boolean,
-    phase: RecoverableSyncPhase,
+    phase: SyncPhase,
     graphUri: string,
     deadline: number,
+    snapshotRef?: string,
   ) => Promise<SyncPageResult>;
   readonly processSharedMemoryBatch: (
     wsDataQuads: Quad[],
@@ -70,6 +86,7 @@ export interface RecoverContextGraphSwmDeps {
     excludedSubGraphNames?: readonly string[],
   ) => Promise<ProcessedSwmBatch>;
   readonly store: SwmRecoveryStore;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
    * REPLACE (not append) the SWM meta for each recovered root, BEFORE the fresh
    * `verifiedMeta` is inserted. `applySwmRecovery` REPLACEs the root DATA, but
@@ -82,6 +99,10 @@ export interface RecoverContextGraphSwmDeps {
   readonly replaceMetaForRoots?: (
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
+  ) => Promise<void>;
+  /** Replace the active head/operation rows for each exact graph asset. */
+  readonly replaceMetaForGraphAssets?: (
+    assets: readonly GraphScopedSwmRecoveryDescriptor[],
   ) => Promise<void>;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
@@ -102,6 +123,7 @@ export interface RecoverContextGraphSwmDeps {
 
 export interface RecoverContextGraphSwmResult {
   readonly replacedRoots: number;
+  readonly replacedGraphs: number;
   readonly insertedDataQuads: number;
   readonly insertedMetaQuads: number;
   readonly droppedDataTriples: number;
@@ -149,25 +171,19 @@ export async function recoverContextGraphSwm(
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
   const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(deps.contextGraphId);
 
-  // Meta first (its rootEntity list is what validates the data subjects), then data.
+  // Metadata is the recovery plan: it identifies both legacy roots and exact
+  // graph-scoped assets. Fetch it before deciding whether an aggregate SWM data
+  // scan is necessary.
   const meta = await fetchPhaseFully(deps, 'meta', wsMetaGraph);
-  const data = await fetchPhaseFully(deps, 'data', wsGraph);
-
-  // All-or-nothing gate (B10): a partial fetch may have cut a root mid-stream,
-  // so applying REPLACE over a prefix would truncate that root. If EITHER phase
-  // is incomplete, mutate nothing — not the data REPLACE, not the additive meta
-  // insert, not the ownership-cache hydration (hydrating roots we didn't write
-  // would desync the ownership map from the store) — and report `completed:
-  // false` so the caller retries. The checkpoint was already dropped above, so
-  // the retry re-accumulates the complete state from offset 0.
-  if (!meta.completed || !data.completed) {
+  if (!meta.completed) {
     deps.logInfo?.(
       deps.ctx,
-      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: partial fetch ` +
-      `(meta ${meta.completed ? 'complete' : 'incomplete'}, data ${data.completed ? 'complete' : 'incomplete'}) — skipped, will retry`,
+      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+      'partial metadata fetch — skipped, will retry',
     );
     return {
       replacedRoots: 0,
+      replacedGraphs: 0,
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,
@@ -181,10 +197,119 @@ export async function recoverContextGraphSwm(
   const excluded = deps.getExcludedSubGraphNames
     ? await deps.getExcludedSubGraphNames(deps.contextGraphId)
     : undefined;
+  const recoveryRegistered = [
+    ...new Set([
+      ...(registered ?? []),
+      ...discoverSwmRecoverySubGraphNames({
+        contextGraphId: deps.contextGraphId,
+        metaQuads: meta.quads,
+        excludedSubGraphNames: excluded,
+      }),
+    ]),
+  ];
 
-  const processed = await deps.processSharedMemoryBatch(
-    data.quads, meta.quads, deps.contextGraphId, registered, excluded,
+  const graphScopedDescriptors = parseGraphScopedSwmRecoveryDescriptors({
+    contextGraphId: deps.contextGraphId,
+    metaQuads: meta.quads,
+    registeredSubGraphNames: recoveryRegistered,
+    excludedSubGraphNames: excluded,
+  });
+
+  // Classify legacy roots from metadata alone. The verifier does not need data
+  // rows to derive entityCreators, and this lets a rootless-only CG avoid the
+  // expensive aggregate `_shared_memory` query entirely. That query is both
+  // redundant (the immutable snapshot is the canonical source for an exact
+  // graph asset) and scales with every KA in the CG.
+  const metadataOnlyProcessed = await deps.processSharedMemoryBatch(
+    [], meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
   );
+  const hasLegacyRoots = metadataOnlyProcessed.entityCreators.length > 0;
+  const hasGraphBackedSnapshots = graphScopedDescriptors.some(
+    (descriptor) => descriptor.publicSnapshotGraph !== undefined,
+  );
+
+  // Fetch store-backed snapshots before any aggregate data scan. Each completed
+  // snapshot is persisted independently, so a deadline can make monotonic
+  // progress across retries while memory remains bounded to one KA rather than
+  // the complete context graph.
+  if (graphScopedDescriptors.length > 0) {
+    const activeGraphMeta = graphScopedDescriptors.flatMap((descriptor) => [
+      ...descriptor.metadataQuads,
+    ]);
+    const snapshotSync = await syncPublicSnapshotsForMeta({
+      ctx: deps.ctx,
+      remotePeerId: deps.remotePeerId,
+      contextGraphId: deps.contextGraphId,
+      deadline: deps.deadline,
+      metaQuads: activeGraphMeta,
+      publicSnapshotStore: deps.publicSnapshotStore,
+      fetchSyncPages: deps.fetchSyncPages,
+      deleteCheckpoint: deps.deleteCheckpoint,
+      setCheckpoint: deps.setCheckpoint,
+    });
+    if (!snapshotSync.completed) {
+      deps.logInfo?.(
+        deps.ctx,
+        `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+        'graph-scoped public snapshot fetch incomplete — skipped, will retry',
+      );
+      return {
+        replacedRoots: 0,
+        replacedGraphs: 0,
+        insertedDataQuads: 0,
+        insertedMetaQuads: 0,
+        droppedDataTriples: 0,
+        completed: false,
+      };
+    }
+  }
+
+  // Only legacy roots and old graph-backed snapshot rows require the aggregate
+  // data phase. New rootless KAs use immutable snapshot refs and never enter
+  // this path.
+  const needsAggregateData = hasLegacyRoots || hasGraphBackedSnapshots;
+  const data = needsAggregateData
+    ? await fetchPhaseFully(deps, 'data', wsGraph)
+    : { quads: [] as Quad[], completed: true };
+
+  // Legacy row pagination can cut a root (or a graph-backed snapshot) in the
+  // middle. Preserve the existing all-or-nothing gate for that compatibility
+  // path; store-backed exact assets above do not depend on it.
+  if (!data.completed) {
+    deps.logInfo?.(
+      deps.ctx,
+      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+      'partial legacy data fetch — skipped, will retry',
+    );
+    return {
+      replacedRoots: 0,
+      replacedGraphs: 0,
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      droppedDataTriples: 0,
+      completed: false,
+    };
+  }
+
+  // Rootless exact graphs and graph-backed immutable snapshots are verified
+  // per KA below. Keep them out of the legacy rootEntity worker path so they
+  // are not counted as invalid root subjects or inserted by union.
+  const graphScopedTransportGraphs = new Set<string>();
+  for (const descriptor of graphScopedDescriptors) {
+    graphScopedTransportGraphs.add(descriptor.assertionGraph);
+    if (descriptor.publicSnapshotGraph) {
+      graphScopedTransportGraphs.add(descriptor.publicSnapshotGraph);
+    }
+  }
+  const legacyDataQuads = data.quads.filter(
+    (quad) => !graphScopedTransportGraphs.has(quad.graph),
+  );
+
+  const processed = needsAggregateData
+    ? await deps.processSharedMemoryBatch(
+      legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
+    )
+    : metadataOnlyProcessed;
 
   await deps.ensureContextGraph(deps.contextGraphId);
 
@@ -194,6 +319,18 @@ export async function recoverContextGraphSwm(
     verifiedData: processed.verifiedData,
     roots: processed.entityCreators,
   });
+  let replacedGraphs = 0;
+  let insertedGraphQuads = 0;
+  for (const descriptor of graphScopedDescriptors) {
+    const asset = await materializeGraphScopedSwmRecoveryAsset({
+      descriptor,
+      fetchedDataQuads: data.quads,
+      publicSnapshotStore: deps.publicSnapshotStore,
+    });
+    await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
+    replacedGraphs += 1;
+    insertedGraphQuads += asset.quads.length;
+  }
   // Codex high: REPLACE the SWM meta for each recovered root (the data was
   // REPLACEd above; the meta must be too). Otherwise a stale WorkspaceOperation
   // pointing at the root survives and the TTL sweep later deletes the
@@ -202,6 +339,9 @@ export async function recoverContextGraphSwm(
   if (processed.entityCreators.length > 0) {
     const metaGraphs = [...new Set(processed.verifiedMeta.map((q) => q.graph))];
     await deps.replaceMetaForRoots?.(processed.entityCreators, metaGraphs);
+  }
+  if (graphScopedDescriptors.length > 0) {
+    await deps.replaceMetaForGraphAssets?.(graphScopedDescriptors);
   }
   if (processed.verifiedMeta.length > 0) {
     await deps.store.insert([...processed.verifiedMeta]);
@@ -226,12 +366,14 @@ export async function recoverContextGraphSwm(
   deps.logInfo?.(
     deps.ctx,
     `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: replaced ${applied.replacedRoots} roots, ` +
-    `${applied.insertedQuads} data + ${processed.verifiedMeta.length} meta triples`,
+    `${replacedGraphs} exact graphs, ${applied.insertedQuads + insertedGraphQuads} data + ` +
+    `${processed.verifiedMeta.length} meta triples`,
   );
 
   return {
     replacedRoots: applied.replacedRoots,
-    insertedDataQuads: applied.insertedQuads,
+    replacedGraphs,
+    insertedDataQuads: applied.insertedQuads + insertedGraphQuads,
     insertedMetaQuads: processed.verifiedMeta.length,
     droppedDataTriples: processed.droppedDataTriples,
     completed: true,

@@ -285,7 +285,9 @@ export class QueryHandler {
     }
 
     try {
-      const resolved = await this.queryEngine.resolveKA(ual);
+      const resolved = this.queryEngine.resolveKnowledgeAsset
+        ? await this.queryEngine.resolveKnowledgeAsset(ual)
+        : await this.queryEngine.resolveKA(ual);
       // PR #1107 review (🔴): enforce the RESOLVED context graph's access
       // policy — config entry first (operator override), then the #1105
       // on-chain public resolver. Pre-fix, UAL lookups bypassed per-CG

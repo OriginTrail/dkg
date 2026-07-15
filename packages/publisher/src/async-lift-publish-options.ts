@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION, type OperationContext } from '@origintrail-official/dkg-core';
 import { MAX_PUBLISH_EPOCHS } from './publisher.js';
 import type {
   PhaseCallback,
@@ -172,12 +172,21 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
 
   // Request flags (enqueue-time caller intent) win over resolved hints (per-process defaults).
   const entityProofs = input.request.entityProofs ?? input.resolved.entityProofs;
+  if (
+    input.request.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+    && entityProofs === true
+  ) {
+    throw new Error('Graph-scoped async publish does not support entityProofs');
+  }
   const publishEpochs = input.request.publishEpochs;
   if (publishEpochs !== undefined && (!Number.isSafeInteger(publishEpochs) || publishEpochs < 1 || publishEpochs > MAX_PUBLISH_EPOCHS)) {
     throw new Error(`Lift publish mapping requires request.publishEpochs to be a positive uint32 integer; got ${String(publishEpochs)}`);
   }
   const publisherNodeIdentityIdOverride = input.request.publisherNodeIdentityIdOverride !== undefined
     ? BigInt(input.request.publisherNodeIdentityIdOverride)
+    : undefined;
+  const privateMerkleRoot = input.request.privateMerkleRoot !== undefined
+    ? decodeSealField('privateMerkleRoot', input.request.privateMerkleRoot, 32)
     : undefined;
 
   return {
@@ -195,6 +204,12 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     onPhase: input.resolved.onPhase,
     receiverSignatureProvider: input.resolved.receiverSignatureProvider,
     publishContextGraphId: input.resolved.publishContextGraphId,
+    contentScopeVersion: input.request.contentScopeVersion,
+    kaUal: input.request.kaUal,
+    assertionVersion: input.request.assertionVersion,
+    publicTripleCount: input.request.publicTripleCount,
+    privateMerkleRoot,
+    privateTripleCount: input.request.privateTripleCount,
     encryptInlinePayload,
     encryptInlineChunked,
     ...(publishEpochs !== undefined

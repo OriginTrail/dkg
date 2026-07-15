@@ -10,7 +10,11 @@ import {
   type OnChainPublishResult,
   type RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  TypedEventBus,
+  type Ed25519Keypair,
+} from '@origintrail-official/dkg-core';
 import {
   ACKCollector,
   AsyncLiftRunner,
@@ -710,13 +714,36 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
   return async (job) => {
     const recovered = await resolveOnChainPublish(job, publishers);
-    return recovered
-      ? mapOnChainPublishResultToKnowledgeAssetVmRecovery(
-          recovered.result,
-          recovered.chain.chainId,
-          recovered.knowledgeAssetsContract,
-        )
-      : null;
+    if (!recovered) return null;
+    const evidence = mapOnChainPublishResultToKnowledgeAssetVmRecovery(
+      recovered.result,
+      recovered.chain.chainId,
+      recovered.knowledgeAssetsContract,
+    );
+    if (!evidence) return null;
+
+    // The chain receipt identifies the minted token by its packed id, so the
+    // generic recovery mapper correctly reconstructs the public
+    // contract/token UAL. A graph-scoped named-KA job, however, persisted its
+    // exact WM/SWM/VM graphs under the immutable author/KA-number UAL. Preserve
+    // that queued identity for local materialization; the agent independently
+    // binds it to the receipt's packed batch/start/end id and signed author.
+    const request = job.request?.jobType === 'knowledge-asset-vm-publish'
+      ? job.request.knowledgeAssetVmPublish
+      : undefined;
+    if (
+      request?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+      || request.kaUal === undefined
+    ) {
+      return evidence;
+    }
+    return {
+      ...evidence,
+      finalization: {
+        ...evidence.finalization,
+        ual: request.kaUal,
+      },
+    };
   };
 }
 

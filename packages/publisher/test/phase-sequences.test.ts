@@ -11,7 +11,6 @@ import {
   TypedEventBus,
   generateEd25519Keypair,
   createOperationContext,
-  encodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
@@ -24,6 +23,7 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
 import { hardhatACKProvider } from './_helpers/acks.js';
+import { encodeRootlessWorkspaceRequest } from './_helpers/rootless-workspace.js';
 
 let CONTEXT_GRAPH: string;
 let _kav10Address: string;
@@ -275,15 +275,14 @@ describe('Phase-sequence contracts', () => {
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"WS draft"')];
     const nquads = quads
-      .map(t => `<${t.subject}> <${t.predicate}> ${t.object} .`)
+      .map(t => `<${t.subject}> <${t.predicate}> ${t.object} <${t.graph}> .`)
       .join('\n');
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       shareOperationId: 'ws-test-001',
       contextGraphId: CONTEXT_GRAPH,
       publisherPeerId: '12D3KooWTest',
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY }],
       timestampMs: Date.now(),
     });
 

@@ -85,6 +85,7 @@ function stubDurableSyncExternalIo(agent: DKGAgent): void {
     rejectedKcs: 0,
     emptyResponses: 1,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
   });
 }
@@ -310,6 +311,51 @@ describe('runSyncOnConnect callbacks', () => {
 
     expect(outcome).toBe('synced');
     expect(synced).toEqual([]);
+  });
+
+  it('does not classify integrity-rejected durable summaries as clean progress', async () => {
+    for (const integrityFailure of [
+      { rejectedKcs: 1, dataRejectedMissingMeta: 0 },
+      { rejectedKcs: 0, dataRejectedMissingMeta: 1 },
+    ]) {
+      const remotePeer = freshPeerIdString();
+      const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+
+      const outcome = await runSyncOnConnect({
+        remotePeer,
+        syncingPeers: new Set(),
+        getPeerProtocols: async () => [PROTOCOL_SYNC],
+        knownCorePeerIds: new Set(),
+        getSyncContextGraphs: () => ['integrity-rejected-cg'],
+        syncFromPeer: async () => ({
+          insertedTriples: 3,
+          insertedDataTriples: 3,
+          completedPhases: 1,
+          checkpointAdvances: 0,
+          timedOutPhases: 0,
+          failedPeers: 0,
+          failedPhases: 0,
+          deniedPhases: 0,
+          ...integrityFailure,
+        }),
+        refreshMetaSyncedFlags: async () => {},
+        discoverContextGraphsFromStore: async () => 0,
+        syncSharedMemoryFromPeer: async () => ({
+          insertedTriples: 0,
+          timedOutPhases: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        }),
+        logInfo: noopLog,
+        onPeerSynced: (peerId, peerOutcome) => synced.push({
+          peerId,
+          fresh: peerOutcome?.fresh,
+        }),
+      });
+
+      expect(outcome).toBe('synced');
+      expect(synced).toEqual([]);
+    }
   });
 
   it('fires onPeerSynced when detailed sync summaries are clean but empty', async () => {
@@ -548,9 +594,13 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([{ peerId: remotePeer, fresh: false, progress: true }]);
   });
 
-  it('does not treat metadata-only summaries as progress or clean freshness', async () => {
+  it('does not treat arbitrary metadata-only summaries as progress or clean freshness', async () => {
     const remotePeer = freshPeerIdString();
-    const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+    const synced: Array<{
+      peerId: string;
+      fresh: boolean | undefined;
+      progress: boolean | undefined;
+    }> = [];
 
     const outcome = await runSyncOnConnect({
       remotePeer,
@@ -563,9 +613,15 @@ describe('runSyncOnConnect callbacks', () => {
         insertedDataTriples: 0,
         insertedMetaTriples: 1,
         metaOnlyResponses: 1,
+        verifiedPrivateOnlyResponses: 0,
+        completedPhases: 1,
+        checkpointAdvances: 1,
         timedOutPhases: 0,
         failedPeers: 0,
+        failedPhases: 0,
         deniedPhases: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
       }),
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
@@ -576,7 +632,113 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onPeerSynced: (peerId, outcome) => synced.push({
+        peerId,
+        fresh: outcome?.fresh,
+        progress: outcome?.progress,
+      }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(synced).toEqual([]);
+  });
+
+  it('treats a clean verified private-only durable completion as fresh progress', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: Array<{
+      peerId: string;
+      fresh: boolean | undefined;
+      progress: boolean | undefined;
+    }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => ({
+        insertedTriples: 1,
+        insertedDataTriples: 0,
+        insertedMetaTriples: 1,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 1,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        deniedPhases: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, syncOutcome) => synced.push({
+        peerId,
+        fresh: syncOutcome?.fresh,
+        progress: syncOutcome?.progress,
+      }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: true, progress: true }]);
+  });
+
+  it.each([
+    ['timed out', { timedOutPhases: 1 }],
+    ['failed integrity verification', { rejectedKcs: 1 }],
+  ])('does not trust a verified private-only signal when the round %s', async (_label, overrides) => {
+    const remotePeer = freshPeerIdString();
+    const synced: Array<{
+      peerId: string;
+      fresh: boolean | undefined;
+      progress: boolean | undefined;
+    }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => ({
+        insertedTriples: 1,
+        insertedDataTriples: 0,
+        insertedMetaTriples: 1,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 1,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        deniedPhases: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        ...overrides,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, syncOutcome) => synced.push({
+        peerId,
+        fresh: syncOutcome?.fresh,
+        progress: syncOutcome?.progress,
+      }),
     });
 
     expect(outcome).toBe('synced');

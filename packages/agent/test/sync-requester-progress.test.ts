@@ -62,6 +62,7 @@ function durableProcessResult() {
     rejectedKcs: 0,
     emptyResponses: 1,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
   };
 }
@@ -395,6 +396,54 @@ describe('sync requester progress accounting', () => {
     expect(setCheckpoint.calls).toEqual([]);
   });
 
+  it('does not advance durable checkpoints when integrity verification rejects a KA', async () => {
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const logWarn = recorder((_ctx: OperationContext, _message: string) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, {
+      nextOffset: phase === 'data' ? 500 : 5,
+    }));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['rejected-integrity-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        rejectedKcs: 1,
+        totalFetchedDataQuads: 500,
+        totalFetchedMetaQuads: 5,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn,
+      logDebug: noop,
+    });
+
+    expect(summary.rejectedKcs).toBe(1);
+    expect(summary.completedPhases).toBe(0);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([]);
+    expect(logWarn.calls).toContainEqual([
+      ctx,
+      expect.stringContaining('failed durable integrity verification'),
+    ]);
+  });
+
   it('advances only the durable meta checkpoint after storing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-meta');
     const storeInsert = recorder(async (_quads: Quad[]) => {});
@@ -482,6 +531,62 @@ describe('sync requester progress accounting', () => {
     expect(storeInsert.calls).toContainEqual([[metaQuad]]);
     expect(deleteCheckpoint.calls).toHaveLength(1);
     expect(deleteCheckpoint.calls).toContainEqual(['meta-only-complete:meta']);
+    expect(setCheckpoint.calls).toEqual([]);
+  });
+
+  it('stores verified private-only metadata and advances both durable checkpoints cleanly', async () => {
+    const metaQuad = quad('verified-private-only-meta');
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, {
+      quads: phase === 'meta' ? [metaQuad] : [],
+      nextOffset: phase === 'meta' ? 1 : 0,
+    }));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['verified-private-only-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        verifiedPrivateOnlyResponses: 1,
+        verifiedMeta: [metaQuad],
+        totalFetchedMetaQuads: 1,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary).toMatchObject({
+      insertedTriples: 1,
+      insertedMetaTriples: 1,
+      insertedDataTriples: 0,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 1,
+      completedPhases: 1,
+      checkpointAdvances: 1,
+      rejectedKcs: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    expect(storeInsert.calls).toEqual([[[metaQuad]]]);
+    expect(deleteCheckpoint.calls).toEqual([
+      ['verified-private-only-cg:meta'],
+      ['verified-private-only-cg:data'],
+    ]);
     expect(setCheckpoint.calls).toEqual([]);
   });
 
@@ -724,7 +829,7 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(1);
   });
 
-  it('reports resume-capable shared-memory snapshot timeouts as checkpoint progress', async () => {
+  it('restarts incomplete shared-memory snapshots because their unverified prefix is not persisted', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_quads: Quad[]) => {});
@@ -792,10 +897,10 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.timedOutPhases).toBe(1);
-    expect(summary.checkpointAdvances).toBe(1);
+    expect(summary.checkpointAdvances).toBe(0);
     expect(summary.insertedTriples).toBe(0);
-    expect(setCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref', 500]);
-    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref']);
     expect(storeInsert.calls).toEqual([]);
     expect(ensureContextGraph.calls).toEqual([]);
   });
@@ -885,15 +990,15 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.timedOutPhases).toBe(2);
-    expect(summary.checkpointAdvances).toBe(2);
+    expect(summary.checkpointAdvances).toBe(1);
     expect(summary.insertedDataTriples).toBe(1);
     expect(summary.insertedMetaTriples).toBe(0);
     expect(ensureContextGraph.calls).toContainEqual(['large-swm']);
     expect(storeInsert.calls).toHaveLength(1);
     expect(storeInsert.calls).toContainEqual([[dataQuad]]);
-    expect(setCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref', 500]);
+    expect(setCheckpoint.calls).not.toContainEqual(['large-swm:snapshot:snapshot-ref', expect.any(Number)]);
     expect(setCheckpoint.calls).toContainEqual(['large-swm:data', 7]);
     expect(setCheckpoint.calls).not.toContainEqual(['large-swm:meta', expect.any(Number)]);
-    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref']);
   });
 });

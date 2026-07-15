@@ -346,15 +346,15 @@ describe('async SWM-share queue daemon routes', () => {
     expect(r.body.error).toMatch(/Invalid "name"/);
   });
 
-  it('POST /:name/swm/share-async accepts an explicit entities list', async () => {
+  it('POST /:name/swm/share-async rejects an explicit entities list', async () => {
     await startRoutes(makeAgent());
     const r = await post('/api/knowledge-assets/list/swm/share-async', {
       contextGraphId: 'cg',
       entities: ['urn:dkg:entity:a', 'urn:dkg:entity:b'],
     });
-    expect(r.status).toBe(200);
-    const job = await queue.getStatus(r.body.jobId);
-    expect(job?.request.entities).toEqual(['urn:dkg:entity:a', 'urn:dkg:entity:b']);
+    expect(r.status).toBe(400);
+    expect(r.body.code).toBe('KA_ATOMIC_SHARE_REQUIRED');
+    expect(await queue.getStats()).toMatchObject({ queued: 0 });
   });
 
   // ---------------------------------------------------------------------------

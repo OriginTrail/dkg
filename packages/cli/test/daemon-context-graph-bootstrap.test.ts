@@ -483,4 +483,45 @@ describe('configured context graph daemon bootstrap', () => {
       );
     });
   });
+
+  it('persists durable readiness for a verified private-only PROJECT_SYNCED response', async () => {
+    const contextGraphId = 'private-only-project-synced';
+    let handler: ((data: unknown) => void) | undefined;
+    const setContextGraphReadinessProvenance = vi.fn();
+    const agent = {
+      eventBus: {
+        on: vi.fn((event: string, next: (data: unknown) => void) => {
+          if (event === DKGEvent.PROJECT_SYNCED) handler = next;
+        }),
+      },
+      hasConfirmedMetaState: vi.fn(async () => true),
+    } as unknown as DKGAgent;
+
+    registerProjectSyncedReadinessPersistence({
+      agent,
+      store: {
+        getContextGraphReadinessProvenance: () => null,
+        setContextGraphReadinessProvenance,
+      },
+      log: vi.fn(),
+    });
+
+    handler?.({
+      contextGraphId,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+      verifiedPrivateOnlyResponses: 1,
+    });
+
+    await vi.waitFor(() => {
+      expect(setContextGraphReadinessProvenance).toHaveBeenCalledWith(
+        contextGraphId,
+        expect.objectContaining({
+          version: 1,
+          durableVerified: true,
+          sharedMemoryVerified: false,
+        }),
+      );
+    });
+  });
 });

@@ -8,7 +8,11 @@ import type {
   UpdateOptions,
   StorePressureSnapshot,
 } from './triple-store.js';
-import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import {
+  UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphCapabilityRefusal,
+} from './unsupported-capability-error.js';
+import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -322,6 +326,39 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     });
   }
 
+  async replaceGraph(
+    graphUri: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraph !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'ChangelogStore');
+    }
+    if (!this.enabled) return this.inner.replaceGraph(graphUri, quads, options);
+    this.assertNotReserved(graphUri, 'replaceGraph');
+    await this.runExclusive(async () => {
+      try {
+        await this.inner.replaceGraph!(graphUri, quads, options);
+      } catch (err) {
+        if (isReplaceGraphCapabilityRefusal(err)) {
+          // A capability refusal is a clean preflight result: no mutation was
+          // started, so there is no gap to reconcile.
+          throw err;
+        }
+        // The replaceGraph contract allows a rejected call to have left either
+        // the complete old graph or the complete new graph (e.g. a response
+        // lost after the backend committed). A committed overwrite with no
+        // marker is invisible to set-only reconcile, so flag the gap before
+        // propagating.
+        this.flagReconcile('replaceGraph(indeterminate-failure)');
+        throw err;
+      }
+      // The adapter's internal staging graph never crosses this decorator.
+      // Sync sees exactly one logical upsert/drop for the canonical graph.
+      await this.markPostMutation([graphUri], options);
+    });
+  }
+
   async createGraph(graphUri: string): Promise<void> {
     // Empty graphs are not listed by this repo's `listGraphs` semantics and
     // carry no data to converge, so no marker until the first insert. Matches
@@ -338,7 +375,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     this.assertNoReservedRef(sparql, 'update');
     await this.runExclusive(async () => {
       await this.inner.update!(sparql, options);
-      const hinted = (options?.touchedGraphs ?? []).filter((g) => !this.reserved.has(g));
+      const hinted = (options?.touchedGraphs ?? []).filter((g) => !this.isReservedGraph(g));
       if (hinted.length > 0) {
         // Strip the update-only touchedGraphs hint before the read-path hasGraph
         // probes — it is meaningless there and must not leak past this boundary.
@@ -366,20 +403,20 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   // ------------------------------------------------------------------
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    if (this.reserved.has(graphUri)) return false; // reserved plane is invisible upward
+    if (this.isReservedGraph(graphUri)) return false; // reserved plane is invisible upward
     return this.inner.hasGraph(graphUri, options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
     const graphs = await this.inner.listGraphs(options);
-    return this.enabled ? graphs.filter((g) => !this.reserved.has(g)) : graphs;
+    return graphs.filter((g) => !this.isReservedGraph(g));
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
     const graphs = this.inner.listGraphsByPrefix
       ? await this.inner.listGraphsByPrefix(prefix, options)
       : (await this.inner.listGraphs(options)).filter((g) => g.startsWith(prefix));
-    return this.enabled ? graphs.filter((g) => !this.reserved.has(g)) : graphs;
+    return graphs.filter((g) => !this.isReservedGraph(g));
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
@@ -617,17 +654,26 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   /** Emit `upsert`/`drop` markers for graphs after a mutation, op by probe. */
   private async markPostMutation(graphs: readonly string[], options?: QueryOptions): Promise<void> {
-    const distinct = [...new Set(graphs.filter((g) => g && !this.reserved.has(g)))];
+    const distinct = [...new Set(graphs.filter((g) => g && !this.isReservedGraph(g)))];
     if (distinct.length === 0) return;
     // The presence probes are independent — run them concurrently (matching
     // GraphSetIndexStore) instead of serially inside the held write mutex, then
     // append markers in the original deterministic (distinct) order.
-    const specs = await Promise.all(
-      distinct.map(async (graph): Promise<{ graph: string; op: ChangeOp }> => ({
-        graph,
-        op: (await this.inner.hasGraph(graph, options)) ? 'upsert' : 'drop',
-      })),
-    );
+    let specs: Array<{ graph: string; op: ChangeOp }>;
+    try {
+      specs = await Promise.all(
+        distinct.map(async (graph): Promise<{ graph: string; op: ChangeOp }> => ({
+          graph,
+          op: (await this.inner.hasGraph(graph, options)) ? 'upsert' : 'drop',
+        })),
+      );
+    } catch (err) {
+      // The mutation already committed; a failed presence probe means its
+      // marker can never be written — the same committed-but-unlogged gap as a
+      // failed marker append, so flag it identically before propagating.
+      this.flagReconcile('markPostMutation(presence-probe-failed)');
+      throw err;
+    }
     await this.appendMarkers(specs, options);
   }
 
@@ -686,14 +732,14 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   private attributableGraphs(quads: readonly Quad[]): string[] {
     const set = new Set<string>();
     for (const q of quads) {
-      if (q.graph && !this.reserved.has(q.graph)) set.add(q.graph);
+      if (q.graph && !this.isReservedGraph(q.graph)) set.add(q.graph);
     }
     return [...set];
   }
 
   /** Drop caller quads that target the reserved plane (marker forgery guard). */
   private stripReserved(quads: readonly Quad[]): Quad[] {
-    return quads.filter((q) => !(q.graph && this.reserved.has(q.graph)));
+    return quads.filter((q) => !(q.graph && this.isReservedGraph(q.graph)));
   }
 
   /** Reject a graph-targeted mutation aimed at the reserved plane. Safe as a
@@ -701,12 +747,16 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
    *  hasGraph returns false), so no legitimate iterate-and-drop loop can reach
    *  one — only a hardcoded reserved IRI does. */
   private assertNotReserved(graphUri: string, op: string): void {
-    if (this.reserved.has(graphUri)) {
+    if (this.isReservedGraph(graphUri)) {
       throw new Error(
         `ChangelogStore: ${op}(<${graphUri}>) targets the reserved changelog plane, ` +
           `which is not writable through the public store API.`,
       );
     }
+  }
+
+  private isReservedGraph(graphUri: string): boolean {
+    return this.reserved.has(graphUri) || isAtomicGraphReplaceStagingGraph(graphUri);
   }
 
   /**

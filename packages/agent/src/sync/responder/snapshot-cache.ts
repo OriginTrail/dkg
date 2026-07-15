@@ -15,7 +15,24 @@ import {
 // compile-time boundary rather than a comment.
 export type SyncRow = Readonly<{ s: string; p: string; o: string; g: string }>;
 
+/**
+ * Hard build caps are intentionally lower than the retained-cache defaults.
+ * They bound temporary materialization even when an operator configures a very
+ * large cache. Larger phases use direct store paging instead of being cached.
+ */
+export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 10_000;
+export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
+export const SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS = 500;
+
+export interface SyncRowSnapshotLoadLimits {
+  maxRows: number;
+  maxBytesEstimate: number;
+  pageRows: number;
+}
+
 export interface SyncRowListMemo {
+  /** Store-paged loader limits; present on production memos. */
+  readonly snapshotLoadLimits?: Readonly<SyncRowSnapshotLoadLimits>;
   get(
     key: string,
     loadRows: () => Promise<readonly SyncRow[]>,
@@ -125,6 +142,18 @@ export function createResponderSyncRowListMemo(
   maxEntries = 32,
   memoOptions: SyncRowListMemoOptions = { phase: 'durable_data' },
 ): SyncRowListMemo {
+  const configuredLimits = memoOptions.budget?.limits();
+  const snapshotLoadLimits: SyncRowSnapshotLoadLimits = {
+    maxRows: Math.min(
+      SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+      configuredLimits?.maxSnapshotRows ?? SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+    ),
+    maxBytesEstimate: Math.min(
+      SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+      configuredLimits?.maxSnapshotBytesEstimate ?? SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+    ),
+    pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  };
   const cached = new Map<string, CachedSnapshot>();
   const expired = new Map<string, ExpiredSnapshot>();
   const rejected = new Map<string, RejectedSnapshot>();
@@ -280,6 +309,7 @@ export function createResponderSyncRowListMemo(
   };
 
   return {
+    snapshotLoadLimits,
     async get(key, loadRows, options) {
       throwIfAborted(options?.signal);
       // A page-zero request carrying a new responder-session token is an
@@ -381,6 +411,19 @@ export function createResponderSyncRowListMemo(
         })
         .catch((error) => {
           loadOutcome = 'error';
+          // A loader may reject before returning its array when a cheap store
+          // preflight or store-paged builder proves the full query would cross
+          // a response/heap safety bound. Remember intrinsic rejections exactly
+          // like storeCached() does, so later pages in this responder session go
+          // straight to bounded store paging instead of repeating the full load.
+          if (
+            error instanceof SyncRowSnapshotBudgetError &&
+            (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')
+          ) {
+            const stale = cached.get(key);
+            if (stale) deleteCached(key, 'replaced');
+            rememberRejected(key, error, options?.refreshGeneration);
+          }
           throw error;
         })
         .finally(() => {

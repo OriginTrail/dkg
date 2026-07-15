@@ -1,6 +1,9 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { sendSyncRequest } from '../../p2p/sync-transport.js';
+import {
+  sendSyncRequest,
+  type SingleUseSyncSender,
+} from '../../p2p/sync-transport.js';
 import { markSyncPeerResponded } from '../error-tags.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
@@ -132,16 +135,11 @@ interface FetchSyncPagesParams {
    * enabled silent replay of stale cached responses past sync's
    * app-layer freshness gate (`SYNC_AUTH_MAX_AGE_MS`). Fresh-per-
    * attempt is the only design that holds under all timing scenarios —
-   * see jsdoc on `sendSyncRequest` for the full rationale.
+   * see jsdoc on `sendSyncRequest` for the full rationale. Production creates
+   * this hook with `createSingleUseSyncSender`, which prevents lower layers
+   * from replaying an envelope before the outer retry can rebuild it.
    */
-  send: (
-    peerId: string,
-    protocolId: string,
-    data: Uint8Array,
-    timeoutMs: number,
-    messageId: string,
-    signal?: AbortSignal,
-  ) => Promise<Uint8Array>;
+  send: SingleUseSyncSender;
   logWarn: (ctx: OperationContext, message: string) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;

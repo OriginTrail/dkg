@@ -6,6 +6,8 @@ declare module 'rdf-canonize' {
     messageDigestAlgorithm?: string;
     signal?: AbortSignal;
     maxWorkFactor?: number;
+    /** Receives the input blank-node label -> canonical label mapping. */
+    canonicalIdMap?: Map<string, string>;
   }
 
   interface RdfCanonize {

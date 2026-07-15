@@ -1,17 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  buildKnowledgeAssetUal,
+  type ChainAdapter,
+} from '@origintrail-official/dkg-chain';
+import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   KnowledgeAssetVmPublishRequest,
   LiftJobBroadcast,
   LiftJobIncluded,
 } from '@origintrail-official/dkg-publisher';
+import { unpackKnowledgeAssetId } from './ka-identity.js';
 
 export interface RecoveredNamedKaPublish {
   readonly reservedKaId: bigint;
-  readonly ual: string;
+  /** Canonical chain receipt identity: contract address + packed KA id. */
+  readonly receiptUal: string;
+  /** Canonical local graph identity: author address + low-96 KA number. */
+  readonly localUal: string;
   readonly txHash: string;
   readonly receiptBlockNumber: number;
   readonly transaction: {
@@ -63,24 +71,50 @@ export async function normalizeRecoveredNamedKaPublish(input: {
     );
   }
 
-  let reservedKaId: bigint;
+  let immutableIdentity: {
+    reservedKaId: bigint;
+    sealedAuthor: string;
+    localUal: string;
+  };
   try {
+    const sealedAuthor = ethers.getAddress(request.seal.authorAddress);
+    let reservedKaId: bigint;
     if (request.seal.reservedKaId !== undefined) {
       reservedKaId = BigInt(request.seal.reservedKaId);
     } else if (request.kaNumber !== undefined) {
-      reservedKaId = (BigInt(ethers.getAddress(request.seal.authorAddress)) << 96n) | BigInt(request.kaNumber);
+      reservedKaId = (BigInt(sealedAuthor) << 96n) | BigInt(request.kaNumber);
     } else {
-      throw inconsistent('the immutable request has no reserved KA id');
+      throw new Error('the immutable request has no reserved KA id');
     }
+    if (reservedKaId < 0n) throw new Error('reserved KA id must be non-negative');
+
+    const unpacked = unpackKnowledgeAssetId(reservedKaId);
+    if (unpacked.agentAddress.toLowerCase() !== sealedAuthor.toLowerCase()) {
+      throw new Error('reserved KA id author bits do not match the signed author address');
+    }
+    if (request.kaUal === undefined || request.assertionVersion === undefined) {
+      throw new Error('the immutable request has no graph-scoped KA identity');
+    }
+    const localScope = createGraphKnowledgeAssetScope(
+      request.kaUal,
+      request.assertionVersion,
+    );
+    if (localScope.chainId !== chain.chainId) {
+      throw new Error('queued graph UAL is not bound to the recovery chain');
+    }
+    if (
+      localScope.agentAddress.toLowerCase() !== unpacked.agentAddress.toLowerCase()
+      || BigInt(localScope.kaNumber) !== unpacked.kaNumber
+    ) {
+      throw new Error(
+        `queued graph UAL ${localScope.ual} does not identify reserved KA id ${reservedKaId.toString()}`,
+      );
+    }
+    immutableIdentity = { reservedKaId, sealedAuthor, localUal: localScope.ual };
   } catch (error) {
-    if ((error as { code?: unknown })?.code === 'KA_VM_RECOVERY_INCONSISTENT') throw error;
     throw inconsistent(`invalid reserved KA identity: ${error instanceof Error ? error.message : String(error)}`);
   }
-
-  const sealedAuthor = ethers.getAddress(request.seal.authorAddress);
-  if ((reservedKaId >> 96n) !== BigInt(sealedAuthor)) {
-    throw inconsistent('reserved KA id author bits do not match the signed author address');
-  }
+  const { reservedKaId, sealedAuthor, localUal } = immutableIdentity;
 
   const { batchId, startKAId, endKAId, ual, publisherAddress } = recovery.finalization;
   if (!batchId || !startKAId || !endKAId) {
@@ -91,17 +125,37 @@ export async function normalizeRecoveredNamedKaPublish(input: {
     ['startKAId', startKAId],
     ['endKAId', endKAId],
   ] as const) {
-    if (BigInt(value) !== reservedKaId) {
+    let parsed: bigint;
+    try {
+      parsed = BigInt(value);
+    } catch {
+      throw inconsistent(`${field} ${value} is not a valid KA id`);
+    }
+    if (parsed !== reservedKaId) {
       throw inconsistent(`${field} ${value} does not match reserved KA id ${reservedKaId.toString()}`);
     }
   }
   if (!ual) throw inconsistent('chain recovery did not return the published UAL');
-  const ualMatch = ual.match(/^did:dkg:(.+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)$/);
-  if (!ualMatch || BigInt(ualMatch[3]) !== reservedKaId) {
-    throw inconsistent(`published UAL ${ual} does not identify reserved KA id ${reservedKaId.toString()}`);
+  let expectedReceiptUal: string;
+  try {
+    if (!chain.getDKGKnowledgeAssetsAddress) {
+      throw new Error('the configured chain adapter cannot resolve the DKGKnowledgeAssets address');
+    }
+    const knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
+    expectedReceiptUal = buildKnowledgeAssetUal(
+      chain.chainId,
+      ethers.getAddress(knowledgeAssetsContract),
+      reservedKaId,
+    );
+  } catch (error) {
+    throw inconsistent(
+      `could not resolve the canonical receipt UAL: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  if (ualMatch[1] !== chain.chainId) {
-    throw inconsistent('published UAL is not bound to the sealed chain');
+  if (ual !== expectedReceiptUal) {
+    throw inconsistent(
+      `published receipt UAL ${ual} does not match ${expectedReceiptUal}`,
+    );
   }
   if (!publisherAddress || !ethers.isAddress(publisherAddress)) {
     throw inconsistent('chain recovery did not return a valid publisher address');
@@ -147,7 +201,8 @@ export async function normalizeRecoveredNamedKaPublish(input: {
 
   return {
     reservedKaId,
-    ual,
+    receiptUal: ual,
+    localUal,
     txHash: recovery.inclusion.txHash,
     receiptBlockNumber: recovery.inclusion.blockNumber,
     transaction: {

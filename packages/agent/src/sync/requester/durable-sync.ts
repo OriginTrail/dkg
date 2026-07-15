@@ -3,6 +3,7 @@ import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
+import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -21,6 +22,7 @@ export interface DurableSyncSummary {
   deniedPhases: number;
   emptyResponses: number;
   metaOnlyResponses: number;
+  verifiedPrivateOnlyResponses: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
@@ -28,6 +30,15 @@ export interface DurableSyncSummary {
   backoffWorthyFailures: number;
   /** Context Graph admissions deferred by local scheduler pressure. */
   deferredBackpressure: number;
+}
+
+/** Graph inventory from one clean, complete legacy full snapshot. */
+export interface VerifiedFullSnapshot {
+  contextGraphId: string;
+  verifiedDataGraphs: ReadonlySet<string>;
+  verifiedMetaGraphs: ReadonlySet<string>;
+  /** False only when this CG's metadata phase was intentionally disabled. */
+  metaFetched: boolean;
 }
 
 interface DurableSyncContext {
@@ -65,17 +76,27 @@ interface DurableSyncContext {
    */
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   stopOnBackoffWorthyFailure?: boolean;
-  processDurableBatchInWorker: (dataQuads: Quad[], metaQuads: Quad[], ctx: OperationContext, acceptUnverified: boolean) => Promise<{
+  processDurableBatchInWorker: (
+    dataQuads: Quad[],
+    metaQuads: Quad[],
+    ctx: OperationContext,
+    acceptUnverified: boolean,
+    mode: DurableBatchVerificationMode,
+  ) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
+    verifiedGraphScopedDataGraphs?: string[];
     totalFetchedDataQuads: number;
     totalFetchedMetaQuads: number;
     rejectedKcs: number;
     emptyResponses: number;
     metaOnlyResponses: number;
+    verifiedPrivateOnlyResponses: number;
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (quads: Quad[]) => Promise<void>;
+  /** Runs after verified snapshot writes and before phase checkpoints advance. */
+  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -97,6 +118,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
+    onVerifiedFullSnapshot,
     deleteCheckpoint,
     setCheckpoint,
     logInfo,
@@ -118,6 +140,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     deniedPhases: 0,
     emptyResponses: 0,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
     rejectedKcs: 0,
     failedPeers: 0,
@@ -209,7 +232,8 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         endPhase();
         break;
       }
-      const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
+      const sinceBatchId = sinceBatchIdFor?.(pid);
+      const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchId);
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
@@ -217,7 +241,15 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       startPhase('verify');
       const verifyStartedAt = Date.now();
-      const processed = await processDurableBatchInWorker(dataResult.quads, metaResult.quads, ctx, isSystemContextGraph);
+      const processed = await processDurableBatchInWorker(
+        dataResult.quads,
+        metaResult.quads,
+        ctx,
+        isSystemContextGraph,
+        sinceBatchId === undefined
+          ? { kind: 'fullSnapshot' }
+          : { kind: 'sinceBatchId', sinceBatchId },
+      );
       endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
 
@@ -228,12 +260,54 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
       summary.emptyResponses += processed.emptyResponses;
       summary.metaOnlyResponses += processed.metaOnlyResponses;
+      summary.verifiedPrivateOnlyResponses += processed.verifiedPrivateOnlyResponses;
       summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
 
+      // A rejected KA means this page cannot be acknowledged safely. We may
+      // still persist independently verified KAs from the page, but keeping
+      // both cursors unchanged makes the next pass retry the rejected content
+      // instead of silently skipping it.
+      const batchVerifiedCleanly = processed.rejectedKcs === 0;
+      if (!batchVerifiedCleanly) {
+        logWarn(
+          ctx,
+          `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
+        );
+        summary.rejectedKcs += processed.rejectedKcs;
+      }
+
+      const notifyVerifiedFullSnapshot = async (): Promise<void> => {
+        if (
+          !onVerifiedFullSnapshot
+          || sinceBatchId !== undefined
+          || !batchVerifiedCleanly
+          || processed.dataRejectedMissingMeta !== 0
+          || !dataResult.completed
+          || dataResult.timedOut
+          || dataResult.resumedFromOffset !== 0
+          || (!skipAgentsMeta && (!metaResult.completed || metaResult.timedOut))
+          || (!skipAgentsMeta && metaResult.resumedFromOffset !== 0)
+        ) return;
+
+        const verifiedDataGraphs = new Set(processed.verifiedData.map((quad) => quad.graph));
+        for (const graph of processed.verifiedGraphScopedDataGraphs ?? []) {
+          verifiedDataGraphs.add(graph);
+        }
+        await onVerifiedFullSnapshot({
+          contextGraphId: pid,
+          verifiedDataGraphs,
+          verifiedMetaGraphs: new Set(processed.verifiedMeta.map((quad) => quad.graph)),
+          metaFetched: !skipAgentsMeta,
+        });
+      };
+
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
-      const updateMetaCheckpoint = processed.dataRejectedMissingMeta === 0
+      const updateMetaCheckpoint = batchVerifiedCleanly
+        && processed.dataRejectedMissingMeta === 0
         && (!metadataOnlyResponse || processed.verifiedMeta.length > 0);
-      const updateDataCheckpoint = processed.dataRejectedMissingMeta === 0 && !metadataOnlyResponse;
+      const updateDataCheckpoint = batchVerifiedCleanly
+        && processed.dataRejectedMissingMeta === 0
+        && !metadataOnlyResponse;
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -241,6 +315,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         processed.dataRejectedMissingMeta > 0 ||
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
+        await notifyVerifiedFullSnapshot();
         // The verifier reports an empty batch only when both fetched phase
         // payloads are empty. Record each phase independently: a completed
         // zero-offset phase is a real clean-empty response, while a sibling
@@ -273,6 +348,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
+      await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
       endPhase();
@@ -288,10 +364,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         );
       }
 
-      if (processed.rejectedKcs > 0) {
-        logWarn(ctx, `Rejected ${processed.rejectedKcs} KCs with invalid merkle roots from ${remotePeerId}`);
-        summary.rejectedKcs += processed.rejectedKcs;
-      }
     } catch (pidErr) {
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);

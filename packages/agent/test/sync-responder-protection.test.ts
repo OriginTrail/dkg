@@ -27,7 +27,10 @@ function baseStore(overrides: Partial<TripleStore> = {}): TripleStore {
     dropGraph: async () => {},
     listGraphs: async () => [],
     deleteBySubjectPrefix: async () => 0,
-    countQuads: async () => 0,
+    // Exact-graph responder paging inventories a listed graph before issuing
+    // its bounded row query. Tests that expose a graph therefore model one row
+    // by default so their query gates still exercise responder admission.
+    countQuads: async (graph) => graph ? 1 : 0,
     close: async () => {},
     ...overrides,
   };

@@ -1,12 +1,13 @@
 import { parentPort } from 'node:worker_threads';
 import { validateSubGraphName } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
+import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, DurableBatchVerificationMode, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
-import { appendInPlace } from './sync/append-in-place.js';
+import {
+  selectVerifiedDurableSyncQuads,
+  type DurableIntegrityVerificationMode,
+} from './sync/durable-integrity.js';
 
-const DKG_NS = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 // Guarded so this module is importable on the main thread (unit tests import
@@ -32,8 +33,18 @@ parentPort?.on('message', async (message: { id: number; method: string; args: un
       return;
     }
     if (message.method === 'processDurableBatch') {
-      const [dataQuads, metaQuads, acceptUnverified] = message.args as [Quad[], Quad[], boolean];
-      const result = processDurableBatchForWire(dataQuads, metaQuads, acceptUnverified);
+      const [dataQuads, metaQuads, acceptUnverified, mode] = message.args as [
+        Quad[],
+        Quad[],
+        boolean,
+        DurableBatchVerificationMode | undefined,
+      ];
+      const result = processDurableBatchForWire(
+        dataQuads,
+        metaQuads,
+        acceptUnverified,
+        mode,
+      );
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -64,209 +75,22 @@ export function verifySyncedData(
   return verifySyncedDataImpl(dataQuads, metaQuads, acceptUnverified);
 }
 
-type VerifiedSelectionIndexes = {
-  data: number[];
-  meta: number[];
-};
-
 function verifySyncedDataImpl(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified = false,
-  recordSelection?: (indexes: VerifiedSelectionIndexes) => void,
 ): SyncVerifyResult {
-  const logs: SyncVerifyLogEntry[] = [];
-  if (metaQuads.length === 0) {
-    recordSelection?.({ data: allIndexes(dataQuads), meta: [] });
-    return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
-  }
-
-  const kcMerkleRoots = new Map<string, string>();
-  const kcRootEntities = new Map<string, string[]>();
-  for (const q of metaQuads) {
-    if (q.predicate === `${DKG_NS}merkleRoot`) kcMerkleRoots.set(q.subject, stripLiteral(q.object));
-  }
-
-  // Read-both (RFC ka-metadata-trim P3.1): legacy rows tie a token subject
-  // `<ual>/<n>` to its KC via `dkg:partOf`; collapsed-shape rows carry ALL
-  // member `dkg:rootEntity` rows directly on the merkleRoot-bearing UAL
-  // subject with NO partOf edge. kaRootEntity is a multi-map because the
-  // collapsed UAL subject holds every member root; legacy token subjects
-  // carry one row each, so legacy behaviour is unchanged. Keep this in sync
-  // with the identical logic in dkg-agent-utils.ts verifySyncedData.
-  const kaToKc = new Map<string, string>();
-  const kaRootEntity = new Map<string, string[]>();
-  for (const q of metaQuads) {
-    if (q.predicate === `${DKG_NS}partOf`) kaToKc.set(q.subject, stripLiteral(q.object));
-    if (q.predicate === `${DKG_NS}rootEntity`) {
-      const entity = stripLiteral(q.object);
-      const list = kaRootEntity.get(q.subject);
-      if (list) list.push(entity);
-      else kaRootEntity.set(q.subject, [entity]);
-    }
-  }
-
-  // Self-map collapsed rows: a merkleRoot-bearing subject that carries its
-  // own rootEntity rows IS the KA (P3.1 — no token edge to join through).
-  // Keying on kcMerkleRoots guards against non-KA rootEntity carriers
-  // (lifecycle URNs, SWM op rows, …) minting bogus KCs. Without this,
-  // collapsed-shape KCs built no kaToKc entry and fell into the
-  // "no KA info — accept on trust" branch, skipping Merkle verification.
-  for (const kcUal of kcMerkleRoots.keys()) {
-    if (kaRootEntity.has(kcUal) && !kaToKc.has(kcUal)) kaToKc.set(kcUal, kcUal);
-  }
-
-  for (const [kaUri, kcUri] of kaToKc) {
-    const rootsForKa = kaRootEntity.get(kaUri);
-    if (!rootsForKa || !kcMerkleRoots.has(kcUri)) continue;
-    let list = kcRootEntities.get(kcUri);
-    if (!list) { list = []; kcRootEntities.set(kcUri, list); }
-    for (const rootEntity of rootsForKa) {
-      // Dedupe: pre-trim stores (and multi-root dual-shape writes) carry the
-      // same root on BOTH the aggregate UAL row and its `<ual>/<n>` token
-      // row — double-counting a partition would corrupt the recomputed root.
-      if (!list.includes(rootEntity)) list.push(rootEntity);
-    }
-  }
-
-  if (kcMerkleRoots.size === 0) {
-    recordSelection?.({ data: allIndexes(dataQuads), meta: allIndexes(metaQuads) });
-    return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
-  }
-
-  const rootEntityToKCs = new Map<string, string[]>();
-  for (const [kcUal, entities] of kcRootEntities) {
-    for (const rootEntity of entities) {
-      if (!rootEntityToKCs.has(rootEntity)) rootEntityToKCs.set(rootEntity, []);
-      rootEntityToKCs.get(rootEntity)!.push(kcUal);
-    }
-  }
-
-  const overlappingKCs = new Set<string>();
-  for (const [, kcUals] of rootEntityToKCs) {
-    if (kcUals.length <= 1) continue;
-    for (const kcUal of kcUals) overlappingKCs.add(kcUal);
-  }
-
-  const partitioned = skolemizeByEntity(dataQuads);
-  const verifiedKcUals = new Set<string>();
-  let rejected = 0;
-
-  for (const [kcUal, claimedHex] of kcMerkleRoots) {
-    const rootEntities = kcRootEntities.get(kcUal) ?? [];
-    if (rootEntities.length === 0) {
-      verifiedKcUals.add(kcUal);
-      continue;
-    }
-
-    if (overlappingKCs.has(kcUal)) {
-      logs.push({ level: 'debug', message: `Skipping Merkle check for ${kcUal}: root entity shared across ${rootEntityToKCs.get(rootEntities[0])!.length} KCs` });
-      verifiedKcUals.add(kcUal);
-      continue;
-    }
-
-    try {
-      const allQuadsForKC: Quad[] = [];
-      for (const rootEntity of rootEntities) {
-        const quads = partitioned.get(rootEntity) ?? [];
-        appendInPlace(allQuadsForKC, quads);
-      }
-
-      const privateRoots: Uint8Array[] = [];
-      for (const [kaUri, kcUri] of kaToKc) {
-        if (kcUri !== kcUal) continue;
-        for (const mq of metaQuads) {
-          if (mq.subject === kaUri && mq.predicate === `${DKG_NS}privateMerkleRoot`) {
-            const hex = stripLiteral(mq.object).replace(/^0x/, '');
-            if (hex.length !== 64) continue;
-            const bytes = new Uint8Array(32);
-            for (let i = 0; i < 32; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-            privateRoots.push(bytes);
-          }
-        }
-      }
-
-      // PoS content-binding: `computeFlatKCRoot` now returns the STRUCTURED root
-      // hashPair(publicRoot, privateDataHash) — private data is always anchored as
-      // the sibling. The legacy "without private root anchoring" fallback is removed:
-      // a root that omits the private sibling is now a genuine mismatch, not a
-      // tolerated legacy format (pre-mainnet cutover clears/re-publishes old KCs).
-      const flatHex = toHex(computeFlatKCRoot(allQuadsForKC, privateRoots));
-      if (flatHex === claimedHex) {
-        verifiedKcUals.add(kcUal);
-        continue;
-      }
-
-      logs.push({
-        level: acceptUnverified ? 'debug' : 'warn',
-        message: `Merkle mismatch for ${kcUal}${acceptUnverified ? ' (system context graph, accepted)' : ''}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`,
-      });
-      rejected++;
-    } catch {
-      logs.push({ level: 'warn', message: `Merkle verification error for ${kcUal}, rejecting` });
-      rejected++;
-    }
-  }
-
-  if (acceptUnverified && rejected > 0 && verifiedKcUals.size < kcMerkleRoots.size) {
-    logs.push({ level: 'debug', message: `Accepting ${rejected} unverified KC(s) (system context graph)` });
-    recordSelection?.({ data: allIndexes(dataQuads), meta: allIndexes(metaQuads) });
-    return { data: dataQuads, meta: metaQuads, rejected: 0, logs };
-  }
-
-  const verifiedRootEntities = new Set<string>();
-  for (const kcUal of verifiedKcUals) {
-    for (const rootEntity of kcRootEntities.get(kcUal) ?? []) {
-      verifiedRootEntities.add(rootEntity);
-    }
-  }
-
-  const allKnownRootEntities = new Set<string>();
-  for (const entities of kcRootEntities.values()) {
-    for (const rootEntity of entities) allKnownRootEntities.add(rootEntity);
-  }
-
-  const selectedData = selectQuads(dataQuads, (q) => {
-    if (allKnownRootEntities.has(q.subject)) return verifiedRootEntities.has(q.subject);
-    for (const rootEntity of verifiedRootEntities) {
-      if (q.subject.startsWith(rootEntity)) return true;
-    }
-    return true;
-  }, recordSelection !== undefined);
-
-  const selectedMeta = selectQuads(metaQuads, (q) => {
-    if (kcMerkleRoots.has(q.subject)) return verifiedKcUals.has(q.subject);
-    const kcUri = kaToKc.get(q.subject);
-    if (kcUri) return verifiedKcUals.has(kcUri);
-    return true;
-  }, recordSelection !== undefined);
-
-  recordSelection?.({
-    data: selectedData.indexes!,
-    meta: selectedMeta.indexes!,
-  });
-
-  return { data: selectedData.quads, meta: selectedMeta.quads, rejected, logs };
-}
-
-function allIndexes(source: readonly unknown[]): number[] {
-  return Array.from({ length: source.length }, (_, index) => index);
-}
-
-function selectQuads(
-  source: Quad[],
-  include: (quad: Quad) => boolean,
-  captureIndexes: boolean,
-): { quads: Quad[]; indexes?: number[] } {
-  const quads: Quad[] = [];
-  const indexes = captureIndexes ? [] as number[] : undefined;
-  for (let index = 0; index < source.length; index++) {
-    const quad = source[index];
-    if (!include(quad)) continue;
-    quads.push(quad);
-    indexes?.push(index);
-  }
-  return { quads, indexes };
+  const selection = selectVerifiedDurableSyncQuads(
+    dataQuads,
+    metaQuads,
+    acceptUnverified,
+  );
+  return {
+    data: selection.dataIndexes.map((index) => dataQuads[index]!),
+    meta: selection.metaIndexes.map((index) => metaQuads[index]!),
+    rejected: selection.rejected,
+    logs: selection.logs,
+  };
 }
 
 function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
@@ -469,6 +293,7 @@ function processDurableBatch(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
+  mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
 ): DurableBatchSelectionResult {
   const logs: SyncVerifyLogEntry[] = [];
   const totalFetchedDataQuads = dataQuads.length;
@@ -480,6 +305,8 @@ function processDurableBatch(
       verifiedMeta: [],
       verifiedDataIndexes: [],
       verifiedMetaIndexes: [],
+      verifiedGraphScopedDataGraphs: [],
+      verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -500,6 +327,8 @@ function processDurableBatch(
       verifiedMeta: [],
       verifiedDataIndexes: [],
       verifiedMetaIndexes: [],
+      verifiedGraphScopedDataGraphs: [],
+      verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -510,45 +339,87 @@ function processDurableBatch(
     };
   }
 
-  const metaOnlyResponses = !acceptUnverified && totalFetchedMetaQuads > 0 && totalFetchedDataQuads === 0 ? 1 : 0;
+  const integrityMode = durableIntegrityMode(mode);
+  const verifiedSelection = selectVerifiedDurableSyncQuads(
+    dataQuads,
+    metaQuads,
+    acceptUnverified,
+    integrityMode,
+  );
+  // A fully-private V2 KA legitimately has an empty public assertion graph.
+  // Its metadata commits the private root and declares publicTripleCount=0,
+  // so exact verification is enough to advance both durable cursors. Keep
+  // treating every other meta-without-data response as potentially pruned.
+  const verifiedFullyPrivateResponse = totalFetchedDataQuads === 0
+    && verifiedSelection.rejected === 0
+    && verifiedSelection.verifiedZeroPublicAssets > 0;
+  // A since-batch response legitimately carries the full metadata phase even
+  // when no asset is newer than the watermark. Once every descriptor was
+  // cleanly classified out of scope, an empty DATA phase is clean delta
+  // completion—not evidence of a pruned graph that should pin the cursor.
+  const cleanEmptySinceBatchDelta = mode.kind === 'sinceBatchId'
+    && totalFetchedDataQuads === 0
+    && verifiedSelection.rejected === 0
+    && verifiedSelection.dataIndexes.length === 0
+    && verifiedSelection.verifiedZeroPublicAssets === 0;
+  const metaOnlyResponses = !acceptUnverified
+    && totalFetchedMetaQuads > 0
+    && totalFetchedDataQuads === 0
+    && !verifiedFullyPrivateResponse
+    && !cleanEmptySinceBatchDelta
+    ? 1
+    : 0;
   if (metaOnlyResponses > 0) {
     logs.push({
       level: 'warn',
       message: `Sync batch received ${totalFetchedMetaQuads} meta triples but no data — peer may have empty or pruned data graph`,
     });
   }
-
-  let verifiedIndexes: VerifiedSelectionIndexes = { data: [], meta: [] };
-  const verified = verifySyncedDataImpl(
-    dataQuads,
-    metaQuads,
-    acceptUnverified,
-    (indexes) => { verifiedIndexes = indexes; },
-  );
   return {
-    verifiedData: verified.data,
-    verifiedMeta: verified.meta,
-    verifiedDataIndexes: verifiedIndexes.data,
-    verifiedMetaIndexes: verifiedIndexes.meta,
+    verifiedData: verifiedSelection.dataIndexes.map((index) => dataQuads[index]!),
+    verifiedMeta: verifiedSelection.metaIndexes.map((index) => metaQuads[index]!),
+    verifiedDataIndexes: verifiedSelection.dataIndexes,
+    verifiedMetaIndexes: verifiedSelection.metaIndexes,
+    verifiedGraphScopedDataGraphs: verifiedSelection.verifiedGraphScopedDataGraphs,
+    verifiedPrivateOnlyResponses: verifiedFullyPrivateResponse ? 1 : 0,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
-    rejectedKcs: verified.rejected,
+    rejectedKcs: verifiedSelection.rejected,
     emptyResponses: 0,
     metaOnlyResponses,
     dataRejectedMissingMeta: 0,
-    logs: [...logs, ...verified.logs],
+    logs: [...logs, ...verifiedSelection.logs],
   };
+}
+
+function durableIntegrityMode(mode: DurableBatchVerificationMode): DurableIntegrityVerificationMode {
+  if (mode.kind === 'fullSnapshot') return mode;
+  if (mode.kind === 'changelogPage') {
+    return { kind: 'changelogPage', changedDataGraphs: new Set(mode.changedDataGraphs) };
+  }
+  if (!/^\d+$/.test(mode.sinceBatchId)) {
+    throw new Error(`Invalid sinceBatchId verification scope: ${mode.sinceBatchId}`);
+  }
+  return { kind: 'sinceBatchId', sinceBatchId: BigInt(mode.sinceBatchId) };
 }
 
 export function processDurableBatchForWire(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
+  mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
 ): DurableBatchProcessWireResult {
-  const result = processDurableBatch(dataQuads, metaQuads, acceptUnverified);
+  const result = processDurableBatch(
+    dataQuads,
+    metaQuads,
+    acceptUnverified,
+    mode,
+  );
   const {
     verifiedDataIndexes,
     verifiedMetaIndexes,
+    verifiedGraphScopedDataGraphs,
+    verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs,
@@ -562,6 +433,8 @@ export function processDurableBatchForWire(
   return {
     verifiedDataIndexes,
     verifiedMetaIndexes,
+    verifiedGraphScopedDataGraphs,
+    verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs,
@@ -694,8 +567,4 @@ function strip(value: string): string {
 
 function stripLiteral(value: string): string {
   return value.replace(/^"|"$/g, '').replace(/"?\^\^.*$/, '');
-}
-
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }

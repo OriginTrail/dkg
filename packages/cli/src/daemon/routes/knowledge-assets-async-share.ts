@@ -52,10 +52,10 @@ import {
 // up front, exactly as the legacy route did via `safeDecodeURIComponent` +
 // `validateAssertionName`); we re-validate the name here so this standalone
 // handler matches the legacy contract byte-for-byte regardless of entry point.
-// OT-RFC-43 §F2 — async share is AVAILABLE: the async-lift seal now allocates and
-// binds the per-author reservedKaId (see agent `buildAsyncLiftSeal`), so the
-// enqueue → worker → sync `assertion.promote` → `assertionFinalize` path produces a
-// mintable Option-1 seal. (The live dispatch in `knowledge-assets.ts` already
+// Async share uses the named Knowledge Asset lifecycle: finalization allocates
+// the UAL-bound KA id, canonicalizes the exact graph, and persists the seal
+// before the graph-scoped queue job can be accepted. (The live dispatch in
+// `knowledge-assets.ts` already
 // serves swm/share-async inline; this standalone faithful-port handler is kept in
 // lockstep so either entry point behaves identically.)
 export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: string): Promise<void> {

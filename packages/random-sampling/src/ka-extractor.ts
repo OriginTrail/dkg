@@ -4,6 +4,9 @@ import {
   contextGraphMetaUri,
   contextGraphLayerUri,
   contextGraphSubGraphUri,
+  createGraphKnowledgeAssetScope,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  knowledgeAssetLayerGraphUri,
   validateSubGraphName,
   MemoryLayer,
   hashTripleV10,
@@ -209,6 +212,21 @@ export async function extractV10KCFromStore(
   if (cgName === null) {
     throw new KCNotFoundError(cgId, kaId);
   }
+
+  // V2/rootless KAs are atomic graphs. Resolve their constant-size label
+  // metadata first and read the exact per-KA VM graph directly; no subject
+  // discovery or shared per-cgId data copy is involved. A missing V2 row falls
+  // through to the legacy root-based extractor below so historical KAs remain
+  // readable during the transition.
+  const graphScoped = await extractGraphScopedV10KC(
+    store,
+    cgName,
+    cgId,
+    kaId,
+    subGraphNameHint,
+  );
+  if (graphScoped) return graphScoped;
+
   const metaGraph = contextGraphMetaUri(cgName, cgIdStr);
   const dataGraph = contextGraphDataUri(cgName, cgIdStr);
   // No assertSafeIri on derived URIs — `cgIdStr` is a bigint stringification
@@ -400,6 +418,249 @@ export async function extractV10KCFromStore(
   return { contextGraphName: cgName, dataGraph, subGraphName, ual, rootEntities, triples, privateRoots, leaves };
 }
 
+async function extractGraphScopedV10KC(
+  store: TripleStore,
+  cgName: string,
+  cgId: bigint,
+  kaId: bigint,
+  _subGraphNameHint?: string,
+): Promise<KCExtractionResult | null> {
+  const labelMetaGraph = contextGraphMetaUri(cgName);
+  // Resolve the V2 discriminator separately from the envelope. A partial or
+  // conflicting V2 row must never disappear into the legacy extractor merely
+  // because one required predicate is absent or LIMIT 1 selected one value.
+  const discriminator = await store.query(
+    `SELECT ?ual ?scope WHERE {
+       GRAPH <${labelMetaGraph}> {
+         ?ual <${DKG}batchId> "${kaId}"^^<${XSD}integer> ;
+           <${DKG}contentScopeVersion> ?scope .
+       }
+     }`,
+  );
+  if (discriminator.type !== 'bindings' || discriminator.bindings.length === 0) {
+    return null;
+  }
+
+  const discriminatorUals = new Set(
+    discriminator.bindings.map((row) => row['ual'] ?? '').filter(Boolean),
+  );
+  const discriminatorScopes = new Set(
+    discriminator.bindings.map((row) => row['scope'] ?? '').filter(Boolean),
+  );
+  if (discriminatorUals.size !== 1 || discriminatorScopes.size !== 1) {
+    throw new Error(`Conflicting graph-scoped discriminator for KC ${kaId} in cg ${cgId}`);
+  }
+  const ual = stripQuotes([...discriminatorUals][0]);
+  const contentScopeVersion = parseXsdIntegerLiteral(
+    [...discriminatorScopes][0],
+    'contentScopeVersion',
+    cgId,
+    kaId,
+  );
+  if (contentScopeVersion <= 1n) return null;
+  if (contentScopeVersion !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
+    throw new Error(
+      `Unsupported content scope version ${contentScopeVersion} for KC ${kaId} in cg ${cgId}`,
+    );
+  }
+  assertSafeIri(ual);
+
+  // Read the bounded metadata subject as predicate/object rows, then enforce
+  // exactly one distinct value for every required field. RDF set semantics
+  // collapse byte-identical duplicates while conflicting convergence rows stay
+  // visible and fail closed.
+  const metadata = await store.query(
+    `SELECT ?predicate ?object WHERE {
+       GRAPH <${labelMetaGraph}> {
+         <${ual}> ?predicate ?object .
+       }
+     }`,
+  );
+  if (metadata.type !== 'bindings') {
+    throw new Error(`Malformed graph-scoped metadata for KC ${kaId} in cg ${cgId}`);
+  }
+  const valuesByPredicate = new Map<string, Set<string>>();
+  for (const row of metadata.bindings) {
+    const predicate = row['predicate'] ?? '';
+    const object = row['object'] ?? '';
+    if (!predicate || !object) continue;
+    const values = valuesByPredicate.get(predicate) ?? new Set<string>();
+    values.add(object);
+    valuesByPredicate.set(predicate, values);
+  }
+  const requiredValue = (predicate: string, field: string): string => {
+    const values = valuesByPredicate.get(predicate);
+    if (!values || values.size !== 1) {
+      throw new Error(
+        `Graph-scoped ${field} must have exactly one value for KC ${kaId} in cg ${cgId}`,
+      );
+    }
+    return [...values][0];
+  };
+  const optionalValue = (predicate: string, field: string): string | undefined => {
+    const values = valuesByPredicate.get(predicate);
+    if (!values || values.size === 0) return undefined;
+    if (values.size !== 1) {
+      throw new Error(
+        `Graph-scoped ${field} must have at most one value for KC ${kaId} in cg ${cgId}`,
+      );
+    }
+    return [...values][0];
+  };
+
+  const status = stripQuotes(requiredValue(`${DKG}status`, 'status'));
+  if (status !== 'confirmed') return null;
+
+  const envelopeScopeVersion = parseXsdIntegerLiteral(
+    requiredValue(`${DKG}contentScopeVersion`, 'contentScopeVersion'),
+    'contentScopeVersion',
+    cgId,
+    kaId,
+  );
+  if (envelopeScopeVersion !== contentScopeVersion) {
+    throw new Error(`Conflicting graph-scoped content scope for KC ${kaId} in cg ${cgId}`);
+  }
+  const envelopeBatchId = parseXsdIntegerLiteral(
+    requiredValue(`${DKG}batchId`, 'batchId'),
+    'batchId',
+    cgId,
+    kaId,
+  );
+  if (envelopeBatchId !== kaId) {
+    throw new Error(`Graph-scoped batchId does not match KC ${kaId} in cg ${cgId}`);
+  }
+  const assertionVersion = parseXsdIntegerLiteral(
+    requiredValue(`${DKG}assertionVersion`, 'assertionVersion'),
+    'assertionVersion',
+    cgId,
+    kaId,
+  );
+  const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+  const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+  if (scope.ual !== ual || packedKaId !== kaId) {
+    throw new Error(`Graph-scoped KC identity does not match kaId ${kaId} in cg ${cgId}`);
+  }
+
+  const publicTripleCount = safeGraphScopedCount(
+    requiredValue(`${DKG}publicTripleCount`, 'publicTripleCount'),
+    'publicTripleCount',
+    cgId,
+    kaId,
+  );
+  const privateTripleCount = safeGraphScopedCount(
+    requiredValue(`${DKG}privateTripleCount`, 'privateTripleCount'),
+    'privateTripleCount',
+    cgId,
+    kaId,
+  );
+  if (
+    publicTripleCount === 0
+    && privateTripleCount === 0
+  ) {
+    throw new Error(`Invalid graph-scoped content counts for KC ${kaId} in cg ${cgId}`);
+  }
+
+  const metaSubGraph = stripQuotes(
+    optionalValue(`${DKG}subGraphName`, 'subGraphName') ?? '',
+  ) || undefined;
+  if (metaSubGraph && !validateSubGraphName(metaSubGraph).valid) {
+    throw new Error(`Invalid graph-scoped sub-graph metadata for KC ${kaId} in cg ${cgId}`);
+  }
+  // V2 metadata is authoritative: an absent subGraphName means the CG root.
+  // Caller hints are only a legacy discovery optimization and must never move
+  // an atomic KA to a different physical graph.
+  const subGraphName = metaSubGraph;
+  const assertionGraph = requiredValue(`${DKG}assertionGraph`, 'assertionGraph');
+  const expectedGraph = knowledgeAssetLayerGraphUri(
+    cgName,
+    MemoryLayer.VerifiableMemory,
+    scope,
+    subGraphName,
+  );
+  if (assertionGraph !== expectedGraph) {
+    throw new Error(`Graph-scoped assertion graph mismatch for KC ${kaId} in cg ${cgId}`);
+  }
+
+  const privateRootLiteral = stripQuotes(
+    optionalValue(`${DKG}privateMerkleRoot`, 'privateMerkleRoot') ?? '',
+  );
+  if (privateRootLiteral && !/^(?:0x)?[0-9a-fA-F]{64}$/.test(privateRootLiteral)) {
+    throw new Error(`Invalid graph-scoped private commitment for KC ${kaId} in cg ${cgId}`);
+  }
+  const privateRoots = privateRootLiteral ? [parseHexBytes(privateRootLiteral)] : [];
+  if (
+    (privateTripleCount > 0 && (privateRoots.length !== 1 || privateRoots[0].length !== 32))
+    || (privateTripleCount === 0 && privateRoots.length !== 0)
+  ) {
+    throw new Error(`Invalid graph-scoped private commitment for KC ${kaId} in cg ${cgId}`);
+  }
+
+  const graphResult = await store.query(
+    `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertionGraph}> { ?s ?p ?o } }`,
+  );
+  const triples: KCTriple[] = graphResult.type === 'quads'
+    ? graphResult.quads
+      .filter((quad) => !POST_PUBLISH_PREDICATES_TO_SKIP.has(quad.predicate))
+      .map((quad) => ({
+        subject: quad.subject,
+        predicate: quad.predicate,
+        object: quad.object,
+        graph: assertionGraph,
+      }))
+    : [];
+  if (triples.length !== publicTripleCount) {
+    throw new KCDataMissingError(cgId, kaId, ual, []);
+  }
+
+  const leaves = triples.map((triple) =>
+    hashTripleV10(triple.subject, triple.predicate, triple.object));
+  leaves.push(...privateRoots);
+  return {
+    contextGraphName: cgName,
+    dataGraph: assertionGraph,
+    subGraphName,
+    ual,
+    rootEntities: [],
+    triples,
+    privateRoots,
+    leaves,
+  };
+}
+
+function parseXsdIntegerLiteral(
+  literal: string,
+  field: string,
+  cgId: bigint,
+  kaId: bigint,
+): bigint {
+  const match = /^"([+-]?[0-9]+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#integer>$/.exec(literal);
+  if (!match) {
+    throw new Error(
+      `Graph-scoped ${field} is not a valid xsd:integer for KC ${kaId} in cg ${cgId}`,
+    );
+  }
+  try {
+    return BigInt(match[1]);
+  } catch {
+    throw new Error(
+      `Graph-scoped ${field} is not a valid xsd:integer for KC ${kaId} in cg ${cgId}`,
+    );
+  }
+}
+
+function safeGraphScopedCount(
+  literal: string,
+  field: string,
+  cgId: bigint,
+  kaId: bigint,
+): number {
+  const value = parseXsdIntegerLiteral(literal, field, cgId, kaId);
+  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Invalid graph-scoped ${field} for KC ${kaId} in cg ${cgId}`);
+  }
+  return Number(value);
+}
+
 // ── Internal helpers ───────────────────────────────────────────────────
 
 /**
@@ -509,7 +770,7 @@ function stripQuotes(v: string): string {
  */
 function parseHexBytes(hex: string): Uint8Array {
   const h = hex.startsWith('0x') ? hex.slice(2) : hex;
-  if (h.length === 0 || h.length % 2 !== 0) {
+  if (h.length === 0 || h.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(h)) {
     throw new Error(`Invalid hex literal length: "${hex}"`);
   }
   const out = new Uint8Array(h.length / 2);

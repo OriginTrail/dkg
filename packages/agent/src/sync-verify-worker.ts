@@ -37,9 +37,17 @@ export interface SharedMemoryBatchProcessResult {
   entityCreators: Array<{ dataGraph: string; entity: string; creator: string }>;
 }
 
+export type DurableBatchVerificationMode =
+  | { kind: 'fullSnapshot' }
+  | { kind: 'sinceBatchId'; sinceBatchId: string }
+  | { kind: 'changelogPage'; changedDataGraphs: readonly string[] };
+
 export interface DurableBatchProcessResult {
   verifiedData: Quad[];
   verifiedMeta: Quad[];
+  verifiedGraphScopedDataGraphs: string[];
+  /** Clean batches containing verified V2 assets with no public assertion triples. */
+  verifiedPrivateOnlyResponses: number;
   totalFetchedDataQuads: number;
   totalFetchedMetaQuads: number;
   rejectedKcs: number;
@@ -212,6 +220,7 @@ export class SyncVerifyWorker {
     dataQuads: readonly Quad[],
     metaQuads: readonly Quad[],
     acceptUnverified: boolean,
+    mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
   ): Promise<DurableBatchProcessResult> {
     // Preserve the array membership/order that the worker verifies without
     // cloning the Quad object graph on the caller side. Callers may resize or
@@ -224,7 +233,12 @@ export class SyncVerifyWorker {
       this.worker.postMessage({
         id,
         method: 'processDurableBatch',
-        args: [stableDataQuads, stableMetaQuads, acceptUnverified],
+        args: [
+          stableDataQuads,
+          stableMetaQuads,
+          acceptUnverified,
+          mode,
+        ],
       });
     }).then((wireResult) => {
       const {

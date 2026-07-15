@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
@@ -1082,6 +1083,42 @@ describe('GraphSetIndexStore', () => {
     });
     expect(typeof optedInStore.listGraphsByPrefix).toBe('function');
     await optedInStore.close();
+  });
+
+  it('preserves atomic graph replacement when a managed SPARQL store is index-wrapped', async () => {
+    let updateRequests = 0;
+    const server = createServer((request, response) => {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => { body += chunk; });
+      request.on('end', () => {
+        if (body.trimStart().startsWith('ASK')) {
+          response.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
+          response.end(JSON.stringify({ boolean: true }));
+          return;
+        }
+        updateRequests++;
+        response.writeHead(204);
+        response.end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const endpoint = `http://127.0.0.1:${port}/sparql`;
+    const store = await createTripleStore({
+      backend: 'sparql-http',
+      options: { queryEndpoint: endpoint, updateEndpoint: endpoint, managedByDkg: true },
+    });
+    try {
+      const graph = 'did:dkg:context-graph:managed-atomic';
+      await expect(store.replaceGraph!(graph, [q(graph)])).resolves.toBeUndefined();
+      expect(updateRequests).toBe(1);
+    } finally {
+      await store.close();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
   });
 
   it('leaves custom backends uncached unless explicitly enabled', async () => {

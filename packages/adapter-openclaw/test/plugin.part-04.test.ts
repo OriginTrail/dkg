@@ -83,7 +83,7 @@ describe("DkgNodePlugin", () => {
       // rc.17 (CONTRACT §2 promote→share, §1 Stage5) + #1116: a FULL share now
       // SEALS BY DEFAULT and is publish-ready via the per-KA
       // dkg_knowledge_asset_publish. The share description must steer the agent
-      // to it and explain the subset-is-not-publishable rule (§5).
+      // to it and make the atomic scope explicit.
       const plugin = new DkgNodePlugin();
       const tools: OpenClawTool[] = [];
       plugin.register({
@@ -95,10 +95,8 @@ describe("DkgNodePlugin", () => {
       });
       const share = tools.find((t) => t.name === 'dkg_knowledge_asset_share')!;
       expect(share.description).toContain('dkg_knowledge_asset_publish');
-      // #1116: a full share now SEALS BY DEFAULT (was "auto-seal best-effort").
-      expect(share.description).toMatch(/seals by default/i);
-      // §5 subset-vs-full language must be present.
-      expect(share.description).toMatch(/NOT publishable to Verifiable Memory/i);
+      expect(share.description).toMatch(/atomically seal and share the complete Knowledge Asset/i);
+      expect(share.description).toMatch(/Root-entity subsets and unsealed shares are not supported/i);
     });
 
 

@@ -137,9 +137,14 @@ function catchupServedUsableData(result: CatchupJobResult): boolean {
 }
 
 function cleanCompletionHasResponse(
-  completion: { verifiedDataPeers: number; emptyPeers: number } | undefined,
+  completion: {
+    verifiedDataPeers: number;
+    verifiedPrivateOnlyPeers?: number;
+    emptyPeers: number;
+  } | undefined,
 ): boolean {
   return (completion?.verifiedDataPeers ?? 0) > 0 ||
+    (completion?.verifiedPrivateOnlyPeers ?? 0) > 0 ||
     (completion?.emptyPeers ?? 0) > 0;
 }
 
@@ -177,7 +182,10 @@ function catchupPlaneReadyThisRun(input: {
 }): boolean {
   const completion = input.result.cleanPlaneCompletions?.[input.plane];
   if (completion) {
+    const verifiedPrivateOnly = input.plane === 'durable' &&
+      (input.result.cleanPlaneCompletions?.durable.verifiedPrivateOnlyPeers ?? 0) > 0;
     return completion.verifiedDataPeers > 0 ||
+      verifiedPrivateOnly ||
       (!input.isPrivate && completion.emptyPeers > 0);
   }
 
@@ -187,7 +195,8 @@ function catchupPlaneReadyThisRun(input: {
   // used as readiness evidence on the production path.
   const diagnostics = input.result.diagnostics?.[input.plane];
   const dataProgress = input.plane === 'durable'
-    ? input.result.dataSynced > 0
+    ? input.result.dataSynced > 0 ||
+      (input.result.diagnostics?.durable.verifiedPrivateOnlyResponses ?? 0) > 0
     : input.result.sharedMemorySynced > 0;
   return catchupPlaneCompletedWithoutFailure(diagnostics) &&
     (dataProgress || (!input.isPrivate && (diagnostics?.emptyResponses ?? 0) > 0));
@@ -201,6 +210,7 @@ export interface ContextGraphCatchupReadinessClassification {
   eventPayload?: {
     dataSynced: number;
     sharedMemorySynced: number;
+    verifiedPrivateOnlyResponses: number;
   };
 }
 
@@ -306,6 +316,11 @@ export function classifyContextGraphCatchupReadiness(input: {
             dataSynced: durableReadyThisRun ? result.dataSynced : 0,
             sharedMemorySynced: sharedMemoryReadyThisRun
               ? result.sharedMemorySynced
+              : 0,
+            verifiedPrivateOnlyResponses: durableReadyThisRun
+              ? result.cleanPlaneCompletions?.durable.verifiedPrivateOnlyPeers
+                ?? result.diagnostics?.durable.verifiedPrivateOnlyResponses
+                ?? 0
               : 0,
           }
         : undefined,
@@ -431,7 +446,8 @@ export async function resetContextGraphReadinessForMissingMetadata(input: {
 /**
  * Persist readiness proven by the agent's automatic post-approval catch-up.
  * PROJECT_SYNCED is also used as a UI event, so fail closed unless it carries
- * actual inserted data and the graph's authoritative metadata is present.
+ * actual inserted data or a cryptographically verified private-only response,
+ * and the graph's authoritative metadata is present.
  */
 export async function persistProjectSyncedReadiness(input: {
   agent: DKGAgent;
@@ -439,9 +455,14 @@ export async function persistProjectSyncedReadiness(input: {
   contextGraphId: string;
   dataSynced: number;
   sharedMemorySynced: number;
+  verifiedPrivateOnlyResponses?: number;
 }): Promise<boolean> {
   const contextGraphId = input.contextGraphId.trim();
-  const durableCompleted = Number.isFinite(input.dataSynced) && input.dataSynced > 0;
+  const verifiedPrivateOnlyResponses = input.verifiedPrivateOnlyResponses ?? 0;
+  const durableCompleted = (Number.isFinite(input.dataSynced) && input.dataSynced > 0) || (
+    Number.isFinite(verifiedPrivateOnlyResponses)
+    && verifiedPrivateOnlyResponses > 0
+  );
   const sharedMemoryCompleted = Number.isFinite(input.sharedMemorySynced) &&
     input.sharedMemorySynced > 0;
   if (
@@ -473,6 +494,7 @@ export interface ProjectSyncedReadinessPayload {
   contextGraphId: string;
   dataSynced: number;
   sharedMemorySynced: number;
+  verifiedPrivateOnlyResponses: number;
 }
 
 export function parseProjectSyncedReadinessPayload(
@@ -485,7 +507,14 @@ export function parseProjectSyncedReadinessPayload(
     typeof candidate.dataSynced !== 'number' ||
     !Number.isFinite(candidate.dataSynced) ||
     typeof candidate.sharedMemorySynced !== 'number' ||
-    !Number.isFinite(candidate.sharedMemorySynced)
+    !Number.isFinite(candidate.sharedMemorySynced) ||
+    (
+      candidate.verifiedPrivateOnlyResponses !== undefined
+      && (
+        typeof candidate.verifiedPrivateOnlyResponses !== 'number'
+        || !Number.isFinite(candidate.verifiedPrivateOnlyResponses)
+      )
+    )
   ) {
     return null;
   }
@@ -493,6 +522,7 @@ export function parseProjectSyncedReadinessPayload(
     contextGraphId: candidate.contextGraphId,
     dataSynced: candidate.dataSynced,
     sharedMemorySynced: candidate.sharedMemorySynced,
+    verifiedPrivateOnlyResponses: candidate.verifiedPrivateOnlyResponses ?? 0,
   };
 }
 

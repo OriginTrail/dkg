@@ -10,6 +10,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolRouter,
+  type SendOptions,
 } from '@origintrail-official/dkg-core';
 import {
   OutboxDrainer,
@@ -183,10 +184,8 @@ export interface MessengerDeps {
   outboxDrain?: OutboxDrainerOptions;
 }
 
-export interface SendOpts {
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}
+/** Router options exposed by Messenger's legacy pass-through send. */
+export type SendOpts = Pick<SendOptions, 'timeoutMs' | 'payloadReuse' | 'signal'>;
 
 export interface SendReliableOpts {
   /**
