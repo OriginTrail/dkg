@@ -306,4 +306,35 @@ describe('durable sync worker result transport', () => {
     expect(wireResult).not.toHaveProperty('verifiedData');
     expect(wireResult).not.toHaveProperty('verifiedMeta');
   });
+
+  it('reports discarded-only sync controls across the worker wire', () => {
+    const subject = 'urn:orphaned:sync-control';
+    const meta: Quad[] = [
+      {
+        subject,
+        predicate: 'http://dkg.io/ontology/batchId',
+        object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: META_GRAPH,
+      },
+      {
+        subject,
+        predicate: 'http://dkg.io/ontology/assertionGraph',
+        object: 'urn:attacker:graph',
+        graph: META_GRAPH,
+      },
+      {
+        subject,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: META_GRAPH,
+      },
+    ];
+
+    const wireResult = processDurableBatchForWire([], meta, false);
+
+    expect(wireResult.verifiedMetaIndexes).toEqual([]);
+    expect(wireResult.droppedSyncControlTriples).toBe(meta.length);
+    expect(wireResult.metaOnlyResponses).toBe(1);
+    expect(wireResult.rejectedKcs).toBe(0);
+  });
 });
