@@ -67,6 +67,10 @@ export const SHARE_INCOMPLETE_PROMOTE_WARNING =
   'The complete sealed Knowledge Asset did not reach SWM and is not publish-ready; ' +
   'keep the Working Memory draft and retry the atomic share.';
 
+export const ATOMIC_SHARE_SIGNING_RECOVERY =
+  'Resolve the local signing capability, then retry the complete atomic ' +
+  'Knowledge Asset share from Working Memory.';
+
 /**
  * #1116: pick the not-publish-ready share warning from the share outcome. Returns
  * `undefined` when the share IS publish-ready (no warning). Branch precedence:
@@ -450,7 +454,7 @@ export function registerAssertionTools(
         // CONTRACT §C: scheme_version is a POSITIVE integer (daemon >= 1) — zod
         // rejects 0 / negative / non-integer at the boundary as a tool error.
         schemeVersion: z.number().int().positive().optional().describe('Optional attestation scheme version (positive integer)'),
-        layer: z.never().optional().describe('Retired: only Working Memory finalization is supported.'),
+        layer: z.literal('wm').optional().describe('Deprecated no-op compatibility value; omitted on the wire.'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
       },
@@ -502,8 +506,8 @@ export function registerAssertionTools(
         'EXPLICITLY first (the default seal cannot carry them).',
       inputSchema: {
         name: z.string().describe('Existing knowledge asset name'),
-        entities: z.never().optional().describe('Retired: Knowledge Assets are shared atomically.'),
-        skipSeal: z.never().optional().describe('Retired: Knowledge Assets are always sealed before sharing.'),
+        entities: z.literal('all').optional().describe('Deprecated no-op compatibility value; omitted on the wire.'),
+        skipSeal: z.literal(false).optional().describe('Deprecated no-op compatibility value; omitted on the wire.'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
       },
@@ -535,11 +539,12 @@ export function registerAssertionTools(
       } catch (e) {
         // #1116: a default (sealing) share that cannot seal fails CLOSED — the
         // daemon returns 409 UNSEALED_SHARE_BLOCKED with a recovery hint and WM
-        // preserved. Surface the recovery text verbatim so the agent can act.
+        // preserved. Older daemons recommend retired skipSeal/SWM-write modes;
+        // replace that hint with the only recovery supported by this client.
         if (e instanceof DkgHttpError && e.status === 409) {
-          const body = e.body as { code?: string; recovery?: string } | undefined;
-          if (body?.code === 'UNSEALED_SHARE_BLOCKED' && body.recovery) {
-            return errResult(body.recovery);
+          const body = e.body as { code?: string } | undefined;
+          if (body?.code === 'UNSEALED_SHARE_BLOCKED') {
+            return errResult(ATOMIC_SHARE_SIGNING_RECOVERY);
           }
         }
         return errResult(`Failed to share knowledge asset: ${formatError(e)}`);

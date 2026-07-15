@@ -664,30 +664,11 @@ export class DkgClient {
     );
   }
 
-  /** Promote specific entity URIs from WM → SWM. */
-  async promoteAssertion(args: {
-    contextGraphId: string;
-    assertionName: string;
-    subGraphName?: string;
-    entities: string[];
-  }): Promise<void> {
-    const body: Record<string, unknown> = {
-      contextGraphId: normalizeContextGraphId(args.contextGraphId),
-      entities: args.entities,
-    };
-    if (args.subGraphName) body.subGraphName = args.subGraphName;
-    await this.request(
-      'POST',
-      `/api/knowledge-assets/${encodeURIComponent(args.assertionName)}/swm/share`,
-      body,
-    );
-  }
-
   /**
    * Create an empty Working Memory assertion graph (idempotent — duplicate
    * names land as `alreadyExists: true` rather than throwing). The
    * canonical write flow is `createAssertion` → `writeAssertion` →
-   * `promoteAssertion` (or `discardAssertion` to roll back).
+   * `knowledgeAssetShare` (or `discardAssertion` to roll back).
    */
   async createAssertion(args: {
     contextGraphId: string;
@@ -1233,7 +1214,6 @@ export class DkgClient {
       body.preSignedAuthorAttestation = args.preSignedAuthorAttestation;
     }
     if (args.schemeVersion !== undefined) body.schemeVersion = args.schemeVersion;
-    if (args.layer !== undefined) body.layer = args.layer;
     return this.request<{ merkleRoot: string; eip712Digest: string }>(
       'POST',
       `/api/knowledge-assets/${encodeURIComponent(args.name)}/wm/finalize`,

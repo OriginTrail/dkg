@@ -994,7 +994,7 @@ describe("DkgNodePlugin", () => {
       expect(res.details?.warning).toContain('retry the atomic share');
     });
 
-    it('dkg_knowledge_asset_share surfaces a 409 UNSEALED_SHARE_BLOCKED recovery verbatim (#1116)', async () => {
+    it('dkg_knowledge_asset_share replaces obsolete 409 recovery with atomic guidance (#1116)', async () => {
       const recovery = 'No local signing key; pass skip_seal:true to share unsealed.';
       const fetchMock = vi.fn(async () =>
         new Response(JSON.stringify({ code: 'UNSEALED_SHARE_BLOCKED', recovery }), {
@@ -1011,8 +1011,9 @@ describe("DkgNodePlugin", () => {
         context_graph_id: 'ctx',
         name: 'notes',
       });
-      // The handler surfaces the daemon's recovery hint verbatim as the tool error.
-      expect(res.details?.error).toBe(recovery);
+      expect(res.details?.error).toContain('Resolve the local signing capability');
+      expect(res.details?.error).toContain('atomic Knowledge Asset share');
+      expect(res.details?.error).not.toContain('skip_seal');
     });
 
     it('dkg_knowledge_asset_share falls back to the generic error for a non-matching 409 (#1116)', async () => {

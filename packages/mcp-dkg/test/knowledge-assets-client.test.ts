@@ -164,6 +164,12 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls[0].body).not.toHaveProperty('layer');
   });
 
+  it('knowledgeAssetFinalize accepts legacy layer:wm but omits it from the wire', async () => {
+    const { client, calls } = makeClient();
+    await client.knowledgeAssetFinalize({ contextGraphId: 'cg-1', name: 'f', layer: 'wm' });
+    expect(calls[0].body).toEqual({ contextGraphId: 'cg-1' });
+  });
+
   it('knowledgeAssetShare rejects unsealed sharing before HTTP', async () => {
     const { client, calls } = makeClient();
     await expect(
@@ -186,7 +192,9 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(rejected.calls).toHaveLength(0);
 
     const { client, calls } = makeClient();
-    await client.knowledgeAssetShare({ contextGraphId: 'cg-1', name: 'f' });
+    await client.knowledgeAssetShare({
+      contextGraphId: 'cg-1', name: 'f', entities: 'all', skipSeal: false,
+    });
     expect(calls[0].body).toEqual({ contextGraphId: 'cg-1' });
     expect(calls[0].body).not.toHaveProperty('skipSeal');
     expect(calls[0].body).not.toHaveProperty('entities');

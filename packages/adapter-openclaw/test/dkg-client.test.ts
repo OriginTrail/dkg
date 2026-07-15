@@ -1058,6 +1058,18 @@ describe('DkgDaemonClient', () => {
       expect(url(1)).toBe('http://localhost:9200/api/knowledge-assets/f/vm/publish');
     });
 
+    it('knowledgeAssetShare rejects retired modes before HTTP and omits safe legacy defaults', async () => {
+      await expect(client.knowledgeAssetShare('cg-1', 'f', { entities: ['urn:x'] }))
+        .rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+      await expect(client.knowledgeAssetShare('cg-1', 'f', { skipSeal: true }))
+        .rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
+      expect(fetchCalls).toHaveLength(0);
+
+      ok({ swmShared: true, promotedCount: 1, sealed: true, publishReady: true });
+      await client.knowledgeAssetShare('cg-1', 'f', { entities: 'all', skipSeal: false });
+      expect(body()).toEqual({ contextGraphId: 'cg-1' });
+    });
+
     it('knowledgeAssetPublish nests finalized-publish controls under `options`', async () => {
       ok({ ual: 'did:dkg:x' });
       await client.knowledgeAssetPublish('cg-1', 'f', {
@@ -1128,6 +1140,16 @@ describe('DkgDaemonClient', () => {
         preSignedAuthorAttestation: { address: '0xauthor', reservedKaId: '1', signature: { r: '0xr', vs: '0xvs' } },
       })).rejects.toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
       expect(fetchCalls).toHaveLength(0);
+    });
+
+    it('knowledgeAssetFinalize rejects SWM before HTTP and omits neutral layer:wm', async () => {
+      await expect(client.knowledgeAssetFinalize('cg-1', 'f', { layer: 'swm' }))
+        .rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+      expect(fetchCalls).toHaveLength(0);
+
+      ok({ merkleRoot: '0xroot', eip712Digest: '0xdig' });
+      await client.knowledgeAssetFinalize('cg-1', 'f', { layer: 'wm' });
+      expect(body()).toEqual({ contextGraphId: 'cg-1' });
     });
 
     it('createKnowledgeAsset rejects mutually exclusive authorship fields before HTTP serialization', async () => {
