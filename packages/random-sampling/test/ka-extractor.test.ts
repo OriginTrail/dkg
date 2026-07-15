@@ -618,6 +618,31 @@ describe('extractV10KCFromStore — error paths', () => {
     );
   });
 
+  it('rejects a malformed legacy private Merkle root before building proof leaves', async () => {
+    const fixture: KCFixture = {
+      cgId: 2n,
+      kaId: 8n,
+      ual: 'did:dkg:hardhat:31337/0xpub/8',
+      rootEntities: ['urn:legacy:private-root'],
+      publicTriples: [
+        { subject: 'urn:legacy:private-root', predicate: 'urn:p:k', object: '"v"' },
+      ],
+    };
+    await seedKC(store, fixture);
+
+    const metaGraph = contextGraphMetaUri('cg-2', '2');
+    await store.insert([{
+      subject: `${fixture.ual}/1`,
+      predicate: `${DKG}privateMerkleRoot`,
+      object: `"${'0g'.repeat(32)}"`,
+      graph: metaGraph,
+    }]);
+
+    await expect(
+      extractV10KCFromStore(store, fixture.cgId, fixture.kaId),
+    ).rejects.toThrow('Invalid hex literal');
+  });
+
   it('uses a typed integer literal so kaId 1 vs 10 do not collide (P-18 lesson, mirrored)', async () => {
     // Two KCs with different batchIds in the same _meta graph. If the
     // SPARQL accidentally string-prefix-matches "1" against "10", we'd
