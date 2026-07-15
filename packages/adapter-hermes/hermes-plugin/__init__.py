@@ -2779,6 +2779,11 @@ SHARE_INCOMPLETE_PROMOTE_WARNING = (
     "keep the Working Memory draft and retry the atomic share."
 )
 
+ATOMIC_SHARE_SIGNING_RECOVERY = (
+    "Resolve the local signing capability, then retry the complete atomic "
+    "Knowledge Asset share from Working Memory."
+)
+
 
 def _create_swm_share_error(result: Any, also_share_swm: bool) -> Optional[str]:
     """Return the share-failure tail when a create one-shot's opt-in SWM share failed.
@@ -2819,17 +2824,14 @@ def _annotate_share_seal(result: Any, entities: Any = None) -> Any:
 
     A default share that CANNOT seal fails CLOSED: the daemon returns 409
     ``UNSEALED_SHARE_BLOCKED`` with a ``recovery`` hint and Working Memory
-    preserved; ``client._post`` surfaces that body as a dict, so re-raise the
-    recovery text as the tool error (parity with MCP/OpenClaw, which return only
-    the recovery string). Anything else passes through untouched.
+    preserved; older daemons may recommend retired skip-seal/SWM-write modes,
+    so replace that hint with the supported atomic recovery. Anything else
+    passes through untouched.
     """
     if not isinstance(result, dict):
         return result
     if result.get("code") == "UNSEALED_SHARE_BLOCKED":
-        recovery = result.get("recovery")
-        if isinstance(recovery, str) and recovery:
-            return {"error": recovery}
-        return result
+        return {"error": ATOMIC_SHARE_SIGNING_RECOVERY}
     if result.get("publishReady") is False:
         if result.get("sealed") is True:
             warning = SHARE_INCOMPLETE_PROMOTE_WARNING

@@ -86,11 +86,10 @@ describe('async SWM-share queue daemon routes', () => {
       },
       resolveAgentByToken: (token?: string) => (token ? tokenToAddress[token] : undefined),
       assertion: {
-        async promoteAsync(
+        async shareWholeKnowledgeAssetAsync(
           contextGraphId: string,
           name: string,
           opts?: {
-            entities?: readonly string[] | 'all';
             subGraphName?: string;
             agentAddress?: string;
             authorAgentAddress?: string;
@@ -100,7 +99,7 @@ describe('async SWM-share queue daemon routes', () => {
             contextGraphId,
             assertionName: name,
             subGraphName: opts?.subGraphName,
-            entities: opts?.entities ?? 'all',
+            entities: 'all',
             ...(opts?.agentAddress ? { agentAddress: opts.agentAddress } : {}),
             ...(opts?.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
           } as any);

@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import {
   ApiClient,
@@ -345,6 +345,10 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       .option('--layer <layer>', 'Deprecated compatibility option: wm (swm is read-only)'),
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
+      const layer = opts.layer === undefined ? undefined : String(opts.layer);
+      if (layer !== undefined && layer !== 'wm' && layer !== 'swm') {
+        throw new Error('--layer must be wm or swm');
+      }
       const authorOptions = parseFinalizeAuthorOptions(opts);
       const layer = opts.layer === undefined ? undefined : String(opts.layer);
       if (layer !== undefined && layer !== 'wm' && layer !== 'swm') {

@@ -824,19 +824,19 @@ def test_annotate_share_seal_incomplete_full_promote_warns_no_finalize(plugin_mo
         assert "retry the atomic share" in out["warning"], ent
 
 
-def test_annotate_share_seal_blocked_surfaces_recovery(plugin_module):
-    # A 409 UNSEALED_SHARE_BLOCKED body (returned by the client as a dict) →
-    # surface the recovery verbatim as {error: recovery}.
+def test_annotate_share_seal_blocked_normalizes_legacy_recovery(plugin_module):
+    # Older daemons recommend retired skip-seal/SWM writes; replace that hint.
     f = plugin_module._annotate_share_seal
     out = f({"code": "UNSEALED_SHARE_BLOCKED", "recovery": "pass skip_seal=true"})
-    assert out == {"error": "pass skip_seal=true"}
+    assert "Resolve the local signing capability" in out["error"]
+    assert "atomic Knowledge Asset share" in out["error"]
+    assert "skip_seal" not in out["error"]
 
 
-def test_annotate_share_seal_blocked_without_recovery_passes_through(plugin_module):
-    # blocked but no recovery hint → pass the raw body through untouched.
+def test_annotate_share_seal_blocked_without_recovery_uses_atomic_guidance(plugin_module):
     f = plugin_module._annotate_share_seal
-    body = {"code": "UNSEALED_SHARE_BLOCKED"}
-    assert f(body) == body
+    out = f({"code": "UNSEALED_SHARE_BLOCKED"})
+    assert "atomic Knowledge Asset share" in out["error"]
 
 
 def test_annotate_share_seal_publish_ready_and_non_dict_pass_through(plugin_module):

@@ -67,6 +67,10 @@ export const SHARE_INCOMPLETE_PROMOTE_WARNING =
   'The complete sealed Knowledge Asset did not reach SWM and is not publish-ready; ' +
   'keep the Working Memory draft and retry the atomic share.';
 
+export const ATOMIC_SHARE_SIGNING_RECOVERY =
+  'Resolve the local signing capability, then retry the complete atomic ' +
+  'Knowledge Asset share from Working Memory.';
+
 /**
  * #1116: pick the not-publish-ready share warning from the share outcome. Returns
  * `undefined` when the share IS publish-ready (no warning). Branch precedence:
@@ -535,11 +539,12 @@ export function registerAssertionTools(
       } catch (e) {
         // #1116: a default (sealing) share that cannot seal fails CLOSED — the
         // daemon returns 409 UNSEALED_SHARE_BLOCKED with a recovery hint and WM
-        // preserved. Surface the recovery text verbatim so the agent can act.
+        // preserved. Older daemons recommend retired skipSeal/SWM-write modes;
+        // replace that hint with the only recovery supported by this client.
         if (e instanceof DkgHttpError && e.status === 409) {
-          const body = e.body as { code?: string; recovery?: string } | undefined;
-          if (body?.code === 'UNSEALED_SHARE_BLOCKED' && body.recovery) {
-            return errResult(body.recovery);
+          const body = e.body as { code?: string } | undefined;
+          if (body?.code === 'UNSEALED_SHARE_BLOCKED') {
+            return errResult(ATOMIC_SHARE_SIGNING_RECOVERY);
           }
         }
         return errResult(`Failed to share knowledge asset: ${formatError(e)}`);

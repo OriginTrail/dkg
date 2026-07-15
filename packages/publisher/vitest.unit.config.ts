@@ -15,6 +15,7 @@ export default defineConfig({
       'test/async-lift-validation.test.ts',
       'test/async-lift-ka-broadcast-progress.test.ts',
       'test/async-lift-publish-options.test.ts',
+      'test/knowledge-asset-content-envelope.test.ts',
       'test/async-promote-queue.test.ts',
       'test/lift-job-types.test.ts',
       'test/multi-root-token-rows.test.ts',

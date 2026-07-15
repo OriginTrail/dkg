@@ -269,15 +269,20 @@ describe('dkg-importer/SKILL.md file', () => {
     expect(importerContent).toMatch(/---\r?\n\r?\n/);
   });
 
-  it('documents the chunking contract from ADR 0002', () => {
+  it('documents atomic whole-KA chunking from ADR 0002', () => {
     expect(importerContent).toContain('CHUNK');
-    expect(importerContent).toContain('ROOT_CHUNK');
+    expect(importerContent).toContain('Whole-KA gossip ceiling');
+    expect(importerContent).toContain('arrays are rejected');
+    expect(importerContent).not.toContain('ROOT_CHUNK');
   });
 
-  it('documents the manifest pattern', () => {
-    expect(importerContent).toContain('createImportManifest');
-    expect(importerContent).toContain('markPartitionStatus');
-    expect(importerContent).toContain('loadImportManifest');
+  it('separates legacy manifest reads from fail-fast mutation compatibility', () => {
+    expect(importerContent).toContain('explicitly read-only compatibility module');
+    expect(importerContent).toContain('manifest-mutations-compat.mjs');
+    expect(importerContent).toContain('KA_ATOMIC_MANIFEST_UNSUPPORTED');
+    expect(importerContent).toContain('before any daemon read or mutation');
+    expect(importerContent).toContain('external durable state');
+    expect(importerContent).toContain('do not call the compatibility mutation names');
   });
 
   it('documents the three known daemon caps with verbatim error strings', () => {

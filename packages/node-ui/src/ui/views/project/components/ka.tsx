@@ -1,6 +1,6 @@
 import React, { useMemo, useState, Suspense } from 'react';
 import { api } from '../../../api-wrapper.js';
-import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublishWithSeal, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
+import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
 import { useMemoryEntities, canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
@@ -54,7 +54,7 @@ export function SubGraphBadge({
 // ─── Verify on DKG CTA ───────────────────────────────────────
 // Two-step progression driven by the profile:
 //   WM  -> SWM  : promoteAssertion(sourceAssertion)                ("Propose…")
-//   SWM -> VM   : knowledgeAssetPublishWithSeal(sourceAssertion)   ("Ratify…")
+//   SWM -> VM   : knowledgeAssetPublish(sourceAssertion)           ("Ratify…")
 // The SWM→VM step publishes the entity's owning NAMED assertion as one
 // Knowledge Asset via the canonical per-KA /vm/publish (named-only, #1087).
 // Labels, hints and the promote-path assertion name all come from the
@@ -136,7 +136,7 @@ export function VerifyOnDkgButton({
     : {
         kind: 'publish' as const,
         label:    binding.publishLabel ?? 'Verify on DKG',
-        hint:     binding.publishHint  ?? 'Anchors this entity on-chain.',
+        hint:     binding.publishHint  ?? 'Publishes the complete owning Knowledge Asset on-chain.',
         busyCopy: 'Anchoring…',
         // Named-only publish (#1087): /vm/publish is keyed by a named SWM
         // assertion. We publish the entity's owning assertion (its
@@ -177,7 +177,7 @@ export function VerifyOnDkgButton({
         // `CG_NOT_REGISTERED` retry path, so a doomed publish never burns gas.
         // The CTA is disabled above when no sourceAssertion resolves, so
         // `sgBinding.sourceAssertion` is present here.
-        const r = await knowledgeAssetPublishWithSeal(
+        const r = await knowledgeAssetPublish(
           contextGraphId,
           sgBinding!.binding.sourceAssertion!,
           sgBinding!.subGraph ? { subGraphName: sgBinding!.subGraph } : {},

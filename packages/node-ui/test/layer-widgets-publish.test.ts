@@ -284,14 +284,14 @@ describe('PromoteWidget — promote flow (#1382)', () => {
     expect(order).toEqual(['promote']);
     expect(apiMocks.knowledgeAssetFinalize).not.toHaveBeenCalled();
     expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
-    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Shared 1 complete Knowledge Asset to Shared Memory');
     await unmount();
   });
 
   // #1464 — THE MASK: a THROWN promote must render under a DISTINCT `layer-action-error` testid,
   // never the success `layer-action-result`. Before this split both shared one testid, so the
   // devnet e2e (which reads `layer-action-result` testid-agnostically and only rejects the literal
-  // "No triples were promoted" no-op string) mistook an "✕ Promote failed…" banner for a
+  // no-op result string) mistook an "✕ Promote failed…" banner for a
   // successful promote — then the SWM count stayed 0 and the throw was misdiagnosed as a silent
   // migration gap (#1464). Deterministic; fails before the testid split (the error was queryable
   // under layer-action-result), passes after.
@@ -334,7 +334,7 @@ describe('LayerWidgetStrip — action-result survives the widget unmount (OVzK3)
   const clickBtn = async (c: HTMLElement, testid: string) =>
     act(async () => { (c.querySelector(`[data-testid="${testid}"]`) as HTMLButtonElement).click(); });
 
-  it('keeps the "Promoted N triples" feedback after promote empties the wm layer', async () => {
+  it('keeps the complete-KA share feedback after share empties the wm layer', async () => {
     apiMocks.promoteAssertion.mockResolvedValue({ promotedCount: 3 });
     const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'wm' }));
     expect(container.querySelector('[data-testid="widget-promote-all-btn"]')).toBeTruthy();
@@ -343,7 +343,7 @@ describe('LayerWidgetStrip — action-result survives the widget unmount (OVzK3)
     // The layer emptied → the action widget unmounted…
     expect(container.querySelector('[data-testid="widget-promote-all-btn"]')).toBeNull();
     // …but the lifted outcome persists in the strip's own state.
-    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Shared 1 complete Knowledge Asset to Shared Memory');
     await unmount();
   });
 

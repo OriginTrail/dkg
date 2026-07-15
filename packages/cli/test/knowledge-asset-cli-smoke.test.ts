@@ -628,6 +628,8 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/wm/write');
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/wm/finalize');
+    expect(calls.filter((call) => call.url === '/api/knowledge-assets/paper/wm/finalize'))
+      .toHaveLength(2);
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/swm/share');
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/vm/publish');
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/vm/publish-async');

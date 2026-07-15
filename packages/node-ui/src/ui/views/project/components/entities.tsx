@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { useFetch } from '../../../hooks.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublishWithSeal, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
@@ -446,9 +446,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         setResult(outcome.message);
       } else {
         // Publish THIS assertion as one Knowledge Asset (Design B, any entity
-        // count) via the shared knowledgeAssetPublishWithSeal wrapper — direct,
-        // fail-closed publishing with 207 partial-publish handling like the other CTAs.
-        const res = await knowledgeAssetPublishWithSeal(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
+        // count) via the direct canonical publish API, preserving 207 partial handling.
+        const res = await knowledgeAssetPublish(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
         setResult(
           res.contextGraphError
             ? `Published ${assertion.name} on-chain — ⚠ ${partialPublishWarning(res.contextGraphError)}`
@@ -479,7 +478,6 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       // off-chain, and /vm/publish registers-then-
       // mints only after preconditions pass.
       if (layer === 'wm') {
-        let total = 0;
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
@@ -489,16 +487,16 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
             a.name,
             a.subGraph ? { subGraphName: a.subGraph } : {},
           );
-          total += res.promotedCount;
           if (res.promotedCount === 0) noopCount += 1;
         }
         // Issue #864 — distinguish "some moved, some no-ops" from
         // "literally nothing moved" so the user gets the truth.
-        if (total > 0) {
-          const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
-          setResult(`Promoted ${total} triples across ${assertions.length} assertion${assertions.length !== 1 ? 's' : ''}${tail}`);
+        const sharedCount = assertions.length - noopCount;
+        if (sharedCount > 0) {
+          const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
+          setResult(`Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''}${tail}`);
         } else {
-          setResult('No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.');
+          setResult('No Knowledge Assets were newly shared — all were already in Shared Memory or still committing.');
         }
       } else {
         // Publish each shared assertion as its own Knowledge Asset (Design B) via the
@@ -555,8 +553,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     );
   }
 
-  const actionLabel = layer === 'wm' ? 'Promote → Shared' : 'Publish to VM';
-  const actionAllLabel = layer === 'wm' ? 'Promote All → Shared' : 'Publish all to Verifiable Memory';
+  const actionLabel = layer === 'wm' ? 'Share Complete KA → Shared' : 'Publish to VM';
+  const actionAllLabel = layer === 'wm' ? 'Share Complete KAs → Shared' : 'Publish all to Verifiable Memory';
 
   return (
     <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>

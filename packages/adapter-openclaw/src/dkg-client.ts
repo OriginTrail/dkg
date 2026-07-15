@@ -1243,10 +1243,16 @@ export class DkgDaemonClient {
     if (opts?.layer !== undefined && opts.layer !== 'wm') {
       throw new TypeError('Only Working Memory finalization is supported');
     }
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, {
+    const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(contextGraphId),
-      ...(opts ?? {}),
-    });
+    };
+    if (opts?.subGraphName) body.subGraphName = opts.subGraphName;
+    if (opts?.authorAgentAddress) body.authorAgentAddress = opts.authorAgentAddress;
+    if (opts?.preSignedAuthorAttestation) {
+      body.preSignedAuthorAttestation = opts.preSignedAuthorAttestation;
+    }
+    if (opts?.schemeVersion !== undefined) body.schemeVersion = opts.schemeVersion;
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, body);
   }
 
   /** Discard the open WM draft (git checkout -- .). */

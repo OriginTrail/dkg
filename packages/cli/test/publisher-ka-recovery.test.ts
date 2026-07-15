@@ -15,12 +15,10 @@ import {
 } from '../src/publisher-runner.js';
 
 describe('named KA publisher recovery wiring', () => {
-  it('preserves the queued graph UAL while generic recovery retains the public token UAL', async () => {
+  it('reconstructs the canonical V10 UAL from a confirmed transaction receipt', async () => {
     const txHash = `0x${'ab'.repeat(32)}` as `0x${string}`;
+    const kaId = 123456789n;
     const walletId = '0x1111111111111111111111111111111111111111';
-    const kaNumber = 7n;
-    const kaId = (BigInt(walletId) << 96n) | kaNumber;
-    const graphUal = `did:dkg:evm:31337/${walletId}/${kaNumber}`;
     const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
     const resolvePublishByTxHash = vi.fn(async () => ({
       batchId: kaId,
@@ -41,21 +39,12 @@ describe('named KA publisher recovery wiring', () => {
         resolvePublishByTxHash,
       },
     } as unknown as DKGPublisher;
-    const publishers = new Map([[walletId, publisher]]);
-    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
+    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(new Map([[walletId, publisher]]));
 
-    const job = {
+    const resolved = await resolver({
       status: 'broadcast',
-      request: {
-        jobType: 'knowledge-asset-vm-publish',
-        knowledgeAssetVmPublish: {
-          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-          kaUal: graphUal,
-        },
-      },
       broadcast: { txHash, walletId },
-    } as LiftJobBroadcast;
-    const resolved = await resolver(job);
+    } as LiftJobBroadcast);
 
     expect(resolvePublishByTxHash).toHaveBeenCalledWith(txHash);
     expect(resolved).toEqual({
@@ -67,18 +56,13 @@ describe('named KA publisher recovery wiring', () => {
       finalization: {
         mode: 'published',
         txHash,
-        ual: graphUal,
+        ual: `did:dkg:evm:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/${kaId}`,
         batchId: kaId.toString(),
         startKAId: kaId.toString(),
         endKAId: kaId.toString(),
         publisherAddress: walletId,
       },
       publishProof: { merkleRoot, authorAddress: walletId },
-    });
-    await expect(createChainRecoveryResolver(publishers)(job)).resolves.toMatchObject({
-      finalization: {
-        ual: `did:dkg:evm:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/${kaId}`,
-      },
     });
   });
 
@@ -181,14 +165,15 @@ describe('named KA publisher recovery wiring', () => {
     const txHash = `0x${'ef'.repeat(32)}` as `0x${string}`;
     const authorAddress = '0x3333333333333333333333333333333333333333';
     const kaId = (BigInt(authorAddress) << 96n) | 7n;
-    const recoveredUal = `did:dkg:evm:31337/${authorAddress.toLowerCase()}/7`;
+    const graphUal = `did:dkg:evm:31337/${authorAddress.toLowerCase()}/7`;
+    const receiptUal = `did:dkg:evm:31337/0x4444444444444444444444444444444444444444/${kaId}`;
     const request = {
       contextGraphId: 'music-social',
       name: 'albums',
       shareOperationId: 'share-op-1',
       roots: [],
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: recoveredUal,
+      kaUal: graphUal,
       assertionVersion: '1',
       publicTripleCount: 1,
       privateTripleCount: 0,
@@ -212,7 +197,7 @@ describe('named KA publisher recovery wiring', () => {
         finalization: {
           mode: 'published',
           txHash,
-          ual: recoveredUal,
+          ual: receiptUal,
           batchId: kaId.toString(),
           startKAId: kaId.toString(),
           endKAId: kaId.toString(),
@@ -244,6 +229,10 @@ describe('named KA publisher recovery wiring', () => {
     expect(finalizeRecovered).toHaveBeenCalledWith(expect.objectContaining({
       walletId: walletB,
       publisher: publisherB,
+      request: expect.objectContaining({ kaUal: graphUal }),
+      recovery: expect.objectContaining({
+        finalization: expect.objectContaining({ ual: receiptUal }),
+      }),
     }));
   });
 });

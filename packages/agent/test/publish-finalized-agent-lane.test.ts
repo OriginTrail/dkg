@@ -296,6 +296,45 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(legacy).toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('rejects a persisted legacy seal before inspecting an empty WM draft', async () => {
+    const store = new OxigraphStore();
+    const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
+    await store.insert(buildAssertionSealQuads({
+      assertionUri,
+      metaGraph: contextGraphMetaUri(CG),
+      merkleRoot: MERKLE,
+      authorAddress: AGENT_B,
+      authorAttestationR: new Uint8Array(32).fill(1),
+      authorAttestationVS: new Uint8Array(32).fill(2),
+      authorSchemeVersion: 1,
+      chainId: 31337n,
+      kav10Address: AGENT_B,
+      reservedKaId: RESERVED_KA_ID,
+      finalizedAtIso: '2026-01-01T00:00:00.000Z',
+      rootEntities: [ROOT],
+    }) as Quad[]);
+
+    let wmReads = 0;
+    const agent = Object.create(DKGAgent.prototype) as any;
+    agent.store = store;
+    agent.log = makeLog();
+    agent.publisher = {
+      wmGraphUri: async () => 'urn:wm:legacy',
+      assertionQuery: async () => {
+        wmReads += 1;
+        return [];
+      },
+      assertionQueryPrivate: async () => {
+        wmReads += 1;
+        return [];
+      },
+    };
+
+    await expect(agent.assertionFinalize(CG, NAME, AGENT_B))
+      .rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(wmReads).toBe(0);
+  });
+
   it('cleans only the finalized named lifecycle after a confirmed update', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);

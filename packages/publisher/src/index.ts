@@ -158,6 +158,12 @@ export { buildVerificationMetadata } from './verification-metadata.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
 export { PublishJournal, type JournalEntry } from './publish-journal.js';
 export {
+  decodeKnowledgeAssetContentEnvelope,
+  serializeKnowledgeAssetContentEnvelope,
+  type GraphKnowledgeAssetContentEnvelope,
+  type KnowledgeAssetContentEnvelope,
+} from './knowledge-asset-content-envelope.js';
+export {
   LIFT_JOB_STATES,
   LIFT_TRANSITION_TYPES,
   LIFT_AUTHORITY_TYPES,
