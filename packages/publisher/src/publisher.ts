@@ -88,6 +88,15 @@ export interface V10ACKProviderBaseParams {
   merkleLeafCount: number;
   /** Canonical KA UAL used by receiver-side lifecycle logs. */
   assetUal?: string;
+  /** Complete rootless-KA content envelope; omitted together for legacy ACKs. */
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
 }
 
 export type V10ACKProviderParams =
@@ -457,6 +466,15 @@ export interface PublishResult {
   v10Origin?: boolean;
   /** Sub-graph the data was published into (for gossip propagation). */
   subGraphName?: string;
+  /** Complete rootless-KA content envelope; omitted together for legacy results. */
+  contentScopeVersion?: number;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  /** Effective access envelope persisted for graph-scoped KAs. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
 }
 
 export interface Publisher {

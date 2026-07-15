@@ -94,7 +94,9 @@ export const FinalizationMessageSchema = new Type('FinalizationMessage')
   .add(new Field('assertionVersion', 19, 'string'))
   .add(new Field('publicTripleCount', 20, 'uint32'))
   .add(new Field('privateMerkleRoot', 21, 'bytes'))
-  .add(new Field('privateTripleCount', 22, 'uint32'));
+  .add(new Field('privateTripleCount', 22, 'uint32'))
+  .add(new Field('accessPolicy', 23, 'string'))
+  .add(new Field('allowedPeers', 24, 'string', 'repeated'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -164,6 +166,10 @@ export interface FinalizationMessageMsg {
   privateMerkleRoot?: Uint8Array;
   /** Number of private RDF triples committed by privateMerkleRoot. */
   privateTripleCount?: number;
+  /** Rootless KA query policy retained by receiving replicas. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Exact peer allow-list when accessPolicy is allowList. */
+  allowedPeers?: string[];
 }
 
 const MAX_UINT64 = (1n << 64n) - 1n;

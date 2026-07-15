@@ -454,9 +454,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
     const finalizationTopic = contextGraphFinalizationTopic(contextGraphId);
     this.gossip.subscribe(finalizationTopic);
-    this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
+    this.gossip.onMessage(finalizationTopic, async (_topic, data, from) => {
       const fh = this.getOrCreateFinalizationHandler();
-      await fh.handleFinalizationMessage(data, contextGraphId);
+      await fh.handleFinalizationMessage(data, contextGraphId, from);
     });
   }
 

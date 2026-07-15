@@ -135,7 +135,11 @@ describe('graph-scoped finalization handler', () => {
   it('atomically replaces the exact VM graph and emits constant-size rootless metadata', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
 
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ...message,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWReader'],
+    }), CG, '12D3KooWPublisher');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(0);
@@ -167,8 +171,13 @@ describe('graph-scoped finalization handler', () => {
       count: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
       privateCount: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
       graph: vmGraph,
-      policy: '"ownerOnly"',
+      policy: '"allowList"',
     });
+    const allowedPeer = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> ` +
+        `<http://dkg.io/ontology/allowedPeer> "12D3KooWReader" } }`,
+    );
+    expect(allowedPeer).toMatchObject({ type: 'boolean', value: true });
     const legacyRoots = await store.query(
       `ASK { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/rootEntity> ?root } }`,
     );

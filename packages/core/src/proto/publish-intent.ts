@@ -101,7 +101,9 @@ export const PublishIntentSchema = new Type('PublishIntent')
   .add(new Field('assertionVersion', 23, 'string'))
   .add(new Field('publicTripleCount', 24, 'uint32'))
   .add(new Field('privateMerkleRoot', 25, 'bytes'))
-  .add(new Field('privateTripleCount', 26, 'uint32'));
+  .add(new Field('privateTripleCount', 26, 'uint32'))
+  .add(new Field('accessPolicy', 27, 'string'))
+  .add(new Field('allowedPeers', 28, 'string', 'repeated'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -223,6 +225,10 @@ export interface PublishIntentMsg {
   privateMerkleRoot?: Uint8Array;
   /** Number of private RDF triples committed by privateMerkleRoot. */
   privateTripleCount?: number;
+  /** Rootless KA query policy retained across ACK-backed replication. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Exact peer allow-list when accessPolicy is allowList. */
+  allowedPeers?: string[];
 }
 
 /** Sent in `ackProtocolVersion` for LU-11 chunked ACKs. */

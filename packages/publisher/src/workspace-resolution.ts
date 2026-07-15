@@ -66,6 +66,8 @@ export interface KnowledgeAssetWorkspaceHead {
   readonly shareOperationId: string;
   /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
   readonly publisherPeerId: string;
+  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers: string[];
 }
 
 /**
@@ -88,7 +90,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   );
   const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
   const result = await params.store.query(
-    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?shareOperationId ?operation ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId WHERE {
+    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?shareOperationId ?operation ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId ?accessPolicy WHERE {
       GRAPH <${assertSafeIri(metaGraph)}> {
         <${assertSafeIri(subject)}> <${DKG}contentScopeVersion> ?scopeVersion ;
           <${DKG}kaUal> ?kaUal ;
@@ -103,6 +105,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
           <${DKG}privateTripleCount> ?privateCount ;
           <${DKG}publisherPeerId> ?publisherPeerId .
         OPTIONAL { ?operation <${DKG}privateMerkleRoot> ?privateRoot }
+        OPTIONAL { ?operation <${DKG}accessPolicy> ?accessPolicy }
       }
     } LIMIT 1`,
   );
@@ -134,6 +137,12 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   const privateMerkleRoot = stripLiteral(row?.['privateRoot'])?.trim();
   const shareOperationId = stripLiteral(row?.['shareOperationId'])?.trim() ?? '';
   const publisherPeerId = stripLiteral(row?.['publisherPeerId'])?.trim() ?? '';
+  const rawAccessPolicy = stripLiteral(row?.['accessPolicy'])?.trim();
+  const accessPolicy = rawAccessPolicy === 'public'
+    || rawAccessPolicy === 'ownerOnly'
+    || rawAccessPolicy === 'allowList'
+    ? rawAccessPolicy
+    : undefined;
   const expectedOperationSubject = shareOperationId
     ? workspaceOperationSubject(params.contextGraphId, shareOperationId)
     : '';
@@ -150,8 +159,24 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     operationVersion.toString() !== actualScope.assertionVersion ||
     (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? '')) ||
     (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+    || (rawAccessPolicy !== undefined && accessPolicy === undefined)
   ) {
     throw new Error(`Corrupt graph-scoped SWM head for ${scope.ual}: incomplete commitment metadata`);
+  }
+  const peersResult = await params.store.query(
+    `SELECT ?peer WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+      `<${assertSafeIri(expectedOperationSubject)}> <${DKG}allowedPeer> ?peer } }`,
+  );
+  const allowedPeers = peersResult.type === 'bindings'
+    ? [...new Set(peersResult.bindings
+        .map((binding) => stripLiteral(binding['peer'])?.trim())
+        .filter((peer): peer is string => Boolean(peer)))]
+    : [];
+  if (
+    (accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+  ) {
+    throw new Error(`Corrupt graph-scoped SWM head for ${scope.ual}: invalid access envelope`);
   }
   return {
     kaUal: actualScope.ual,
@@ -163,6 +188,8 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     privateTripleCount,
     shareOperationId,
     publisherPeerId,
+    ...(accessPolicy ? { accessPolicy } : {}),
+    allowedPeers,
   };
 }
 
@@ -352,6 +379,8 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
   privateMerkleRoot?: Uint8Array;
   privateTripleCount?: number;
   publisherPeerId?: string;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: readonly string[];
   agentAddress?: string;
   subGraphName?: string;
   timestamp?: Date;
@@ -400,6 +429,8 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
       privateMerkleRoot: params.privateMerkleRoot,
       privateTripleCount: params.privateTripleCount,
       publisherPeerId,
+      accessPolicy: params.accessPolicy,
+      allowedPeers: params.allowedPeers,
       agentAddress: params.agentAddress?.trim() || undefined,
       timestamp,
       subGraphName,

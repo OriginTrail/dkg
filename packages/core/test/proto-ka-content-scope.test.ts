@@ -76,11 +76,15 @@ describe('rootless KA graph scope wire contract', () => {
       publicTripleCount: 1_000,
       privateMerkleRoot: PRIVATE_ROOT,
       privateTripleCount: 11,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWReader'],
     }));
 
     expect(decoded.kaUal).toBe(UAL);
     expect(decoded.rootEntities).toEqual([]);
     expect(decoded.privateMerkleRoots).toEqual([]);
+    expect(decoded.accessPolicy).toBe('allowList');
+    expect(decoded.allowedPeers).toEqual(['12D3KooWReader']);
     expectGraphScope(decoded);
   });
 
@@ -102,10 +106,14 @@ describe('rootless KA graph scope wire contract', () => {
       publicTripleCount: 1_000,
       privateMerkleRoot: PRIVATE_ROOT,
       privateTripleCount: 11,
+      accessPolicy: 'ownerOnly',
+      allowedPeers: [],
     }));
 
     expect(decoded.ual).toBe(UAL);
     expect(decoded.rootEntities).toEqual([]);
+    expect(decoded.accessPolicy).toBe('ownerOnly');
+    expect(decoded.allowedPeers).toEqual([]);
     expectGraphScope(decoded);
   });
 
@@ -122,6 +130,8 @@ describe('rootless KA graph scope wire contract', () => {
       chainId: 'base:8453',
       publisherSignatureR: new Uint8Array(32),
       publisherSignatureVs: new Uint8Array(32),
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWOne', '12D3KooWTwo'],
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       assertionVersion: '2',
       publicTripleCount: 1_000,
@@ -132,6 +142,8 @@ describe('rootless KA graph scope wire contract', () => {
     expect(decoded.ual).toBe(UAL);
     expect(decoded.kas).toEqual([]);
     expectGraphScope(decoded);
+    expect(decoded.accessPolicy).toBe('allowList');
+    expect(decoded.allowedPeers).toEqual(['12D3KooWOne', '12D3KooWTwo']);
   });
 
   it('round-trips one KA scope through update gossip', () => {

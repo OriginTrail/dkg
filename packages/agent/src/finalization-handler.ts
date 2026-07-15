@@ -223,7 +223,11 @@ export class FinalizationHandler {
     this.lifecycle = new FinalizationLifecycleLogger(this.log, lifecycleLogOptions);
   }
 
-  async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
+  async handleFinalizationMessage(
+    data: Uint8Array,
+    contextGraphId: string,
+    sourcePeerId?: string,
+  ): Promise<void> {
     let ctx = createOperationContext('gossip');
     let decodedMsg: FinalizationMessageMsg | undefined;
     let resolvedTargetContextGraphId: string | undefined;
@@ -355,6 +359,7 @@ export class FinalizationHandler {
           ctxGraphId,
           subGraphName,
           blockNumber,
+          sourcePeerId,
           ctx,
         });
         if (graphOutcome === 'applied' || graphOutcome === 'already-confirmed') {
@@ -606,6 +611,7 @@ export class FinalizationHandler {
     ctxGraphId?: string;
     subGraphName?: string;
     blockNumber: number;
+    sourcePeerId?: string;
     ctx: OperationContext;
   }): Promise<'applied' | 'already-confirmed' | 'deferred'> {
     const {
@@ -614,6 +620,7 @@ export class FinalizationHandler {
       ctxGraphId,
       subGraphName,
       blockNumber,
+      sourcePeerId,
       ctx,
     } = input;
     if (msg.rootEntities.length !== 0) {
@@ -655,6 +662,21 @@ export class FinalizationHandler {
       || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
     ) {
       this.log.warn(ctx, `Finalization: invalid graph-scoped content envelope for ${scope.ual}, ignoring`);
+      return 'deferred';
+    }
+    const rawAllowedPeers = msg.allowedPeers ?? [];
+    const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
+    const wireAccessPolicy = msg.accessPolicy || undefined;
+    if (
+      (wireAccessPolicy !== undefined
+        && wireAccessPolicy !== 'public'
+        && wireAccessPolicy !== 'ownerOnly'
+        && wireAccessPolicy !== 'allowList')
+      || allowedPeers.length !== rawAllowedPeers.length
+      || (wireAccessPolicy === 'allowList' && allowedPeers.length === 0)
+      || (wireAccessPolicy !== 'allowList' && allowedPeers.length > 0)
+    ) {
+      this.log.warn(ctx, `Finalization: invalid graph-scoped access envelope for ${scope.ual}`);
       return 'deferred';
     }
 
@@ -731,6 +753,16 @@ export class FinalizationHandler {
       this.log.warn(ctx, `Finalization: no matching graph-scoped SWM head for ${scope.ual}`);
       return 'deferred';
     }
+    const trustedWireAccess = wireAccessPolicy !== undefined
+      && sourcePeerId !== undefined
+      && sourcePeerId === head.publisherPeerId;
+    if (wireAccessPolicy !== undefined && !trustedWireAccess) {
+      this.log.warn(
+        ctx,
+        `Finalization: ignoring untrusted access envelope for ${scope.ual}; ` +
+          `source=${sourcePeerId ?? '(missing)'} owner=${head.publisherPeerId}`,
+      );
+    }
 
     const swmResult = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(swmGraph)}> { ?s ?p ?o } }`,
@@ -787,6 +819,12 @@ export class FinalizationHandler {
         blockNumber,
         txIndex: verified.txIndex ?? 0,
       },
+      accessPolicy: head.accessPolicy ?? (trustedWireAccess ? wireAccessPolicy : undefined),
+      allowedPeers: head.accessPolicy
+        ? head.allowedPeers
+        : trustedWireAccess
+          ? allowedPeers
+          : [],
       subGraphName,
       source: 'finalization',
       ctx,
@@ -974,6 +1012,8 @@ export class FinalizationHandler {
     batchId: bigint;
     authorAddress?: string;
     materializedVersion: MaterializedVersion;
+    accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+    allowedPeers?: string[];
     subGraphName?: string;
     source: 'finalization' | 'chain-reconcile';
     ctx: OperationContext;
@@ -991,6 +1031,8 @@ export class FinalizationHandler {
       batchId,
       authorAddress,
       materializedVersion,
+      accessPolicy: requestedAccessPolicy,
+      allowedPeers: requestedAllowedPeers = [],
       subGraphName,
       source,
       ctx,
@@ -1010,6 +1052,16 @@ export class FinalizationHandler {
       subGraphName,
     );
     const metaGraph = contextGraphMetaUri(contextGraphId);
+    const effectiveAccessPolicy = requestedAccessPolicy
+      ?? head.accessPolicy
+      ?? 'ownerOnly';
+    const effectiveAllowedPeers = effectiveAccessPolicy === 'allowList'
+      ? (requestedAccessPolicy ? requestedAllowedPeers : head.allowedPeers)
+      : [];
+    const safeAccessPolicy = effectiveAccessPolicy === 'allowList'
+      && effectiveAllowedPeers.length === 0
+      ? 'ownerOnly'
+      : effectiveAccessPolicy;
 
     const outcome = await withMaterializationLock(metaGraph, scope.ual, async () => {
       if (!(await shouldApplyMaterialization(
@@ -1056,7 +1108,10 @@ export class FinalizationHandler {
           contextGraphId,
           merkleRoot: computedMerkleRoot,
           publisherPeerId: head.publisherPeerId,
-          accessPolicy: privateTripleCount > 0 ? 'ownerOnly' : 'public',
+          accessPolicy: safeAccessPolicy,
+          ...(safeAccessPolicy === 'allowList'
+            ? { allowedPeers: effectiveAllowedPeers }
+            : {}),
           timestamp: new Date(),
           subGraphName,
           ...(authorAddress ? { authorAddress } : {}),

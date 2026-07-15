@@ -592,6 +592,8 @@ export interface KnowledgeAssetShareMetadata {
   /** Number of private triples committed by privateMerkleRoot. */
   privateTripleCount?: number;
   publisherPeerId: string;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: readonly string[];
   agentAddress?: string;
   timestamp: Date;
   subGraphName?: string;
@@ -626,6 +628,15 @@ export function generateKnowledgeAssetShareMetadata(
   if (meta.publicTripleCount === 0 && privateTripleCount === 0) {
     throw new Error('Graph-scoped KA share cannot contain zero public and zero private triples');
   }
+  const rawAllowedPeers = meta.allowedPeers ?? [];
+  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
+  if (
+    allowedPeers.length !== rawAllowedPeers.length
+    || (meta.accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (meta.accessPolicy !== 'allowList' && allowedPeers.length > 0)
+  ) {
+    throw new Error('Graph-scoped KA share has an invalid access-policy peer envelope');
+  }
   const subject = `urn:dkg:share:${meta.contextGraphId}:${meta.shareOperationId}`;
   const quads = [
     mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
@@ -649,6 +660,12 @@ export function generateKnowledgeAssetShareMetadata(
     quads.push(
       mq(subject, `${DKG}privateMerkleRoot`, lit(`0x${toHex(privateMerkleRoot)}`), swmMetaGraph),
     );
+  }
+  if (meta.accessPolicy) {
+    quads.push(mq(subject, `${DKG}accessPolicy`, lit(meta.accessPolicy), swmMetaGraph));
+    for (const peer of allowedPeers) {
+      quads.push(mq(subject, `${DKG}allowedPeer`, lit(peer), swmMetaGraph));
+    }
   }
   if (meta.subGraphName) {
     quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), swmMetaGraph));

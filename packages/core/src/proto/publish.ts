@@ -42,6 +42,8 @@ export const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('publicTripleCount', 18, 'uint32'))
   .add(new Field('privateMerkleRoot', 19, 'bytes'))
   .add(new Field('privateTripleCount', 20, 'uint32'))
+  .add(new Field('accessPolicy', 21, 'string'))
+  .add(new Field('allowedPeers', 22, 'string', 'repeated'))
   .add(KAManifestEntrySchema);
 
 export const PublishAckSchema = new Type('PublishAck')
@@ -90,6 +92,10 @@ export interface PublishRequestMsg {
   privateMerkleRoot?: Uint8Array;
   /** Number of private RDF triples committed by privateMerkleRoot. */
   privateTripleCount?: number;
+  /** KA-level access policy carried by graph-scoped writers. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Exact allow-list retained when accessPolicy is allowList. */
+  allowedPeers?: string[];
 }
 
 export interface PublishAckMsg {

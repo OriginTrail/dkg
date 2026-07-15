@@ -1426,6 +1426,19 @@ export class PublishMethods extends DKGAgentBase {
       ? { aeadBindingContextGraphId: onChainId }
       : undefined;
 
+    // Every new on-chain KA uses the V2 atomic content model. Curated CGs
+    // include their deterministic public catalog floor in that same asset;
+    // the exact trust-key set is passed to the publisher for policy checks.
+    const graphScopedDirectPublish = onChainId != null
+      && this.chain.isV10Ready?.() === true
+      && typeof this.chain.getEvmChainId === 'function'
+      && typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
+    const preparedCatalog = graphScopedDirectPublish
+      && await this.isPrivateContextGraph(contextGraphId)
+      ? replaceCatalogPartitionWithGeneratedPrivateFloor(contextGraphId, quads)
+      : undefined;
+    const publishQuads = preparedCatalog?.quads ?? quads;
+
     // RFC-001 §9.x — sign-at-creation. The publisher refuses on-chain
     // publishes without a `precomputedAttestation`, so the agent
     // mints one here at the publish boundary using the publisher
@@ -1449,7 +1462,7 @@ export class PublishMethods extends DKGAgentBase {
       try {
         precomputedAttestation = await this._buildPrecomputedAttestationForSelection(
           contextGraphId,
-          quads,
+          publishQuads,
           {
             targetOnChainCgId: onChainId,
             // Round 4 review §11 — propagate privateQuads so the
@@ -1459,16 +1472,51 @@ export class PublishMethods extends DKGAgentBase {
             // with private content silently downgrades to tentative on
             // the publisher's `expectedMerkleRoot` guard).
             privateQuads,
+            graphScoped: graphScopedDirectPublish,
           },
         );
       } catch (err) {
-        this.log.warn(
+        this.log.error(
           ctx,
-          `Inline seal mint failed; on-chain publish will fall back to tentative: ${
+          `Inline rootless seal preparation failed: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
+        throw err;
       }
+    }
+
+    let graphScopeOptions: Pick<
+      PublishOptions,
+      | 'contentScopeVersion'
+      | 'kaUal'
+      | 'assertionVersion'
+      | 'publicTripleCount'
+      | 'privateMerkleRoot'
+      | 'privateTripleCount'
+    > = {};
+    if (graphScopedDirectPublish) {
+      if (!precomputedAttestation) {
+        throw new Error('Rootless direct publish requires a precomputed author attestation');
+      }
+      const canonical = await skolemizeKnowledgeAssetParts(publishQuads, privateQuads ?? []);
+      const privateMerkleRoot = computePrivateRoot(canonical.privateQuads);
+      const authorAddress = ethers.getAddress(precomputedAttestation.authorAddress).toLowerCase();
+      const reservedKaId = precomputedAttestation.reservedKaId;
+      if ((reservedKaId >> 96n) !== BigInt(authorAddress)) {
+        throw new Error(
+          `Rootless direct publish reserved kaId ${reservedKaId} is outside author ${authorAddress}'s namespace`,
+        );
+      }
+      const kaNumber = reservedKaId & ((1n << 96n) - 1n);
+      graphScopeOptions = {
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: `did:dkg:${this.chain.chainId}/${authorAddress}/${kaNumber}`,
+        assertionVersion: '1',
+        publicTripleCount: canonical.publicQuads.length,
+        ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+        privateTripleCount: canonical.privateQuads.length,
+      };
     }
 
     // OT-RFC-38 / LU-5 — curated CG ACK payloads ship as AEAD ciphertext
@@ -1504,7 +1552,7 @@ export class PublishMethods extends DKGAgentBase {
 
     const result = await this.publisher.publish({
       contextGraphId,
-      quads,
+      quads: publishQuads,
       privateQuads,
       publisherPeerId: this.peerId,
       accessPolicy: opts?.accessPolicy,
@@ -1518,6 +1566,9 @@ export class PublishMethods extends DKGAgentBase {
       publishContextGraphId: onChainId ?? undefined,
       publishEpochs: opts?.publishEpochs,
       precomputedAttestation,
+      trustedNonManifestCatalogTriples:
+        preparedCatalog?.trustedNonManifestCatalogTriples,
+      ...graphScopeOptions,
       encryptInlinePayload,
       encryptInlineChunked,
     });
@@ -1530,7 +1581,10 @@ export class PublishMethods extends DKGAgentBase {
 
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
-    await this.broadcastPublish(contextGraphId, result, ctx);
+    await this.broadcastPublish(contextGraphId, result, ctx, {
+      accessPolicy: opts?.accessPolicy,
+      allowedPeers: opts?.allowedPeers,
+    });
     onPhase?.('broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kaId=${result.kaId}`);
 
@@ -2968,6 +3022,8 @@ export class PublishMethods extends DKGAgentBase {
        * matches what the publisher will recompute.
        */
       privateQuads?: Quad[];
+      /** Compute the V2 one-asset commitment instead of legacy per-root commitments. */
+      graphScoped?: boolean;
     },
   ): Promise<PublishOptions['precomputedAttestation']> {
     if (
@@ -2989,15 +3045,26 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     const privateQuads = opts?.privateQuads ?? [];
-    const trustedCatalogOnChainId = opts?.targetOnChainCgId ?? await this.getContextGraphOnChainId(contextGraphId);
-    const canonical = canonicalPublishPayload(
-      quads,
-      privateQuads,
-      trustedCatalogOnChainId != null && (await this.isPrivateContextGraph(contextGraphId))
-        ? { trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(contextGraphId) }
-        : undefined,
-    );
-    const merkleRoot = canonical.kcMerkleRoot;
+    let merkleRoot: Uint8Array;
+    if (opts?.graphScoped) {
+      const canonical = await skolemizeKnowledgeAssetParts(quads, privateQuads);
+      const privateRoot = computePrivateRoot(canonical.privateQuads);
+      merkleRoot = computeFlatKCRoot(
+        canonical.publicQuads,
+        privateRoot ? [privateRoot] : [],
+      );
+    } else {
+      const trustedCatalogOnChainId = opts?.targetOnChainCgId
+        ?? await this.getContextGraphOnChainId(contextGraphId);
+      const canonical = canonicalPublishPayload(
+        quads,
+        privateQuads,
+        trustedCatalogOnChainId != null && (await this.isPrivateContextGraph(contextGraphId))
+          ? { trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(contextGraphId) }
+          : undefined,
+      );
+      merkleRoot = canonical.kcMerkleRoot;
+    }
 
     const chainId = await this.chain.getEvmChainId();
     const kav10Address = await this.chain.getKnowledgeAssetsLifecycleAddress();
@@ -4626,6 +4693,8 @@ export class PublishMethods extends DKGAgentBase {
         publicTripleCount: seal.publicTripleCount,
         ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
         privateTripleCount: seal.privateTripleCount,
+        accessPolicy: result.accessPolicy ?? 'ownerOnly',
+        allowedPeers: result.allowedPeers ?? [],
       };
       const topic = contextGraphFinalizationTopic(request.contextGraphId);
       try {
@@ -5739,6 +5808,8 @@ export class PublishMethods extends DKGAgentBase {
                 ? { privateMerkleRoot: options.privateMerkleRoot }
                 : {}),
               privateTripleCount: options.privateTripleCount ?? 0,
+              accessPolicy: result.accessPolicy ?? 'ownerOnly',
+              allowedPeers: result.allowedPeers ?? [],
             }
           : {}),
       };

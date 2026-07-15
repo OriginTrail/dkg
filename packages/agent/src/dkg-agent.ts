@@ -11,6 +11,9 @@ import {
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
@@ -2053,6 +2056,14 @@ export class DKGAgent extends DKGAgentBase {
         subGraphName: params.subGraphName,
         merkleLeafCount: params.merkleLeafCount,
         assetUal: params.assetUal,
+        contentScopeVersion: params.contentScopeVersion,
+        kaUal: params.kaUal,
+        assertionVersion: params.assertionVersion,
+        publicTripleCount: params.publicTripleCount,
+        privateMerkleRoot: params.privateMerkleRoot,
+        privateTripleCount: params.privateTripleCount,
+        accessPolicy: params.accessPolicy,
+        allowedPeers: params.allowedPeers,
         ackMode: params.ackMode,
       });
       return result.acks;
@@ -2226,26 +2237,55 @@ export class DKGAgent extends DKGAgentBase {
     };
   }
 
-  async broadcastPublish(contextGraphId: string, result: PublishResult, ctx: OperationContext): Promise<void> {
+  async broadcastPublish(
+    contextGraphId: string,
+    result: PublishResult,
+    ctx: OperationContext,
+    policy?: {
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      allowedPeers?: string[];
+    },
+  ): Promise<void> {
     // Use the public quads from the publish result to avoid leaking private
     // triples that are stored in the same data graph.
     const publicQuads = result.publicQuads ?? [];
+    const isGraphScoped = result.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
+    const graphScope = isGraphScoped
+      ? createGraphKnowledgeAssetScope(result.ual, result.assertionVersion ?? '')
+      : undefined;
+    const exactGraph = graphScope
+      ? knowledgeAssetLayerGraphUri(
+          contextGraphId,
+          MemoryLayer.VerifiableMemory,
+          graphScope,
+          result.subGraphName,
+        )
+      : undefined;
     const ntriples = publicQuads.map(q => {
       const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-      return `<${q.subject}> <${q.predicate}> ${obj} .`;
+      return exactGraph
+        ? `<${q.subject}> <${q.predicate}> ${obj} <${exactGraph}> .`
+        : `<${q.subject}> <${q.predicate}> ${obj} .`;
     }).join('\n');
+
+    const accessPolicy = result.accessPolicy
+      ?? policy?.accessPolicy
+      ?? ((result.privateTripleCount ?? 0) > 0 ? 'ownerOnly' : 'public');
+    const allowedPeers = result.allowedPeers ?? policy?.allowedPeers ?? [];
 
     const onChain = result.onChainResult;
     const msg = encodePublishRequest({
       ual: result.ual,
       nquads: new TextEncoder().encode(ntriples),
       contextGraphId: contextGraphId,
-      kas: result.kaManifest.map(ka => ({
-        tokenId: ka.tokenId,
-        rootEntity: ka.rootEntity,
-        privateMerkleRoot: ka.privateMerkleRoot ?? new Uint8Array(0),
-        privateTripleCount: ka.privateTripleCount ?? 0,
-      })),
+      kas: isGraphScoped
+        ? []
+        : result.kaManifest.map(ka => ({
+            tokenId: ka.tokenId,
+            rootEntity: ka.rootEntity,
+            privateMerkleRoot: ka.privateMerkleRoot ?? new Uint8Array(0),
+            privateTripleCount: ka.privateTripleCount ?? 0,
+          })),
       publisherIdentity: this.wallet.keypair.publicKey,
       publisherAddress: onChain?.publisherAddress ?? '',
       startKAId: onChain?.startKAId ?? 0n,
@@ -2257,6 +2297,19 @@ export class DKGAgent extends DKGAgentBase {
       blockNumber: onChain?.blockNumber ?? 0,
       operationId: ctx.operationId,
       subGraphName: result.subGraphName,
+      ...(graphScope
+        ? {
+            contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+            assertionVersion: graphScope.assertionVersion,
+            publicTripleCount: result.publicTripleCount ?? 0,
+            ...(result.privateMerkleRoot
+              ? { privateMerkleRoot: result.privateMerkleRoot }
+              : {}),
+            privateTripleCount: result.privateTripleCount ?? 0,
+            accessPolicy,
+            allowedPeers,
+          }
+        : {}),
     });
 
     const topic = contextGraphPublishTopic(contextGraphId);

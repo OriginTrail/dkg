@@ -253,6 +253,13 @@ async function invokeV10ACKProvider(
     return (provider as V10ACKProviderObject)(params);
   }
 
+  if (params.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(
+      'Graph-scoped V10 ACK collection requires object-form v10ACKProvider ' +
+      'so the complete content and access envelopes reach ACK replicas.',
+    );
+  }
+
   if (params.ackMode.kind === 'folded-private') {
     throw new Error(
       'Folded-private V10 ACK collection requires object-form v10ACKProvider ' +
@@ -2577,7 +2584,7 @@ export class DKGPublisher implements Publisher {
     // `useCuratedCatalog` gates the inline-catalog ACK path (cores rebuild the
     // catalog root from the inline plaintext and DECLINE on mismatch).
     const useCuratedCatalog = useEncryptedInline && catalogCommitment !== undefined;
-    if (useEncryptedInline && privateRoots.length > 0) {
+    if (useEncryptedInline && privateRoots.length > 0 && !graphPublish) {
       throw new Error(
         'Encrypted inline publishes with privateQuads are not supported by the current V10 ACK model. ' +
         'The publisher can collect either curated-catalog ACKs or folded-private public-CG ACKs, ' +
@@ -2796,6 +2803,18 @@ export class DKGPublisher implements Publisher {
           subGraphName: options.subGraphName,
           merkleLeafCount: kcMerkleLeafCount,
           assetUal,
+          ...(graphPublish
+            ? {
+                contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+                kaUal: graphPublish.scope.ual,
+                assertionVersion: graphPublish.scope.assertionVersion,
+                publicTripleCount: graphPublish.publicTripleCount,
+                ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
+                privateTripleCount: graphPublish.privateTripleCount,
+                accessPolicy: effectiveAccessPolicy,
+                allowedPeers: [...normalizedAllowedPeers],
+              }
+            : {}),
         };
         const lifecycleAckMode = useCuratedCatalog
           ? 'curated_catalog'
@@ -3730,6 +3749,17 @@ export class DKGPublisher implements Publisher {
       v10ACKs,
       v10Origin: usedV10Path,
       subGraphName: options.subGraphName,
+      ...(graphPublish
+        ? {
+            contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+            assertionVersion: graphPublish.scope.assertionVersion,
+            publicTripleCount: graphPublish.publicTripleCount,
+            ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
+            privateTripleCount: graphPublish.privateTripleCount,
+            accessPolicy: effectiveAccessPolicy,
+            allowedPeers: [...normalizedAllowedPeers],
+          }
+        : {}),
     };
     lifecycle.emit('finalization', 'complete', {
       metadata: {

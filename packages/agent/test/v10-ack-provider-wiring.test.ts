@@ -337,6 +337,51 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     })).rejects.toThrow('zero is valid only for curated encrypted updates');
   });
 
+  it('forwards the complete graph-scoped publish envelope into ACK collection', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const publishProvider = boot.internals.createV10ACKProvider('test-cg') as V10ACKProviderObject;
+    const root = new Uint8Array(32).fill(0x44);
+    const privateRoot = new Uint8Array(32).fill(0x55);
+    const kaUal = 'did:dkg:mock:31337/0x1111111111111111111111111111111111111111/7';
+
+    await expect(publishProvider({
+      merkleRoot: root,
+      contextGraphId: '42',
+      kaCount: 1,
+      rootEntities: [],
+      publicByteSize: 100n,
+      merkleLeafCount: 4,
+      contentScopeVersion: 2,
+      kaUal,
+      assertionVersion: '1',
+      publicTripleCount: 4,
+      privateMerkleRoot: privateRoot,
+      privateTripleCount: 9,
+      accessPolicy: 'ownerOnly',
+      allowedPeers: [],
+      stagingQuads: new Uint8Array([1]),
+      ackMode: {
+        kind: 'curated-catalog',
+        catalogCommitment: { catalogRoot: root, catalogLeafCount: 4 },
+      },
+    })).resolves.toEqual([]);
+
+    expect(capturedPublishCollectParams).toHaveLength(1);
+    expect(capturedPublishCollectParams[0]).toMatchObject({
+      rootEntities: [],
+      contentScopeVersion: 2,
+      kaUal,
+      assertionVersion: '1',
+      publicTripleCount: 4,
+      privateTripleCount: 9,
+      accessPolicy: 'ownerOnly',
+      allowedPeers: [],
+    });
+    expect((capturedPublishCollectParams[0] as { privateMerkleRoot: Uint8Array }).privateMerkleRoot)
+      .toBe(privateRoot);
+  });
+
   it('passes ackSendTimeoutMs through publish and update ACK provider sendP2P closures', async () => {
     const boot = await bootProviderAgent({ ackSendTimeoutMs: 60_000 });
     agent = boot.agent;
