@@ -6,8 +6,16 @@ import {
   sparqlString,
   validateSubGraphName,
   contextGraphCatalogUri,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import type { QueryOptions, TripleStore, ChangelogReader, ChangeOp } from '@origintrail-official/dkg-storage';
+import {
+  StoreResponseTooLargeError,
+  type QueryOptions,
+  type TripleStore,
+  type ChangelogReader,
+  type ChangeOp,
+} from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import {
@@ -39,6 +47,11 @@ const DKG_SHARE_OPERATION_ID = `${DKG}shareOperationId`;
 const DKG_ASSERTION_GRAPH = `${DKG}assertionGraph`;
 const DKG_ASSERTION_NAME = `${DKG}assertionName`;
 const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
+const DKG_CONTEXT_GRAPH = `${DKG}contextGraph`;
+const DKG_PUBLIC_TRIPLE_COUNT = `${DKG}publicTripleCount`;
+const DKG_PRIVATE_TRIPLE_COUNT = `${DKG}privateTripleCount`;
+const DKG_STATUS = `${DKG}status`;
+const DKG_SUB_GRAPH_NAME = `${DKG}subGraphName`;
 const DKG_PART_OF = `${DKG}partOf`;
 const DKG_BATCH_ID = `${DKG}batchId`;
 const SCHEMA_NAME = 'http://schema.org/name';
@@ -90,9 +103,31 @@ interface ExactGraphPagePlanEntry {
   rowCount: number;
 }
 
+interface ConfirmedGraphScopedVmManifestEntry extends ExactGraphPagePlanEntry {
+  ual: string;
+}
+
+interface GraphScopedVmManifest {
+  confirmedEntries: readonly ConfirmedGraphScopedVmManifestEntry[];
+  confirmedGraphs: ReadonlySet<string>;
+  /** Complete V2 descriptors in any lifecycle state, used to reject tentative VM payloads. */
+  knownGraphs: ReadonlySet<string>;
+}
+
 interface ExactGraphPagePlan {
   entries: readonly ExactGraphPagePlanEntry[];
   totalRows: number;
+  /** At most one exact graph is retained while an oversized phase is framed. */
+  activeGraphRows?: {
+    graph: string;
+    rows: readonly SyncRow[];
+  };
+  activeGraphRowsLoad?: {
+    graph: string;
+    promise: Promise<readonly SyncRow[] | null>;
+  };
+  /** Graphs that exceeded the bounded local snapshot and require ordered paging. */
+  pagedGraphs: Set<string>;
 }
 
 export interface ExactGraphPagePlanMemo {
@@ -542,6 +577,14 @@ export async function readDurableMetaPage(params: {
     params.offset,
     params.limit,
     params.signal,
+    cache
+      ? () => readBoundedDurableMetaSnapshot(
+        params.store,
+        params.contextGraphId,
+        params.registeredSubGraphNames,
+        cache,
+      )
+      : undefined,
   );
 }
 
@@ -551,9 +594,273 @@ export async function readDurableMetaPage(params: {
 const DEFAULT_CHANGELOG_PAGE_BYTES = 4 * 1024 * 1024;
 
 /**
+ * Read the constant-size V2 control rows that already form a per-KA manifest.
+ *
+ * The payload graph and its row count are authenticated again by the requester,
+ * but deriving the responder plan from these rows removes three store-wide or
+ * per-graph discovery operations from the normal rootless path: graph-family
+ * enumeration as authority, child-prefix probing after the reserved VM segment,
+ * and COUNT(*)/countQuads for every KA. The query is deliberately one exact
+ * metadata graph, standard SPARQL 1.1, unordered, row/response bounded, and
+ * backend-neutral.
+ */
+async function readGraphScopedVmManifest(
+  store: TripleStore,
+  contextGraphId: string,
+  signal?: AbortSignal,
+): Promise<GraphScopedVmManifest> {
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const contextGraph = contextGraphDataGraphUri(contextGraphId);
+  const maxRows = SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS;
+  const readBoundedBindings = async (
+    sparql: string,
+    operation: string,
+  ): Promise<Array<Record<string, string>>> => {
+    let result;
+    try {
+      result = await store.query(sparql, {
+        ...syncResponderStoreOptions(signal, operation),
+        maxResponseBytes: snapshotResponseByteLimit(
+          SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+        ),
+      });
+    } catch (error) {
+      if (!(error instanceof StoreResponseTooLargeError)) throw error;
+      throw snapshotBudgetError({
+        key: `durable-v2-manifest:${contextGraphId}`,
+        reason: 'snapshot_bytes',
+        rows: 0,
+        bytesEstimate: typeof error.actualBytes === 'bigint'
+          ? Number(error.actualBytes > BigInt(Number.MAX_SAFE_INTEGER)
+            ? BigInt(Number.MAX_SAFE_INTEGER)
+            : error.actualBytes)
+          : error.actualBytes,
+        limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+      });
+    }
+    if (result.type !== 'bindings') return [];
+    if (result.bindings.length > maxRows) {
+      throw snapshotBudgetError({
+        key: `durable-v2-manifest:${contextGraphId}`,
+        reason: 'snapshot_rows',
+        rows: result.bindings.length,
+        bytesEstimate: 0,
+        limit: maxRows,
+      });
+    }
+    return result.bindings;
+  };
+
+  // Read every scope marker independently of the complete descriptor join.
+  // Without this pass, a partially written V2 descriptor would be absent from
+  // the join below and its payload graph could incorrectly fall through the
+  // legacy compatibility lane.
+  const markerBindings = await readBoundedBindings(`
+    SELECT ?ual ?scopeVersion WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        ?ual <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion .
+      }
+    }
+    LIMIT ${maxRows + 1}
+  `, 'sync.responder.readGraphScopedVmManifestMarkers');
+  const scopeVersionsByUal = new Map<string, Set<string>>();
+  for (const row of markerBindings) {
+    const ual = row['ual'];
+    const rawVersion = row['scopeVersion'];
+    if (!ual || !rawVersion) continue;
+    const versions = scopeVersionsByUal.get(ual) ?? new Set<string>();
+    versions.add(stripLiteral(rawVersion));
+    scopeVersionsByUal.set(ual, versions);
+  }
+  const currentV2Uals = new Set<string>();
+  for (const [ual, versions] of scopeVersionsByUal) {
+    if (versions.size !== 1) {
+      throw new Error(`Rootless sync manifest ${ual} has ambiguous scopeVersion`);
+    }
+    const decoded = [...versions][0]!;
+    if (!/^-?\d+$/.test(decoded)) {
+      throw new Error(`Rootless sync manifest ${ual} has invalid scopeVersion: ${decoded}`);
+    }
+    const version = BigInt(decoded);
+    if (version < 0n || version.toString() !== decoded) {
+      throw new Error(`Rootless sync manifest ${ual} has non-canonical scopeVersion: ${decoded}`);
+    }
+    if (version === 0n || version === 1n) continue;
+    if (version !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
+      throw new Error(`Rootless sync manifest ${ual} has unsupported contentScopeVersion ${decoded}`);
+    }
+    currentV2Uals.add(ual);
+  }
+
+  const bindings = await readBoundedBindings(`
+      SELECT ?ual ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph
+             ?contextGraph ?publicTripleCount ?privateTripleCount ?status ?subGraphName
+      WHERE {
+        GRAPH <${assertSafeIri(metaGraph)}> {
+          ?ual <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion ;
+               <${DKG_KA_UAL}> ?kaUal ;
+               <${DKG_ASSERTION_VERSION}> ?assertionVersion ;
+               <${DKG_ASSERTION_GRAPH}> ?assertionGraph ;
+               <${DKG_CONTEXT_GRAPH}> ?contextGraph ;
+               <${DKG_PUBLIC_TRIPLE_COUNT}> ?publicTripleCount ;
+               <${DKG_PRIVATE_TRIPLE_COUNT}> ?privateTripleCount ;
+               <${DKG_STATUS}> ?status .
+          OPTIONAL { ?ual <${DKG_SUB_GRAPH_NAME}> ?subGraphName }
+        }
+      }
+      LIMIT ${maxRows + 1}
+  `, 'sync.responder.readGraphScopedVmManifest');
+
+  type ManifestField =
+    | 'scopeVersion'
+    | 'kaUal'
+    | 'assertionVersion'
+    | 'assertionGraph'
+    | 'contextGraph'
+    | 'publicTripleCount'
+    | 'privateTripleCount'
+    | 'status'
+    | 'subGraphName';
+  const fields: readonly ManifestField[] = [
+    'scopeVersion',
+    'kaUal',
+    'assertionVersion',
+    'assertionGraph',
+    'contextGraph',
+    'publicTripleCount',
+    'privateTripleCount',
+    'status',
+    'subGraphName',
+  ];
+  const byUal = new Map<string, Map<ManifestField, Set<string>>>();
+  for (const row of bindings) {
+    const ual = row['ual'];
+    if (!ual) continue;
+    const values = byUal.get(ual) ?? new Map<ManifestField, Set<string>>();
+    for (const field of fields) {
+      const value = row[field];
+      if (!value) continue;
+      const set = values.get(field) ?? new Set<string>();
+      set.add(value);
+      values.set(field, set);
+    }
+    byUal.set(ual, values);
+  }
+  for (const ual of currentV2Uals) {
+    if (!byUal.has(ual)) {
+      throw new Error(`Rootless sync manifest ${ual} has an incomplete V2 descriptor`);
+    }
+  }
+
+  const confirmedEntries: ConfirmedGraphScopedVmManifestEntry[] = [];
+  const knownGraphs = new Set<string>();
+  const graphOwners = new Map<string, string>();
+  for (const [ual, values] of byUal) {
+    if (!currentV2Uals.has(ual)) continue;
+    const requireSingle = (field: ManifestField): string => {
+      const candidates = [...(values.get(field) ?? [])];
+      if (candidates.length !== 1) {
+        throw new Error(
+          `Rootless sync manifest ${ual} has ${candidates.length === 0 ? 'missing' : 'ambiguous'} ${field}`,
+        );
+      }
+      return candidates[0]!;
+    };
+    const optionalSingle = (field: ManifestField): string | undefined => {
+      const candidates = [...(values.get(field) ?? [])];
+      if (candidates.length > 1) {
+        throw new Error(`Rootless sync manifest ${ual} has ambiguous ${field}`);
+      }
+      return candidates[0];
+    };
+    const parseCanonicalInteger = (field: ManifestField, minimum: bigint): bigint => {
+      const decoded = stripLiteral(requireSingle(field));
+      if (!/^-?\d+$/.test(decoded)) {
+        throw new Error(`Rootless sync manifest ${ual} has invalid ${field}: ${decoded}`);
+      }
+      const value = BigInt(decoded);
+      if (value < minimum || value.toString() !== decoded) {
+        throw new Error(`Rootless sync manifest ${ual} has non-canonical ${field}: ${decoded}`);
+      }
+      return value;
+    };
+
+    const scopeVersion = parseCanonicalInteger('scopeVersion', 0n);
+    if (scopeVersion !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
+      throw new Error(`Rootless sync manifest ${ual} changed scopeVersion during projection`);
+    }
+    const metadataUal = requireSingle('kaUal');
+    if (metadataUal !== ual) {
+      throw new Error(`Rootless sync manifest UAL mismatch: subject ${ual}, kaUal ${metadataUal}`);
+    }
+    const assertionVersion = parseCanonicalInteger('assertionVersion', 1n);
+    const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+    if (scope.ual !== ual) {
+      throw new Error(`Rootless sync manifest contains non-canonical UAL ${ual}`);
+    }
+    if (requireSingle('contextGraph') !== contextGraph) {
+      throw new Error(`Rootless sync manifest ${ual} points outside context graph ${contextGraphId}`);
+    }
+    const rawSubGraphName = optionalSingle('subGraphName');
+    const subGraphName = rawSubGraphName === undefined
+      ? undefined
+      : stripLiteral(rawSubGraphName);
+    if (subGraphName !== undefined && !validateSubGraphName(subGraphName).valid) {
+      throw new Error(`Rootless sync manifest ${ual} has invalid subGraphName ${subGraphName}`);
+    }
+    const expectedGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      scope,
+      subGraphName,
+    );
+    const assertionGraph = requireSingle('assertionGraph');
+    if (assertionGraph !== expectedGraph) {
+      throw new Error(
+        `Rootless sync manifest ${ual} assertionGraph mismatch: expected ${expectedGraph}, found ${assertionGraph}`,
+      );
+    }
+    const publicCount = parseCanonicalInteger('publicTripleCount', 0n);
+    const privateCount = parseCanonicalInteger('privateTripleCount', 0n);
+    if (publicCount > BigInt(Number.MAX_SAFE_INTEGER) || privateCount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`Rootless sync manifest ${ual} has an unsafe triple count`);
+    }
+    if (publicCount === 0n && privateCount === 0n) {
+      throw new Error(`Rootless sync manifest ${ual} describes an empty asset`);
+    }
+    const owner = graphOwners.get(assertionGraph);
+    if (owner && owner !== ual) {
+      throw new Error(`Rootless sync graph ${assertionGraph} has multiple UAL owners`);
+    }
+    graphOwners.set(assertionGraph, ual);
+    knownGraphs.add(assertionGraph);
+
+    const statuses = new Set(
+      [...(values.get('status') ?? [])].map((status) => stripLiteral(status)),
+    );
+    if (statuses.size !== 1) {
+      throw new Error(`Rootless sync manifest ${ual} has ambiguous status metadata`);
+    }
+    if (!statuses.has('confirmed')) continue;
+    confirmedEntries.push({
+      ual,
+      graph: assertionGraph,
+      rowCount: Number(publicCount),
+    });
+  }
+  confirmedEntries.sort((a, b) => compareCodePoint(a.graph, b.graph));
+  return {
+    confirmedEntries,
+    confirmedGraphs: new Set(confirmedEntries.map((entry) => entry.graph)),
+    knownGraphs,
+  };
+}
+
+/**
  * The per-CG admission boundary shared by the durable-data phase and the
  * changelog delta lane: the candidate-graph exclusions (wrong CG / top or
- * first-level subgraph `_meta` / `/_shared_memory*` / `/_private`) and the
+ * first-level subgraph `_meta` / transient WM / `/_shared_memory*` /
+ * `/_private`) and the
  * RFC-49 `isAdmitted` gate
  * (assertion-graph membership + child-CG descendant rejection). `assertionGraphs`
  * is memoised per invocation, matching the original inline closure.
@@ -566,7 +873,10 @@ function createAdmissionContext(
   // serves data AND meta in ONE delta stream, so it must INCLUDE topMeta —
   // otherwise a public CG routed to changelog-only never converges its top-level
   // metadata (OT-RFC-59 review 🔴 3594). SWM (own phase) and `/_private` stay out.
-  opts: { includeTopMeta?: boolean } = {},
+  opts: {
+    includeTopMeta?: boolean;
+    graphScopedVmManifest?: GraphScopedVmManifest;
+  } = {},
 ): {
   cgPrefix: string;
   topMetaGraph: string;
@@ -587,17 +897,27 @@ function createAdmissionContext(
       ? graph.slice(cgPrefix.length + 1)
       : '';
     if (relative.split('/').length === 2 && relative.endsWith('/_meta')) return false;
-    // SWM graphs are the dedicated SWM phase's exclusive domain; `/_private` is
-    // never durable-served (see readDurableDataPage's original inline note).
-    if (graph.includes('/_shared_memory')) return false;
-    return !graph.includes('/_private');
+    const segments = relative.split('/').filter(Boolean);
+    // Working memory is transient and has no durable metadata anchor (the
+    // durable-meta phase deliberately excludes memoryLayer=WM). Serving an
+    // orphan or abandoned WM graph here therefore creates unverifiable payload
+    // and, on real stores, can sort millions of unrelated draft rows. SWM has a
+    // dedicated phase and private graphs are never served by durable sync.
+    if (segments.includes('_working_memory')) return false;
+    if (segments.includes('_shared_memory') || segments.includes('_shared_memory_meta')) return false;
+    return !segments.includes('_private');
   };
   let assertionGraphs: Set<string> | null = null;
   const isAdmitted = (signal?: AbortSignal) => async (graph: string): Promise<boolean> => {
+    const graphWithoutMeta = graph.endsWith('/_meta')
+      ? graph.slice(0, -'/_meta'.length)
+      : graph;
+    if (opts.graphScopedVmManifest?.knownGraphs.has(graphWithoutMeta)) {
+      if (!opts.graphScopedVmManifest.confirmedGraphs.has(graphWithoutMeta)) return false;
+    }
     if (graph.includes('/assertion/')) {
       assertionGraphs ??= await readAdmittedAssertionGraphs(store, contextGraphId, signal);
-      const assertionGraph = graph.endsWith('/_meta') ? graph.slice(0, -'/_meta'.length) : graph;
-      if (!assertionGraphs.has(assertionGraph)) return false;
+      if (!assertionGraphs.has(graphWithoutMeta)) return false;
     }
     return !(await isDescendantOfKnownChildContextGraph(store, cgPrefix, graph, signal));
   };
@@ -652,8 +972,15 @@ export async function readChangelogDeltaPage(params: {
   // DATA phase — it INCLUDES the top-level `_meta` graph (the requester applies meta
   // as a trusted anchor, legacy-parity), so a changelog-only public CG converges its
   // top-level metadata rather than silently skipping it.
+  const graphScopedVmManifest = await readGraphScopedVmManifest(
+    params.store,
+    params.contextGraphId,
+    params.signal,
+  );
   const { isCandidateGraph, isAdmitted } = createAdmissionContext(
-    params.store, params.contextGraphId, { includeTopMeta: true },
+    params.store,
+    params.contextGraphId,
+    { includeTopMeta: true, graphScopedVmManifest },
   );
   const lastOp = new Map<string, { seq: number; op: ChangeOp }>();
   for (const r of raw) {
@@ -727,32 +1054,81 @@ export async function readDurableDataPage(params: {
   refreshGeneration?: string;
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
 }): Promise<SyncRow[]> {
-  // Admission context (candidate exclusions + RFC-49 `isAdmitted`) — extracted to
-  // a module factory so `readChangelogDeltaPage` reuses it verbatim. Behaviour
-  // here is byte-identical to the previous inline closures.
-  const { cgPrefix, topMetaGraph, isCandidateGraph, isAdmitted } =
-    createAdmissionContext(params.store, params.contextGraphId);
-  const candidateGraphs = params.graphList.filter(isCandidateGraph).sort(compareCodePoint);
+  const cache = params.rowListMemo
+    ? {
+      memo: params.rowListMemo,
+      key: durableDataRowListCacheKey(
+        params.rowListCacheScope ?? 'default',
+        params.contextGraphId,
+        params.sinceBatchId,
+      ),
+      refresh: params.refreshRowList,
+      refreshGeneration: params.refreshGeneration,
+    }
+    : undefined;
 
   if (params.sinceBatchId == null) {
-    return readPagedRowsAcrossGraphs(
+    return readPagedRowsFromExactGraphPlanLoader(
       params.store,
-      candidateGraphs,
       params.offset,
       params.limit,
-      isAdmitted(params.rowListMemo ? undefined : params.signal),
-      params.rowListMemo
-        ? {
-          memo: params.rowListMemo,
-          key: durableDataRowListCacheKey(params.rowListCacheScope ?? 'default', params.contextGraphId, params.sinceBatchId),
-          refresh: params.refreshRowList,
-          refreshGeneration: params.refreshGeneration,
-        }
-        : undefined,
+      cache,
       params.signal,
       params.exactGraphPlanMemo,
+      async (planSignal) => {
+        const manifest = await readGraphScopedVmManifest(
+          params.store,
+          params.contextGraphId,
+          planSignal,
+        );
+        const { isCandidateGraph, isAdmitted } = createAdmissionContext(
+          params.store,
+          params.contextGraphId,
+          { graphScopedVmManifest: manifest },
+        );
+        // A just-committed exact graph may precede a stale external graph-list
+        // cache. Include every confirmed non-empty manifest graph explicitly;
+        // the count-vs-read invariant below will fail closed if its payload is
+        // absent or raced. The legacy list remains only as the compatibility
+        // source for pre-V2 graphs and non-KA durable partitions.
+        const candidateGraphs = dedupeStrings([
+          ...params.graphList.filter(isCandidateGraph),
+          ...manifest.confirmedEntries
+            .filter((entry) => entry.rowCount > 0)
+            .map((entry) => entry.graph),
+        ]).sort(compareCodePoint);
+        const knownRowCounts = new Map(
+          manifest.confirmedEntries.map((entry) => [entry.graph, entry.rowCount]),
+        );
+        return buildExactGraphPagePlan(
+          params.store,
+          candidateGraphs,
+          isAdmitted(params.rowListMemo ? undefined : planSignal),
+          planSignal,
+          knownRowCounts,
+        );
+      },
     );
   }
+
+  // The batch-id lane is legacy compatibility. Still load the V2 manifest for
+  // admission so tentative V2 graphs cannot fall through as legacy payload;
+  // OT-RFC-59 changelog is the scalable incremental lane for rootless KAs.
+  const manifest = await readGraphScopedVmManifest(
+    params.store,
+    params.contextGraphId,
+    params.signal,
+  );
+  const { cgPrefix, topMetaGraph, isCandidateGraph, isAdmitted } =
+    createAdmissionContext(params.store, params.contextGraphId, {
+      graphScopedVmManifest: manifest,
+    });
+  const candidateGraphs = dedupeStrings([
+    ...params.graphList.filter(isCandidateGraph),
+    ...manifest.confirmedEntries
+      .filter((entry) => entry.rowCount > 0)
+      .map((entry) => entry.graph),
+  ]).sort(compareCodePoint);
 
   const graphs: string[] = [];
   const isAdmittedForRequest = isAdmitted(params.signal);
@@ -773,14 +1149,7 @@ export async function readDurableDataPage(params: {
     params.sinceBatchId,
     params.offset,
     params.limit,
-    params.rowListMemo
-      ? {
-        memo: params.rowListMemo,
-        key: durableDataRowListCacheKey(params.rowListCacheScope ?? 'default', params.contextGraphId, params.sinceBatchId),
-        refresh: params.refreshRowList,
-        refreshGeneration: params.refreshGeneration,
-      }
-      : undefined,
+    cache,
     params.signal,
   );
 }
@@ -816,6 +1185,33 @@ async function readPagedRowsAcrossGraphs(
   cache?: RowListCache,
   signal?: AbortSignal,
   planMemo?: ExactGraphPagePlanMemo,
+  knownRowCounts?: ReadonlyMap<string, number>,
+): Promise<SyncRow[]> {
+  return readPagedRowsFromExactGraphPlanLoader(
+    store,
+    offset,
+    limit,
+    cache,
+    signal,
+    planMemo,
+    (planSignal) => buildExactGraphPagePlan(
+      store,
+      graphs,
+      isAdmitted,
+      planSignal,
+      knownRowCounts,
+    ),
+  );
+}
+
+async function readPagedRowsFromExactGraphPlanLoader(
+  store: TripleStore,
+  offset: number,
+  limit: number,
+  cache: RowListCache | undefined,
+  signal: AbortSignal | undefined,
+  planMemo: ExactGraphPagePlanMemo | undefined,
+  loadExactGraphPlan: (signal?: AbortSignal) => Promise<ExactGraphPagePlan>,
 ): Promise<SyncRow[]> {
   // A small snapshot is first assembled into the row cache. If that build
   // crosses its cap, readResponderRowsPage immediately retries page zero via
@@ -823,13 +1219,16 @@ async function readPagedRowsAcrossGraphs(
   // that fallback reuses the exact graph/count plan instead of counting every
   // graph twice.
   let planRefreshPending = cache?.refresh === true;
-  const loadPage: StorePageLoader = async (pageOffset, pageLimit, pageSignal) => {
-    const loadPlan = () => buildExactGraphPagePlan(
-      store,
-      graphs,
-      isAdmitted,
-      pageSignal,
-    );
+  const rowSnapshotLimits = cache?.memo.snapshotLoadLimits ?? {
+    maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+    maxBytesEstimate: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+    pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  };
+  const getPlan = async (
+    pageOffset: number,
+    pageSignal: AbortSignal | undefined,
+  ): Promise<ExactGraphPagePlan> => {
+    const loadPlan = () => loadExactGraphPlan(pageSignal);
     const refreshPlan = pageOffset === 0 && planRefreshPending;
     if (refreshPlan) planRefreshPending = false;
     const plan = planMemo && cache
@@ -842,7 +1241,18 @@ async function readPagedRowsAcrossGraphs(
     if (!plan) {
       throw new Error('Sync session exact-graph plan expired before page completion');
     }
-    return readRowsPageFromExactGraphPlan(store, plan, pageOffset, pageLimit, pageSignal);
+    return plan;
+  };
+  const loadPage: StorePageLoader = async (pageOffset, pageLimit, pageSignal) => {
+    const plan = await getPlan(pageOffset, pageSignal);
+    return readRowsPageFromExactGraphPlan(
+      store,
+      plan,
+      pageOffset,
+      pageLimit,
+      rowSnapshotLimits,
+      pageSignal,
+    );
   };
   return readResponderRowsPage(
     cache && {
@@ -853,6 +1263,14 @@ async function readPagedRowsAcrossGraphs(
     offset,
     limit,
     signal,
+    cache
+      ? async () => readExactGraphPlanSnapshot(
+        store,
+        await getPlan(0, undefined),
+        cache,
+        rowSnapshotLimits,
+      )
+      : undefined,
   );
 }
 
@@ -861,12 +1279,13 @@ async function buildExactGraphPagePlan(
   graphs: readonly string[],
   isAdmitted: (graph: string) => Promise<boolean>,
   signal?: AbortSignal,
+  knownRowCounts?: ReadonlyMap<string, number>,
 ): Promise<ExactGraphPagePlan> {
   const entries: ExactGraphPagePlanEntry[] = [];
   for (const graph of dedupeStrings(graphs).sort(compareCodePoint)) {
     throwIfAborted(signal);
     if (!(await isAdmitted(graph))) continue;
-    const rowCount = await store.countQuads(
+    const rowCount = knownRowCounts?.get(graph) ?? await store.countQuads(
       graph,
       syncResponderStoreOptions(signal, 'sync.responder.countExactGraphRows'),
     );
@@ -875,7 +1294,146 @@ async function buildExactGraphPagePlan(
   return {
     entries,
     totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
+    pagedGraphs: new Set<string>(),
   };
+}
+
+interface ExactGraphSnapshotLimits {
+  maxRows: number;
+  maxBytesEstimate: number;
+}
+
+function snapshotResponseByteLimit(maxBytesEstimate: number): number {
+  // SPARQL JSON adds field names and escaping around each RDF term. Bound the
+  // transport body independently while leaving enough headroom for that wire
+  // overhead. HTTP adapters enforce this before parsing; embedded adapters are
+  // still bounded by the row LIMIT below.
+  return Math.max(
+    1,
+    Math.min(Number.MAX_SAFE_INTEGER, Math.floor(maxBytesEstimate) * 2),
+  );
+}
+
+function snapshotBudgetError(params: {
+  key: string;
+  reason: 'snapshot_rows' | 'snapshot_bytes';
+  rows: number;
+  bytesEstimate: number;
+  limit: number;
+}): SyncRowSnapshotBudgetError {
+  return new SyncRowSnapshotBudgetError(params);
+}
+
+async function loadExactGraphRowsSnapshot(
+  store: TripleStore,
+  plan: ExactGraphPagePlan,
+  entry: ExactGraphPagePlanEntry,
+  limits: ExactGraphSnapshotLimits,
+  signal?: AbortSignal,
+): Promise<readonly SyncRow[] | null> {
+  if (entry.rowCount > limits.maxRows || plan.pagedGraphs.has(entry.graph)) return null;
+  if (plan.activeGraphRows?.graph === entry.graph) return plan.activeGraphRows.rows;
+  if (plan.activeGraphRowsLoad?.graph === entry.graph) {
+    return raceAgainstAbort(plan.activeGraphRowsLoad.promise, signal);
+  }
+
+  const load = (async (): Promise<readonly SyncRow[] | null> => {
+    try {
+      const result = await store.query(`
+        SELECT ?s ?p ?o WHERE {
+          GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
+        }
+        LIMIT ${limits.maxRows + 1}
+      `, {
+        ...syncResponderStoreOptions(undefined, 'sync.responder.readExactGraphSnapshot'),
+        maxResponseBytes: snapshotResponseByteLimit(limits.maxBytesEstimate),
+      });
+      if (result.type !== 'bindings') return [];
+      const rows: SyncRow[] = [];
+      let bytesEstimate = 0;
+      for (const row of result.bindings) {
+        const s = row['s'];
+        const p = row['p'];
+        const o = row['o'];
+        if (!s || !p || !o) continue;
+        const nextBytes = bytesEstimate + estimateStringRowHeapBytes(s, p, o, entry.graph);
+        if (rows.length + 1 > limits.maxRows || nextBytes > limits.maxBytesEstimate) {
+          plan.pagedGraphs.add(entry.graph);
+          return null;
+        }
+        rows.push({ s, p, o, g: entry.graph });
+        bytesEstimate = nextBytes;
+      }
+      // The plan count and payload must describe one immutable graph snapshot.
+      // A mismatch means the graph changed between COUNT and SELECT; fail the
+      // session rather than silently skipping or duplicating rows.
+      if (rows.length !== entry.rowCount) {
+        throw new Error(
+          `Sync exact-graph plan changed while reading ${entry.graph}: ` +
+          `expected ${entry.rowCount} rows, found ${rows.length}`,
+        );
+      }
+      rows.sort(compareRows);
+      plan.activeGraphRows = { graph: entry.graph, rows };
+      return rows;
+    } catch (error) {
+      if (error instanceof StoreResponseTooLargeError) {
+        plan.pagedGraphs.add(entry.graph);
+        return null;
+      }
+      throw error;
+    }
+  })().finally(() => {
+    if (plan.activeGraphRowsLoad?.promise === load) plan.activeGraphRowsLoad = undefined;
+  });
+  plan.activeGraphRowsLoad = { graph: entry.graph, promise: load };
+  return raceAgainstAbort(load, signal);
+}
+
+async function readExactGraphPlanSnapshot(
+  store: TripleStore,
+  plan: ExactGraphPagePlan,
+  cache: RowListCache,
+  limits: ExactGraphSnapshotLimits,
+): Promise<readonly SyncRow[]> {
+  if (plan.totalRows > limits.maxRows) {
+    throw snapshotBudgetError({
+      key: cache.key,
+      reason: 'snapshot_rows',
+      rows: plan.totalRows,
+      bytesEstimate: 0,
+      limit: limits.maxRows,
+    });
+  }
+  const rows: SyncRow[] = [];
+  let bytesEstimate = 0;
+  for (const entry of plan.entries) {
+    const graphRows = await loadExactGraphRowsSnapshot(store, plan, entry, limits);
+    if (!graphRows) {
+      throw snapshotBudgetError({
+        key: cache.key,
+        reason: 'snapshot_bytes',
+        rows: rows.length,
+        bytesEstimate: limits.maxBytesEstimate + 1,
+        limit: limits.maxBytesEstimate,
+      });
+    }
+    for (const row of graphRows) {
+      const nextBytes = bytesEstimate + estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
+      if (nextBytes > limits.maxBytesEstimate) {
+        throw snapshotBudgetError({
+          key: cache.key,
+          reason: 'snapshot_bytes',
+          rows: rows.length + 1,
+          bytesEstimate: nextBytes,
+          limit: limits.maxBytesEstimate,
+        });
+      }
+      rows.push(row);
+      bytesEstimate = nextBytes;
+    }
+  }
+  return rows.sort(compareRows);
 }
 
 async function readRowsPageFromExactGraphPlan(
@@ -883,6 +1441,7 @@ async function readRowsPageFromExactGraphPlan(
   plan: ExactGraphPagePlan,
   offset: number,
   limit: number,
+  snapshotLimits: ExactGraphSnapshotLimits,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   let skip = Math.max(0, Math.floor(offset));
@@ -894,23 +1453,39 @@ async function readRowsPageFromExactGraphPlan(
       skip -= entry.rowCount;
       continue;
     }
-    const result = await store.query(`
-      SELECT ?s ?p ?o WHERE {
-        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
-      }
-      ORDER BY ?s ?p ?o
-      OFFSET ${skip}
-      LIMIT ${remaining}
-    `, syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'));
     let added = 0;
-    if (result.type === 'bindings') {
-      for (const row of result.bindings) {
-        const s = row['s'];
-        const p = row['p'];
-        const o = row['o'];
-        if (s && p && o) {
-          rows.push({ s, p, o, g: entry.graph });
-          added += 1;
+    const graphRows = await loadExactGraphRowsSnapshot(
+      store,
+      plan,
+      entry,
+      snapshotLimits,
+      signal,
+    );
+    if (graphRows) {
+      const page = graphRows.slice(skip, skip + remaining);
+      rows.push(...page);
+      added = page.length;
+    } else {
+      const result = await store.query(`
+        SELECT ?s ?p ?o WHERE {
+          GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
+        }
+        ORDER BY ?s ?p ?o
+        OFFSET ${skip}
+        LIMIT ${remaining}
+      `, {
+        ...syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'),
+        maxResponseBytes: snapshotResponseByteLimit(snapshotLimits.maxBytesEstimate),
+      });
+      if (result.type === 'bindings') {
+        for (const row of result.bindings) {
+          const s = row['s'];
+          const p = row['p'];
+          const o = row['o'];
+          if (s && p && o) {
+            rows.push({ s, p, o, g: entry.graph });
+            added += 1;
+          }
         }
       }
     }
@@ -1047,6 +1622,7 @@ async function readResponderRowsPage(
   offset: number,
   limit: number,
   signal?: AbortSignal,
+  loadSnapshot?: () => Promise<readonly SyncRow[]>,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
@@ -1055,7 +1631,7 @@ async function readResponderRowsPage(
   try {
     return await readCachedRowsPage(
       cache,
-      () => loadStorePagedSnapshot(cache, loadStoreBoundedPage),
+      loadSnapshot ?? (() => loadStorePagedSnapshot(cache, loadStoreBoundedPage)),
       safeOffset,
       safeLimit,
       signal,
@@ -1201,6 +1777,22 @@ async function isDescendantOfKnownChildContextGraph(
   const remainder = graph.slice(cgPrefix.length + 1);
   const segments = remainder.split('/').filter(Boolean);
   if (isParentOwnedReservedGraphSegments(segments)) return false;
+
+  // A KA layer segment is a namespace boundary, not a possible child-CG name.
+  // Only prefixes BEFORE it can own the graph. The previous generic walk also
+  // ASKed the full graph and every publisher/KA-id suffix (including the full
+  // graph twice), multiplying a 50-KA bootstrap into roughly 200 pointless
+  // metadata probes. Top-level VM therefore needs zero ASK calls; a VM under a
+  // named subgraph needs only the one ownership check for that subgraph prefix.
+  const vmBoundary = segments.indexOf('_verifiable_memory');
+  if (vmBoundary >= 0) {
+    let possibleChild = cgPrefix;
+    for (let index = 0; index < vmBoundary; index++) {
+      possibleChild = `${possibleChild}/${segments[index]}`;
+      if (await isKnownContextGraph(store, possibleChild, signal)) return true;
+    }
+    return false;
+  }
   if (await isKnownContextGraph(store, graph, signal)) return true;
   if (graph.endsWith('/_meta')) {
     const graphOwner = graph.slice(0, -'/_meta'.length);
@@ -1616,7 +2208,9 @@ async function readFreshSwmRoots(
 function buildDurableMetaRowsQuery(
   contextGraphId: string,
   registeredSubGraphNames: readonly string[],
-  page?: { offset: number; limit: number },
+  window?:
+    | { kind: 'page'; offset: number; limit: number }
+    | { kind: 'snapshot'; limit: number },
 ): string {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const cgEntity = contextGraphDataGraphUri(contextGraphId);
@@ -1629,9 +2223,12 @@ function buildDurableMetaRowsQuery(
   const registeredSubGraphClause = registeredSubGraphSubjects.length
     ? `|| ?s IN (${registeredSubGraphSubjects.join(', ')})`
     : '';
-  const pagination = page
-    ? `\n    OFFSET ${Math.max(0, Math.floor(page.offset))}\n    LIMIT ${Math.max(0, Math.floor(page.limit))}`
-    : '';
+  const pagination = window?.kind === 'page'
+    ? `\n    ORDER BY ?g ?s ?p ?o\n    OFFSET ${Math.max(0, Math.floor(window.offset))}` +
+      `\n    LIMIT ${Math.max(0, Math.floor(window.limit))}`
+    : window?.kind === 'snapshot'
+      ? `\n    LIMIT ${Math.max(0, Math.floor(window.limit))}`
+      : '';
   return `
     SELECT ?g ?s ?p ?o WHERE {
       VALUES ?g { <${assertSafeIri(metaGraph)}> }
@@ -1642,6 +2239,14 @@ function buildDurableMetaRowsQuery(
         || ${activeDelegationSubjectExpression}
         ${registeredSubGraphClause}
         || STRSTARTS(STR(?s), "did:dkg:activity:")
+        || EXISTS {
+             GRAPH ?g {
+               ?s <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion ;
+                  <${DKG_STATUS}> ${sparqlString('confirmed')} .
+             }
+             FILTER(STR(?scopeVersion) = ${sparqlString(String(GRAPH_KA_CONTENT_SCOPE_VERSION))})
+             FILTER(REGEX(STR(?s), "^did:dkg:[^/]+/0x[0-9A-Fa-f]{40}/[0-9]+$"))
+           }
         || EXISTS { GRAPH ?g { ?s <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
         || EXISTS { GRAPH ?g { ?agLifecycle <${DKG_ASSERTION_GRAPH}> ?s ; <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
         || EXISTS {
@@ -1659,7 +2264,7 @@ function buildDurableMetaRowsQuery(
            )
       )
     }
-    ORDER BY ?g ?s ?p ?o${pagination}
+    ${pagination}
   `;
 }
 
@@ -1667,22 +2272,30 @@ async function queryDurableMetaRows(
   store: TripleStore,
   contextGraphId: string,
   registeredSubGraphNames: readonly string[],
-  page: { offset: number; limit: number } | undefined,
+  window:
+    | { kind: 'page'; offset: number; limit: number }
+    | { kind: 'snapshot'; limit: number; maxResponseBytes: number }
+    | undefined,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
-  if (page && Math.max(0, Math.floor(page.limit)) === 0) return [];
+  if (window && Math.max(0, Math.floor(window.limit)) === 0) return [];
   const res = await store.query(
-    buildDurableMetaRowsQuery(contextGraphId, registeredSubGraphNames, page),
-    syncResponderStoreOptions(
-      signal,
-      page ? 'sync.responder.readDurableMetaRowsPage' : 'sync.responder.readDurableMetaRows',
-    ),
+    buildDurableMetaRowsQuery(contextGraphId, registeredSubGraphNames, window),
+    {
+      ...syncResponderStoreOptions(
+        signal,
+        window?.kind === 'page'
+          ? 'sync.responder.readDurableMetaRowsPage'
+          : 'sync.responder.readDurableMetaRowsSnapshot',
+      ),
+      ...(window?.kind === 'snapshot' ? { maxResponseBytes: window.maxResponseBytes } : {}),
+    },
   );
   if (res.type !== 'bindings') return [];
   const rows = res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
     .filter((row) => row.s && row.p && row.o && row.g);
-  return page ? rows : rows.sort(compareRows);
+  return window?.kind === 'page' ? rows : rows.sort(compareRows);
 }
 
 /**
@@ -1703,6 +2316,196 @@ async function readDurableMetaRows(
     undefined,
     signal,
   );
+}
+
+async function readBoundedDurableMetaSnapshot(
+  store: TripleStore,
+  contextGraphId: string,
+  registeredSubGraphNames: readonly string[],
+  cache: RowListCache,
+): Promise<readonly SyncRow[]> {
+  const limits = cache.memo.snapshotLoadLimits ?? {
+    maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+    maxBytesEstimate: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+    pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  };
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  let rawRows: SyncRow[];
+  try {
+    const result = await store.query(`
+      SELECT ?s ?p ?o WHERE {
+        GRAPH <${assertSafeIri(metaGraph)}> { ?s ?p ?o }
+      }
+      LIMIT ${limits.maxRows + 1}
+    `, {
+      ...syncResponderStoreOptions(undefined, 'sync.responder.readDurableMetaGraphSnapshot'),
+      maxResponseBytes: snapshotResponseByteLimit(limits.maxBytesEstimate),
+    });
+    rawRows = result.type === 'bindings'
+      ? result.bindings
+        .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: metaGraph }))
+        .filter((row): row is SyncRow => Boolean(row.s && row.p && row.o))
+      : [];
+  } catch (error) {
+    if (!(error instanceof StoreResponseTooLargeError)) throw error;
+    const actualBytes = typeof error.actualBytes === 'bigint'
+      ? Number(error.actualBytes > BigInt(Number.MAX_SAFE_INTEGER)
+        ? BigInt(Number.MAX_SAFE_INTEGER)
+        : error.actualBytes)
+      : error.actualBytes;
+    throw snapshotBudgetError({
+      key: cache.key,
+      reason: 'snapshot_bytes',
+      rows: 0,
+      bytesEstimate: actualBytes,
+      limit: limits.maxBytesEstimate,
+    });
+  }
+  if (rawRows.length > limits.maxRows) {
+    throw snapshotBudgetError({
+      key: cache.key,
+      reason: 'snapshot_rows',
+      rows: rawRows.length,
+      bytesEstimate: 0,
+      limit: limits.maxRows,
+    });
+  }
+  let bytesEstimate = 0;
+  for (const row of rawRows) {
+    bytesEstimate += estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
+    if (bytesEstimate > limits.maxBytesEstimate) {
+      throw snapshotBudgetError({
+        key: cache.key,
+        reason: 'snapshot_bytes',
+        rows: rawRows.length,
+        bytesEstimate,
+        limit: limits.maxBytesEstimate,
+      });
+    }
+  }
+  return filterDurableMetaSnapshotRows(
+    rawRows,
+    contextGraphId,
+    registeredSubGraphNames,
+  );
+}
+
+/**
+ * Canonical durable-meta admission over one already-bounded exact graph.
+ *
+ * This is deliberately the in-process twin of buildDurableMetaRowsQuery's
+ * oversized fallback predicate. Executing the nested EXISTS expression in the
+ * store caused both Oxigraph and Blazegraph planners to rescan/sort the same
+ * metadata graph for every frame. Reading that one graph once and building
+ * subject indexes is O(meta rows), backend-neutral, and retains the exact
+ * privacy boundary. sync-responder-oversized-fallback.test.ts proves set
+ * equivalence between this path and the SPARQL fallback across every branch.
+ */
+function filterDurableMetaSnapshotRows(
+  rows: readonly SyncRow[],
+  contextGraphId: string,
+  registeredSubGraphNames: readonly string[],
+): SyncRow[] {
+  const cgEntity = contextGraphDataGraphUri(contextGraphId);
+  const registeredSubjects = new Set(
+    dedupeStrings(registeredSubGraphNames)
+      .filter((name) => validateSubGraphName(name).valid)
+      .map((name) => `${cgEntity}/${name}`),
+  );
+  const bySubject = new Map<string, SyncRow[]>();
+  for (const row of rows) {
+    const bucket = bySubject.get(row.s) ?? [];
+    bucket.push(row);
+    bySubject.set(row.s, bucket);
+  }
+  const objects = (subject: string, predicate: string): string[] =>
+    (bySubject.get(subject) ?? [])
+      .filter((row) => row.p === predicate)
+      .map((row) => row.o);
+  const lowerStringValues = (subject: string, predicates: readonly string[]): Set<string> =>
+    new Set(predicates.flatMap((predicate) => objects(subject, predicate))
+      .map((value) => stripLiteral(value).toLowerCase()));
+
+  const nonWorkingSubjects = new Set<string>();
+  for (const [subject] of bySubject) {
+    if (objects(subject, DKG_MEMORY_LAYER).some(
+      (layer) => stripLiteral(layer) !== MemoryLayer.WorkingMemory,
+    )) nonWorkingSubjects.add(subject);
+  }
+
+  const admitted = new Set<string>([cgEntity, ...registeredSubjects]);
+  for (const subject of nonWorkingSubjects) admitted.add(subject);
+
+  // Rootless V2 descriptors live directly on the deterministic UAL and do not
+  // carry the legacy lifecycle memoryLayer predicate. Admit confirmed V2
+  // descriptor rows explicitly; tentative rows remain workspace-local. The
+  // requester performs the complete descriptor, graph-URI, count and Merkle
+  // validation, so a malformed confirmed marker is visible and fails closed
+  // instead of silently falling through as harmless configuration metadata.
+  for (const [subject] of bySubject) {
+    if (!/^did:dkg:[^/]+\/0x[0-9A-Fa-f]{40}\/[0-9]+$/.test(subject)) continue;
+    const versions = objects(subject, DKG_CONTENT_SCOPE_VERSION).map(stripLiteral);
+    const statuses = objects(subject, DKG_STATUS).map(stripLiteral);
+    if (
+      versions.includes(String(GRAPH_KA_CONTENT_SCOPE_VERSION)) &&
+      statuses.includes('confirmed')
+    ) admitted.add(subject);
+  }
+
+  const members = lowerStringValues(cgEntity, [
+    DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+    DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+  ]);
+  const revoked = lowerStringValues(cgEntity, [DKG_ONTOLOGY.DKG_REVOKED_AGENT]);
+  const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
+  for (const [subject] of bySubject) {
+    if (subject.startsWith('did:dkg:activity:')) admitted.add(subject);
+    if (!subject.startsWith(delegationPrefix)) continue;
+    const delegatedAgents = objects(subject, DKG_ONTOLOGY.DKG_DELEGATION_AGENT)
+      .map((value) => stripLiteral(value).toLowerCase());
+    if (delegatedAgents.some((agent) => members.has(agent) && !revoked.has(agent))) {
+      admitted.add(subject);
+    }
+  }
+
+  const assertionNames = new Set<string>();
+  for (const lifecycle of nonWorkingSubjects) {
+    for (const graph of objects(lifecycle, DKG_ASSERTION_GRAPH)) admitted.add(graph);
+    for (const rawName of objects(lifecycle, DKG_ASSERTION_NAME)) {
+      const name = stripLiteral(rawName);
+      if (name) assertionNames.add(name);
+    }
+  }
+  const assertionNamesByTail = new Map<string, string[]>();
+  for (const name of assertionNames) {
+    const tail = name.slice(name.lastIndexOf('/') + 1);
+    const names = assertionNamesByTail.get(tail) ?? [];
+    names.push(name);
+    assertionNamesByTail.set(tail, names);
+  }
+
+  for (const [subject, subjectRows] of bySubject) {
+    if (subjectRows.some((row) =>
+      (row.p === PROV_GENERATED || row.p === PROV_USED) && nonWorkingSubjects.has(row.o),
+    )) admitted.add(subject);
+    if (subject.includes('/assertion/')) {
+      const tail = subject.slice(subject.lastIndexOf('/') + 1);
+      if ((assertionNamesByTail.get(tail) ?? []).some(
+        (name) => subject.endsWith(`/${name}`),
+      )) admitted.add(subject);
+    }
+  }
+
+  return rows
+    .filter((row) =>
+      admitted.has(row.s) &&
+      !(isIriTerm(row.s) && row.s.startsWith(DKG_JOIN_REQUEST_SUBJECT_PREFIX)),
+    )
+    .sort(compareRows);
+}
+
+function isIriTerm(term: string): boolean {
+  return !term.startsWith('_:') && !term.startsWith('"');
 }
 
 /**
@@ -1734,7 +2537,7 @@ async function readDurableMetaRowsPage(
     store,
     contextGraphId,
     registeredSubGraphNames,
-    { offset: safeOffset, limit: safeLimit },
+    { kind: 'page', offset: safeOffset, limit: safeLimit },
     signal,
   );
 }
