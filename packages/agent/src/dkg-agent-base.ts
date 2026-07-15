@@ -11,6 +11,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -831,8 +832,15 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_SWEEP_INTERVAL_MS =
     Number(process.env['DKG_VM_RECONCILE_INTERVAL_MS']) || 60_000;
+  // The periodic sweep is a missed-event safety net, not startup readiness.
+  // Spread its first run across the configured cadence so a rolling fleet
+  // restart does not immediately launch a full reconciliation scan on every
+  // node. Live chain nudges remain available from startup.
   static readonly VM_RECONCILE_STARTUP_MAX_DELAY_MS =
-    Math.max(0, Number(process.env['DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS']) || 30_000);
+    resolveVmReconcileStartupMaxDelayMs(
+      process.env['DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS'],
+      DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS,
+    );
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =

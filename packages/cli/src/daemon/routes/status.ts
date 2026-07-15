@@ -403,13 +403,14 @@ function createRouteEvmProvider(rpcUrl: string, rpcUrls?: string[]): ethers.Json
   );
 }
 
-// Quad-count cache for external SPARQL backends. Every /api/status hit
-// otherwise issues a `SELECT (COUNT(*))` against the remote endpoint —
-// expensive on a large namespace, and the route is polled by the
-// dashboard, telemetry, and `dkg status` operators. 30 s TTL is short
-// enough that a fresh wipe / bulk publish shows up quickly without
-// flooding Blazegraph. Cold/stale callers get the current snapshot while
-// one refresh runs in the background, so status never waits on the count.
+// Quad-count cache for external SPARQL backends. A full-store COUNT is not a
+// liveness check: on a multi-million-row namespace it can occupy the store for
+// seconds and compete directly with sync. Normal /api/status polling therefore
+// never starts it. Operators may request a background refresh explicitly with
+// `?includeStoreQuads=true`; subsequent ordinary status calls can reuse the
+// cached value without touching the store. Cold/stale explicit callers get the
+// current snapshot while one refresh runs in the background, so status never
+// waits on the count.
 // Local backends bypass this entirely (file-bytes metric stays on the
 // metrics collector tick).
 const STORE_QUADS_CACHE_TTL_MS = 30_000;
@@ -475,6 +476,11 @@ function getCachedExternalStoreQuads(
     });
   }
   return currentSnapshot;
+}
+
+function peekCachedExternalStoreQuads(): StoreQuadsSnapshot | null {
+  if (!storeQuadsCache) return null;
+  return { value: storeQuadsCache.value, status: storeQuadsCache.status };
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
@@ -669,8 +675,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     });
     const reportsExternalStoreQuads =
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
+    const includeStoreQuads = url.searchParams.get('includeStoreQuads') === 'true'
+      || url.searchParams.get('includeStoreQuads') === '1';
     const storeQuadsSnapshot = reportsExternalStoreQuads
-      ? getCachedExternalStoreQuads(agent, Date.now())
+      ? includeStoreQuads
+        ? getCachedExternalStoreQuads(agent, Date.now())
+        : peekCachedExternalStoreQuads()
       : null;
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to

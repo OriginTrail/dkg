@@ -82,14 +82,15 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-async function fetchStatus(baseUrl: string): Promise<{
+async function fetchStatus(baseUrl: string, includeStoreQuads = false): Promise<{
   status: number;
   body: {
     storeQuads: number | null;
     storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
   };
 }> {
-  const response = await fetch(`${baseUrl}/api/status`);
+  const suffix = includeStoreQuads ? '?includeStoreQuads=true' : '';
+  const response = await fetch(`${baseUrl}/api/status${suffix}`);
   return {
     status: response.status,
     body: await response.json() as {
@@ -105,6 +106,28 @@ describe('/api/status external-store quad count', () => {
     vi.restoreAllMocks();
   });
 
+  it('does not start a full-store count during ordinary liveness polling', async () => {
+    let queryCalls = 0;
+    const { server, baseUrl } = await startStatusServer(async () => {
+      queryCalls += 1;
+      return { type: 'bindings', bindings: [{ c: '123' }] };
+    });
+
+    try {
+      const first = await fetchStatus(baseUrl);
+      const second = await fetchStatus(baseUrl);
+      expect(first).toMatchObject({
+        status: 200,
+        body: { storeQuads: null },
+      });
+      expect(first.body.storeQuadsStatus).toBeUndefined();
+      expect(second.body.storeQuadsStatus).toBeUndefined();
+      expect(queryCalls).toBe(0);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it('returns a pending cold count without waiting for the store refresh', async () => {
     const countResult = deferred<unknown>();
     const queryStarted = deferred<void>();
@@ -116,7 +139,7 @@ describe('/api/status external-store quad count', () => {
     });
 
     try {
-      const responsePromise = fetch(`${baseUrl}/api/status`).then(async (response) => ({
+      const responsePromise = fetch(`${baseUrl}/api/status?includeStoreQuads=true`).then(async (response) => ({
         status: response.status,
         body: await response.json() as {
           storeQuads: number | null;
@@ -160,8 +183,8 @@ describe('/api/status external-store quad count', () => {
 
     try {
       const [firstCold, secondCold] = await Promise.all([
-        fetchStatus(baseUrl),
-        fetchStatus(baseUrl),
+        fetchStatus(baseUrl, true),
+        fetchStatus(baseUrl, true),
       ]);
       expect(firstCold.body.storeQuads).toBeNull();
       expect(secondCold.body.storeQuads).toBeNull();
@@ -175,7 +198,7 @@ describe('/api/status external-store quad count', () => {
       });
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      const fresh = await fetchStatus(baseUrl);
+      const fresh = await fetchStatus(baseUrl, true);
       expect(fresh.body.storeQuads).toBe(123);
       expect(fresh.body.storeQuadsStatus).toBe('ready');
       expect(queryCalls).toBe(1);
@@ -183,8 +206,8 @@ describe('/api/status external-store quad count', () => {
       const staleNow = Date.now() + 30_001;
       vi.spyOn(Date, 'now').mockReturnValue(staleNow);
       const [firstStale, secondStale] = await Promise.all([
-        fetchStatus(baseUrl),
-        fetchStatus(baseUrl),
+        fetchStatus(baseUrl, true),
+        fetchStatus(baseUrl, true),
       ]);
       expect(firstStale.body.storeQuads).toBe(123);
       expect(secondStale.body.storeQuads).toBe(123);
@@ -195,7 +218,7 @@ describe('/api/status external-store quad count', () => {
       staleRefresh.reject(new Error('store unavailable'));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      const afterFailure = await fetchStatus(baseUrl);
+      const afterFailure = await fetchStatus(baseUrl, true);
       expect(afterFailure.body.storeQuads).toBeNull();
       expect(afterFailure.body.storeQuadsStatus).toBe('unreachable');
       expect(queryCalls).toBe(2);
