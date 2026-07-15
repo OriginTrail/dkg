@@ -18,9 +18,12 @@ import { AccessHandler } from '../src/access-handler.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 
 const CONTEXT_GRAPH = 'rootless-private-access';
+const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
 const AUTHOR = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
 const UAL = `did:dkg:base:8453/${AUTHOR}/77`;
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const DKG_CONTEXT_GRAPH = 'https://dkg.network/ontology#ContextGraph';
 
 function quad(subject: string, predicate: string, object: string): Quad {
   return { subject, predicate, object, graph: '' };
@@ -86,6 +89,16 @@ describe('graph-scoped KA private access & metadata convergence', () => {
 
   beforeEach(async () => {
     store = new OxigraphStore();
+    // The canonical V2 metadata reader only trusts KA control-plane rows for
+    // a registered root context graph. Real nodes receive this registration
+    // when the CG is created/joined; seed the same prerequisite here instead
+    // of exercising the intentionally rejected untrusted-metadata path.
+    await store.insert([{
+      subject: CONTEXT_GRAPH_URI,
+      predicate: RDF_TYPE,
+      object: DKG_CONTEXT_GRAPH,
+      graph: META_GRAPH,
+    }]);
     publisher = new DKGPublisher({
       store,
       chain: new NoChainAdapter(),
@@ -323,14 +336,15 @@ describe('graph-scoped KA private access & metadata convergence', () => {
     );
     expect(denied.granted).toBe(false);
 
-    // The unambiguous owner still gets through under the fail-closed policy.
-    const granted = decodeAccessResponse(
+    // The canonical metadata resolver fails closed more strictly than the
+    // original review patch: an ambiguous control plane serves nobody until
+    // convergence completes, including the otherwise valid owner.
+    const ownerWhileAmbiguous = decodeAccessResponse(
       await handler.handler(await ownerAccessRequestBytes(UAL), 'rootless-publisher' as never),
     );
-    expect(granted.rejectionReason).toBe('');
-    expect(granted.granted).toBe(true);
-    expect(parseSimpleNQuads(new TextDecoder().decode(granted.nquads)))
-      .toHaveLength(canonicalPrivate.length);
+    expect(ownerWhileAmbiguous.granted).toBe(false);
+    expect(ownerWhileAmbiguous.rejectionReason).toContain('ambiguous');
+    expect(canonicalPrivate).toHaveLength(1);
 
     // A conflicting owner identity is ambiguous — nobody passes ownerOnly.
     await store.insert([{

@@ -6778,7 +6778,12 @@ export class DKGPublisher implements Publisher {
     const stale = previous.quads.filter(
       (quad) => !nextKeys.has(JSON.stringify([quad.subject, quad.predicate, quad.object])),
     );
-    if (stale.length > 0) await this.store.delete(stale);
+    if (stale.length > 0) {
+      // CONSTRUCT results carry no graph — restore the metadata graph before
+      // deleting, otherwise the delete targets the default graph and every
+      // superseded control-plane row survives alongside the new value.
+      await this.store.delete(stale.map((quad) => ({ ...quad, graph: metaGraph })));
+    }
   }
 
   /** Load the immutable access/sub-graph identity of an existing graph KA. */
