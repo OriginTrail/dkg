@@ -312,6 +312,51 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([]);
   });
 
+  it('does not classify integrity-rejected durable summaries as clean progress', async () => {
+    for (const integrityFailure of [
+      { rejectedKcs: 1, dataRejectedMissingMeta: 0 },
+      { rejectedKcs: 0, dataRejectedMissingMeta: 1 },
+    ]) {
+      const remotePeer = freshPeerIdString();
+      const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+
+      const outcome = await runSyncOnConnect({
+        remotePeer,
+        syncingPeers: new Set(),
+        getPeerProtocols: async () => [PROTOCOL_SYNC],
+        knownCorePeerIds: new Set(),
+        getSyncContextGraphs: () => ['integrity-rejected-cg'],
+        syncFromPeer: async () => ({
+          insertedTriples: 3,
+          insertedDataTriples: 3,
+          completedPhases: 1,
+          checkpointAdvances: 0,
+          timedOutPhases: 0,
+          failedPeers: 0,
+          failedPhases: 0,
+          deniedPhases: 0,
+          ...integrityFailure,
+        }),
+        refreshMetaSyncedFlags: async () => {},
+        discoverContextGraphsFromStore: async () => 0,
+        syncSharedMemoryFromPeer: async () => ({
+          insertedTriples: 0,
+          timedOutPhases: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        }),
+        logInfo: noopLog,
+        onPeerSynced: (peerId, peerOutcome) => synced.push({
+          peerId,
+          fresh: peerOutcome?.fresh,
+        }),
+      });
+
+      expect(outcome).toBe('synced');
+      expect(synced).toEqual([]);
+    }
+  });
+
   it('fires onPeerSynced when detailed sync summaries are clean but empty', async () => {
     const remotePeer = freshPeerIdString();
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];

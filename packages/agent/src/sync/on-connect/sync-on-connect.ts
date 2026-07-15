@@ -5,6 +5,8 @@ interface SyncProgressSummary {
   insertedDataTriples?: number;
   insertedMetaTriples?: number;
   metaOnlyResponses?: number;
+  dataRejectedMissingMeta?: number;
+  rejectedKcs?: number;
   completedPhases?: number;
   checkpointAdvances?: number;
   timedOutPhases?: number;
@@ -80,6 +82,7 @@ function insertedTriples(result: SyncFromPeerResult): number {
 
 function madeSyncProgress(result: SyncFromPeerResult): boolean {
   if (typeof result === 'number') return true;
+  if (hadIntegrityRejection(result)) return false;
   const phaseProgress = !metadataOnlySync(result) && (
     (result.completedPhases ?? 0) > 0 ||
     (result.checkpointAdvances ?? 0) > 0
@@ -104,7 +107,12 @@ function hadDeniedPhase(result: SyncFromPeerResult): boolean {
 
 function hadFailedPhase(result: SyncFromPeerResult): boolean {
   if (typeof result === 'number') return false;
-  return (result.failedPhases ?? 0) > 0;
+  return (result.failedPhases ?? 0) > 0 || hadIntegrityRejection(result);
+}
+
+function hadIntegrityRejection(result: SyncProgressSummary): boolean {
+  return (result.dataRejectedMissingMeta ?? 0) > 0
+    || (result.rejectedKcs ?? 0) > 0;
 }
 
 function hadBackpressureDeferral(result: SyncFromPeerResult): boolean {
@@ -119,6 +127,7 @@ function cleanDetailedSync(result: SyncFromPeerResult): boolean {
     (result.failedPhases ?? 0) === 0 &&
     (result.timedOutPhases ?? 0) === 0 &&
     (result.deniedPhases ?? 0) === 0 &&
+    !hadIntegrityRejection(result) &&
     !metadataOnlySync(result)
   );
 }

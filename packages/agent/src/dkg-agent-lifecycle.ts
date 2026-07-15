@@ -35,6 +35,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
@@ -4121,7 +4122,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         result = mergeDurableSyncResults(result, r);
         const complete = r.timedOutPhases === 0 && r.failedPhases === 0
-          && r.failedPeers === 0 && r.dataRejectedMissingMeta === 0;
+          && r.failedPeers === 0 && r.dataRejectedMissingMeta === 0
+          && r.rejectedKcs === 0;
         return { complete, insertedTriples: r.insertedTriples };
       },
       logWarn: (m) => this.log.warn(ctx, m),
@@ -4152,6 +4154,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const arr = verifiedByGraph.get(q.graph);
           if (arr) arr.push(q); else verifiedByGraph.set(q.graph, [q]);
         }
+        const graphScopedSubjects = new Set(
+          processed.verifiedMeta
+            .filter((q) => (
+              q.predicate === 'http://dkg.io/ontology/contentScopeVersion'
+              && stripLiteral(q.object) === String(GRAPH_KA_CONTENT_SCOPE_VERSION)
+            ))
+            .map((q) => q.subject),
+        );
+        const merkleBoundDataGraphs = new Set(
+          processed.verifiedMeta
+            .filter((q) => (
+              graphScopedSubjects.has(q.subject)
+              && q.predicate === 'http://dkg.io/ontology/assertionGraph'
+            ))
+            .map((q) => stripLiteral(q.object)),
+        );
+        result.rejectedKcs += processed.rejectedKcs;
+        result.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
         const plan = planPageApply({
           records: page.records,
           nextSeq: page.nextSeq,
@@ -4160,6 +4180,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           verifiedByGraph,
           recordQuadCountByGraph,
           metaGraphsWithRoot,
+          merkleBoundDataGraphs,
           batchVerifiedCleanly: processed.rejectedKcs === 0 && processed.dataRejectedMissingMeta === 0,
         });
         // Apply REPLACE per graph and COMMIT before the driver persists the cursor
@@ -4184,7 +4205,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     result.insertedDataTriples += insertedDataTriples;
     result.insertedMetaTriples += insertedMetaTriples;
     result.insertedTriples += insertedDataTriples + insertedMetaTriples;
-    result.completedPhases += 1;
+    if (
+      outcome.kind !== 'denied'
+      && result.timedOutPhases === 0
+      && result.failedPhases === 0
+      && result.failedPeers === 0
+      && result.dataRejectedMissingMeta === 0
+      && result.rejectedKcs === 0
+    ) {
+      result.completedPhases += 1;
+    }
     if (outcome.kind === 'denied') result.deniedPhases += 1;
     return result;
   }
@@ -5046,6 +5076,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         || (r.shared ? r.shared.insertedMetaTriples > 0 : false)
       );
       const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
+      const durableIntegrityRejected = r.durable.dataRejectedMissingMeta > 0
+        || r.durable.rejectedKcs > 0;
       // A deferred plane only counts as a response when the peer actually
       // delivered something before local admission pressure stopped the batch.
       const durableResponded = !durableFailed && (!durableDeferred || (
@@ -5075,7 +5107,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         && (r.durable.failedPhases ?? 0) === 0
         && r.durable.failedPeers === 0
         && !durableDeferred
-        && (r.durable.deniedPhases ?? 0) === 0;
+        && (r.durable.deniedPhases ?? 0) === 0
+        && !durableIntegrityRejected;
       const sharedMemoryCompletedCleanly = r.shared != null
         && r.shared.insertedDataTriples > 0
         && r.shared.completedPhases > 0
@@ -5103,6 +5136,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // inline and worker-backed catch-up paths classify a peer identically.
         !peerDeferred &&
         !peerTimedOut &&
+        !durableIntegrityRejected &&
         (peerMadeProgress || !peerMetadataOnly)
       ) {
         peersSucceeded++;

@@ -35,7 +35,7 @@ function buildPage(specs: Array<{ seq: number; graph: string; op?: 'upsert' | 'd
   return { records, verifiedByGraph, recordQuadCountByGraph, metaGraphsWithRoot };
 }
 
-const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; priorSeq?: number; isForeign?: (g: string) => boolean; batchClean?: boolean }) =>
+const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; priorSeq?: number; isForeign?: (g: string) => boolean; batchClean?: boolean; merkleBoundDataGraphs?: Set<string> }) =>
   planPageApply({
     records: page.records,
     nextSeq: extra.nextSeq,
@@ -44,6 +44,7 @@ const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; prio
     verifiedByGraph: page.verifiedByGraph,
     recordQuadCountByGraph: page.recordQuadCountByGraph,
     metaGraphsWithRoot: page.metaGraphsWithRoot,
+    merkleBoundDataGraphs: extra.merkleBoundDataGraphs ?? new Set(),
     batchVerifiedCleanly: extra.batchClean ?? true,
   });
 
@@ -78,6 +79,33 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.deferred).toBe(true);
     expect(p.ops).toHaveLength(0);
     expect(p.advanceTo).toBe(1);
+  });
+
+  it('does not replace a merkle-bearing meta graph with a rejected partial subset', () => {
+    const page = buildPage([
+      { seq: 2, graph: META, count: 4, verified: 3 },
+      { seq: 3, graph: DATA, count: 3 },
+    ]);
+    const p = plan(page, { nextSeq: 3, priorSeq: 1, batchClean: false });
+    expect(p.deferred).toBe(true);
+    expect(p.ops).toEqual([]);
+    expect(p.advanceTo).toBe(1);
+  });
+
+  it('accepts a rootless exact graph bound by verified top-level V2 metadata', () => {
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/7';
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const page = buildPage([
+      { seq: 2, graph, count: 3 },
+      { seq: 3, graph: topMeta, count: 9 },
+    ]);
+    const p = plan(page, {
+      nextSeq: 3,
+      merkleBoundDataGraphs: new Set([graph]),
+    });
+    expect(p.deferred).toBe(false);
+    expect(p.ops.map((op) => op.graph)).toEqual([graph, topMeta]);
+    expect(p.advanceTo).toBe(3);
   });
 
   it('DEFERS when the sibling meta carries no merkle root (rootless meta cannot bind data)', () => {

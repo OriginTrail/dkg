@@ -23,13 +23,11 @@ export interface PageApplyPlan {
 /**
  * Pure, crash-safe planner for one decoded delta page (OT-RFC-59 requester, model R).
  *
- * A data graph is trusted ONLY when (a) the whole page verified cleanly, (b) its sibling
- * `/_meta` record — carrying a real `dkg:merkleRoot` — is in THIS page, and (c) every one
- * of its parsed quads survived `verifySyncedData`. Gates (a)+(b) close the default-accept
- * hole: `verifiedData` passes through quads whose subject is not a recognised root entity
- * and is permissive on empty/rootless meta, so "survived verification" ALONE would let
- * orphan or unbound data through — the clean-batch + merkle-root-present checks force an
- * actual merkle bind.
+ * A data graph is trusted ONLY when (a) the whole page verified cleanly, (b) metadata in
+ * THIS page binds it either as a legacy `/_meta` sibling with a real `dkg:merkleRoot` or
+ * as the exact `dkg:assertionGraph` of a verified V2 graph-scoped KA, and (c) every parsed
+ * quad in the graph survived `verifySyncedData`. These gates prevent orphan, partially
+ * verified, or unbound data from crossing the durable cursor.
  *
  * The cursor advances only along a CONTIGUOUS verified prefix (iteration stops at the FIRST
  * unresolved record), so the durable cursor never passes a change that was not applied.
@@ -47,8 +45,10 @@ export function planPageApply(params: {
   verifiedByGraph: Map<string, Quad[]>;
   /** graph → parsed record quad count (pre-verify) — to detect partial/whole rejection & empties. */
   recordQuadCountByGraph: Map<string, number>;
-  /** meta-graph URIs present in-page THAT carry a `dkg:merkleRoot` (a rootless meta cannot bind data). */
+  /** Legacy sibling meta-graph URIs present in-page that carry a `dkg:merkleRoot`. */
   metaGraphsWithRoot: Set<string>;
+  /** Exact V2 assertion graphs bound by verified graph-scoped metadata in THIS page. */
+  merkleBoundDataGraphs: Set<string>;
   /** processDurableBatch rejected nothing this page (rejectedKcs===0 && dataRejectedMissingMeta===0). */
   batchVerifiedCleanly: boolean;
 }): PageApplyPlan {
@@ -59,7 +59,9 @@ export function planPageApply(params: {
 
   const dataGraphTrusted = (dataGraph: string): boolean => {
     if (!params.batchVerifiedCleanly) return false; // any KC in the page failed merkle ⇒ trust nothing
-    if (!params.metaGraphsWithRoot.has(`${dataGraph}/_meta`)) return false; // no merkle-root-bearing sibling in-page
+    const legacySiblingBound = params.metaGraphsWithRoot.has(`${dataGraph}/_meta`);
+    const graphScopeBound = params.merkleBoundDataGraphs.has(dataGraph);
+    if (!legacySiblingBound && !graphScopeBound) return false;
     const parsedCount = params.recordQuadCountByGraph.get(dataGraph);
     if (parsedCount === undefined || parsedCount === 0) return false; // absent/empty ⇒ nothing merkle-checkable
     return (params.verifiedByGraph.get(dataGraph)?.length ?? 0) === parsedCount; // ALL of G's quads survived
@@ -83,6 +85,20 @@ export function planPageApply(params: {
       continue;
     }
     if (rec.graph.endsWith('/_meta')) {
+      const parsedCount = params.recordQuadCountByGraph.get(rec.graph) ?? 0;
+      const verifiedCount = params.verifiedByGraph.get(rec.graph)?.length ?? 0;
+      // A merkle-bearing metadata snapshot is shared by every KA in the CG.
+      // Never REPLACE it with the verifier's partial subset: that would erase
+      // rejected KA metadata and then advance beyond it. Plain CG config
+      // metadata (no merkle roots) retains the established trusted-anchor path.
+      if (
+        params.metaGraphsWithRoot.has(rec.graph)
+        && (!params.batchVerifiedCleanly || verifiedCount !== parsedCount)
+      ) {
+        deferred = true;
+        earliestUnresolvedSeq = Math.min(earliestUnresolvedSeq, rec.seq);
+        break;
+      }
       // META graphs are trusted ANCHORS, exactly like legacy sync: the served meta is
       // applied as-is (rejected-KC rows already dropped from verifiedMeta), and DATA is
       // what gets merkle-verified against it. This is what lets the top-level `_meta`
@@ -155,9 +171,10 @@ const RESYNC_AFTER_STALLED_ROUNDS = 3;
  * rollback / first-contact the responder returns `resync` and we bootstrap via the legacy
  * lane — advancing the cursor to headSeq ONLY when that resync completed fully (a partial
  * resync leaves the cursor so the next cycle retries, never leaving a gap below headSeq).
- * A page whose sibling meta straddled the byte budget defers; re-fetching from the
- * (unadvanced) cursor pulls the meta into the same window next round. If a record stays
- * unresolvable for {@link RESYNC_AFTER_STALLED_ROUNDS} rounds, a resync clears it.
+ * A page whose legacy sibling meta or V2 graph binding straddled the byte budget defers;
+ * re-fetching from the unadvanced cursor pulls the binding into the same window next
+ * round. If a record stays unresolvable for {@link RESYNC_AFTER_STALLED_ROUNDS} rounds,
+ * a resync clears it.
  */
 export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<ChangelogSyncOutcome> {
   let applied = 0;

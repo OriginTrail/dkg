@@ -230,10 +230,26 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       summary.metaOnlyResponses += processed.metaOnlyResponses;
       summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
 
+      // A rejected KA means this page cannot be acknowledged safely. We may
+      // still persist independently verified KAs from the page, but keeping
+      // both cursors unchanged makes the next pass retry the rejected content
+      // instead of silently skipping it.
+      const batchVerifiedCleanly = processed.rejectedKcs === 0;
+      if (!batchVerifiedCleanly) {
+        logWarn(
+          ctx,
+          `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
+        );
+        summary.rejectedKcs += processed.rejectedKcs;
+      }
+
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
-      const updateMetaCheckpoint = processed.dataRejectedMissingMeta === 0
+      const updateMetaCheckpoint = batchVerifiedCleanly
+        && processed.dataRejectedMissingMeta === 0
         && (!metadataOnlyResponse || processed.verifiedMeta.length > 0);
-      const updateDataCheckpoint = processed.dataRejectedMissingMeta === 0 && !metadataOnlyResponse;
+      const updateDataCheckpoint = batchVerifiedCleanly
+        && processed.dataRejectedMissingMeta === 0
+        && !metadataOnlyResponse;
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -288,10 +304,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         );
       }
 
-      if (processed.rejectedKcs > 0) {
-        logWarn(ctx, `Rejected ${processed.rejectedKcs} KCs with invalid merkle roots from ${remotePeerId}`);
-        summary.rejectedKcs += processed.rejectedKcs;
-      }
     } catch (pidErr) {
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);

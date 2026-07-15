@@ -395,6 +395,54 @@ describe('sync requester progress accounting', () => {
     expect(setCheckpoint.calls).toEqual([]);
   });
 
+  it('does not advance durable checkpoints when integrity verification rejects a KA', async () => {
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const logWarn = recorder((_ctx: OperationContext, _message: string) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, {
+      nextOffset: phase === 'data' ? 500 : 5,
+    }));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['rejected-integrity-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        rejectedKcs: 1,
+        totalFetchedDataQuads: 500,
+        totalFetchedMetaQuads: 5,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn,
+      logDebug: noop,
+    });
+
+    expect(summary.rejectedKcs).toBe(1);
+    expect(summary.completedPhases).toBe(0);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([]);
+    expect(logWarn.calls).toContainEqual([
+      ctx,
+      expect.stringContaining('failed durable integrity verification'),
+    ]);
+  });
+
   it('advances only the durable meta checkpoint after storing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-meta');
     const storeInsert = recorder(async (_quads: Quad[]) => {});
