@@ -50,6 +50,7 @@ import {
   serializeWalletLock,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
+import { withLegacyRawLiftTestSeeder } from './_helpers/legacy-raw-lift.js';
 
 describe('TripleStoreAsyncLiftPublisher', () => {
   let now = 1_000;
@@ -168,13 +169,20 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainRecoveryResolver'>;
     } = {},
   ) {
-    return new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++now,
-      idGenerator: () => `job-${++ids}`,
-      legacyRawLiftWriteCapability: 'migration-only',
+    const clock = () => ++now;
+    const nextId = () => `job-${++ids}`;
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: clock,
+      idGenerator: nextId,
       chainRecoveryResolver:
         options.recoveryResult === undefined ? undefined : async () => options.recoveryResult ?? null,
       ...options.config,
+    });
+    return withLegacyRawLiftTestSeeder(publisher, store, {
+      now: clock,
+      idGenerator: nextId,
+      maxRetries: options.config?.maxRetries,
+      graphUri: options.config?.graphUri,
     });
   }
 
@@ -218,10 +226,14 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     return Number.parseInt(match[1] as string, 10);
   }
 
-  it('creates accepted jobs and returns status', async () => {
+  it('restores accepted legacy records without mutating workspace data', async () => {
     const publisher = createPublisher();
+    const privateStore = new PrivateContentStore(store, new GraphManager(store));
+    await privateStore.storePrivateTriplesForOperation('music-social', 'op-1', 'urn:local:/rihana', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/secret', object: '"legacy"', graph: '' },
+    ]);
 
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     const job = await publisher.getStatus(jobId);
 
     expect(jobId).toBe('job-1');
@@ -236,17 +248,19 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     expect(job?.retries.maxRetries).toBe(10);
+    const workspaceMutation = await store.query(
+      'ASK { GRAPH <did:dkg:context-graph:music-social/_shared_memory> { ?s ?p ?o } }',
+    );
+    expect(workspaceMutation).toMatchObject({ type: 'boolean', value: false });
   });
 
-  it('rejects new raw-root lift jobs unless an explicit migration capability is supplied', async () => {
+  it('does not expose a raw-root enqueue path on the concrete runtime publisher', async () => {
     const runtimePublisher = new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++now,
       idGenerator: () => `runtime-job-${++ids}`,
     });
 
-    await expect(runtimePublisher.lift(request())).rejects.toMatchObject({
-      code: 'LEGACY_KA_READ_ONLY',
-    });
+    expect((runtimePublisher as unknown as { lift?: unknown }).lift).toBeUndefined();
     await expect(runtimePublisher.list()).resolves.toEqual([]);
   });
 
@@ -275,7 +289,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       ...request(),
       shareOperationId: share.shareOperationId,
     };
-    const jobId = await publisher.lift(legacyRequest);
+    const jobId = await publisher.seedLegacyRawLift(legacyRequest);
     const stored = await publisher.getStatus(jobId);
     expect(stored?.request.jobType).toBe('lift');
     if (!stored) throw new Error('expected stored job');
@@ -692,7 +706,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('stores explicit LiftJob and LiftRequest control-plane triples', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift({ ...request(), subGraphName: 'research' });
+    const jobId = await publisher.seedLegacyRawLift({ ...request(), subGraphName: 'research' });
 
     const result = await store.query(`SELECT ?p ?o WHERE {
       GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
@@ -737,8 +751,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('claims the oldest accepted job for a wallet', async () => {
     const publisher = createPublisher();
 
-    await publisher.lift(request());
-    await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    await publisher.seedLegacyRawLift(request());
+    await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
 
     const claimed = await publisher.claimNext('wallet-1');
     const remaining = await publisher.list({ status: 'accepted' });
@@ -752,7 +766,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('persists wallet locks in a separate control-plane graph and releases them on terminal states', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
 
@@ -791,8 +805,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('renews wallet lock leases while jobs remain active', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
-    await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
 
     await publisher.claimNext('wallet-1');
     const originalExpiresAt = await readLockExpiresAt('wallet-1');
@@ -817,7 +831,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('releases stale wallet locks during recovery', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
 
@@ -839,7 +853,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('clears orphan wallet locks for terminal jobs during recovery', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'failed', {
@@ -878,8 +892,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('rejects a stale release without deleting a newer wallet lock', async () => {
     const publisher = createPublisher();
-    const jobA = await publisher.lift(request());
-    const jobB = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const jobA = await publisher.seedLegacyRawLift(request());
+    const jobB = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
 
     await publisher.claimNext('wallet-1');
     await publisher.update(jobA, 'validated', {
@@ -933,7 +947,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('serializes concurrent claims so only one wallet gets the job', async () => {
     const publisher = createPublisher();
-    await publisher.lift(request());
+    await publisher.seedLegacyRawLift(request());
 
     const [first, second] = await Promise.all([
       publisher.claimNext('wallet-1'),
@@ -951,7 +965,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('serializes claims across publisher instances in the same process', async () => {
     const first = createPublisher();
     const second = createPublisher();
-    await first.lift(request());
+    await first.seedLegacyRawLift(request());
 
     const [jobA, jobB] = await Promise.all([
       first.claimNext('wallet-1'),
@@ -969,7 +983,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('derives readable root-range slugs for multiple roots', async () => {
     const publisher = createPublisher();
 
-    const jobId = await publisher.lift({
+    const jobId = await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: 'op-9',
       roots: ['urn:local:/manson', 'urn:local:/rihana'],
@@ -981,7 +995,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('updates jobs through the MVP state machine', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
 
     await publisher.update(jobId, 'validated', {
@@ -1017,7 +1031,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('records canonical publish results back into LiftJob progress states', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1079,7 +1093,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('rejects publish results whose tx differs from persisted broadcast tx', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1125,7 +1139,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('records canonical publish failures back into LiftJob failed state', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1199,7 +1213,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     ]);
     expect(await privateStore.getPrivateTriples('music-social', 'urn:local:/rihana')).toEqual([]);
 
-    const jobId = await publisher.lift({
+    const jobId = await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: write.shareOperationId,
     });
@@ -1237,7 +1251,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: write.shareOperationId,
     });
@@ -1273,7 +1287,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: write.shareOperationId,
     });
@@ -1292,7 +1306,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('persists unknown included-phase failures as terminal failed jobs', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
@@ -1332,7 +1346,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(write.shareOperationId).toContain('swm-');
 
-    const jobId = await publisher.lift({
+    const jobId = await publisher.seedLegacyRawLift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],
@@ -1447,7 +1461,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/genre', object: '"Pop"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       contextGraphId: CONTEXT_GRAPH,
       shareOperationId: write.shareOperationId,
@@ -1500,7 +1514,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       contextGraphId: CONTEXT_GRAPH,
       shareOperationId: write.shareOperationId,
@@ -1541,7 +1555,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: write.shareOperationId,
       authority: { type: 'owner', proofRef: 'proof:owner:1' },
@@ -1561,7 +1575,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
       },
     });
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: 'op-1',
     });
@@ -1583,8 +1597,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('lists and counts jobs by status', async () => {
     const publisher = createPublisher();
-    const acceptedId = await publisher.lift(request());
-    const failedId = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const acceptedId = await publisher.seedLegacyRawLift(request());
+    const failedId = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
     await publisher.claimNext('wallet-1');
     await publisher.claimNext('wallet-2');
     await publisher.update(failedId, 'failed', {
@@ -1622,8 +1636,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
 
-    const claimedId = await publisher.lift(request());
-    const broadcastId = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const claimedId = await publisher.seedLegacyRawLift(request());
+    const broadcastId = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
     const privateStore = new PrivateContentStore(store, new GraphManager(store));
     await privateStore.storePrivateTriplesForOperation('music-social', 'op-2', 'urn:local:/rihana', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/secret', object: '"recover-secret"', graph: '' },
@@ -1659,7 +1673,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {
     const publisher = createPublisher({ recoveryResult: null });
-    const broadcastId = await publisher.lift(request());
+    const broadcastId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
     await publisher.update(broadcastId, 'validated', {
@@ -1690,7 +1704,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         recoveryLookupTimeoutMs: 50,
       },
     });
-    const broadcastId = await publisher.lift(request());
+    const broadcastId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
     await publisher.update(broadcastId, 'validated', {
@@ -1719,15 +1733,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('finalizes retry_recovery jobs from broadcast with correct recoveredFromStatus', async () => {
     let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
-    const publisher = new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++now,
-      idGenerator: () => `job-${++ids}`,
-      legacyRawLiftWriteCapability: 'migration-only',
+    const clock = () => ++now;
+    const nextId = () => `job-${++ids}`;
+    const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
+      now: clock,
+      idGenerator: nextId,
       chainRecoveryResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
-    });
+    }), store, { now: clock, idGenerator: nextId });
 
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1765,15 +1780,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('finalizes retry_recovery jobs from included with correct recoveredFromStatus', async () => {
     let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
-    const publisher = new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++now,
-      idGenerator: () => `job-${++ids}`,
-      legacyRawLiftWriteCapability: 'migration-only',
+    const clock = () => ++now;
+    const nextId = () => `job-${++ids}`;
+    const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
+      now: clock,
+      idGenerator: nextId,
       chainRecoveryResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
-    });
+    }), store, { now: clock, idGenerator: nextId });
 
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1887,9 +1903,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('supports pause, resume, cancel, retry, and clear', async () => {
     const publisher = createPublisher();
-    const cancelId = await publisher.lift(request());
-    const retryId = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
-    const clearId = await publisher.lift({ ...request(), shareOperationId: 'op-3' });
+    const cancelId = await publisher.seedLegacyRawLift(request());
+    const retryId = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
+    const clearId = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-3' });
 
     await publisher.pause();
     expect(await publisher.claimNext('wallet-1')).toBeNull();

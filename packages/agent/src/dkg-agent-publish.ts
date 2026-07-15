@@ -1079,9 +1079,9 @@ export class PublishMethods extends DKGAgentBase {
     rejectOversizedRdfLiterals(publicQuads, 'publishAsync.publicQuads');
     rejectOversizedRdfLiterals(privateQuads, 'publishAsync.privateQuads');
 
-    if (opts?.transitionType !== undefined && opts.transitionType !== 'CREATE') {
+    if (opts?.transitionType !== undefined) {
       throw new InvalidContentError(
-        'publishAsync creates one new atomic Knowledge Asset; use the KA update API for MUTATE or REVOKE',
+        'publishAsync no longer accepts transitionType; use the named KA mutation API for updates or revocation',
       );
     }
     if (opts?.priorVersion !== undefined) {

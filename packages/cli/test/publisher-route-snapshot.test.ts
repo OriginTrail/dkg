@@ -10,8 +10,8 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   DKGPublisher,
   FileWorkspacePublicSnapshotStore,
-  TripleStoreAsyncLiftPublisher,
 } from '@origintrail-official/dkg-publisher';
+import { seedLegacyRawLiftTestJob } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -46,10 +46,7 @@ describe('publisher routes with disk public snapshot refs', () => {
     ], { publisherPeerId: 'peer-route' });
 
     const publisherControl = createPublisherControlFromStore(store, publicSnapshotStore);
-    const jobId = await new TripleStoreAsyncLiftPublisher(store, {
-      publicSnapshotStore,
-      legacyRawLiftWriteCapability: 'migration-only',
-    }).lift({
+    const jobId = await seedLegacyRawLiftTestJob(store, {
       contextGraphId: CONTEXT_GRAPH,
       swmId: write.shareOperationId,
       shareOperationId: write.shareOperationId,

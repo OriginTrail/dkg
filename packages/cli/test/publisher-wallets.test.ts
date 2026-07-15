@@ -13,9 +13,9 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
 import {
   DKGPublisher,
-  TripleStoreAsyncLiftPublisher,
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
+import { seedLegacyRawLiftTestJob } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, createPublisherWalletChain, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
@@ -260,9 +260,7 @@ describe('publisher wallets', () => {
       },
     });
 
-    const jobId = await new TripleStoreAsyncLiftPublisher(store, {
-      legacyRawLiftWriteCapability: 'migration-only',
-    }).lift({
+    const jobId = await seedLegacyRawLiftTestJob(store, {
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],
@@ -620,9 +618,7 @@ describe('publisher wallets', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await new TripleStoreAsyncLiftPublisher(store, {
-      legacyRawLiftWriteCapability: 'migration-only',
-    }).lift({
+    await seedLegacyRawLiftTestJob(store, {
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],
