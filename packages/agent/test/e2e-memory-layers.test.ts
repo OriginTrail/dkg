@@ -548,6 +548,21 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
     expect(intent.shareOperationId).toBe(share.shareOperationId);
 
+    // Rootless metadata trimming consumes the lifecycle-level operation row
+    // once the immutable SWM snapshot and head are durable. The promoted
+    // event remains the canonical lifecycle reference. Revalidation must read
+    // that same shape instead of rejecting an otherwise unchanged queued job.
+    const author = agent.defaultAgentAddress ?? agent.peerId;
+    await (agent as any).store.deleteByPattern({
+      graph: contextGraphMetaUri(CG_ID),
+      subject: assertionLifecycleUri(CG_ID, author, name),
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+    });
+    const trimmedHistory = await agent.assertion.history(CG_ID, name);
+    expect(trimmedHistory?.currentShareOperationId).toBeUndefined();
+    expect(trimmedHistory?.events.find((event) => event.type === 'promoted')?.shareOperationId)
+      .toBe(share.shareOperationId);
+
     await (agent as any).publisher.clearPublishedSwmRoots(
       CG_ID,
       [...intent.roots],
