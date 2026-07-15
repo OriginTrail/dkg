@@ -2,6 +2,7 @@ import {
   parseRdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import {
+  contextGraphDataUri,
   contextGraphMetaUri,
   validateContextGraphId,
   validateSubGraphName,
@@ -18,6 +19,21 @@ import { assertSafeIri, isSafeIri } from './sparql-safe.js';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const SYSTEM_ONTOLOGY_GRAPH = contextGraphDataUri('ontology');
+const SYSTEM_AGENTS_GRAPH = contextGraphDataUri('agents');
+const ROOT_CONTEXT_GRAPH_TYPES = [
+  'https://dkg.network/ontology#ContextGraph',
+  'http://dkg.io/ontology/ContextGraph',
+] as const;
+const SUB_GRAPH_TYPES = [
+  'https://dkg.network/ontology#SubGraph',
+  'http://dkg.io/ontology/SubGraph',
+] as const;
+const PARENT_CONTEXT_GRAPH_PREDICATES = [
+  'https://dkg.network/ontology#parentContextGraph',
+  'http://dkg.io/ontology/parentContextGraph',
+] as const;
 
 const METADATA_PREDICATES = {
   scopeVersion: `${DKG}contentScopeVersion`,
@@ -107,6 +123,83 @@ export type GraphKnowledgeAssetMetadataParseResult =
   | { readonly kind: 'graph'; readonly metadata: ParsedGraphKnowledgeAssetMetadata };
 
 /**
+ * Require a context-graph subject to be declared in an authoritative root
+ * registry. Open roots are registered in the system ontology graph; curated
+ * roots keep the same declaration in their own control-plane metadata graph.
+ * Payload and named-subgraph graphs are deliberately excluded.
+ */
+export function buildTrustedRootContextGraphRegistrationFilter(
+  contextGraphVariable: string,
+  metadataGraphVariable: string,
+): string {
+  const variablePattern = /^\?[A-Za-z_][A-Za-z0-9_]*$/;
+  if (!variablePattern.test(contextGraphVariable) || !variablePattern.test(metadataGraphVariable)) {
+    throw new Error('Trusted context-graph registration filter requires SPARQL variables');
+  }
+  const rootTypes = ROOT_CONTEXT_GRAPH_TYPES.map((iri) => `<${iri}>`).join(' ');
+  const subGraphTypes = SUB_GRAPH_TYPES.map((iri) => `<${iri}>`).join(' ');
+  const parentPredicates = PARENT_CONTEXT_GRAPH_PREDICATES
+    .map((iri) => `<${iri}>`)
+    .join(' ');
+  const rootRegistryGraphs = `<${SYSTEM_ONTOLOGY_GRAPH}> <${SYSTEM_AGENTS_GRAPH}>`;
+  return `FILTER EXISTS {
+      VALUES ?_dkgRootContextGraphType { ${rootTypes} }
+      VALUES ?_dkgRootRegistryGraph { ${rootRegistryGraphs} }
+      {
+        GRAPH ?_dkgRootRegistryGraph {
+          ${contextGraphVariable} <${RDF_TYPE}> ?_dkgRootContextGraphType .
+        }
+      }
+      UNION
+      {
+        GRAPH ${metadataGraphVariable} {
+          ${contextGraphVariable} <${RDF_TYPE}> ?_dkgRootContextGraphType .
+        }
+      }
+    }
+    FILTER NOT EXISTS {
+      GRAPH ?_dkgParentMetaGraph {
+        ${contextGraphVariable} <${RDF_TYPE}> ?_dkgSubGraphType .
+        ${contextGraphVariable} ?_dkgParentPredicate ?_dkgParentContextGraph .
+      }
+      VALUES ?_dkgSubGraphType { ${subGraphTypes} }
+      VALUES ?_dkgParentPredicate { ${parentPredicates} }
+      FILTER(
+        STR(?_dkgParentMetaGraph) = CONCAT(STR(?_dkgParentContextGraph), "/_meta")
+      )
+      VALUES ?_dkgParentRootType { ${rootTypes} }
+      VALUES ?_dkgParentRegistryGraph { ${rootRegistryGraphs} }
+      {
+        GRAPH ?_dkgParentRegistryGraph {
+          ?_dkgParentContextGraph <${RDF_TYPE}> ?_dkgParentRootType .
+        }
+      }
+      UNION
+      {
+        GRAPH ?_dkgParentMetaGraph {
+          ?_dkgParentContextGraph <${RDF_TYPE}> ?_dkgParentRootType .
+        }
+      }
+    }
+    FILTER NOT EXISTS {
+      VALUES ?_dkgAliasRootType { ${rootTypes} }
+      VALUES ?_dkgAliasRegistryGraph { ${rootRegistryGraphs} }
+      {
+        GRAPH ?_dkgAliasRegistryGraph {
+          ${metadataGraphVariable} <${RDF_TYPE}> ?_dkgAliasRootType .
+        }
+      }
+      UNION
+      {
+        GRAPH ?_dkgAliasMetaGraph {
+          ${metadataGraphVariable} <${RDF_TYPE}> ?_dkgAliasRootType .
+        }
+        FILTER(STR(?_dkgAliasMetaGraph) = CONCAT(STR(${metadataGraphVariable}), "/_meta"))
+      }
+    }`;
+}
+
+/**
  * Build the one canonical graph-scoped metadata lookup.
  *
  * Rows are deliberately vertical (`predicate`, `value`) instead of a group of
@@ -131,11 +224,10 @@ export function buildGraphKnowledgeAssetMetadataQuery(ual: string): string {
       FILTER EXISTS {
         <${safeUal}> <${METADATA_PREDICATES.scopeVersion}> ?_scopeMarker .
       }
+      <${safeUal}> <${METADATA_PREDICATES.contextGraph}> ?_contextGraph .
     }
-    FILTER(
-      STRSTARTS(STR(?g), "${CONTEXT_GRAPH_PREFIX}") &&
-      STRENDS(STR(?g), "/_meta")
-    )
+    FILTER(STR(?g) = CONCAT(STR(?_contextGraph), "/_meta"))
+    ${buildTrustedRootContextGraphRegistrationFilter('?_contextGraph', '?g')}
   }`;
 }
 

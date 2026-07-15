@@ -7,6 +7,7 @@ import {
   DKGEvent,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   buildGraphKnowledgeAssetMetadataQuery,
+  buildTrustedRootContextGraphRegistrationFilter,
   decodeAccessRequest,
   encodeAccessResponse,
   ed25519Verify,
@@ -354,6 +355,7 @@ export class AccessHandler {
           BIND(CONCAT(STR(?contextGraph), '/_meta') AS ?expectedMetaGraph)
           FILTER(STR(?g) = ?expectedMetaGraph)
         }
+        ${buildTrustedRootContextGraphRegistrationFilter('?contextGraph', '?g')}
       }`,
     );
 

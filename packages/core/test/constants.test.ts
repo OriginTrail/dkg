@@ -9,6 +9,7 @@ import {
   contextGraphWorkspaceTopic,
   DHT_PROTOCOL,
   validateContextGraphId,
+  validateNewContextGraphId,
   validateSubGraphName,
   validateAssertionName,
   deriveCuratorDidFromCgId,
@@ -159,14 +160,15 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('user@domain').valid).toBe(true);
   });
 
-  it('rejects path segments reserved for storage partitions', () => {
+  it('reserves structural partition segments for new IDs without breaking legacy reads', () => {
     for (const id of [
       'victim/_meta',
       'victim/_private',
       'victim/_shared_memory',
       'victim/_future-partition',
     ]) {
-      expect(validateContextGraphId(id)).toMatchObject({ valid: false });
+      expect(validateContextGraphId(id)).toEqual({ valid: true });
+      expect(validateNewContextGraphId(id)).toMatchObject({ valid: false });
     }
   });
 

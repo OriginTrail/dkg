@@ -510,6 +510,21 @@ export function validateContextGraphId(id: string): { valid: boolean; reason?: s
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
   if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
+  return { valid: true };
+}
+
+/**
+ * Validate a newly-created context graph ID against the storage namespace.
+ *
+ * Existing stores may contain IDs that predate the reserved-partition rule,
+ * so read/sync paths intentionally keep using {@link validateContextGraphId}.
+ * New roots must not claim a path segment used by a structural graph such as
+ * `_meta`, otherwise their payload graph can alias another root's control
+ * plane.
+ */
+export function validateNewContextGraphId(id: string): { valid: boolean; reason?: string } {
+  const validation = validateContextGraphId(id);
+  if (!validation.valid) return validation;
   const reservedSegment = id.split('/').find((segment) => segment.startsWith('_'));
   if (reservedSegment) {
     return {

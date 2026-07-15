@@ -14,7 +14,6 @@ import {
   contextGraphCatalogUri,
   canonicalKnowledgeAssetGraphIdentitySuffix,
   knowledgeAssetAgentAddressesEqual,
-  validateContextGraphId,
   isSafeIri,
   assertSafeIri,
   sparqlString,
@@ -806,10 +805,6 @@ export class ContextGraphManager {
   }
 
   async ensureContextGraph(contextGraphId: string): Promise<void> {
-    const validation = validateContextGraphId(contextGraphId);
-    if (!validation.valid) {
-      throw new Error(`Invalid context graph ID: ${validation.reason}`);
-    }
     if (this.ensuredContextGraphs.has(contextGraphId)) return;
     await this.store.createGraph(this.dataGraphUri(contextGraphId));
     await this.store.createGraph(this.metaGraphUri(contextGraphId));

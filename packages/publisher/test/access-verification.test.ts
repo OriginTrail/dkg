@@ -22,6 +22,7 @@ import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dk
 import { AccessHandler } from '../src/access-handler.js';
 
 const CONTEXT_GRAPH = 'test-access-verify';
+const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
 const PRIVATE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_private`;
 const DKG = 'http://dkg.io/ontology/';
@@ -48,9 +49,15 @@ async function setupStoreWithPolicy(
 
   // KA metadata in meta graph
   await store.insert([
+    mq(
+      CONTEXT_GRAPH_URI,
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      'https://dkg.network/ontology#ContextGraph',
+      META_GRAPH,
+    ),
     mq(KA_UAL, `${DKG}rootEntity`, ENTITY, META_GRAPH),
     mq(KA_UAL, `${DKG}partOf`, KC_UAL, META_GRAPH),
-    mq(KC_UAL, `${DKG}contextGraph`, `did:dkg:context-graph:${CONTEXT_GRAPH}`, META_GRAPH),
+    mq(KC_UAL, `${DKG}contextGraph`, CONTEXT_GRAPH_URI, META_GRAPH),
     mq(KC_UAL, `${DKG}accessPolicy`, lit(policy), META_GRAPH),
     mq(KC_UAL, `${DKG}status`, lit('confirmed'), META_GRAPH),
   ]);
