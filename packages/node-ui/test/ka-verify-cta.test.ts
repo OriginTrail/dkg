@@ -7,7 +7,7 @@
 // of a named SWM asset. The rootless-KA cutover also makes the WM→SWM action
 // share the complete owning assertion instead of one entity. These tests pin:
 // (1) the publish CTA calls
-// knowledgeAssetPublishWithSeal with the entity's owning `sourceAssertion` AND
+// knowledgeAssetPublish with the entity's owning `sourceAssertion` AND
 // its `subGraphName` (so a future change can't drop the slug or publish the
 // wrong assertion), and (2) a shared entity with no named source assertion
 // disables the CTA rather than publishing the wrong thing.
@@ -19,13 +19,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const apiMocks = vi.hoisted(() => ({
-  knowledgeAssetPublishWithSeal: vi.fn(),
+  knowledgeAssetPublish: vi.fn(),
   promoteAssertion: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', () => ({
   promoteAssertion: apiMocks.promoteAssertion,
-  knowledgeAssetPublishWithSeal: apiMocks.knowledgeAssetPublishWithSeal,
+  knowledgeAssetPublish: apiMocks.knowledgeAssetPublish,
   describePromoteResult: (_n: string, r: unknown) => r,
   describePromoteError: () => null,
   partialPublishWarning: () => '',
@@ -72,8 +72,8 @@ const sharedEntity = { trustLevel: 'shared', types: ['ex:Character'], subGraphs:
 const workingEntity = { ...sharedEntity, trustLevel: 'working' } as any;
 
 beforeEach(() => {
-  apiMocks.knowledgeAssetPublishWithSeal.mockReset();
-  apiMocks.knowledgeAssetPublishWithSeal.mockResolvedValue({ status: 'confirmed', txHash: '0xtx', kaId: '1' });
+  apiMocks.knowledgeAssetPublish.mockReset();
+  apiMocks.knowledgeAssetPublish.mockResolvedValue({ status: 'confirmed', txHash: '0xtx', kaId: '1' });
   apiMocks.promoteAssertion.mockReset();
   profileRef.current = null;
 });
@@ -104,7 +104,7 @@ describe('VerifyOnDkgButton — entity-level SWM→VM publish CTA (#1087 named-K
     await unmount();
   });
 
-  it("publishes the entity's owning NAMED assertion via knowledgeAssetPublishWithSeal, threading its subGraphName", async () => {
+  it("publishes the entity's owning NAMED assertion via knowledgeAssetPublish, threading its subGraphName", async () => {
     profileRef.current = {
       forType: () => ({ publishLabel: 'Publish as canon', publishHint: 'Anchors on-chain.' }),
       forSubGraph: (s: string) => (s === 'sg1' ? { sourceAssertion: 'character-sheet' } : null),
@@ -124,8 +124,8 @@ describe('VerifyOnDkgButton — entity-level SWM→VM publish CTA (#1087 named-K
 
     // The named-KA publish contract: publish the OWNING sourceAssertion, not the
     // raw entity URI, and thread the sub-graph slug so the daemon keys (cg,name,subGraph).
-    expect(apiMocks.knowledgeAssetPublishWithSeal).toHaveBeenCalledTimes(1);
-    expect(apiMocks.knowledgeAssetPublishWithSeal).toHaveBeenCalledWith('cg-1', 'character-sheet', { subGraphName: 'sg1' });
+    expect(apiMocks.knowledgeAssetPublish).toHaveBeenCalledTimes(1);
+    expect(apiMocks.knowledgeAssetPublish).toHaveBeenCalledWith('cg-1', 'character-sheet', { subGraphName: 'sg1' });
     await unmount();
   });
 
@@ -142,7 +142,7 @@ describe('VerifyOnDkgButton — entity-level SWM→VM publish CTA (#1087 named-K
     const btn = container.querySelector('button.v10-ka-verify-btn') as HTMLButtonElement;
     expect(btn?.disabled, 'CTA disabled without a named source assertion').toBe(true);
     expect(container.textContent).toContain('not part of a named Shared-Memory asset');
-    expect(apiMocks.knowledgeAssetPublishWithSeal).not.toHaveBeenCalled();
+    expect(apiMocks.knowledgeAssetPublish).not.toHaveBeenCalled();
     await unmount();
   });
 });

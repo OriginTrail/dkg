@@ -21,7 +21,7 @@ vi.mock('../src/ui/api.js', () => ({
   fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })),
   // ka.tsx (pulled in transitively via the components barrel) imports these —
   // they must exist on the full mock or module-load fails.
-  knowledgeAssetPublishWithSeal: vi.fn(),
+  knowledgeAssetPublish: vi.fn(),
   partialPublishWarning: vi.fn(() => ''),
   PARTIAL_PUBLISH_STATUS_SUFFIX: 'binding incomplete',
 }));

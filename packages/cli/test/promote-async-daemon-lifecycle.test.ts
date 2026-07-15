@@ -90,16 +90,16 @@ describe('promote-async daemon lifecycle wiring', () => {
       },
       resolveAgentByToken: () => undefined,
       assertion: {
-        async promoteAsync(
+        async shareWholeKnowledgeAssetAsync(
           contextGraphId: string,
           name: string,
-          opts?: { entities?: readonly string[] | 'all'; subGraphName?: string },
+          opts?: { subGraphName?: string },
         ): Promise<{ jobId: string }> {
           const jobId = await queue.enqueue({
             contextGraphId,
             assertionName: name,
             subGraphName: opts?.subGraphName,
-            entities: opts?.entities ?? 'all',
+            entities: 'all',
           });
           return { jobId };
         },

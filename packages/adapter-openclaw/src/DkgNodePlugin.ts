@@ -126,6 +126,10 @@ export const SHARE_INCOMPLETE_PROMOTE_WARNING =
   'The complete sealed Knowledge Asset did not reach SWM and is not publish-ready; ' +
   'keep the Working Memory draft and retry the atomic share.';
 
+export const ATOMIC_SHARE_SIGNING_RECOVERY =
+  'Resolve the local signing capability, then retry the complete atomic ' +
+  'Knowledge Asset share from Working Memory.';
+
 /**
  * #1116: pick the not-publish-ready share warning from the share outcome. Returns
  * `undefined` when the share IS publish-ready (no warning). Precedence:
@@ -146,8 +150,8 @@ export function classifyShareWarning(outcome: {
 }
 
 /**
- * #1116: extract the daemon's recovery hint from a 409 UNSEALED_SHARE_BLOCKED
- * share failure. The DkgDaemonClient throws a typed {@link DkgDaemonHttpError}
+ * #1116: normalize a 409 UNSEALED_SHARE_BLOCKED share failure to the
+ * supported atomic recovery. The DkgDaemonClient throws a typed {@link DkgDaemonHttpError}
  * carrying the response `status` and parsed JSON `body`, so branch structurally
  * on the status + body code (no JSON-from-message parsing). Returns undefined
  * for any other error (caller falls back to the generic daemonError).
@@ -159,9 +163,9 @@ function extractUnsealedShareRecovery(err: unknown): string | undefined {
     typeof err.body === 'object' &&
     err.body !== null
   ) {
-    const body = err.body as { code?: string; recovery?: string };
-    if (body.code === 'UNSEALED_SHARE_BLOCKED' && typeof body.recovery === 'string' && body.recovery) {
-      return body.recovery;
+    const body = err.body as { code?: string };
+    if (body.code === 'UNSEALED_SHARE_BLOCKED') {
+      return ATOMIC_SHARE_SIGNING_RECOVERY;
     }
   }
   return undefined;
@@ -3650,8 +3654,8 @@ export class DkgNodePlugin {
     } catch (err: any) {
       // #1116: a default (sealing) share that cannot seal fails CLOSED — the
       // daemon returns 409 UNSEALED_SHARE_BLOCKED with a recovery hint and WM
-      // preserved. The client throws an Error whose message carries the response
-      // body; surface the recovery text verbatim when present.
+      // preserved. Normalize old-daemon hints that recommend retired
+      // skipSeal/SWM-write modes to the supported atomic recovery.
       const recovery = extractUnsealedShareRecovery(err);
       if (recovery) return this.error(recovery);
       return this.daemonError(err);

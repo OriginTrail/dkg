@@ -568,27 +568,32 @@ describe('UI API tests', () => {
 
     it('knowledgeAssetFinalize rejects legacy SWM finalization before POSTing', () => {
       expect(() =>
-        knowledgeAssetFinalize('cg-1', 'legacy', { layer: 'swm' }),
+        knowledgeAssetFinalize('cg-1', 'legacy', { layer: 'swm' } as any),
       ).toThrow('Legacy root-scoped Knowledge Assets are read-only');
       expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetFinalize accepts neutral layer:wm but omits it from the wire', async () => {
+      await knowledgeAssetFinalize('cg-1', 'asset', { layer: 'wm' });
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({ contextGraphId: 'cg-1' });
     });
 
     it('knowledgeAssetShare sends only atomic scope and rejects root-entity subsets before POSTing', async () => {
       await knowledgeAssetShare('cg-1', 'asset', {
         subGraphName: 'sg',
         entities: 'all', // compatibility-only neutral value
-      });
+      } as any);
       const call = requestLog.find(r => r.url.includes('/api/knowledge-assets/asset/swm/share'));
       expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-1', subGraphName: 'sg' });
 
       requestLog.length = 0;
       expect(() =>
-        knowledgeAssetShare('cg-1', 'asset', { entities: ['urn:root'] }),
+        knowledgeAssetShare('cg-1', 'asset', { entities: ['urn:root'] } as any),
       ).toThrow('root-entity selection is not supported');
       expect(requestLog).toHaveLength(0);
 
       expect(() =>
-        knowledgeAssetShare('cg-1', 'asset', { skipSeal: true }),
+        knowledgeAssetShare('cg-1', 'asset', { skipSeal: true } as any),
       ).toThrow('always sealed before sharing');
       expect(requestLog).toHaveLength(0);
     });
@@ -603,6 +608,13 @@ describe('UI API tests', () => {
       expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
         contextGraphId: 'cg-1',
         subGraphName: 'sg-legacy',
+      });
+
+      requestLog.length = 0;
+      await promoteAssertion('cg-1', 'undefined-placeholder', undefined, 'sg-from-fourth-arg');
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg-from-fourth-arg',
       });
 
       requestLog.length = 0;

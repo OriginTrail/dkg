@@ -189,14 +189,12 @@ assertionCmd
   .command('promote <name>')
   .description('Promote an assertion from local working memory into shared memory')
   .requiredOption('-c, --context-graph <id>', 'Target context graph')
-  .option('--entity <uri...>', 'Promote only specific root entities (defaults to all)')
   .option('--sub-graph-name <name>', 'Source sub-graph inside the context graph')
   .action(async (name: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       const result = await client.promoteAssertion(name, {
         contextGraphId: opts.contextGraph,
-        entities: opts.entity?.length ? opts.entity as string[] : 'all',
         subGraphName: opts.subGraphName,
       });
       const promotedCount = result.promotedCount ?? result.count ?? 0;

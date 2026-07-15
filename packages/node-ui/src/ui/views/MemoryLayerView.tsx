@@ -505,7 +505,6 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     setPromoting('__all__');
     setPromoteResult(null);
     setPromoteError(null);
-    let totalPromoted = 0;
     let noopCount = 0;
     // Issue #864 (Codex review on #874) — capture the in-flight
     // assertion name so a mid-loop failure surfaces "<name>: …"
@@ -522,15 +521,15 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
           a.name,
           a.subGraph ? { subGraphName: a.subGraph } : {},
         );
-        totalPromoted += res.promotedCount;
         if (res.promotedCount === 0) noopCount += 1;
       }
-      const tail = noopCount > 0 ? ` (${noopCount} assertion${noopCount === 1 ? '' : 's'} had nothing to promote)` : '';
+      const sharedCount = assertions.length - noopCount;
+      const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
       setPromoteResult({
-        message: totalPromoted > 0
-          ? `Promoted ${totalPromoted} triple${totalPromoted === 1 ? '' : 's'} across ${assertions.length} assertion${assertions.length === 1 ? '' : 's'}.${tail}`
-          : `No triples were promoted — every assertion was already in Shared Working Memory or its content has not been committed yet.`,
-        kind: totalPromoted > 0 ? 'success' : 'noop',
+        message: sharedCount > 0
+          ? `Shared ${sharedCount} complete Knowledge Asset${sharedCount === 1 ? '' : 's'} to Shared Working Memory${tail}.`
+          : 'No Knowledge Assets were newly shared — all were already in Shared Working Memory or still committing.',
+        kind: sharedCount > 0 ? 'success' : 'noop',
       });
       refresh();
       onPromoted();
@@ -558,7 +557,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
           disabled={promoting !== null}
           onClick={handlePromoteAll}
         >
-          {promoting === '__all__' ? 'Promoting...' : 'Promote All → SWM'}
+          {promoting === '__all__' ? 'Sharing...' : 'Share Complete KAs → SWM'}
         </button>
       </div>
       <div className="v10-assertion-items">
@@ -592,7 +591,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
               className="v10-btn-promote"
               disabled={promoting !== null}
               onClick={() => handlePromote(a)}
-              title="Copy these triples to Shared Working Memory"
+              title="Share this complete Knowledge Asset to Shared Working Memory"
             >
               {promoting === a.graphUri ? 'Promoting...' : '→ SWM'}
             </button>

@@ -191,7 +191,6 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
         // The share route seals and transfers each complete KA atomically. It is
         // off-chain, so no client-side CG pre-registration is needed.
         const assertions = await listAssertions(contextGraphId, 'wm');
-        let promoted = 0;
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
@@ -202,16 +201,16 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
             a.name,
             a.subGraph ? { subGraphName: a.subGraph } : {},
           );
-          promoted += res.promotedCount;
           if (res.promotedCount === 0) noopCount += 1;
         }
         // Issue #864 — flag the "nothing was actually moved" case so users on the bulk-promote
         // widget aren't lied to by a "Promoted 0 triples" success toast.
-        if (promoted > 0) {
-          const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
-          return `Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory${tail}`;
+        const sharedCount = assertions.length - noopCount;
+        if (sharedCount > 0) {
+          const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
+          return `Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''} to Shared Memory${tail}`;
         }
-        return 'No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.';
+        return 'No Knowledge Assets were newly shared — all were already in Shared Memory or still committing.';
       },
       (err: any) => {
         const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
@@ -226,9 +225,9 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
 
   return (
     <LayerActionShell
-      title="Promote"
-      footnote={`Moves ${noun} from this layer to Shared Working Memory.`}
-      context={<>{count} {noun} in this layer can be promoted to Shared Working Memory for collaborative review.</>}
+      title="Share complete Knowledge Assets"
+      footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
+      context={<>The displayed {noun} will be shared through their complete owning Knowledge Assets for collaborative review.</>}
       result={result}
       error={error}
     >
@@ -239,7 +238,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
         disabled={busy}
         onClick={promote}
       >
-        {busy ? '...' : '✓ Promote All → Shared'}
+        {busy ? '...' : '✓ Share Complete KAs → Shared'}
       </button>
     </LayerActionShell>
   );
