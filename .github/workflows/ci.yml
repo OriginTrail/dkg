@@ -54,6 +54,7 @@ jobs:
     outputs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
+      abi_freshness: ${{ steps.plan.outputs.abi_freshness }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -941,8 +942,9 @@ jobs:
   #
   # This job catches the only way that contract can break: a contributor
   # changes a `.sol` file and forgets to commit the regenerated ABIs.
-  # Runs only when `changes.outputs.contracts == 'true'` so PRs that
-  # don't touch contracts pay zero cost. On failure prints an explicit
+  # Runs when contract/compiler inputs or committed ABI files change. Solidity
+  # test relevance stays independent, so ABI-only PRs pay for this gate but
+  # not the four Hardhat shards. On failure prints an explicit
   # remediation command so the fix is one copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
@@ -950,7 +952,7 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: needs.changes.outputs.contracts == 'true'
+    if: needs.changes.outputs.abi_freshness == 'true'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

@@ -63,7 +63,8 @@ test('non-PR events run every lane while full-PR overrides preserve the Solidity
   assert.equal(labeled.fullCi, true);
   assert.deepEqual(selectedLanes(labeled), NON_SOLIDITY_LANES);
   assert.deepEqual(labeled.evmScopes, EVM_SCOPES);
-  assert.equal(labeled.solidityRelevant, false);
+  assert.equal(labeled.lanes.contracts, false);
+  assert.equal(labeled.abiFreshnessRelevant, false);
   assert.deepEqual(NODE_EVM_LANES, NON_SOLIDITY_LANES);
 });
 
@@ -71,7 +72,8 @@ test('unknown PR diffs fail closed with Solidity selected and enforced', () => {
   const plan = pullRequestPlan([]);
   assert.equal(plan.mode, 'full');
   assert.equal(plan.fullCi, true);
-  assert.equal(plan.solidityRelevant, true);
+  assert.equal(plan.lanes.contracts, true);
+  assert.equal(plan.abiFreshnessRelevant, true);
   assert.deepEqual(selectedLanes(plan), CI_LANES);
   assert.match(plan.reasons.join('\n'), /failing closed/);
 
@@ -135,15 +137,24 @@ test('full PR plans preserve legacy Solidity paths and cover Hardhat support cod
   ]);
   assert.equal(hardhatSupport.mode, 'full');
   assert.equal(hardhatSupport.lanes.contracts, true);
+  assert.equal(hardhatSupport.abiFreshnessRelevant, true);
 
   for (const filePath of solidityRelevantPaths) {
     const plan = pullRequestPlan([change(filePath)], { labels: ['ci:full'] });
     assert.equal(plan.mode, 'full', filePath);
     assert.equal(plan.lanes.contracts, true, filePath);
+    assert.equal(plan.abiFreshnessRelevant, true, filePath);
   }
 
+  const abiOnly = pullRequestPlan([
+    change('packages/evm-module/abi/KnowledgeAssets.json'),
+  ]);
+  assert.equal(abiOnly.mode, 'full');
+  assert.equal(abiOnly.lanes.contracts, false);
+  assert.equal(abiOnly.abiFreshnessRelevant, true);
+  assert.deepEqual(selectedLanes(abiOnly), NON_SOLIDITY_LANES);
+
   const nonSolidityPaths = [
-    'packages/evm-module/abi/KnowledgeAssets.json',
     'packages/evm-module/README.md',
     'packages/evm-module/docs/greenfield-ka-ual.md',
     'packages/agent/package.json',
@@ -154,6 +165,7 @@ test('full PR plans preserve legacy Solidity paths and cover Hardhat support cod
     const plan = pullRequestPlan([change(filePath)], { labels: ['ci:full'] });
     assert.equal(plan.mode, 'full', filePath);
     assert.equal(plan.lanes.contracts, false, filePath);
+    assert.equal(plan.abiFreshnessRelevant, false, filePath);
     assert.deepEqual(selectedLanes(plan), NON_SOLIDITY_LANES, filePath);
   }
 });
@@ -535,6 +547,7 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     );
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
+  assert.ok(workflow.includes("needs.changes.outputs.abi_freshness == 'true'"));
   assert.ok(
     workflow.includes(
       "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
@@ -609,7 +622,9 @@ test('GitHub outputs are booleans plus compact JSON matrices', () => {
   const gatePlan = JSON.parse(outputs.plan_json);
   assert.equal(gatePlan.mode, 'delta');
   assert.equal(gatePlan.lanes.kosava_supporting, true);
-  assert.equal(gatePlan.solidityRelevant, false);
+  assert.equal(gatePlan.lanes.contracts, false);
+  assert.equal(gatePlan.abiFreshnessRelevant, false);
+  assert.equal('solidityRelevant' in gatePlan, false);
   assert.equal('changedFiles' in gatePlan, false);
   assert.equal('reasons' in gatePlan, false);
 });
@@ -655,6 +670,26 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
     plan: fullNonContract,
     needs: fullNonContractNeeds,
   }), []);
+
+  const abiOnly = pullRequestPlan([
+    change('packages/evm-module/abi/KnowledgeAssets.json'),
+  ]);
+  const abiOnlyNeeds = structuredClone(fullNonContractNeeds);
+  abiOnlyNeeds['abi-freshness'].result = 'success';
+  assert.deepEqual(validatePrimaryResults({
+    eventName: 'pull_request',
+    plan: abiOnly,
+    needs: abiOnlyNeeds,
+  }), []);
+  abiOnlyNeeds['abi-freshness'].result = 'skipped';
+  assert.match(
+    validatePrimaryResults({
+      eventName: 'pull_request',
+      plan: abiOnly,
+      needs: abiOnlyNeeds,
+    }).join('\n'),
+    /abi-freshness was selected but ended with skipped/,
+  );
 
   const evmPlan = pullRequestPlan([change('packages/agent/src/index.ts')]);
   assert.deepEqual(validateEvmResults({

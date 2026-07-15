@@ -261,6 +261,11 @@ function isSolidityRelevantPath(filePath) {
     && !isDocumentationOnlyPath(filePath);
 }
 
+function isAbiFreshnessRelevantPath(filePath) {
+  return isSolidityRelevantPath(filePath)
+    || /^packages\/evm-module\/abi\/.*\.json$/i.test(filePath);
+}
+
 const BLAZEGRAPH_ARM64_PATHS = new Set([
   'blazegraph-image.json',
   'packages/cli/blazegraph-image-metadata.cjs',
@@ -286,16 +291,17 @@ function fullPlan({
   reasons,
   changedFiles = [],
   auditSampled = false,
-  solidityRelevant = true,
+  contracts = true,
+  abiFreshnessRelevant = true,
 }) {
   const lanes = Object.fromEntries(NODE_EVM_LANES.map((lane) => [lane, true]));
-  lanes.contracts = solidityRelevant;
+  lanes.contracts = contracts;
   return {
     mode: 'full',
     fullCi: true,
     auditSampled,
     runNode: true,
-    solidityRelevant,
+    abiFreshnessRelevant,
     lanes,
     evmScopes: [...EVM_SCOPES],
     changedFileCount: changedFiles.length,
@@ -309,7 +315,8 @@ function knownDiffPullRequestFullPlan(reasons, changedFiles = [], auditSampled =
     reasons,
     changedFiles,
     auditSampled,
-    solidityRelevant: changedFiles.some(isSolidityRelevantPath),
+    contracts: changedFiles.some(isSolidityRelevantPath),
+    abiFreshnessRelevant: changedFiles.some(isAbiFreshnessRelevantPath),
   });
 }
 
@@ -449,7 +456,8 @@ export function planCi({
     return fullPlan({
       reasons: ['No changed files were reported; failing closed'],
       changedFiles,
-      solidityRelevant: true,
+      contracts: true,
+      abiFreshnessRelevant: true,
     });
   }
 
@@ -468,7 +476,7 @@ export function planCi({
       fullCi: false,
       auditSampled: false,
       runNode: false,
-      solidityRelevant: false,
+      abiFreshnessRelevant: false,
       lanes: emptyLanes(),
       evmScopes: [],
       changedFileCount: changedFiles.length,
@@ -545,7 +553,7 @@ export function planCi({
     fullCi: false,
     auditSampled: false,
     runNode,
-    solidityRelevant: lanes.contracts,
+    abiFreshnessRelevant: false,
     lanes,
     evmScopes: EVM_SCOPES.filter((scope) => evmScopes.has(scope)),
     changedFileCount: changedFiles.length,
@@ -559,13 +567,14 @@ export function githubOutputsForPlan(plan) {
     mode: plan.mode,
     fullCi: plan.fullCi,
     runNode: plan.runNode,
-    solidityRelevant: plan.solidityRelevant,
+    abiFreshnessRelevant: plan.abiFreshnessRelevant,
     lanes: plan.lanes,
     evmScopes: plan.evmScopes,
   };
   return {
     full_ci: String(plan.fullCi),
     run_node: String(plan.runNode),
+    abi_freshness: String(plan.abiFreshnessRelevant),
     ...Object.fromEntries(CI_LANES.map((lane) => [lane, String(plan.lanes[lane])])),
     evm_matrix: JSON.stringify(plan.evmScopes),
     plan_json: JSON.stringify(gatePlan),

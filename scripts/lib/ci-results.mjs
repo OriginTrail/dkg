@@ -42,12 +42,12 @@ function checkPlanShape(plan, eventName, errors) {
   if (
     typeof plan.fullCi !== 'boolean'
     || typeof plan.runNode !== 'boolean'
-    || typeof plan.solidityRelevant !== 'boolean'
+    || typeof plan.abiFreshnessRelevant !== 'boolean'
   ) {
-    errors.push('CI plan fullCi/runNode/solidityRelevant flags must be booleans');
+    errors.push('CI plan fullCi/runNode/abiFreshnessRelevant flags must be booleans');
   }
-  if (plan.lanes?.contracts !== plan.solidityRelevant) {
-    errors.push('CI plan contracts output must match solidityRelevant');
+  if (plan.lanes?.contracts && !plan.abiFreshnessRelevant) {
+    errors.push('CI plan cannot select Solidity without ABI freshness');
   }
   for (const lane of CI_LANES) {
     if (typeof plan.lanes?.[lane] !== 'boolean') {
@@ -100,8 +100,8 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
     requireSuccess(needs, job, Boolean(plan.lanes?.[lane]), errors);
   }
 
-  const contracts = Boolean(plan.solidityRelevant);
-  requireSuccess(needs, 'abi-freshness', contracts, errors);
+  const contracts = Boolean(plan.lanes?.contracts);
+  requireSuccess(needs, 'abi-freshness', Boolean(plan.abiFreshnessRelevant), errors);
   const candidateEvent = eventName === 'pull_request' || eventName === 'merge_group';
   requireSuccess(needs, 'solidity', candidateEvent && contracts, errors);
   requireSuccess(
