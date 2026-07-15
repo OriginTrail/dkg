@@ -223,6 +223,29 @@ const GLOBAL_FULL_PATHS = new Set([
   'vitest.evm-integration.ts',
 ]);
 
+// Preserve the independent Solidity gate that existed before delta CI. A PR
+// can be promoted to full Node/EVM CI for many reasons (audit sample, label,
+// unknown path, disabled rollout) without making a four-shard Hardhat run
+// relevant. These paths intentionally mirror the former dorny/paths-filter
+// allowlist in .github/workflows/ci.yml.
+const SOLIDITY_RELEVANT_PATHS = new Set([
+  'packages/evm-module/package.json',
+  'packages/evm-module/slither.config.json',
+  'packages/evm-module/.solhint.json',
+  'packages/evm-module/.solhintignore',
+  'packages/evm-module/aderyn.toml',
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  '.github/workflows/ci.yml',
+]);
+
+function isSolidityRelevantPath(filePath) {
+  return SOLIDITY_RELEVANT_PATHS.has(filePath)
+    || /^packages\/evm-module\/(?:contracts|test|deploy|scripts)\//.test(filePath)
+    || /^packages\/evm-module\/hardhat\.[^/]+$/.test(filePath);
+}
+
 const BLAZEGRAPH_ARM64_PATHS = new Set([
   'blazegraph-image.json',
   'packages/cli/blazegraph-image-metadata.cjs',
@@ -244,18 +267,29 @@ function emptyLanes() {
   return Object.fromEntries(CI_LANES.map((lane) => [lane, false]));
 }
 
-function fullPlan(reasons, changedFiles = [], auditSampled = false) {
+function fullPlan(reasons, changedFiles = [], auditSampled = false, contracts = true) {
+  const lanes = Object.fromEntries(CI_LANES.map((lane) => [lane, true]));
+  lanes.contracts = contracts;
   return {
     mode: 'full',
     fullCi: true,
     auditSampled,
     runNode: true,
-    lanes: Object.fromEntries(CI_LANES.map((lane) => [lane, true])),
+    lanes,
     evmScopes: [...EVM_SCOPES],
     changedFileCount: changedFiles.length,
     changedFiles: changedFiles.slice(0, MAX_REPORTED_FILES),
     reasons,
   };
+}
+
+function fullPullRequestPlan(reasons, changedFiles = [], auditSampled = false) {
+  return fullPlan(
+    reasons,
+    changedFiles,
+    auditSampled,
+    changedFiles.some(isSolidityRelevantPath),
+  );
 }
 
 function normalizePath(filePath) {
@@ -362,26 +396,34 @@ export function planCi({
   auditPercentage = 5,
 } = {}) {
   const changedFiles = [...new Set(changeEntries.flatMap((entry) => entry.paths).map(normalizePath))];
+  const isPullRequest = eventName === 'pull_request' || eventName === 'pull_request_delta_disabled';
 
-  if (eventName !== 'pull_request') {
+  if (!isPullRequest) {
     return fullPlan([`${eventName || 'unknown'} events always run full CI`], changedFiles);
   }
 
+  if (eventName === 'pull_request_delta_disabled') {
+    return fullPullRequestPlan(['PR delta routing is disabled; running full CI'], changedFiles);
+  }
+
   if (labels.includes('ci:full')) {
-    return fullPlan(['PR has the ci:full override label'], changedFiles);
+    return fullPullRequestPlan(['PR has the ci:full override label'], changedFiles);
   }
 
   if (isAuditSample(sampleKey, auditPercentage)) {
-    return fullPlan([`${auditPercentage}% deterministic audit sample`], changedFiles, true);
+    return fullPullRequestPlan([`${auditPercentage}% deterministic audit sample`], changedFiles, true);
   }
 
   if (changeEntries.length === 0 || changedFiles.length === 0) {
-    return fullPlan(['No changed files were reported; failing closed'], changedFiles);
+    return fullPullRequestPlan(['No changed files were reported; failing closed'], changedFiles);
   }
 
   const riskyChange = changeEntries.find(({ status }) => ['D', 'R', 'C', 'T', 'U', 'X', 'B'].includes(status[0]));
   if (riskyChange) {
-    return fullPlan([`Git change status ${riskyChange.status} cannot be narrowed safely`], changedFiles);
+    return fullPullRequestPlan(
+      [`Git change status ${riskyChange.status} cannot be narrowed safely`],
+      changedFiles,
+    );
   }
 
   const productionFiles = changedFiles.filter((filePath) => !isDocumentationOnlyPath(filePath));
@@ -400,12 +442,18 @@ export function planCi({
   }
 
   if (productionFiles.length > 100) {
-    return fullPlan([`Large PR (${productionFiles.length} non-documentation files)`], changedFiles);
+    return fullPullRequestPlan(
+      [`Large PR (${productionFiles.length} non-documentation files)`],
+      changedFiles,
+    );
   }
 
   const touchedWorkspaces = new Set(productionFiles.map(workspaceForPath).filter(Boolean));
   if (touchedWorkspaces.size >= 4) {
-    return fullPlan([`Cross-cutting PR (${touchedWorkspaces.size} production workspaces)`], changedFiles);
+    return fullPullRequestPlan(
+      [`Cross-cutting PR (${touchedWorkspaces.size} production workspaces)`],
+      changedFiles,
+    );
   }
 
   const lanes = emptyLanes();
@@ -414,7 +462,7 @@ export function planCi({
 
   for (const filePath of productionFiles) {
     if (isGlobalFullPath(filePath)) {
-      return fullPlan([`Global CI input changed: ${filePath}`], changedFiles);
+      return fullPullRequestPlan([`Global CI input changed: ${filePath}`], changedFiles);
     }
 
     const blazegraphProvisioningChange = isBlazegraphArm64Path(filePath);
@@ -427,16 +475,19 @@ export function planCi({
     const workspace = workspaceForPath(filePath);
     if (!workspace) {
       if (blazegraphProvisioningChange) continue;
-      return fullPlan([`Unclassified path changed: ${filePath}`], changedFiles);
+      return fullPullRequestPlan([`Unclassified path changed: ${filePath}`], changedFiles);
     }
 
     if (filePath === `${workspace}/package.json`) {
-      return fullPlan([`Workspace dependency manifest changed: ${filePath}`], changedFiles);
+      return fullPullRequestPlan(
+        [`Workspace dependency manifest changed: ${filePath}`],
+        changedFiles,
+      );
     }
 
     const rule = WORKSPACE_RULES[workspace];
     if (rule.forceFull) {
-      return fullPlan([`Highest-risk workspace changed: ${workspace}`], changedFiles);
+      return fullPullRequestPlan([`Highest-risk workspace changed: ${workspace}`], changedFiles);
     }
 
     for (const lane of rule.lanes) lanes[lane] = true;
@@ -447,7 +498,10 @@ export function planCi({
   const deduplicatedReasons = [...new Set(reasons)];
   const runNode = NODE_LANES.some((lane) => lanes[lane]);
   if (!runNode && !lanes.bura_blazegraph_arm64 && !lanes.contracts && evmScopes.size === 0) {
-    return fullPlan(['Planner selected no lane for a production change; failing closed'], changedFiles);
+    return fullPullRequestPlan(
+      ['Planner selected no lane for a production change; failing closed'],
+      changedFiles,
+    );
   }
 
   return {

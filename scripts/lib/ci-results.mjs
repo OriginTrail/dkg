@@ -55,8 +55,11 @@ function checkPlanShape(plan, eventName, errors) {
     errors.push('CI plan has an invalid EVM scope matrix');
   }
   if (plan.mode === 'full') {
-    if (!plan.fullCi || CI_LANES.some((lane) => plan.lanes?.[lane] !== true)) {
-      errors.push('Full CI mode must select every lane');
+    const requiredFullLanes = eventName === 'pull_request'
+      ? CI_LANES.filter((lane) => lane !== 'contracts')
+      : CI_LANES;
+    if (!plan.fullCi || requiredFullLanes.some((lane) => plan.lanes?.[lane] !== true)) {
+      errors.push('Full CI mode must select every required lane');
     }
     if (EVM_SCOPES.some((scope) => !plan.evmScopes?.includes(scope))) {
       errors.push('Full CI mode must select every EVM scope');
@@ -95,9 +98,13 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
 
   const contracts = Boolean(plan.lanes?.contracts);
   requireSuccess(needs, 'abi-freshness', contracts, errors);
-  const candidateEvent = eventName === 'pull_request' || eventName === 'merge_group';
-  requireSuccess(needs, 'solidity', candidateEvent && contracts, errors);
-  requireSuccess(needs, 'solidity-coverage', !candidateEvent, errors);
+  requireSuccess(needs, 'solidity', eventName === 'pull_request' && contracts, errors);
+  requireSuccess(
+    needs,
+    'solidity-coverage',
+    eventName !== 'pull_request' && eventName !== 'merge_group',
+    errors,
+  );
   requireSuccess(
     needs,
     'tornado-static-analysis',
