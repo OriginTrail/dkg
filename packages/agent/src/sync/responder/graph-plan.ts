@@ -2254,9 +2254,10 @@ function parseSparqlInteger(value: string | undefined): number {
  * graph; on a 1 GiB workspace that exceeded the 30s HTTP query timeout on every
  * page. This planner inverts the work with backend-neutral SPARQL 1.1:
  *
- *  1. Join each concrete graph to its fresh metadata roots by the root subject
- *     (an indexed lookup and a DKG workspace invariant: `rootEntity` names an
- *     entity present in the shared payload).
+ *  1. Join each concrete graph to its fresh metadata roots by either the root
+ *     subject or one of its generated descendants. Some valid closures contain
+ *     only generated rows, so requiring a direct root triple is not
+ *     set-equivalent to the canonical snapshot reader.
  *  2. Count the exact root closures per concrete graph without returning their
  *     large literal values.
  *  3. Cache only graph/root/count scalars for the responder session.
@@ -2299,7 +2300,14 @@ async function buildFreshSwmDataGraphPlan(
                 <${DKG_ROOT_ENTITY}> ?root .
             ${cutoffFilter}
           }
-          GRAPH <${assertSafeIri(graph)}> { ?root ?rootPredicate ?rootObject }
+          GRAPH <${assertSafeIri(graph)}> { ?candidateSubject ?rootPredicate ?rootObject }
+          FILTER(
+            ?candidateSubject = ?root
+            || STRSTARTS(
+              STR(?candidateSubject),
+              CONCAT(STR(?root), "/.well-known/genid/")
+            )
+          )
         }
       }`);
     const rootResult = await store.query(`

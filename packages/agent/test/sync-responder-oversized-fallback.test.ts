@@ -195,6 +195,10 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
       ...workspaceOpQuads(cgId, 'opA', 'urn:root:A', bucketAMeta, recent),
       { graph: bucketAData, subject: 'urn:root:A', predicate: `${DKG_NS}label`, object: '"A-root-row"' },
       { graph: bucketAData, subject: 'urn:root:A/.well-known/genid/child', predicate: `${DKG_NS}label`, object: '"A-skolem-row"' },
+      // bucket A: a recent root represented only by a generated descendant.
+      // The bounded planner must admit this closure without a direct root row.
+      ...workspaceOpQuads(cgId, 'opAgen', 'urn:root:Agenerated', bucketAMeta, recent),
+      { graph: bucketAData, subject: 'urn:root:Agenerated/.well-known/genid/child', predicate: `${DKG_NS}label`, object: '"A-generated-only-skolem-row"' },
       // bucket A: a STALE root (older than cutoff) whose row must be excluded
       ...workspaceOpQuads(cgId, 'opAold', 'urn:root:Aold', bucketAMeta, stale),
       { graph: bucketAData, subject: 'urn:root:Aold', predicate: `${DKG_NS}label`, object: '"A-stale-should-be-excluded"' },
@@ -243,6 +247,7 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     const joined = [...canonical].join('\n');
     expect(joined).toContain('"A-root-row"');
     expect(joined).toContain('"A-skolem-row"');
+    expect(joined).toContain('"A-generated-only-skolem-row"');
     expect(joined).toContain('"B-root-row"');
     expect(joined).not.toContain('A-stale-should-be-excluded');
     expect(joined).not.toContain('orphan-should-be-excluded');
