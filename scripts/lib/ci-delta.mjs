@@ -433,6 +433,19 @@ export function planCi({
     });
   }
 
+  // Missing diff data is the highest-risk input and must win over every PR
+  // override. Labels, audit sampling, and the delta rollback switch may force
+  // a known diff to full CI, but they cannot infer that Solidity is irrelevant
+  // when GitHub reported no changed files at all.
+  if (changeEntries.length === 0 || changedFiles.length === 0) {
+    return fullPlan({
+      reasons: ['No changed files were reported; failing closed'],
+      changedFiles,
+      contracts: true,
+      abiFreshnessRelevant: true,
+    });
+  }
+
   if (eventName === 'pull_request_delta_disabled') {
     return knownDiffPullRequestFullPlan(
       ['PR delta routing is disabled; running full CI'],
@@ -450,15 +463,6 @@ export function planCi({
       changedFiles,
       true,
     );
-  }
-
-  if (changeEntries.length === 0 || changedFiles.length === 0) {
-    return fullPlan({
-      reasons: ['No changed files were reported; failing closed'],
-      changedFiles,
-      contracts: true,
-      abiFreshnessRelevant: true,
-    });
   }
 
   const riskyChange = changeEntries.find(({ status }) => ['D', 'R', 'C', 'T', 'U', 'X', 'B'].includes(status[0]));

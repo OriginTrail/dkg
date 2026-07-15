@@ -77,6 +77,21 @@ test('unknown PR diffs fail closed with Solidity selected and enforced', () => {
   assert.deepEqual(selectedLanes(plan), CI_LANES);
   assert.match(plan.reasons.join('\n'), /failing closed/);
 
+  for (const [name, overridePlan] of [
+    ['ci:full', pullRequestPlan([], { labels: ['ci:full'] })],
+    ['audit sample', pullRequestPlan([], { sampleKey: '00000000ffffffff' })],
+    ['delta disabled', planCi({
+      eventName: 'pull_request_delta_disabled',
+      changeEntries: [],
+    })],
+  ]) {
+    assert.equal(overridePlan.mode, 'full', name);
+    assert.equal(overridePlan.lanes.contracts, true, name);
+    assert.equal(overridePlan.abiFreshnessRelevant, true, name);
+    assert.deepEqual(selectedLanes(overridePlan), CI_LANES, name);
+    assert.match(overridePlan.reasons.join('\n'), /failing closed/, name);
+  }
+
   const needs = {
     changes: { result: 'success' },
     build: { result: 'success' },
