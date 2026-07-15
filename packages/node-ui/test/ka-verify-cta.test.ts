@@ -28,7 +28,6 @@ vi.mock('../src/ui/api.js', () => ({
   describePromoteError: () => null,
   partialPublishWarning: () => '',
   PARTIAL_PUBLISH_STATUS_SUFFIX: 'binding incomplete',
-  SwmSubsetNotSealableError: class SwmSubsetNotSealableError extends Error {},
 }));
 
 // The profile context drives the CTA copy + the publish target.

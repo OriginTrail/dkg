@@ -85,7 +85,7 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
       },
       resolveAgentByToken: () => undefined,
       assertion: {
-        promote,
+        shareWholeKnowledgeAsset: promote,
       },
     };
     server = createServer(async (req, res) => {

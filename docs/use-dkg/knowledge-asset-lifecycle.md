@@ -53,7 +53,7 @@ Async VM publish requires the async publisher to be enabled and backed by publis
 | `dkg ka import-file <name> -c <cg> --input-file <file>` | Extract a local document into WM |
 | `dkg ka extraction-status <name> -c <cg>` | Check document extraction status |
 | `dkg ka finalize <name> -c <cg> [--layer wm|swm]` | Seal WM or already-shared SWM content |
-| `dkg ka share <name> -c <cg> [--entity <uri...>] [--skip-seal]` | Share WM to SWM |
+| `dkg ka share <name> -c <cg>` | Atomically seal and share the whole WM Knowledge Asset to SWM |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
 | `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n>]` | List async share jobs |
 | `dkg ka share-job <job-id>` | Show one async share job |
