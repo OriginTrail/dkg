@@ -4365,6 +4365,18 @@ export class DKGPublisher implements Publisher {
           `Graph-scoped update kaId ${kaId} does not match UAL-derived kaId ${scopeKaId}`,
         );
       }
+      // 🔴 PR #1712 review (3586686572): the packed-id check above proves
+      // author+number but ignores the UAL's chain namespace, so an update
+      // could be submitted on this chain while persisting and returning an
+      // identity that names another chain. Mirror publish()'s pre-mint guard;
+      // chainless (NoChainAdapter) updates stay exempt like local publishes —
+      // with no chain identity there is nothing for the UAL to disagree with.
+      if (this.chain.chainId !== 'none' && graphUpdate.scope.chainId !== this.chain.chainId) {
+        throw new Error(
+          `Graph-scoped update UAL ${graphUpdate.scope.ual} targets chain ` +
+            `${graphUpdate.scope.chainId}, but this publisher operates on ${this.chain.chainId}`,
+        );
+      }
     }
     // Round 12 Bug 34: `update()` is a Bucket A public write entry
     // point (accepts user-authored quads) that Round 9 missed. Apply
