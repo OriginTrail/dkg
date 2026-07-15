@@ -86,6 +86,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   ENTITY_PRED_ALT,
+  LegacyKnowledgeAssetReadOnlyError,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -410,7 +411,6 @@ import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,
 } from './dkg-agent-publish.js';
-import { placeFinalizedLifecycleSwm } from './finalized-lifecycle-swm.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';
@@ -2623,13 +2623,10 @@ export class DKGAgent extends DKGAgentBase {
           ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
           schemeVersion?: number;
           /**
-           * #1116 — which layer holds the content to seal. `"wm"` (default)
-           * finalizes the Working-Memory draft. `"swm"` seals an asset whose
-           * content is already in Shared Working Memory (e.g. after a
-           * `skipSeal` share, or an asset stuck unsealed under the old
-           * behavior): it reconstructs a transient WM draft from SWM, then
-           * finalizes — no delete-and-recreate. The asset stays in SWM and
-           * becomes publishable.
+           * @deprecated `"swm"` remains recognizable only so mixed-version
+           * callers get the stable `LEGACY_KA_READ_ONLY` error. New KAs are
+           * sealed in WM and shared atomically; existing root-scoped SWM assets
+           * are readable but cannot be reconstructed, resealed, or migrated.
            */
           layer?: 'wm' | 'swm';
         },
@@ -2643,102 +2640,16 @@ export class DKGAgent extends DKGAgentBase {
         eip712Digest: string;
       }> {
         const finalizeAgentAddress = opts?.agentAddress ?? agentAddress;
-        // #1116 seal-in-SWM: pull the asset's roots back out of SWM into a
-        // transient WM draft (reusing pull-from — incl. its seal-independent
-        // root resolution), run the ordinary finalize over that draft, then DROP
-        // the transient draft so the asset is left resident PURELY in SWM (with
-        // its fresh seal), not duplicated across WM+SWM. The seal is
-        // content-based, so it is valid for the SWM-resident content; the SWM
-        // copy itself is never modified. We reconstruct unconditionally
-        // (onConflict 'replace') so a stale WM draft never blocks the re-seal;
-        // pull-from now PRESERVES the dkg:rootEntity recovery rows across its
-        // clean-slate, so a finalize that fails here leaves the asset safely
-        // re-tryable (seal-in-SWM is atomic-on-failure).
-        if (opts?.layer !== 'swm') {
-          return agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
-            subGraphName: opts?.subGraphName,
-            authorAgentAddress: opts?.authorAgentAddress,
-            preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-            authorSignTypedData: opts?.authorSignTypedData,
-            schemeVersion: opts?.schemeVersion,
-          });
+        if (opts?.layer === 'swm') {
+          throw new LegacyKnowledgeAssetReadOnlyError();
         }
-        // #1116 (review A1) — seal-in-SWM is publishable-by-construction: it
-        // reconstructs a WM draft from the promoted root rows, seals it, and
-        // leaves the asset resident in SWM ready to publish under the KA name.
-        // A SUBSET share also stamps those root rows but is SWM-ONLY (not
-        // publishable) — so guard on the full-share marker BEFORE the pull-from.
-        // Without this, a {A,B} KA only SUBSET-shared (A) could be sealed and
-        // published as a partial asset, breaking the subset-shares-aren't-
-        // publishable invariant.
-        const fullyShared = await agent.publisher.hasSwmShareComplete(
-          contextGraphId, name, finalizeAgentAddress, opts?.subGraphName,
-        );
-        if (!fullyShared) {
-          throw Object.assign(
-            new Error(
-              'Cannot seal-in-SWM: this asset was not fully shared to SWM — subset shares are not publishable. ' +
-                'Share the full asset (entities:"all") first, then finalize(layer:"swm").',
-            ),
-            { code: 'SWM_SUBSET_NOT_SEALABLE' },
-          );
-        }
-        // #1116 (round 9) — NO pre-clear of the seal here. Round 8 made the SWM
-        // pull resolve entities from the member rows (NOT seal.rootEntities), so a
-        // stale seal can no longer mis-scope the reconstruction; and
-        // assertionPullFrom's INTERNAL teardown clears the seal AFTER it validates
-        // the source is non-empty. A pre-clear ran BEFORE the pull and stranded the
-        // asset (seal gone, no fresh seal) if the pull threw PULL_FROM_EMPTY_SOURCE.
-        // Dropping it makes finalize(layer:"swm") atomic-on-failure: on a failed
-        // pull the prior seal survives and the asset stays re-tryable.
-        await agent.publisher.assertionPullFrom(contextGraphId, name, finalizeAgentAddress, 'swm', {
-          subGraphName: opts?.subGraphName,
-          onConflict: 'replace',
-        });
-        const swmSeal = await agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
+        return agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
           subGraphName: opts?.subGraphName,
           authorAgentAddress: opts?.authorAgentAddress,
           preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+          authorSignTypedData: opts?.authorSignTypedData,
           schemeVersion: opts?.schemeVersion,
         });
-        // Upgraded full `skipSeal` shares may predate KA-number allocation and
-        // still live in the legacy SWM bucket. Finalize has now allocated the
-        // packed id bound by the seal; ensure that exact root closure also exists
-        // in its canonical named lifecycle before publish uses exact-scope reads.
-        // This is idempotent, so retrying after placement repairs the lifecycle
-        // pointer safely.
-        await placeFinalizedLifecycleSwm({
-          publisher: agent.publisher,
-          operationContext: createOperationContext('share'),
-          authorAddress: swmSeal.authorAddress,
-          packedKaId: swmSeal.reservedKaId,
-          contextGraphId,
-          assertionName: name,
-          assertionLifecycleAgentAddress: finalizeAgentAddress,
-          subGraphName: opts?.subGraphName,
-          rootEntities: swmSeal.rootEntities,
-        });
-        // #1116 FIX 2 — make the SWM-resident position observable. The original
-        // (possibly skipSeal) promote had no seal yet, so `_stampSwmPointer` ran a
-        // no-op then; now that the seal EXISTS, stamp dkg:swmCurrentAssertion to it
-        // so status reports "swm-shared". This must precede the WM-draft cleanup
-        // below, whose stale-WM-pointer retirement is gated on the SWM pointer
-        // being present (the content is genuinely SWM-resident).
-        await agent._stampSwmPointer(contextGraphId, name, finalizeAgentAddress, opts?.subGraphName);
-        // Best-effort: the seal (in _meta) and the SWM content are already
-        // durable, so a cleanup failure is harmless (it only leaves a sealed WM
-        // draft alongside SWM — which the finalize-after-edit guards still
-        // protect). Drop it so the post-condition is "purely in SWM".
-        try {
-          await agent.publisher.clearWmDraftDataGraph(contextGraphId, name, finalizeAgentAddress, opts?.subGraphName);
-        } catch (cleanupErr: any) {
-          agent.log.warn(
-            createOperationContext('share'),
-            `seal-in-SWM: WM-draft cleanup failed (asset is sealed and resident in SWM; ` +
-              `a harmless WM copy remains): ${cleanupErr?.message ?? String(cleanupErr)}`,
-          );
-        }
-        return swmSeal;
       },
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionHistoryDescriptor | null> {

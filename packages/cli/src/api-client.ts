@@ -707,6 +707,7 @@ export class ApiClient {
     name: string,
     options?: {
       subGraphName?: string;
+      /** @deprecated Only WM finalization is supported. `swm` fails read-only. */
       layer?: 'wm' | 'swm';
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
@@ -717,6 +718,12 @@ export class ApiClient {
     // self-sign vs external-signer conflict client-side instead of relying on
     // the daemon, so every SDK surface enforces the same contract.
     assertExclusiveAuthorFields(options ?? {});
+    if (options?.layer === 'swm') {
+      throw Object.assign(
+        new Error('Legacy root-scoped Knowledge Assets are read-only'),
+        { code: 'LEGACY_KA_READ_ONLY' },
+      );
+    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...(options ?? {}) });
   }
 

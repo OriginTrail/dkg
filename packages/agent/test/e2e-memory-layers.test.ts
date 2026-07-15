@@ -1256,7 +1256,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     ).rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
     await expect(
       agent.assertion.finalize(CG_ID, name, { layer: 'swm' }),
-    ).rejects.toMatchObject({ code: 'SWM_SUBSET_NOT_SEALABLE' });
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
 
     const wm = await agent.assertion.query(CG_ID, name);
     expect(wm).toHaveLength(1);
@@ -1447,8 +1447,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
       agent.assertion.promote(CG_ID, name, { entities: [`${ENTITY_BASE}:a`] }),
     ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
 
-    // 4. Seal-in-SWM is refused: the marker was cleared at discard AND on the
-    // subset share, so a partial asset can't be published under the KA name.
+    // 4. SWM reconstruction/resealing is refused unconditionally. Legacy
+    // root-scoped data remains readable but is never migrated by a write path.
     let thrown: any;
     try {
       await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
@@ -1456,7 +1456,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
       thrown = e;
     }
     expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('SWM_SUBSET_NOT_SEALABLE');
+    expect(thrown.code).toBe('LEGACY_KA_READ_ONLY');
   }, 30_000);
 
   it('a rejected subset re-share preserves the prior sealed exact SWM version', async () => {
@@ -1699,10 +1699,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect((await agent.assertion.query(CG_ID, name)).map((quad) => quad.object).sort()).toEqual(['"A"', '"B"']);
   }, 40_000);
 
-  // (d) a CONFIRMED publish CLEARS the marker (step 3); a subsequent
-  // finalize(layer:swm) REJECTS (SWM_SUBSET_NOT_SEALABLE — the marker is gone)
-  // WITHOUT stranding the seal (the wrapper pre-clear is gone, step 4).
-  it('round 9 (d): confirmed publish clears the marker; a later finalize(layer:swm) rejects without stranding the seal', async () => {
+  // A confirmed publish clears the marker; a later legacy SWM-finalize request
+  // is read-only and cannot strand the surviving seal.
+  it('confirmed publish clears the marker; legacy SWM finalize rejects without stranding the seal', async () => {
     const agent = await createAgent('Round9PostPublishBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Round9 PostPublish E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1719,20 +1718,18 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // step 3: the confirmed publish consumed the SWM share → marker cleared.
     expect(await agent.publisher.hasSwmShareComplete(CG_ID, name, agent.defaultAgentAddress ?? agent.peerId)).toBe(false);
 
-    // A post-publish seal-in-SWM must REJECT (no live full share) and must NOT
-    // strand the seal (the published seal survives for VM ops).
+    // The deprecated write bridge must reject before touching the published seal.
     const sealBefore = await sealExists(agent, CG_ID, name);
     let thrown: any;
     try { await agent.assertion.finalize(CG_ID, name, { layer: 'swm' }); } catch (e) { thrown = e; }
     expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('SWM_SUBSET_NOT_SEALABLE');
+    expect(thrown.code).toBe('LEGACY_KA_READ_ONLY');
     expect(await sealExists(agent, CG_ID, name)).toBe(sealBefore); // seal not stranded
   }, 40_000);
 
-  // (e) finalize(layer:swm) whose SWM is EMPTY but the marker survived (simulate by
-  // clearing SWM after a full share) no longer strands the seal — the wrapper
-  // pre-clear is gone (step 4), so a PULL_FROM_EMPTY_SOURCE leaves the seal intact.
-  it('round 9 (e): finalize(layer:swm) on an empty-SWM (marker survived) does NOT strand the seal', async () => {
+  // Even inconsistent legacy metadata (empty SWM with a surviving marker) is
+  // never repaired through a write-side root migration; the seal stays intact.
+  it('legacy SWM finalize on empty SWM rejects read-only without stranding the seal', async () => {
     const agent = await createAgent('Round9NoStrandBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Round9 NoStrand E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1749,12 +1746,11 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // (without clearing the marker), mimicking a consumed/missing SWM slice.
     await agent.publisher.clearPublishedSwmRoots(CG_ID, [A], undefined, createOperationContext('publishFromSWM'));
 
-    // finalize(layer:swm) passes the marker gate, runs pull-from which finds an
-    // EMPTY source → PULL_FROM_EMPTY_SOURCE. The seal must SURVIVE (atomic-on-failure).
+    // Rejection happens before source inspection or mutation.
     let thrown: any;
     try { await agent.assertion.finalize(CG_ID, name, { layer: 'swm' }); } catch (e) { thrown = e; }
     expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('PULL_FROM_EMPTY_SOURCE');
+    expect(thrown.code).toBe('LEGACY_KA_READ_ONLY');
     expect(await sealExists(agent, CG_ID, name)).toBe(true); // NOT stranded (step 4)
   }, 40_000);
 

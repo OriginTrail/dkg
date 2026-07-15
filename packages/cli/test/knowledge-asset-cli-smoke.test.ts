@@ -609,7 +609,9 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     expect(createCall?.body.alsoPublishVm).toBeUndefined();
 
     await runCli(['knowledge-asset', 'write', 'paper', '-c', 'research', '--subject', 'urn:company:acme', '--predicate', 'http://schema.org/description', '--object', 'Logistics'], env);
-    await runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'swm'], env);
+    await runCli(['ka', 'finalize', 'paper', '-c', 'research'], env);
+    await expect(runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'swm'], env))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--layer'") });
     await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--entity', 'urn:company:acme'], env))
       .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--entity'") });
     await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--skip-seal'], env))
@@ -636,7 +638,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
         object: '"Logistics"',
       }),
     ]);
-    expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/wm/finalize')?.body.layer).toBe('swm');
+    expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/wm/finalize')?.body.layer).toBeUndefined();
     const shareCalls = calls.filter((call) => call.url === '/api/knowledge-assets/paper/swm/share');
     expect(shareCalls[0]?.body).toMatchObject({
       contextGraphId: 'research',

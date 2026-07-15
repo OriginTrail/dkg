@@ -316,12 +316,18 @@ export function resolveFinalizeOptions(
     schemeVersion,
     layer,
   } = raw;
-  // #1116: optional `layer` selects WHERE the content to seal lives. "wm"
-  // (default) seals the Working-Memory draft; "swm" seals content already
-  // shared to SWM (reconstructs a transient WM draft from SWM, then finalizes)
-  // — mirrors the body-field `layer` precedent on pull-from.
-  if (layer != null && layer !== "wm" && layer !== "swm") {
-    jsonResponse(res, 400, { error: 'finalize "layer" must be "wm" or "swm" when supplied' });
+  // Rootless KAs are sealed in WM and shared atomically. Retain a deliberate,
+  // stable response for older clients that still send `layer:"swm"`, but never
+  // invoke the legacy root-closure reconstruction/migration path.
+  if (layer === "swm") {
+    jsonResponse(res, 409, {
+      code: "LEGACY_KA_READ_ONLY",
+      error: "Legacy root-scoped Knowledge Assets are read-only",
+    });
+    return null;
+  }
+  if (layer != null && layer !== "wm") {
+    jsonResponse(res, 400, { error: 'finalize "layer" must be "wm" when supplied' });
     return null;
   }
   if (authorAgentAddress != null && preSignedAuthorAttestation != null) {
@@ -383,7 +389,6 @@ export function resolveFinalizeOptions(
     ...(typeof effectiveAuthorAgentAddress === "string" ? { authorAgentAddress: effectiveAuthorAgentAddress } : {}),
     ...(resolvedPreSignedAttestation ? { preSignedAuthorAttestation: resolvedPreSignedAttestation } : {}),
     ...(schemeVersion != null ? { schemeVersion } : {}),
-    ...(layer === "swm" ? { layer } : {}),
   };
 }
 
@@ -1155,26 +1160,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           finalizeOptions,
           writePreflightCallerAgentAddress,
         );
-        let seal;
-        try {
-          seal = await agent.assertion.finalize(contextGraphId, name, {
-            ...finalizeOptions,
-            ...finalizeStorageLane,
-          });
-        } catch (e: any) {
-          // #1116 (review A1): a finalize(layer:"swm") on an asset that was only
-          // SUBSET-shared is rejected — subset shares are SWM-only, not
-          // publishable. Map it to a 409 (parity with the swm/share
-          // UNSEALED_SHARE_BLOCKED mapping) carrying the recovery hint in the
-          // message; everything else propagates to the outer handler unchanged.
-          if (e?.code === "SWM_SUBSET_NOT_SEALABLE") {
-            return jsonResponse(res, 409, { code: "SWM_SUBSET_NOT_SEALABLE", error: e.message });
-          }
-          throw e;
-        }
-        // #1116: a layer:"swm" finalize touches SWM (it reconstructs a WM draft
-        // from SWM, then seals), so reflect both layers in the change event.
-        emitMemoryGraphChanged?.({ contextGraphId, layers: finalizeOptions.layer === "swm" ? ["wm", "swm"] : ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
+        const seal = await agent.assertion.finalize(contextGraphId, name, {
+          ...finalizeOptions,
+          ...finalizeStorageLane,
+        });
+        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
         // Full seal payload (PR #971) — clients inspect the attestation.
         return jsonResponse(res, 200, {
           assertionUri: seal.assertionUri,

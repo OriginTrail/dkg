@@ -1038,15 +1038,12 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls).toHaveLength(0);
   });
 
-  it('knowledgeAssetFinalize can target WM or SWM layer', async () => {
+  it('knowledgeAssetFinalize rejects the legacy SWM write bridge before HTTP serialization', async () => {
     const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
-    await client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' });
-    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/wm/finalize`);
-    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
-      contextGraphId: 'cg',
-      layer: 'swm',
-      subGraphName: 'notes',
-    });
+    await expect(
+      client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' }),
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(calls).toHaveLength(0);
   });
 
   it('knowledgeAssetShareAsync and share job helpers use lifecycle routes', async () => {

@@ -3,7 +3,7 @@
  * share contract, driven over real HTTP against `handleKnowledgeAssetsRoutes`
  * with a MINIMAL fake agent (same proven pattern as
  * `promote-route-not-persisted.test.ts`). The ENGINE outcomes (fail-closed +
- * WM-preserved + subset-not-sealable) are pinned at the agent e2e level
+ * WM-preserved + legacy-read-only) are pinned at the agent e2e level
  * (`packages/agent/test/e2e-memory-layers.test.ts`, #1116 block); this pins the
  * ROUTE's catch branches so the HTTP surface can't silently drift:
  *
@@ -12,8 +12,8 @@
  *     `{ code, error, recovery }`. The live-daemon suite explicitly can NOT
  *     reach this (it always has a signing key + V10 chain), so it's covered
  *     here with a fake agent.
- *   - wm/finalize (layer:swm): a subset-shared asset throws
- *     `code:'SWM_SUBSET_NOT_SEALABLE'` → route 409 `{ code, error }`.
+ *   - wm/finalize (layer:swm): the route rejects the retired write bridge with
+ *     `code:'LEGACY_KA_READ_ONLY'` before invoking the engine.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -247,31 +247,20 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.namedGraphs).toEqual(['urn:test:graph:one']);
   });
 
-  it('wm/finalize (layer:swm): forwards layer:"swm" to the engine AND maps SWM_SUBSET_NOT_SEALABLE → 409', async () => {
-    // Round 10 (reviewer 🟡): CAPTURE the finalize call args so we prove the route
-    // threaded `layer:"swm"` through resolveFinalizeOptions into
-    // agent.assertion.finalize — a fake that ignored its args would let a route
-    // that dropped `layer` (always finalizing WM) pass this test silently.
+  it('wm/finalize (layer:swm): rejects read-only before invoking the engine', async () => {
     const finalizeCalls: Array<{ contextGraphId: unknown; name: unknown; opts: any }> = [];
     await startWith({
       finalize: async (contextGraphId: unknown, name: unknown, opts: any) => {
         finalizeCalls.push({ contextGraphId, name, opts });
-        throw Object.assign(
-          new Error('Cannot seal-in-SWM: this asset was not fully shared to SWM — subset shares are not publishable. Share the full asset (entities:"all") first, then finalize(layer:"swm").'),
-          { code: 'SWM_SUBSET_NOT_SEALABLE' },
-        );
+        throw new Error('must not be called');
       },
     });
 
     const res = await post('wm/finalize', { contextGraphId: CG_ID, layer: 'swm' });
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('SWM_SUBSET_NOT_SEALABLE');
-    expect(String(res.body.error)).toContain('subset shares are not publishable');
-
-    // The route actually forwarded layer:"swm" (not dropped, not defaulted to WM).
-    expect(finalizeCalls.length).toBe(1);
-    expect(finalizeCalls[0]?.opts?.layer).toBe('swm');
-    expect(finalizeCalls[0]?.contextGraphId).toBe(CG_ID);
+    expect(res.body.code).toBe('LEGACY_KA_READ_ONLY');
+    expect(String(res.body.error)).toContain('read-only');
+    expect(finalizeCalls).toHaveLength(0);
   });
 
   it('wm/finalize: uses the token-canonical storage lane and author when body author differs only by case', async () => {

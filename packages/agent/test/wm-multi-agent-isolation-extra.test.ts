@@ -280,7 +280,7 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
     expect(wm.some((q) => q.subject === 'urn:wm:bob:pull')).toBe(true);
   });
 
-  it('an unsealed SWM recovery cannot bypass the explicitly selected non-default agent lane', async () => {
+  it('legacy SWM recovery is read-only even on an explicitly selected non-default agent lane', async () => {
     const cgId = freshCgId('wm-assertion-swm-finalize-b');
     const assertionName = 'b-lane-swm-finalize';
     await node!.createContextGraph({ id: cgId, name: 'WM assertion SWM finalize B', description: '' });
@@ -304,7 +304,7 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
       agentAddress: agentB.agentAddress,
       authorAgentAddress: agentB.agentAddress,
     })).rejects.toMatchObject({
-      code: 'SWM_SUBSET_NOT_SEALABLE',
+      code: 'LEGACY_KA_READ_ONLY',
     });
     expect(await node!.publisher.assertionQuery(cgId, assertionName, agentB.agentAddress)).toHaveLength(1);
   });
