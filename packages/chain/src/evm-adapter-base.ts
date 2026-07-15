@@ -2753,6 +2753,21 @@ export class EVMChainAdapterBase {
     return this.contracts.knowledgeAssetStorage.target as string;
   }
 
+  async getKnowledgeAssetOwner(kaId: bigint): Promise<string> {
+    await this.init();
+    const storage = this.contracts.knowledgeAssetStorage;
+    if (!storage) {
+      throw new Error('DKGKnowledgeAssets not deployed on this chain.');
+    }
+    const owner = await this.readContract<string>(
+      storage,
+      'DKGKnowledgeAssets.ownerOf',
+      'ownerOf',
+      kaId,
+    );
+    return ethers.getAddress(owner);
+  }
+
   /**
    * OT-RFC-43 Option 1 — highest per-author KA `number` already minted on chain,
    * or `-1n` if `author` never minted. Backs the allocator's cold-start
@@ -3342,6 +3357,30 @@ export class EVMChainAdapterBase {
     try {
       const code = await this.readProvider('hasContractCode getCode', (p) => p.getCode(address));
       return code !== undefined && code !== null && code !== '0x' && code.length > 2;
+    } catch {
+      return false;
+    }
+  }
+
+  async verifyContractSignature(
+    address: string,
+    digest: string,
+    signature: string,
+  ): Promise<boolean> {
+    const wallet = new Contract(
+      ethers.getAddress(address),
+      ['function isValidSignature(bytes32,bytes) view returns (bytes4)'],
+      this.signer,
+    );
+    try {
+      const magic = await this.readContract<string>(
+        wallet,
+        'IERC1271.isValidSignature',
+        'isValidSignature',
+        digest,
+        signature,
+      );
+      return magic.toLowerCase() === '0x1626ba7e';
     } catch {
       return false;
     }

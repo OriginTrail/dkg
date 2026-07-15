@@ -357,20 +357,22 @@ export class PublishMethods extends EVMChainAdapterBase {
               break;
             }
           }
-          if (roots.length > 0) {
-            merkleRootCount = BigInt(matchedIndex >= 0 ? matchedIndex + 1 : roots.length);
+          if (matchedIndex < 0) {
+            return { verified: false };
           }
-        } catch { /* optional historical V10 view */ }
-        if (!onChainPublisher) {
-          try {
-            onChainPublisher = await this.readContract(
-              this.contracts.knowledgeAssetStorage, 'kas.getLatestMerkleRootPublisher',
-              'getLatestMerkleRootPublisher', batchId,
-            );
-          } catch { /* not found in V10 storage */ }
+          merkleRootCount = BigInt(matchedIndex + 1);
+        } catch {
+          // A latest-state fallback can authenticate a historical receipt with
+          // a different publisher/root after a later update. V10 verification
+          // therefore fails closed when the receipt-block view is unavailable.
+          return { verified: false };
         }
       }
-      if ((!onChainPublisher || onChainPublisher === ethers.ZeroAddress) && this.contracts.knowledgeAssetsStorage) {
+      if (
+        !this.contracts.knowledgeAssetStorage
+        && (!onChainPublisher || onChainPublisher === ethers.ZeroAddress)
+        && this.contracts.knowledgeAssetsStorage
+      ) {
         try {
           onChainPublisher = await this.readContract(
             this.contracts.knowledgeAssetsStorage, 'kasV9.getBatchPublisher',

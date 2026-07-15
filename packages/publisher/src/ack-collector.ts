@@ -2,6 +2,8 @@ import {
   PROTOCOL_STORAGE_ACK,
   PROTOCOL_STORAGE_ACK_V2,
   PROTOCOL_STORAGE_UPDATE_ACK,
+  PROTOCOL_STORAGE_UPDATE_ACK_V2,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   encodePublishIntent,
   encodeUpdateIntent,
   decodeStorageACK,
@@ -12,7 +14,6 @@ import {
   STORAGE_ACK_DECLINE_CODES,
   boundedDeclineCodeLabel,
   isSubscriptionSource,
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   withSpan,
   getMetrics,
@@ -651,7 +652,10 @@ export class ACKCollector {
 
     log(`[ACKCollector] Collecting UPDATE ACKs via direct P2P (kaId=${kaId}, newMerkleRoot=${ethers.hexlify(newMerkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers(PROTOCOL_STORAGE_UPDATE_ACK);
+    const updateAckProtocolId = params.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+      ? PROTOCOL_STORAGE_UPDATE_ACK_V2
+      : PROTOCOL_STORAGE_UPDATE_ACK;
+    const corePeers = this.deps.getConnectedCorePeers(updateAckProtocolId);
     if (corePeers.length === 0) {
       throw new QuorumUnmetError({
         collected: 0,
@@ -695,7 +699,7 @@ export class ACKCollector {
 
     return this.runACKRound({
       intentBytes,
-      ackProtocolId: PROTOCOL_STORAGE_UPDATE_ACK,
+      ackProtocolId: updateAckProtocolId,
       ackDigest,
       merkleRoot: newMerkleRoot,
       contextGraphId,

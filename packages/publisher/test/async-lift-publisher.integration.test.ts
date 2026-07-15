@@ -5,6 +5,7 @@ import {
   createLiftJobFailureMetadata,
   type LiftRequest,
 } from '../src/index.js';
+import { withLegacyRawLiftTestSeeder } from './_helpers/legacy-raw-lift.js';
 
 describe('TripleStoreAsyncLiftPublisher integration', () => {
   const stores: TripleStore[] = [];
@@ -30,14 +31,16 @@ describe('TripleStoreAsyncLiftPublisher integration', () => {
 
     let now = 10_000;
     let ids = 0;
-    const publisher = new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++now,
-      idGenerator: () => `job-${++ids}`,
-      legacyRawLiftWriteCapability: 'migration-only',
-    });
+    const clock = () => ++now;
+    const nextId = () => `job-${++ids}`;
+    const publisher = withLegacyRawLiftTestSeeder(
+      new TripleStoreAsyncLiftPublisher(store, { now: clock, idGenerator: nextId }),
+      store,
+      { now: clock, idGenerator: nextId },
+    );
 
-    const acceptedId = await publisher.lift(request('op-1'));
-    const retryId = await publisher.lift(request('op-2', ['urn:local:/manson', 'urn:local:/rihana']));
+    const acceptedId = await publisher.seedLegacyRawLift(request('op-1'));
+    const retryId = await publisher.seedLegacyRawLift(request('op-2', ['urn:local:/manson', 'urn:local:/rihana']));
 
     await publisher.claimNext('wallet-1');
     await publisher.claimNext('wallet-2');

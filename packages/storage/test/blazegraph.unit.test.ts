@@ -629,7 +629,9 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       .toBe('application/sparql-update; charset=utf-8');
     expect(body).toContain('urn:dkg:internal:atomic-graph-replace:');
     expect(body).toContain('INSERT DATA');
-    expect(body).toContain('MOVE SILENT GRAPH');
+    // Non-SILENT: a missing staging graph must fail loudly, not report success.
+    expect(body).toContain('MOVE GRAPH');
+    expect(body).not.toContain('MOVE SILENT');
     expect(body).toContain('TO GRAPH <http://ex.org/g>');
     expect(body).toContain('<http://ex.org/new> <http://ex.org/p> "new" .');
   });

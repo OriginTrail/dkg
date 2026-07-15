@@ -66,6 +66,13 @@ def test_finalize_omits_layer_when_none(recording_client):
     assert "layer" not in body
 
 
+def test_finalize_accepts_wm_but_omits_layer_from_wire(recording_client):
+    client = recording_client
+    client.finalize_assertion("k", "cg1", layer="wm")
+    _, body = client.posts[-1]
+    assert body == {"contextGraphId": "cg1"}
+
+
 def test_finalize_rejects_non_wm_layer_before_http(recording_client):
     client = recording_client
     before = len(client.posts)

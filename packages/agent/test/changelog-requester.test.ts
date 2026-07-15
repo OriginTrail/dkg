@@ -7,7 +7,10 @@ import {
   encodeChangelogResponse, decodeChangelogRequest, decodeChangelogResponse,
   type ChangelogDeltaRecord, type ChangelogSyncRequest, type ChangelogSyncResponse,
 } from '../src/sync/changelog/wire.js';
-import { classifyDurableMetaGraph } from '../src/sync/durable-integrity.js';
+import {
+  DURABLE_INTEGRITY_META_PREDICATES,
+  classifyDurableMetaGraph,
+} from '../src/sync/durable-integrity.js';
 
 const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: 'p', object: `o${n}`, graph });
 
@@ -16,8 +19,7 @@ const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: '
 /**
  * Build records + the verify maps planPageApply consumes. Each spec is a graph with `count`
  * parsed quads of which `verified` survived; a meta graph is added to metaGraphsWithRoot
- * unless `noRoot` (a rootless meta cannot bind data), and to integrityMetaGraphs unless
- * explicitly marked as plain configuration.
+ * unless `noRoot` (a rootless meta cannot bind data).
  */
 function buildPage(specs: Array<{
   seq: number;
@@ -26,39 +28,44 @@ function buildPage(specs: Array<{
   count?: number;
   verified?: number;
   noRoot?: boolean;
-  noIntegrity?: boolean;
   parsedQuads?: Quad[];
 }>) {
   const records: ChangelogDeltaRecord[] = [];
   const verifiedByGraph = new Map<string, Quad[]>();
   const recordQuadCountByGraph = new Map<string, number>();
   const metaGraphsWithRoot = new Set<string>();
-  const integrityMetaGraphs = new Set<string>();
   for (const s of specs) {
     const op = s.op ?? 'upsert';
     if (op === 'drop') { records.push({ seq: s.seq, graph: s.graph, op }); continue; }
-    const parsedQuads = s.parsedQuads;
-    const count = s.count ?? parsedQuads?.length ?? 1;
+    const count = s.count ?? s.parsedQuads?.length ?? 1;
     const verified = s.verified ?? count;
     records.push({ seq: s.seq, graph: s.graph, op, quads: `nq:${s.graph}` });
     recordQuadCountByGraph.set(s.graph, count);
-    const recordQuads = parsedQuads ?? Array.from({ length: count }, (_, i) => qd(s.graph, i));
+    const recordQuads = s.parsedQuads ?? Array.from({ length: count }, (_, i) => qd(s.graph, i));
     verifiedByGraph.set(s.graph, recordQuads.slice(0, verified));
     if (s.graph.endsWith('/_meta')) {
-      if (parsedQuads) {
-        const classification = classifyDurableMetaGraph(parsedQuads);
-        if (classification.hasMerkleRoot) metaGraphsWithRoot.add(s.graph);
-        if (classification.hasIntegrityEnvelope) integrityMetaGraphs.add(s.graph);
-      } else {
-        if (!s.noRoot) metaGraphsWithRoot.add(s.graph);
-        if (!s.noIntegrity) integrityMetaGraphs.add(s.graph);
+      if (s.parsedQuads) {
+        if (classifyDurableMetaGraph(s.parsedQuads).hasMerkleRoot) metaGraphsWithRoot.add(s.graph);
+      } else if (!s.noRoot) {
+        metaGraphsWithRoot.add(s.graph);
       }
     }
   }
-  return { records, verifiedByGraph, recordQuadCountByGraph, metaGraphsWithRoot, integrityMetaGraphs };
+  return {
+    records,
+    verifiedByGraph,
+    recordQuadCountByGraph,
+    metaGraphsWithRoot,
+  };
 }
 
-const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; priorSeq?: number; isForeign?: (g: string) => boolean; batchClean?: boolean; merkleBoundDataGraphs?: Set<string> }) =>
+const plan = (page: ReturnType<typeof buildPage>, extra: {
+  nextSeq: number;
+  priorSeq?: number;
+  isForeign?: (g: string) => boolean;
+  batchClean?: boolean;
+  verifiedGraphScopedDataGraphs?: Set<string>;
+}) =>
   planPageApply({
     records: page.records,
     nextSeq: extra.nextSeq,
@@ -67,8 +74,7 @@ const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; prio
     verifiedByGraph: page.verifiedByGraph,
     recordQuadCountByGraph: page.recordQuadCountByGraph,
     metaGraphsWithRoot: page.metaGraphsWithRoot,
-    integrityMetaGraphs: page.integrityMetaGraphs,
-    merkleBoundDataGraphs: extra.merkleBoundDataGraphs ?? new Set(),
+    verifiedGraphScopedDataGraphs: extra.verifiedGraphScopedDataGraphs ?? new Set(),
     batchVerifiedCleanly: extra.batchClean ?? true,
   });
 
@@ -76,17 +82,14 @@ const DATA = 'did:dkg:context-graph:cg/context/1';
 const META = `${DATA}/_meta`;
 
 describe('planPageApply — verified-apply planner', () => {
-  it('applies a paired data+meta page and advances to nextSeq', () => {
+  it('defers a paired data+meta page instead of whole-replacing shared metadata', () => {
     const page = buildPage([
       { seq: 2, graph: DATA, count: 3 },
       { seq: 3, graph: META, count: 1 },
     ]);
     const p = plan(page, { nextSeq: 3 });
-    expect(p.deferred).toBe(false);
-    expect(p.advanceTo).toBe(3);
-    expect(p.applied).toBe(2);
-    expect(p.ops.map((o) => o.graph)).toEqual([DATA, META]);
-    expect(p.ops[0].quads).toHaveLength(3);
+    expect(p).toMatchObject({ deferred: true, advanceTo: 1, applied: 0 });
+    expect(p.ops).toEqual([]);
   });
 
   it('DEFERS orphan data (no sibling meta in page)', () => {
@@ -116,7 +119,18 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.advanceTo).toBe(1);
   });
 
-  it('does not acknowledge rejected V2 metadata when its merkle root is missing', () => {
+  it('defers a fully verified metadata subset because omitted live KAs are not provable', () => {
+    const page = buildPage([{ seq: 8, graph: META, count: 4, verified: 4 }]);
+
+    const p = plan(page, { nextSeq: 8, priorSeq: 7, batchClean: true });
+
+    expect(p).toMatchObject({ deferred: true, advanceTo: 7, applied: 0 });
+    expect(p.ops).toEqual([]);
+  });
+
+  it.each(DURABLE_INTEGRITY_META_PREDICATES.filter(
+    (predicate) => predicate !== 'http://dkg.io/ontology/merkleRoot',
+  ))('does not acknowledge rejected V2 metadata containing %s without a merkle root', (predicate) => {
     const topMeta = 'did:dkg:context-graph:cg/_meta';
     const subject = 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7';
     const page = buildPage([
@@ -126,7 +140,7 @@ describe('planPageApply — verified-apply planner', () => {
         verified: 0,
         parsedQuads: [{
           subject,
-          predicate: 'http://dkg.io/ontology/contentScopeVersion',
+          predicate,
           object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
           graph: topMeta,
         }],
@@ -138,46 +152,46 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.advanceTo).toBe(6);
   });
 
-  it('classifies ordinary CG metadata as non-integrity configuration', () => {
-    const topMeta = 'did:dkg:context-graph:cg/_meta';
-    const page = buildPage([{
-      seq: 7,
-      graph: topMeta,
-      parsedQuads: [{
-        subject: 'did:dkg:context-graph:cg',
-        predicate: 'http://schema.org/name',
-        object: '"Context graph"',
-        graph: topMeta,
-      }],
-    }]);
-    const p = plan(page, { nextSeq: 7, priorSeq: 6 });
-    expect(p.deferred).toBe(false);
-    expect(p.ops.map((op) => op.graph)).toEqual([topMeta]);
-    expect(p.advanceTo).toBe(7);
-  });
-
-  it('classifies lifecycle scope fields as non-integrity metadata', () => {
-    const topMeta = 'did:dkg:context-graph:cg/_meta';
-    const lifecycle = 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7/assertion/1';
-    const classification = classifyDurableMetaGraph([
-      {
-        subject: lifecycle,
-        predicate: 'http://dkg.io/ontology/contentScopeVersion',
-        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
-        graph: topMeta,
-      },
-      {
-        subject: lifecycle,
-        predicate: 'http://dkg.io/ontology/assertionGraph',
-        object: 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/7',
-        graph: topMeta,
-      },
+  it('defers duplicate graph records before an empty tail can hide non-empty metadata', () => {
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/8';
+    const page = buildPage([
+      { seq: 1, graph, count: 1 },
+      { seq: 2, graph: META, count: 2, verified: 2 },
+      { seq: 3, graph: META, count: 0, verified: 0 },
     ]);
 
-    expect(classification).toEqual({ hasMerkleRoot: false, hasIntegrityEnvelope: false });
+    const p = plan(page, {
+      nextSeq: 3,
+      verifiedGraphScopedDataGraphs: new Set([graph]),
+    });
+
+    expect(p).toMatchObject({ deferred: true, advanceTo: 0, applied: 0 });
+    expect(p.ops).toEqual([]);
   });
 
-  it('accepts a rootless exact graph bound by verified top-level V2 metadata', () => {
+  it.each(DURABLE_INTEGRITY_META_PREDICATES)(
+    'classifies %s as part of the durable integrity envelope',
+    (predicate) => {
+      expect(classifyDurableMetaGraph([{
+        subject: 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7',
+        predicate,
+        object: '"value"',
+        graph: 'urn:meta',
+      }]).hasIntegrityEnvelope).toBe(true);
+    },
+  );
+
+  it('classifies ordinary CG metadata as non-integrity configuration', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    expect(classifyDurableMetaGraph([{
+      subject: 'did:dkg:context-graph:cg',
+      predicate: 'http://schema.org/name',
+      object: '"Context graph"',
+      graph: topMeta,
+    }])).toEqual({ hasMerkleRoot: false, hasIntegrityEnvelope: false });
+  });
+
+  it('defers rootless data paired with a whole shared metadata snapshot', () => {
     const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/7';
     const topMeta = 'did:dkg:context-graph:cg/_meta';
     const page = buildPage([
@@ -186,11 +200,10 @@ describe('planPageApply — verified-apply planner', () => {
     ]);
     const p = plan(page, {
       nextSeq: 3,
-      merkleBoundDataGraphs: new Set([graph]),
+      verifiedGraphScopedDataGraphs: new Set([graph]),
     });
-    expect(p.deferred).toBe(false);
-    expect(p.ops.map((op) => op.graph)).toEqual([graph, topMeta]);
-    expect(p.advanceTo).toBe(3);
+    expect(p).toMatchObject({ deferred: true, advanceTo: 1, applied: 0 });
+    expect(p.ops).toEqual([]);
   });
 
   it('DEFERS when the sibling meta carries no merkle root (rootless meta cannot bind data)', () => {
@@ -198,6 +211,22 @@ describe('planPageApply — verified-apply planner', () => {
     const p = plan(page, { nextSeq: 3 });
     expect(p.deferred).toBe(true);
     expect(p.ops).toHaveLength(0);
+  });
+
+  it('does not acknowledge rejected V2 metadata whose Merkle root is missing', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const page = buildPage([{
+      seq: 8,
+      graph: topMeta,
+      count: 8,
+      verified: 0,
+      noRoot: true,
+    }]);
+
+    const p = plan(page, { nextSeq: 8, priorSeq: 7, batchClean: false });
+
+    expect(p).toMatchObject({ deferred: true, advanceTo: 7, applied: 0 });
+    expect(p.ops).toEqual([]);
   });
 
   it('DEFERS a partially-rejected data graph (not all quads survived)', () => {
@@ -218,46 +247,59 @@ describe('planPageApply — verified-apply planner', () => {
 
   it('stops at the FIRST unresolved record (contiguous prefix)', () => {
     const G2 = 'did:dkg:context-graph:cg/context/2';
+    const FIRST_DATA = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/1';
     const page = buildPage([
-      { seq: 1, graph: 'did:dkg:context-graph:cg/x', op: 'drop' },
+      { seq: 1, graph: FIRST_DATA, count: 1 },
       { seq: 4, graph: G2, count: 1 },          // orphan (no meta) ⇒ defer here
-      { seq: 6, graph: DATA, count: 1 }, { seq: 7, graph: META, count: 1 },
+      { seq: 6, graph: DATA, count: 1 },
     ]);
-    const p = plan(page, { nextSeq: 7 });
+    const p = plan(page, {
+      nextSeq: 7,
+      verifiedGraphScopedDataGraphs: new Set([FIRST_DATA]),
+    });
     expect(p.deferred).toBe(true);
-    expect(p.ops.map((o) => o.graph)).toEqual(['did:dkg:context-graph:cg/x']);
+    expect(p.ops.map((o) => o.graph)).toEqual([FIRST_DATA]);
     expect(p.advanceTo).toBe(3);
   });
 
   it('skips a leaked foreign graph but consumes its seq', () => {
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/2';
     const page = buildPage([
       { seq: 1, graph: 'urn:dkg:changelog', count: 1 },
-      { seq: 2, graph: DATA, count: 1 }, { seq: 3, graph: META, count: 1 },
+      { seq: 2, graph, count: 1 },
     ]);
-    const p = plan(page, { nextSeq: 3, isForeign: (g) => g.startsWith('urn:dkg:changelog') });
+    const p = plan(page, {
+      nextSeq: 2,
+      isForeign: (g) => g.startsWith('urn:dkg:changelog'),
+      verifiedGraphScopedDataGraphs: new Set([graph]),
+    });
     expect(p.deferred).toBe(false);
-    expect(p.ops.map((o) => o.graph)).toEqual([DATA, META]);
-    expect(p.advanceTo).toBe(3);
+    expect(p.ops.map((o) => o.graph)).toEqual([graph]);
+    expect(p.advanceTo).toBe(2);
   });
 
-  it('applies drops without pairing', () => {
-    const page = buildPage([{ seq: 9, graph: DATA, op: 'drop' }]);
-    const p = plan(page, { nextSeq: 9 });
-    expect(p.ops).toEqual([{ seq: 9, graph: DATA, op: 'drop', quads: [] }]);
-    expect(p.advanceTo).toBe(9);
+  it.each([
+    ['live V2 assertion graph', DATA],
+    ['top-level metadata graph', 'did:dkg:context-graph:cg/_meta'],
+  ])('DEFERS an unauthenticated drop of a %s', (_label, graph) => {
+    const page = buildPage([{ seq: 9, graph, op: 'drop' }]);
+    const p = plan(page, { nextSeq: 9, priorSeq: 8 });
+
+    expect(p.ops).toEqual([]);
+    expect(p.deferred).toBe(true);
+    expect(p.advanceTo).toBe(8);
   });
 
-  it('applies a META-only page as a trusted anchor (top-level metadata convergence, no data sibling)', () => {
-    // Top-level `_meta` (CG config) with no merkle root and no data sibling in-page —
-    // legacy trusts served meta, so the changelog lane must apply it, not defer forever.
+  it('DEFERS markerless metadata so it cannot erase live KA descriptors by replacement', () => {
+    // A non-empty markerless snapshot can look like harmless CG config while
+    // omitting every live KA descriptor. Replacing the shared graph would be
+    // an unauthenticated bulk delete.
     const TOP_META = 'did:dkg:context-graph:cg/_meta';
     const page = buildPage([{ seq: 7, graph: TOP_META, count: 2, noRoot: true }]);
-    const p = plan(page, { nextSeq: 7 });
-    expect(p.deferred).toBe(false);
-    expect(p.ops.map((o) => o.graph)).toEqual([TOP_META]);
-    expect(p.ops[0].op).toBe('upsert');
-    expect(p.ops[0].quads).toHaveLength(2);
-    expect(p.advanceTo).toBe(7);
+    const p = plan(page, { nextSeq: 7, priorSeq: 6 });
+
+    expect(p).toMatchObject({ deferred: true, advanceTo: 6, applied: 0 });
+    expect(p.ops).toEqual([]);
   });
 });
 

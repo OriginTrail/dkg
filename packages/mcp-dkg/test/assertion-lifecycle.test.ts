@@ -337,7 +337,7 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     })).rejects.toThrow();
   });
 
-  it('share accepts harmless legacy defaults and omits them from the client call', async () => {
+  it('share accepts safe legacy defaults but omits them from the client call', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
       knowledgeAssetShare: async (args) => {
@@ -349,12 +349,10 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
     const result = await localServer.call('dkg_knowledge_asset_share', {
-      name: 'doc',
-      entities: 'all',
-      skipSeal: false,
+      name: 'doc', entities: 'all', skipSeal: false,
     });
     expect(result.isError).toBeFalsy();
-    expect(captured).toMatchObject({ name: 'doc', contextGraphId: 'test-cg' });
+    expect(captured).toMatchObject({ contextGraphId: 'test-cg', name: 'doc' });
     expect(captured).not.toHaveProperty('entities');
     expect(captured).not.toHaveProperty('skipSeal');
   });
@@ -792,7 +790,7 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(res.content[0].text).not.toContain('NOT publish-ready');
   });
 
-  it('share surfaces a 409 UNSEALED_SHARE_BLOCKED recovery verbatim (#1116)', async () => {
+  it('share replaces obsolete UNSEALED_SHARE_BLOCKED recovery with atomic guidance (#1116)', async () => {
     const recovery = 'No local signing key; pass skipSeal:true to share unsealed.';
     const localClient = new FakeClient({
       knowledgeAssetShare: async () => {
@@ -804,8 +802,9 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
 
     const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc' });
     expect(res.isError).toBe(true);
-    // The handler surfaces the daemon's recovery hint verbatim as the tool error.
-    expect(res.content[0].text).toBe(recovery);
+    expect(res.content[0].text).toContain('Resolve the local signing capability');
+    expect(res.content[0].text).toContain('atomic Knowledge Asset share');
+    expect(res.content[0].text).not.toContain('skipSeal');
   });
 
   it('share falls back to the generic error for a non-matching 409 (#1116)', async () => {
@@ -857,6 +856,23 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
       localServer.call('dkg_knowledge_asset_finalize', { name: 'doc', layer: 'swm' }),
     ).rejects.toThrow();
     expect(captured).toEqual({});
+  });
+
+  it('finalize accepts legacy layer:wm but omits it from the client call', async () => {
+    const captured: Record<string, unknown> = {};
+    const localClient = new FakeClient({
+      knowledgeAssetFinalize: async (args) => {
+        Object.assign(captured, args);
+        return { merkleRoot: '0xroot', eip712Digest: '0xdig', authorAddress: '0xtoken' };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_knowledge_asset_finalize', { name: 'doc', layer: 'wm' });
+    expect(result.isError).toBeFalsy();
+    expect(captured).toMatchObject({ contextGraphId: 'test-cg', name: 'doc' });
+    expect(captured).not.toHaveProperty('layer');
   });
 
   it('finalize rejects an invalid layer at the schema boundary (wm|swm enum) (#1116)', async () => {

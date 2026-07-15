@@ -9,6 +9,7 @@ import {
   contextGraphWorkspaceTopic,
   DHT_PROTOCOL,
   validateContextGraphId,
+  validateNewContextGraphId,
   validateSubGraphName,
   validateAssertionName,
   deriveCuratorDidFromCgId,
@@ -157,6 +158,18 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('urn:uuid:12345').valid).toBe(true);
     expect(validateContextGraphId('my-graph_v2').valid).toBe(true);
     expect(validateContextGraphId('user@domain').valid).toBe(true);
+  });
+
+  it('reserves structural partition segments for new IDs without breaking legacy reads', () => {
+    for (const id of [
+      'victim/_meta',
+      'victim/_private',
+      'victim/_shared_memory',
+      'victim/_future-partition',
+    ]) {
+      expect(validateContextGraphId(id)).toEqual({ valid: true });
+      expect(validateNewContextGraphId(id)).toMatchObject({ valid: false });
+    }
   });
 
   it('rejects IDs exceeding 256 chars', () => {

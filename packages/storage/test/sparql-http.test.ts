@@ -4,6 +4,7 @@ import {
   SparqlHttpStore,
   createTripleStore,
   getExternalStorePrioritySchedulerSnapshot,
+  tryReplaceGraphAtomically,
   type Quad,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
@@ -529,9 +530,14 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads.some(q => q.includes('DROP'))).toBe(true);
   });
 
-  it('replaceGraph sends one staged MOVE update for the complete graph', async () => {
+  it('replaceGraph sends one staged MOVE update when the endpoint declares atomic updates', async () => {
     insertedQuads.length = 0;
-    await store.replaceGraph('http://ex.org/g1', [{
+    const atomicStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      atomicUpdates: true,
+    });
+    await atomicStore.replaceGraph('http://ex.org/g1', [{
       subject: 'http://ex.org/new',
       predicate: 'http://ex.org/p',
       object: '"new"',
@@ -540,8 +546,42 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads).toHaveLength(1);
     expect(insertedQuads[0]).toContain('urn:dkg:internal:atomic-graph-replace:');
     expect(insertedQuads[0]).toContain('INSERT DATA');
-    expect(insertedQuads[0]).toContain('MOVE SILENT GRAPH');
+    // Non-SILENT: a missing staging graph must fail loudly, not report success.
+    expect(insertedQuads[0]).toContain('MOVE GRAPH');
+    expect(insertedQuads[0]).not.toContain('MOVE SILENT');
     expect(insertedQuads[0]).toContain('TO GRAPH <http://ex.org/g1>');
+  });
+
+  it('replaceGraph fails closed for endpoints without a declared atomicity guarantee', async () => {
+    // SPARQL 1.1 only RECOMMENDS whole-request atomicity: a generic endpoint
+    // could apply the staged DROP/INSERT/MOVE partially and strand the target
+    // graph. The plain store must refuse the capability BEFORE sending any
+    // update, so rootless KA writers take their non-atomic fallback instead.
+    insertedQuads.length = 0;
+    const replacement = [{
+      subject: 'http://ex.org/new',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }];
+    await expect(store.replaceGraph('http://ex.org/g1', replacement))
+      .rejects.toMatchObject({
+        name: 'UnsupportedTripleStoreCapabilityError',
+        capability: 'replaceGraph',
+      });
+    await expect(tryReplaceGraphAtomically(store, 'http://ex.org/g1', replacement))
+      .resolves.toBe(false);
+    expect(insertedQuads).toHaveLength(0);
+
+    // Daemon-owned endpoints are oxigraph-server (transactional) and keep it.
+    const managedStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      managedByDkg: true,
+    });
+    await expect(tryReplaceGraphAtomically(managedStore, 'http://ex.org/g1', replacement))
+      .resolves.toBe(true);
+    expect(insertedQuads).toHaveLength(1);
   });
 
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {

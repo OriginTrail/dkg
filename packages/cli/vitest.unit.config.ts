@@ -34,6 +34,7 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          'test/context-graph-catchup-readiness.test.ts',
           'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.
@@ -51,6 +52,7 @@ export default defineConfig({
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',
           'test/catchup-runner.test.ts',
+          'test/catchup-runner-worker-impl.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',

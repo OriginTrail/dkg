@@ -62,6 +62,80 @@ function byteSizeFloor(quads: readonly Pick<Quad, 'subject' | 'predicate' | 'obj
 }
 
 describe('graph-scoped publish storage ACKs', () => {
+  it('keeps identical-content KAs in distinct durable workspace operations', async () => {
+    const store = new OxigraphStore();
+    const handler = new StorageACKHandler(
+      store,
+      handlerConfig(ethers.Wallet.createRandom(), false),
+      new TypedEventBus(),
+    );
+    const secondUal = `did:dkg:otp:20430/${AUTHOR}/8`;
+
+    for (const ual of [UAL, secondUal]) {
+      const scope = createGraphKnowledgeAssetScope(ual, 1);
+      const swmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH_ID,
+        MemoryLayer.SharedWorkingMemory,
+        scope,
+      );
+      const quads: Quad[] = [{
+        subject: 'urn:asset:same',
+        predicate: 'urn:p:value',
+        object: '"same"',
+        graph: swmGraph,
+      }];
+      await store.insert(quads);
+      const merkleRoot = computeFlatKCRootV10(quads, []);
+      const deps: ACKCollectorDeps = {
+        gossipPublish: async () => {},
+        sendP2P: async (_peerId, _protocol, data) => handler.handler(data, PEER),
+        getConnectedCorePeers: () => ['core-1'],
+        verifyIdentity: async () => true,
+        log: () => {},
+      };
+      const result = await new ACKCollector(deps).collect({
+        merkleRoot,
+        contextGraphId: BigInt(CONTEXT_GRAPH_ID),
+        contextGraphIdStr: CONTEXT_GRAPH_ID,
+        publisherPeerId: 'publisher-peer',
+        publicByteSize: BigInt(byteSizeFloor(quads)),
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: [],
+        chainId: 31337n,
+        kav10Address: KAV10,
+        requiredACKs: 1,
+        merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: ual,
+        assertionVersion: '1',
+        publicTripleCount: quads.length,
+        privateTripleCount: 0,
+        accessPolicy: 'public',
+        allowedPeers: [],
+        ackMode: { kind: 'public' },
+      });
+      expect(result.acks).toHaveLength(1);
+    }
+
+    const graphManager = new GraphManager(store);
+    const firstHead = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    });
+    const secondHead = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: secondUal,
+    });
+    expect(firstHead?.kaUal).toBe(UAL);
+    expect(secondHead?.kaUal).toBe(secondUal);
+    expect(firstHead?.shareOperationId).not.toBe(secondHead?.shareOperationId);
+  });
+
   it('collects over V2 from only the exact per-KA SWM graph', async () => {
     const store = new OxigraphStore();
     const quads: Quad[] = [

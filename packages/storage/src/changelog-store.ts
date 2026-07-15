@@ -8,7 +8,10 @@ import type {
   UpdateOptions,
   StorePressureSnapshot,
 } from './triple-store.js';
-import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import {
+  UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphCapabilityRefusal,
+} from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
 /**
@@ -334,7 +337,22 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     if (!this.enabled) return this.inner.replaceGraph(graphUri, quads, options);
     this.assertNotReserved(graphUri, 'replaceGraph');
     await this.runExclusive(async () => {
-      await this.inner.replaceGraph!(graphUri, quads, options);
+      try {
+        await this.inner.replaceGraph!(graphUri, quads, options);
+      } catch (err) {
+        if (isReplaceGraphCapabilityRefusal(err)) {
+          // A capability refusal is a clean preflight result: no mutation was
+          // started, so there is no gap to reconcile.
+          throw err;
+        }
+        // The replaceGraph contract allows a rejected call to have left either
+        // the complete old graph or the complete new graph (e.g. a response
+        // lost after the backend committed). A committed overwrite with no
+        // marker is invisible to set-only reconcile, so flag the gap before
+        // propagating.
+        this.flagReconcile('replaceGraph(indeterminate-failure)');
+        throw err;
+      }
       // The adapter's internal staging graph never crosses this decorator.
       // Sync sees exactly one logical upsert/drop for the canonical graph.
       await this.markPostMutation([graphUri], options);
@@ -641,12 +659,21 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     // The presence probes are independent — run them concurrently (matching
     // GraphSetIndexStore) instead of serially inside the held write mutex, then
     // append markers in the original deterministic (distinct) order.
-    const specs = await Promise.all(
-      distinct.map(async (graph): Promise<{ graph: string; op: ChangeOp }> => ({
-        graph,
-        op: (await this.inner.hasGraph(graph, options)) ? 'upsert' : 'drop',
-      })),
-    );
+    let specs: Array<{ graph: string; op: ChangeOp }>;
+    try {
+      specs = await Promise.all(
+        distinct.map(async (graph): Promise<{ graph: string; op: ChangeOp }> => ({
+          graph,
+          op: (await this.inner.hasGraph(graph, options)) ? 'upsert' : 'drop',
+        })),
+      );
+    } catch (err) {
+      // The mutation already committed; a failed presence probe means its
+      // marker can never be written — the same committed-but-unlogged gap as a
+      // failed marker append, so flag it identically before propagating.
+      this.flagReconcile('markPostMutation(presence-probe-failed)');
+      throw err;
+    }
     await this.appendMarkers(specs, options);
   }
 

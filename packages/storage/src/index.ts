@@ -29,6 +29,7 @@ export {
 } from './atomic-graph-replace.js';
 export {
   UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {
@@ -76,6 +77,20 @@ export {
   asGraphWriteGenSource,
   type GraphWriteGenSource,
 } from './graph-write-gen.js';
+export {
+  ExactGraphReadError,
+  quadToNQuad,
+  quadsToNQuads,
+  readExactGraphPaged,
+  type ExactGraphReadErrorCode,
+  type ExactGraphReadErrorKind,
+  type ReadExactGraphPagedOptions,
+} from './bounded-rdf.js';
+export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  resolveGraphScopedOrLegacyMetadata,
+  type GraphScopedOrLegacyMetadata,
+} from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
@@ -114,7 +129,10 @@ export {
   type SwmSliceSourceTags,
   type LoadSharedMemorySliceWithKaBoundFallbackOptions,
 } from './graph-manager.js';
-export { PrivateContentStore } from './private-store.js';
+export {
+  PrivateContentStore,
+  type KnowledgeAssetPrivateReadOptions,
+} from './private-store.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';

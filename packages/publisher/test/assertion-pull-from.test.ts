@@ -138,7 +138,6 @@ describe('rootless assertionPullFrom', () => {
       q('urn:e:legacy-decoy', SCHEMA, '"Legacy bucket decoy"', LEGACY_SWM_GRAPH),
       q(lifecycle, `${DKG}rootEntity`, ENTITY_1, meta),
     ]);
-    await publisher.clearSwmShareComplete(CG, NAME, AGENT);
 
     const result = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
 
@@ -162,9 +161,38 @@ describe('rootless assertionPullFrom', () => {
     if (staleRoots.type === 'bindings') expect(staleRoots.bindings).toHaveLength(0);
   });
 
+  it('blocks a destructive pull until a marker-less promote tail is repaired', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store);
+    await publisher.clearSwmShareComplete(CG, NAME, AGENT);
+
+    await expect(
+      publisher.assertionPullFrom(CG, NAME, AGENT, 'swm'),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(true);
+    expect(await publisher.assertionQuery(CG, NAME, AGENT)).toEqual([]);
+  });
+
+  it('snapshots pull options before waiting for its lifecycle lock', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store);
+    const options: NonNullable<Parameters<DKGPublisher['assertionPullFrom']>[4]> = {
+      onConflict: 'replace',
+    };
+
+    const pull = publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', options);
+    options.subGraphName = 'mutated-after-lock-selection';
+
+    await expect(pull).resolves.toMatchObject({
+      seeded: finalized.publicQuads.length,
+      fromLayer: 'swm',
+    });
+  });
+
   it('rejects a dirty public WM draft by default', async () => {
     const { publisher, store } = await makePublisher();
     await seedShared(publisher, store);
+    await publisher.assertionCreate(CG, NAME, AGENT);
     await publisher.assertionWrite(CG, NAME, AGENT, [
       q('urn:e:local', SCHEMA, '"Local edit"'),
     ]);
@@ -180,6 +208,7 @@ describe('rootless assertionPullFrom', () => {
   it('treats a private-only dirty WM draft as a conflict', async () => {
     const { publisher, store } = await makePublisher();
     await seedShared(publisher, store);
+    await publisher.assertionCreate(CG, NAME, AGENT);
     await publisher.assertionWritePrivate(CG, NAME, AGENT, [
       q('urn:e:private-local', 'urn:predicate:secret', '"Local secret"'),
     ]);
@@ -196,6 +225,7 @@ describe('rootless assertionPullFrom', () => {
       publicQuads: [q(ENTITY_2, SCHEMA, '"Bob from SWM"')],
     });
     const localNamedGraph = 'urn:test:graph:stale-local';
+    await publisher.assertionCreate(CG, NAME, AGENT);
     const wmGraph = await publisher.wmGraphUri(CG, AGENT, NAME);
     const scopedLocalGraph = assertionScopedGraphUri(wmGraph, localNamedGraph);
     await publisher.assertionWrite(CG, NAME, AGENT, [
@@ -226,6 +256,7 @@ describe('rootless assertionPullFrom', () => {
   it('validates a missing source before replacing the dirty draft', async () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
+    await publisher.assertionCreate(CG, NAME, AGENT);
     await publisher.assertionWrite(CG, NAME, AGENT, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
@@ -242,6 +273,7 @@ describe('rootless assertionPullFrom', () => {
   it('rejects a tampered exact source and preserves the dirty draft', async () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
+    await publisher.assertionCreate(CG, NAME, AGENT);
     await publisher.assertionWrite(CG, NAME, AGENT, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
@@ -260,6 +292,7 @@ describe('rootless assertionPullFrom', () => {
   it('rejects named-graph identity injected into the exact source before replacement', async () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
+    await publisher.assertionCreate(CG, NAME, AGENT);
     await publisher.assertionWrite(CG, NAME, AGENT, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
@@ -451,6 +484,29 @@ describe('rootless assertionPullFrom', () => {
     });
     expect(new Set((await publisher.assertionQuery(CG, NAME, AGENT)).map(key)))
       .toEqual(new Set(finalized.publicQuads.map(key)));
+  });
+
+  it('retains private commitments and content across SWM pull, discard, and reopen', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store, {
+      publicQuads: [q(ENTITY_1, SCHEMA, '"Public recovery content"')],
+      privateQuads: [
+        q(ENTITY_1, 'urn:predicate:secret', '"Private recovery content"'),
+        q(ENTITY_2, 'urn:predicate:secret', '"Second private recovery content"'),
+      ],
+    });
+
+    await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
+    await publisher.assertionDiscard(CG, NAME, AGENT);
+    const reopened = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
+
+    expect(reopened).toMatchObject({
+      kaUal: finalized.kaUal,
+      assertionVersion: finalized.assertionVersion,
+      seededPrivate: finalized.privateQuads.length,
+    });
+    expect(new Set((await publisher.assertionQueryPrivate(CG, NAME, AGENT)).map(key)))
+      .toEqual(new Set(finalized.privateQuads.map(key)));
   });
 
   it('keeps a sub-graph recovery seal inside its private partition across pull and discard', async () => {

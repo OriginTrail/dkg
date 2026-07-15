@@ -62,6 +62,7 @@ function durableProcessResult() {
     rejectedKcs: 0,
     emptyResponses: 1,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
   };
 }
@@ -530,6 +531,62 @@ describe('sync requester progress accounting', () => {
     expect(storeInsert.calls).toContainEqual([[metaQuad]]);
     expect(deleteCheckpoint.calls).toHaveLength(1);
     expect(deleteCheckpoint.calls).toContainEqual(['meta-only-complete:meta']);
+    expect(setCheckpoint.calls).toEqual([]);
+  });
+
+  it('stores verified private-only metadata and advances both durable checkpoints cleanly', async () => {
+    const metaQuad = quad('verified-private-only-meta');
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, {
+      quads: phase === 'meta' ? [metaQuad] : [],
+      nextOffset: phase === 'meta' ? 1 : 0,
+    }));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['verified-private-only-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        verifiedPrivateOnlyResponses: 1,
+        verifiedMeta: [metaQuad],
+        totalFetchedMetaQuads: 1,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary).toMatchObject({
+      insertedTriples: 1,
+      insertedMetaTriples: 1,
+      insertedDataTriples: 0,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 1,
+      completedPhases: 1,
+      checkpointAdvances: 1,
+      rejectedKcs: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    expect(storeInsert.calls).toEqual([[[metaQuad]]]);
+    expect(deleteCheckpoint.calls).toEqual([
+      ['verified-private-only-cg:meta'],
+      ['verified-private-only-cg:data'],
+    ]);
     expect(setCheckpoint.calls).toEqual([]);
   });
 

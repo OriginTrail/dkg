@@ -56,7 +56,12 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  isRootlessUpdateError,
+  loadOpWallets,
+  type RootlessUpdateErrorCode,
+} from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -69,6 +74,13 @@ import {
   LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
+
+const ROOTLESS_UPDATE_HTTP_STATUS = {
+  ROOTLESS_UPDATE_INVALID_KA_ID: 422,
+  ROOTLESS_KA_NOT_MATERIALIZED: 422,
+  ROOTLESS_UPDATE_TARGET_CORRUPT: 422,
+  ROOTLESS_UPDATE_TARGET_NOT_CONFIRMED: 422,
+} as const satisfies Record<RootlessUpdateErrorCode, number>;
 import {
   loadConfig,
   saveConfig,
@@ -1066,17 +1078,26 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       // those to 422 (Unprocessable Entity) so the API surfaces a proper 4xx
       // instead of letting it bubble to the generic 500 handler.
       const message = err instanceof Error ? err.message : String(err);
-      if ((err as any)?.code === "OVERSIZED_RDF_LITERAL") {
+      const errorCode = typeof err === 'object' && err !== null
+        ? Reflect.get(err, 'code')
+        : undefined;
+      if (errorCode === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
       }
-      if ((err as any)?.code === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
+      if (errorCode === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
         return jsonResponse(res, 400, { error: message });
       }
-      if ((err as any)?.code === "LEGACY_KA_READ_ONLY") {
+      if (errorCode === "KA_UPDATE_AUTHOR_NOT_OWNER") {
+        return jsonResponse(res, 403, { error: message, code: "KA_UPDATE_AUTHOR_NOT_OWNER" });
+      }
+      if (errorCode === "LEGACY_KA_READ_ONLY") {
         return jsonResponse(res, 409, { error: message, code: "LEGACY_KA_READ_ONLY" });
       }
-      if (String((err as any)?.code ?? '').startsWith("ROOTLESS_")) {
-        return jsonResponse(res, 422, { error: message, code: (err as any).code });
+      if (isRootlessUpdateError(err)) {
+        return jsonResponse(res, ROOTLESS_UPDATE_HTTP_STATUS[err.code], {
+          error: message,
+          code: err.code,
+        });
       }
       if (message.includes('precomputedUpdateAttestation')) {
         return jsonResponse(res, 422, { error: message });

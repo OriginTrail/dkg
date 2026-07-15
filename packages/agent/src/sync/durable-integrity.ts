@@ -20,6 +20,7 @@ const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
+const BATCH_ID = `${DKG_NS}batchId`;
 const PUBLIC_TRIPLE_COUNT = `${DKG_NS}publicTripleCount`;
 const PRIVATE_TRIPLE_COUNT = `${DKG_NS}privateTripleCount`;
 const PRIVATE_MERKLE_ROOT = `${DKG_NS}privateMerkleRoot`;
@@ -34,7 +35,7 @@ const SKOLEM_SUFFIX = '/.well-known/genid/';
  * changelog cursor planning must fail closed when any one of these fields is
  * present, even when a malformed record is missing its Merkle root.
  */
-const DURABLE_INTEGRITY_META_PREDICATES: ReadonlySet<string> = new Set([
+export const DURABLE_INTEGRITY_META_PREDICATES = [
   MERKLE_ROOT,
   CONTENT_SCOPE_VERSION,
   KA_UAL,
@@ -43,7 +44,11 @@ const DURABLE_INTEGRITY_META_PREDICATES: ReadonlySet<string> = new Set([
   PUBLIC_TRIPLE_COUNT,
   PRIVATE_TRIPLE_COUNT,
   PRIVATE_MERKLE_ROOT,
-]);
+] as const;
+
+const DURABLE_INTEGRITY_META_PREDICATE_SET: ReadonlySet<string> = new Set(
+  DURABLE_INTEGRITY_META_PREDICATES,
+);
 
 export interface DurableMetaGraphClassification {
   hasMerkleRoot: boolean;
@@ -59,7 +64,7 @@ export function classifyDurableMetaGraph(
   for (const quad of quads) {
     if (quad.predicate === MERKLE_ROOT) hasMerkleRoot = true;
     if (
-      DURABLE_INTEGRITY_META_PREDICATES.has(quad.predicate)
+      DURABLE_INTEGRITY_META_PREDICATE_SET.has(quad.predicate)
       && (quad.predicate === MERKLE_ROOT || isDeterministicKaMetadataSubject(quad.subject))
     ) {
       hasIntegrityEnvelope = true;
@@ -74,12 +79,19 @@ export interface DurableIntegrityLogEntry {
   message: string;
 }
 
+export type DurableIntegrityVerificationMode =
+  | { kind: 'fullSnapshot' }
+  | { kind: 'sinceBatchId'; sinceBatchId: bigint }
+  | { kind: 'changelogPage'; changedDataGraphs: ReadonlySet<string> };
+
 export interface DurableIntegritySelection {
   dataIndexes: number[];
   metaIndexes: number[];
   rejected: number;
   /** Verified V2 assets whose exact public assertion graph is intentionally empty. */
   verifiedZeroPublicAssets: number;
+  /** Exact assertion graphs whose V2 descriptors and fetched payload verified. */
+  verifiedGraphScopedDataGraphs: string[];
   logs: DurableIntegrityLogEntry[];
 }
 
@@ -91,6 +103,66 @@ interface GraphScopedDescriptor {
   claimedRootHex: string;
 }
 
+interface IntegrityMetadataIndex {
+  metaBySubject: Map<string, Quad[]>;
+  dataIndexesByGraph: Map<string, number[]>;
+  merkleSubjects: Set<string>;
+  markerSubjects: Set<string>;
+}
+
+interface GraphScopedCandidate {
+  kind: 'graph-scoped';
+  ual: string;
+  descriptor: GraphScopedDescriptor;
+}
+
+interface LegacyCandidate {
+  kind: 'legacy';
+  ual: string;
+}
+
+type IntegrityCandidate = GraphScopedCandidate | LegacyCandidate;
+
+interface IntegrityMetadataRead {
+  candidates: IntegrityCandidate[];
+  invalidKcUals: Set<string>;
+  fatalUnscopedFailure: boolean;
+  logs: DurableIntegrityLogEntry[];
+}
+
+interface GraphScopedVerificationOutcome {
+  hasGraphScopedCandidates: boolean;
+  admittedMetadataUals: Set<string>;
+  rejectedKcUals: Set<string>;
+  graphVerification: Map<string, boolean>;
+  verifiedGraphScopedDataGraphs: Set<string>;
+  verifiedZeroPublicAssets: number;
+  fatalUnscopedFailure: boolean;
+  logs: DurableIntegrityLogEntry[];
+}
+
+interface LegacyVerificationOutcome {
+  verifiedKcUals: Set<string>;
+  rejectedKcUals: Set<string>;
+  kaToKc: Map<string, string>;
+  kcRootEntities: Map<string, string[]>;
+  fatalUnscopedFailure: boolean;
+  logs: DurableIntegrityLogEntry[];
+}
+
+interface IntegrityVerificationOutcome {
+  hasGraphScopedCandidates: boolean;
+  admittedMetadataUals: Set<string>;
+  rejectedKcUals: Set<string>;
+  graphVerification: Map<string, boolean>;
+  verifiedGraphScopedDataGraphs: Set<string>;
+  verifiedZeroPublicAssets: number;
+  kaToKc: Map<string, string>;
+  kcRootEntities: Map<string, string[]>;
+  fatalUnscopedFailure: boolean;
+  logs: DurableIntegrityLogEntry[];
+}
+
 /**
  * Verify one complete durable-sync batch and return indexes into the caller's
  * arrays. V2 assets are selected by their exact UAL-derived VM graph; legacy
@@ -100,6 +172,7 @@ export function selectVerifiedDurableSyncQuads(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
   acceptUnverified = false,
+  mode: DurableIntegrityVerificationMode = { kind: 'fullSnapshot' },
 ): DurableIntegritySelection {
   const logs: DurableIntegrityLogEntry[] = [];
   if (metaQuads.length === 0) {
@@ -113,6 +186,7 @@ export function selectVerifiedDurableSyncQuads(
         metaIndexes: [],
         rejected: 1,
         verifiedZeroPublicAssets: 0,
+        verifiedGraphScopedDataGraphs: [],
         logs,
       };
     }
@@ -121,10 +195,83 @@ export function selectVerifiedDurableSyncQuads(
       metaIndexes: [],
       rejected: 0,
       verifiedZeroPublicAssets: 0,
+      verifiedGraphScopedDataGraphs: [],
       logs,
     };
   }
 
+  const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
+  if (metadata.merkleSubjects.size === 0 && metadata.markerSubjects.size === 0) {
+    if (!acceptUnverified && dataQuads.length > 0) {
+      logs.push({
+        level: 'warn',
+        message: `Rejecting sync batch: received ${dataQuads.length} data triples without a Merkle-bound KA descriptor`,
+      });
+      return {
+        dataIndexes: [],
+        metaIndexes: [],
+        rejected: 1,
+        verifiedZeroPublicAssets: 0,
+        verifiedGraphScopedDataGraphs: [],
+        logs,
+      };
+    }
+    return {
+      dataIndexes: allIndexes(dataQuads),
+      metaIndexes: allIndexes(metaQuads),
+      rejected: 0,
+      verifiedZeroPublicAssets: 0,
+      verifiedGraphScopedDataGraphs: [],
+      logs,
+    };
+  }
+
+  const parsed = readIntegrityMetadata(metadata, acceptUnverified);
+  const graphScoped = verifyGraphScopedCandidates(
+    dataQuads,
+    metadata,
+    parsed,
+    acceptUnverified,
+    mode,
+  );
+  const legacy = verifyLegacyCandidates(
+    dataQuads,
+    metaQuads,
+    metadata,
+    parsed.candidates,
+    acceptUnverified,
+    mode,
+  );
+  const outcome: IntegrityVerificationOutcome = {
+    hasGraphScopedCandidates: graphScoped.hasGraphScopedCandidates,
+    admittedMetadataUals: new Set([
+      ...graphScoped.admittedMetadataUals,
+      ...legacy.verifiedKcUals,
+    ]),
+    rejectedKcUals: new Set([...graphScoped.rejectedKcUals, ...legacy.rejectedKcUals]),
+    graphVerification: graphScoped.graphVerification,
+    verifiedGraphScopedDataGraphs: graphScoped.verifiedGraphScopedDataGraphs,
+    verifiedZeroPublicAssets: graphScoped.verifiedZeroPublicAssets,
+    kaToKc: legacy.kaToKc,
+    kcRootEntities: legacy.kcRootEntities,
+    fatalUnscopedFailure:
+      graphScoped.fatalUnscopedFailure || legacy.fatalUnscopedFailure,
+    logs: [...graphScoped.logs, ...legacy.logs],
+  };
+
+  return selectVerifiedQuads(
+    dataQuads,
+    metaQuads,
+    metadata,
+    outcome,
+    acceptUnverified,
+  );
+}
+
+function indexIntegrityMetadata(
+  dataQuads: readonly Quad[],
+  metaQuads: readonly Quad[],
+): IntegrityMetadataIndex {
   const metaBySubject = new Map<string, Quad[]>();
   const dataIndexesByGraph = new Map<string, number[]>();
   for (const quad of metaQuads) {
@@ -142,7 +289,9 @@ export function selectVerifiedDurableSyncQuads(
   const merkleSubjects = new Set<string>();
   const markerSubjects = new Set<string>();
   for (const quad of metaQuads) {
-    if (quad.predicate === MERKLE_ROOT) merkleSubjects.add(quad.subject);
+    if (quad.predicate === MERKLE_ROOT) {
+      merkleSubjects.add(quad.subject);
+    }
     if (
       quad.predicate === CONTENT_SCOPE_VERSION
       && isDeterministicKaMetadataSubject(quad.subject)
@@ -151,39 +300,31 @@ export function selectVerifiedDurableSyncQuads(
     }
   }
 
-  if (merkleSubjects.size === 0 && markerSubjects.size === 0) {
-    if (!acceptUnverified && dataQuads.length > 0) {
-      logs.push({
-        level: 'warn',
-        message: `Rejecting sync batch: received ${dataQuads.length} data triples without a Merkle-bound KA descriptor`,
-      });
-      return {
-        dataIndexes: [],
-        metaIndexes: [],
-        rejected: 1,
-        verifiedZeroPublicAssets: 0,
-        logs,
-      };
-    }
-    return {
-      dataIndexes: allIndexes(dataQuads),
-      metaIndexes: allIndexes(metaQuads),
-      rejected: 0,
-      verifiedZeroPublicAssets: 0,
-      logs,
-    };
-  }
+  return {
+    metaBySubject,
+    dataIndexesByGraph,
+    merkleSubjects,
+    markerSubjects,
+  };
+}
 
-  const graphDescriptors = new Map<string, GraphScopedDescriptor>();
-  const legacyKcUals = new Set<string>();
+function readIntegrityMetadata(
+  metadata: IntegrityMetadataIndex,
+  acceptUnverified: boolean,
+): IntegrityMetadataRead {
+  const candidates: IntegrityCandidate[] = [];
   const invalidKcUals = new Set<string>();
   let fatalUnscopedFailure = false;
+  const logs: DurableIntegrityLogEntry[] = [];
 
-  for (const subject of new Set([...merkleSubjects, ...markerSubjects])) {
-    const rows = metaBySubject.get(subject) ?? [];
+  for (const subject of new Set([
+    ...metadata.merkleSubjects,
+    ...metadata.markerSubjects,
+  ])) {
+    const rows = metadata.metaBySubject.get(subject) ?? [];
     const markerValues = distinctObjects(rows, CONTENT_SCOPE_VERSION);
     if (markerValues.length === 0) {
-      legacyKcUals.add(subject);
+      candidates.push({ kind: 'legacy', ual: subject });
       continue;
     }
 
@@ -193,17 +334,21 @@ export function selectVerifiedDurableSyncQuads(
         throw new Error('ambiguous contentScopeVersion metadata');
       }
       const version = BigInt(versions[0]!);
+      if (!metadata.merkleSubjects.has(subject)) {
+        throw new Error('missing merkleRoot metadata');
+      }
       if (version === 1n) {
-        legacyKcUals.add(subject);
+        candidates.push({ kind: 'legacy', ual: subject });
         continue;
       }
       if (version !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
         throw new Error(`unsupported contentScopeVersion ${version}`);
       }
-      if (!merkleSubjects.has(subject)) {
-        throw new Error('missing merkleRoot metadata');
-      }
-      graphDescriptors.set(subject, parseGraphScopedDescriptor(subject, rows));
+      candidates.push({
+        kind: 'graph-scoped',
+        ual: subject,
+        descriptor: parseGraphScopedDescriptor(subject, rows),
+      });
     } catch (error) {
       invalidKcUals.add(subject);
       fatalUnscopedFailure = true;
@@ -218,13 +363,13 @@ export function selectVerifiedDurableSyncQuads(
   // same graph makes ownership ambiguous, so reject the batch rather than let
   // either subject authenticate the other's payload.
   const graphOwners = new Map<string, string>();
-  for (const [ual, descriptor] of graphDescriptors) {
+  for (const candidate of candidates) {
+    if (candidate.kind !== 'graph-scoped') continue;
+    const { ual, descriptor } = candidate;
     const owner = graphOwners.get(descriptor.assertionGraph);
     if (owner && owner !== ual) {
       invalidKcUals.add(owner);
       invalidKcUals.add(ual);
-      graphDescriptors.delete(owner);
-      graphDescriptors.delete(ual);
       fatalUnscopedFailure = true;
       logs.push({
         level: acceptUnverified ? 'debug' : 'warn',
@@ -235,13 +380,84 @@ export function selectVerifiedDurableSyncQuads(
     }
   }
 
-  const verifiedKcUals = new Set<string>();
-  const rejectedKcUals = new Set<string>(invalidKcUals);
-  const graphVerification = new Map<string, boolean>();
-  let verifiedZeroPublicAssets = 0;
+  // A V2 asset must never acquire legacy token/root ownership aliases. Check
+  // token-level partOf rows here, after the candidate kind is known, so the
+  // graph-scoped verifier owns this boundary rather than letting those rows
+  // fall through as unrelated metadata during final selection.
+  const graphScopedUals = new Set(
+    candidates
+      .filter((candidate): candidate is GraphScopedCandidate => candidate.kind === 'graph-scoped')
+      .map((candidate) => candidate.ual),
+  );
+  for (const rows of metadata.metaBySubject.values()) {
+    for (const quad of rows) {
+      if (quad.predicate !== PART_OF) continue;
+      const owner = stripLiteral(quad.object);
+      if (!graphScopedUals.has(owner)) continue;
+      if (!invalidKcUals.has(owner)) {
+        logs.push({
+          level: acceptUnverified ? 'debug' : 'warn',
+          message: `Invalid graph-scoped KA metadata for ${owner}: token-level legacy ownership binding`,
+        });
+      }
+      invalidKcUals.add(owner);
+      fatalUnscopedFailure = true;
+    }
+  }
 
-  for (const [ual, descriptor] of graphDescriptors) {
-    const indexes = dataIndexesByGraph.get(descriptor.assertionGraph) ?? [];
+  return {
+    candidates: candidates.filter((candidate) => !invalidKcUals.has(candidate.ual)),
+    invalidKcUals,
+    fatalUnscopedFailure,
+    logs,
+  };
+}
+
+function verifyGraphScopedCandidates(
+  dataQuads: readonly Quad[],
+  metadata: IntegrityMetadataIndex,
+  parsed: IntegrityMetadataRead,
+  acceptUnverified: boolean,
+  mode: DurableIntegrityVerificationMode,
+): GraphScopedVerificationOutcome {
+  const graphScopedCandidates = parsed.candidates.filter(
+    (candidate): candidate is GraphScopedCandidate => candidate.kind === 'graph-scoped',
+  );
+  const admittedMetadataUals = new Set<string>();
+  const rejectedKcUals = new Set<string>(parsed.invalidKcUals);
+  const graphVerification = new Map<string, boolean>();
+  const verifiedGraphScopedDataGraphs = new Set<string>();
+  let verifiedZeroPublicAssets = 0;
+  let fatalUnscopedFailure = parsed.fatalUnscopedFailure;
+  const logs = [...parsed.logs];
+
+  for (const candidate of graphScopedCandidates) {
+    const { ual, descriptor } = candidate;
+    let inScope: boolean;
+    try {
+      inScope = graphScopedCandidateIsInScope(ual, descriptor.assertionGraph, metadata, mode);
+    } catch (error) {
+      rejectedKcUals.add(ual);
+      fatalUnscopedFailure = true;
+      logs.push({
+        level: acceptUnverified ? 'debug' : 'warn',
+        message: `Invalid graph-scoped KA delta metadata for ${ual}: ${errorMessage(error)}`,
+      });
+      continue;
+    }
+    // Changelog and since-batch responses carry complete shared metadata but
+    // only a scoped data payload. Out-of-scope descriptors are structurally
+    // valid, yet their peer-supplied rows are not authenticated by this page.
+    if (!inScope) {
+      // The shared metadata record includes descriptors for unchanged assets.
+      // They are structurally valid but not authenticated by this page's
+      // payload, so never select their peer-supplied rows for replacement.
+      // System graphs retain their explicit unverified-data override.
+      if (acceptUnverified) admittedMetadataUals.add(ual);
+      continue;
+    }
+
+    const indexes = metadata.dataIndexesByGraph.get(descriptor.assertionGraph) ?? [];
     const publicQuads = indexes.map((index) => dataQuads[index]!);
     let computedHex: string | undefined;
     if (publicQuads.length === descriptor.publicTripleCount) {
@@ -259,7 +475,8 @@ export function selectVerifiedDurableSyncQuads(
     const verified = computedHex === descriptor.claimedRootHex;
     graphVerification.set(descriptor.assertionGraph, verified);
     if (verified) {
-      verifiedKcUals.add(ual);
+      admittedMetadataUals.add(ual);
+      verifiedGraphScopedDataGraphs.add(descriptor.assertionGraph);
       if (descriptor.publicTripleCount === 0) verifiedZeroPublicAssets += 1;
       continue;
     }
@@ -273,6 +490,36 @@ export function selectVerifiedDurableSyncQuads(
       message: `Merkle mismatch for graph-scoped KA ${ual}${acceptUnverified ? ' (system context graph, accepted)' : ''}: ${detail}`,
     });
   }
+
+  return {
+    hasGraphScopedCandidates: graphScopedCandidates.length > 0,
+    admittedMetadataUals,
+    rejectedKcUals,
+    graphVerification,
+    verifiedGraphScopedDataGraphs,
+    verifiedZeroPublicAssets,
+    fatalUnscopedFailure,
+    logs,
+  };
+}
+
+function verifyLegacyCandidates(
+  dataQuads: readonly Quad[],
+  metaQuads: readonly Quad[],
+  metadata: IntegrityMetadataIndex,
+  candidates: readonly IntegrityCandidate[],
+  acceptUnverified: boolean,
+  mode: DurableIntegrityVerificationMode,
+): LegacyVerificationOutcome {
+  const legacyKcUals = new Set(
+    candidates
+      .filter((candidate): candidate is LegacyCandidate => candidate.kind === 'legacy')
+      .map((candidate) => candidate.ual),
+  );
+  const verifiedKcUals = new Set<string>();
+  const rejectedKcUals = new Set<string>();
+  let fatalUnscopedFailure = false;
+  const logs: DurableIntegrityLogEntry[] = [];
 
   // Legacy read-only verification. Token rows use partOf; collapsed legacy
   // rows self-map from the merkle-bearing UAL to their rootEntity rows.
@@ -324,11 +571,27 @@ export function selectVerifiedDurableSyncQuads(
 
   const partitioned = skolemizeByEntity(dataQuads as Quad[]);
   for (const kcUal of legacyKcUals) {
-    if (!merkleSubjects.has(kcUal)) continue;
+    if (!metadata.merkleSubjects.has(kcUal)) continue;
+    if (mode.kind === 'sinceBatchId') {
+      try {
+        if (!candidateIsNewerThan(metadata.metaBySubject.get(kcUal) ?? [], mode.sinceBatchId)) {
+          if (acceptUnverified) verifiedKcUals.add(kcUal);
+          continue;
+        }
+      } catch (error) {
+        rejectedKcUals.add(kcUal);
+        fatalUnscopedFailure = true;
+        logs.push({
+          level: acceptUnverified ? 'debug' : 'warn',
+          message: `Invalid legacy KA delta metadata for ${kcUal}: ${errorMessage(error)}`,
+        });
+        continue;
+      }
+    }
     const roots = kcRootEntities.get(kcUal) ?? [];
     let claimedRoots: string[];
     try {
-      claimedRoots = distinctObjects(metaBySubject.get(kcUal) ?? [], MERKLE_ROOT)
+      claimedRoots = distinctObjects(metadata.metaBySubject.get(kcUal) ?? [], MERKLE_ROOT)
         .map((raw) => normalizeHex32(raw, 'merkleRoot'));
     } catch (error) {
       rejectedKcUals.add(kcUal);
@@ -348,25 +611,39 @@ export function selectVerifiedDurableSyncQuads(
       });
       continue;
     }
-    if (overlappingLegacyKcs.has(kcUal)) {
-      verifiedKcUals.add(kcUal);
-      logs.push({
-        level: 'debug',
-        message: `Skipping legacy Merkle check for ${kcUal}: root entity is shared across versions`,
-      });
-      continue;
-    }
-
     try {
-      const publicQuads: Quad[] = [];
-      for (const root of roots) appendInPlace(publicQuads, partitioned.get(root) ?? []);
       const privateRoots: Uint8Array[] = [];
       for (const [kaUri, owner] of kaToKc) {
         if (owner !== kcUal) continue;
-        for (const raw of distinctObjects(metaBySubject.get(kaUri) ?? [], PRIVATE_MERKLE_ROOT)) {
+        for (const raw of distinctObjects(metadata.metaBySubject.get(kaUri) ?? [], PRIVATE_MERKLE_ROOT)) {
           privateRoots.push(hexToBytes(normalizeHex32(raw, 'privateMerkleRoot')));
         }
       }
+      const legacyDataGraph = legacyDataGraphFromMetadata(kcUal, metadata);
+      if (
+        mode.kind === 'changelogPage'
+        && (
+          legacyDataGraph === undefined
+          || !mode.changedDataGraphs.has(legacyDataGraph)
+        )
+      ) {
+        // Changelog pages carry the complete shared metadata graph but only
+        // changed data graphs. Do not select unchanged peer-supplied legacy
+        // rows for whole-graph replacement when their payload was not checked.
+        if (acceptUnverified) verifiedKcUals.add(kcUal);
+        continue;
+      }
+      if (overlappingLegacyKcs.has(kcUal)) {
+        verifiedKcUals.add(kcUal);
+        logs.push({
+          level: 'debug',
+          message: `Skipping legacy Merkle check for ${kcUal}: root entity is shared across versions`,
+        });
+        continue;
+      }
+
+      const publicQuads: Quad[] = [];
+      for (const root of roots) appendInPlace(publicQuads, partitioned.get(root) ?? []);
       const computedHex = toHex(computeStructuredKCRoot(publicQuads, privateRoots));
       if (computedHex === claimedRoots[0]) {
         verifiedKcUals.add(kcUal);
@@ -386,7 +663,99 @@ export function selectVerifiedDurableSyncQuads(
     }
   }
 
-  const rejected = rejectedKcUals.size;
+  return {
+    verifiedKcUals,
+    rejectedKcUals,
+    kaToKc,
+    kcRootEntities,
+    fatalUnscopedFailure,
+    logs,
+  };
+}
+
+function graphScopedCandidateIsInScope(
+  ual: string,
+  assertionGraph: string,
+  metadata: IntegrityMetadataIndex,
+  mode: DurableIntegrityVerificationMode,
+): boolean {
+  if (mode.kind === 'fullSnapshot') return true;
+  if (mode.kind === 'changelogPage') return mode.changedDataGraphs.has(assertionGraph);
+  return candidateIsNewerThan(metadata.metaBySubject.get(ual) ?? [], mode.sinceBatchId);
+}
+
+function candidateIsNewerThan(rows: readonly Quad[], sinceBatchId: bigint): boolean {
+  const values = distinctObjects(rows, BATCH_ID);
+  if (values.length !== 1) {
+    throw new Error(`${values.length === 0 ? 'missing' : 'ambiguous'} batchId metadata`);
+  }
+  const batchId = parseInteger(values[0]!, 'batchId');
+  if (batchId < 0n) throw new Error(`invalid batchId: ${batchId}`);
+  return batchId > sinceBatchId;
+}
+
+function legacyDataGraphFromMetadata(
+  kcUal: string,
+  metadata: IntegrityMetadataIndex,
+): string | undefined {
+  const metaGraphs = new Set(
+    (metadata.metaBySubject.get(kcUal) ?? [])
+      .filter((quad) => quad.predicate === MERKLE_ROOT)
+      .map((quad) => quad.graph),
+  );
+  if (metaGraphs.size !== 1) return undefined;
+  const [metaGraph] = metaGraphs;
+  return metaGraph?.endsWith('/_meta')
+    ? metaGraph.slice(0, -'/_meta'.length)
+    : undefined;
+}
+
+function selectVerifiedQuads(
+  dataQuads: readonly Quad[],
+  metaQuads: readonly Quad[],
+  metadata: IntegrityMetadataIndex,
+  outcome: IntegrityVerificationOutcome,
+  acceptUnverified: boolean,
+): DurableIntegritySelection {
+  const logs = [...outcome.logs];
+  const verifiedGraphScopedDataGraphs = [...outcome.verifiedGraphScopedDataGraphs].sort();
+
+  const verifiedLegacyRoots = new Set<string>();
+  const allLegacyRoots = new Set<string>();
+  for (const [kcUal, roots] of outcome.kcRootEntities) {
+    for (const root of roots) {
+      allLegacyRoots.add(root);
+      if (outcome.admittedMetadataUals.has(kcUal)) verifiedLegacyRoots.add(root);
+    }
+  }
+
+  const dataIndexes: number[] = [];
+  let unboundDataTriples = 0;
+  for (let index = 0; index < dataQuads.length; index++) {
+    const quad = dataQuads[index]!;
+    const graphVerified = outcome.graphVerification.get(quad.graph);
+    if (graphVerified !== undefined) {
+      if (graphVerified) dataIndexes.push(index);
+      continue;
+    }
+    const legacyOwner = findLegacyRootOwner(quad.subject, allLegacyRoots);
+    if (legacyOwner) {
+      if (verifiedLegacyRoots.has(legacyOwner)) dataIndexes.push(index);
+      continue;
+    }
+    if (outcome.hasGraphScopedCandidates) unboundDataTriples += 1;
+    else dataIndexes.push(index); // quarantined legacy compatibility
+  }
+
+  if (unboundDataTriples > 0) {
+    logs.push({
+      level: acceptUnverified ? 'debug' : 'warn',
+      message: `Rejecting sync batch: ${unboundDataTriples} data triples are not bound to a verified KA`,
+    });
+  }
+  const rejected = outcome.rejectedKcUals.size + (
+    unboundDataTriples > 0 && outcome.rejectedKcUals.size === 0 ? 1 : 0
+  );
   if (acceptUnverified && rejected > 0) {
     // Preserve the established audit wording consumed by worker/runtime
     // diagnostics while the verifier supports both legacy KCs and V2 KAs.
@@ -395,47 +764,44 @@ export function selectVerifiedDurableSyncQuads(
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: allIndexes(metaQuads),
       rejected: 0,
-      verifiedZeroPublicAssets,
+      verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
+      verifiedGraphScopedDataGraphs,
       logs,
     };
   }
-  if (fatalUnscopedFailure) {
-    return { dataIndexes: [], metaIndexes: [], rejected, verifiedZeroPublicAssets, logs };
-  }
-
-  const verifiedLegacyRoots = new Set<string>();
-  const allLegacyRoots = new Set<string>();
-  for (const [kcUal, roots] of kcRootEntities) {
-    for (const root of roots) {
-      allLegacyRoots.add(root);
-      if (verifiedKcUals.has(kcUal)) verifiedLegacyRoots.add(root);
-    }
-  }
-
-  const dataIndexes: number[] = [];
-  for (let index = 0; index < dataQuads.length; index++) {
-    const quad = dataQuads[index]!;
-    const graphVerified = graphVerification.get(quad.graph);
-    if (graphVerified !== undefined) {
-      if (graphVerified) dataIndexes.push(index);
-      continue;
-    }
-    const legacyOwner = findLegacyRootOwner(quad.subject, allLegacyRoots);
-    if (!legacyOwner || verifiedLegacyRoots.has(legacyOwner)) dataIndexes.push(index);
+  if (outcome.fatalUnscopedFailure || unboundDataTriples > 0) {
+    return {
+      dataIndexes: [],
+      metaIndexes: [],
+      rejected,
+      verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
+      verifiedGraphScopedDataGraphs,
+      logs,
+    };
   }
 
   const metaIndexes: number[] = [];
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
-    if (merkleSubjects.has(quad.subject) || markerSubjects.has(quad.subject)) {
-      if (verifiedKcUals.has(quad.subject)) metaIndexes.push(index);
+    if (
+      metadata.merkleSubjects.has(quad.subject)
+      || metadata.markerSubjects.has(quad.subject)
+    ) {
+      if (outcome.admittedMetadataUals.has(quad.subject)) metaIndexes.push(index);
       continue;
     }
-    const owner = kaToKc.get(quad.subject);
-    if (!owner || verifiedKcUals.has(owner)) metaIndexes.push(index);
+    const owner = outcome.kaToKc.get(quad.subject);
+    if (!owner || outcome.admittedMetadataUals.has(owner)) metaIndexes.push(index);
   }
 
-  return { dataIndexes, metaIndexes, rejected, verifiedZeroPublicAssets, logs };
+  return {
+    dataIndexes,
+    metaIndexes,
+    rejected,
+    verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
+    verifiedGraphScopedDataGraphs,
+    logs,
+  };
 }
 
 /**

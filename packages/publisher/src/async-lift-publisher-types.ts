@@ -149,12 +149,4 @@ export interface AsyncLiftPublisherConfig {
   ) => Promise<void>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  /**
-   * Explicit escape hatch for offline migration tooling and legacy-queue tests.
-   * Runtime nodes must leave this unset: legacy root-scoped KAs are read-only,
-   * and every new async write must use enqueueKnowledgeAssetVmPublish().
-   *
-   * @internal
-   */
-  legacyRawLiftWriteCapability?: 'migration-only';
 }

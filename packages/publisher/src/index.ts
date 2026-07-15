@@ -3,12 +3,14 @@ export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } fro
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export {
   KNOWLEDGE_ASSET_SKOLEM_PREFIX,
+  KNOWLEDGE_ASSET_PRIVATE_SKOLEM_PREFIX,
+  assertNoUserAuthoredKnowledgeAssetSkolemTerms,
   skolemizeKnowledgeAsset,
   skolemizeKnowledgeAssetParts,
-  skolemizeByEntity,
-  autoPartition,
+  type SkolemizeKnowledgeAssetOptions,
   type SkolemizedKnowledgeAssetParts,
-} from './auto-partition.js';
+} from './ka-skolemization.js';
+export { skolemizeByEntity, autoPartition } from './auto-partition.js';
 export { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 export {
   ASSERTION_NAMED_GRAPH_PREFIX,
@@ -75,6 +77,7 @@ export {
   MultiRootPublishNotAtomicError,
   CuratorUnconfirmedError,
   CuratorRejectedError,
+  assertValidPrecomputedUpdateAttestation,
   type DKGPublisherConfig,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,

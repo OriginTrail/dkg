@@ -3,6 +3,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LEGACY_ROOT_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
+  MAX_KNOWLEDGE_ASSET_NUMBER,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
@@ -28,6 +29,14 @@ describe('KA content scope', () => {
       assertionVersion: '2',
       access: 'read-write',
     });
+  });
+
+  it('rejects KA numbers outside the uint96 on-chain identity domain', () => {
+    const tooLarge = 1n << 96n;
+    const ual = `did:dkg:base:8453/0x70997970c51812dc3a010C7d01b50e0d17dc79C8/${tooLarge}`;
+
+    expect(() => parseDeterministicKnowledgeAssetUal(ual))
+      .toThrow(/packed uint96 identity domain/);
   });
 
   it('derives one stable per-KA graph while assertion version remains explicit', () => {
@@ -72,6 +81,29 @@ describe('KA content scope', () => {
       expect(() => resolveKnowledgeAssetWriteScope(input))
         .toThrow(LegacyKnowledgeAssetReadOnlyError);
     }
+  });
+
+  it('admits only KA numbers that round-trip through the packed uint96 kaId', () => {
+    const prefix = 'did:dkg:base:8453/0x0000000000000000000000000000000000000002/';
+    const maxUal = `${prefix}${MAX_KNOWLEDGE_ASSET_NUMBER}`;
+    expect(parseDeterministicKnowledgeAssetUal(maxUal)).toMatchObject({
+      ual: maxUal,
+      kaNumber: MAX_KNOWLEDGE_ASSET_NUMBER.toString(),
+    });
+    expect(parseDeterministicKnowledgeAssetUal(`${prefix}0`).kaNumber).toBe('0');
+
+    // 2^96 packs to (author+1, number 0): author 0x…02 with number 2^96 would
+    // collide with author 0x…03 / number 0. The parser must reject the spill.
+    const overflow = MAX_KNOWLEDGE_ASSET_NUMBER + 1n;
+    expect(() => parseDeterministicKnowledgeAssetUal(`${prefix}${overflow}`))
+      .toThrow(/packed uint96 identity domain/);
+    expect(() => parseDeterministicKnowledgeAssetUal(`${prefix}${overflow + 5n}`))
+      .toThrow(/packed uint96 identity domain/);
+    // Negative numbers never match the UAL grammar.
+    expect(() => parseDeterministicKnowledgeAssetUal(`${prefix}-1`))
+      .toThrow(/must match/);
+    expect(() => createGraphKnowledgeAssetScope(`${prefix}${overflow}`, 1))
+      .toThrow(/packed uint96 identity domain/);
   });
 
   it('fails closed on missing identity/version, invalid roots, and future versions', () => {

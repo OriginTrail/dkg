@@ -15,6 +15,7 @@ import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
@@ -25,6 +26,7 @@ import {
   contextGraphLayerUri,
   ASSERTION_SEAL_PREDICATES,
   ASSERTION_PUBLISH_RECEIPT_PREDICATES,
+  createGraphKnowledgeAssetScope,
   createOperationContext,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
@@ -376,9 +378,21 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
       { subject: `${ENTITY_BASE}:b`, predicate: 'http://schema.org/name', object: '"Entity B"' },
     ]);
 
+    const publicDraftProbe = vi.spyOn(agent.publisher, 'assertionQuery');
+    const privateDraftProbe = vi.spyOn(agent.publisher, 'assertionQueryPrivate');
+    const finalize = vi.spyOn(agent as any, 'assertionFinalize');
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
     await expect(
       agent.assertion.promote(CG_ID, 'selective', { entities: [`${ENTITY_BASE}:a`] }),
     ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(publicDraftProbe).not.toHaveBeenCalled();
+    expect(privateDraftProbe).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+    expect(publisherPromote).not.toHaveBeenCalled();
+    publicDraftProbe.mockRestore();
+    privateDraftProbe.mockRestore();
+    finalize.mockRestore();
+    publisherPromote.mockRestore();
 
     // Rejection is pre-commit: the complete draft remains available and no
     // subject subset can escape into SWM under the KA identity.
@@ -622,6 +636,20 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const onChain = confirmed.onChainResult!;
     const kaId = BigInt(intent.seal.reservedKaId!);
     const txHash = onChain.txHash as `0x${string}`;
+    const recoveryChain = (agent as unknown as { chain: {
+      chainId: string;
+      getDKGKnowledgeAssetsAddress(): Promise<string>;
+    } }).chain;
+    const knowledgeAssetsContract = onChain.knowledgeAssetsContract
+      ?? await recoveryChain.getDKGKnowledgeAssetsAddress();
+    const receiptUal = buildKnowledgeAssetUal(
+      recoveryChain.chainId,
+      knowledgeAssetsContract,
+      kaId,
+    );
+    expect(receiptUal).not.toBe(intent.kaUal);
+    const recoveryPublisher = (agent as any).publisher;
+    const recoveryCleanup = vi.spyOn(recoveryPublisher, 'clearPublishedKnowledgeAssetSwm');
     const recoveryInput = {
       walletId: 'wallet-1',
       request: intent,
@@ -648,7 +676,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
         finalization: {
           mode: 'published',
           txHash,
-          ual: confirmed.ual,
+          // Production recovery resolver shape: contract + packed KA id. The
+          // finalizer must keep using intent.kaUal for the local exact graph.
+          ual: receiptUal,
           batchId: kaId.toString(),
           startKAId: kaId.toString(),
           endKAId: kaId.toString(),
@@ -659,8 +689,42 @@ describe('rootless graph-scoped KA lifecycle', () => {
           authorAddress: intent.seal.authorAddress,
         },
       },
-      publisher: (agent as any).publisher,
+      publisher: recoveryPublisher,
     } as const;
+
+    for (const invalidReceiptUal of [
+      buildKnowledgeAssetUal(
+        recoveryChain.chainId,
+        '0x0000000000000000000000000000000000000001',
+        kaId,
+      ),
+      buildKnowledgeAssetUal('evm:1', knowledgeAssetsContract, kaId),
+      buildKnowledgeAssetUal(recoveryChain.chainId, knowledgeAssetsContract, kaId + 1n),
+    ]) {
+      await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+        ...recoveryInput,
+        recovery: {
+          ...recoveryInput.recovery,
+          finalization: {
+            ...recoveryInput.recovery.finalization,
+            ual: invalidReceiptUal,
+          },
+        },
+      } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    }
+    const queuedScope = createGraphKnowledgeAssetScope(
+      intent.kaUal!,
+      intent.assertionVersion!,
+    );
+    for (const invalidGraphUal of [
+      `did:dkg:${queuedScope.chainId}/0x0000000000000000000000000000000000000001/${queuedScope.kaNumber}`,
+      `did:dkg:${queuedScope.chainId}/${queuedScope.agentAddress}/${BigInt(queuedScope.kaNumber) + 1n}`,
+    ]) {
+      await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+        ...recoveryInput,
+        request: { ...recoveryInput.request, kaUal: invalidGraphUal },
+      } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    }
 
     await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       ...recoveryInput,
@@ -700,13 +764,25 @@ describe('rootless graph-scoped KA lifecycle', () => {
 
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    expect(recoveryCleanup).not.toHaveBeenCalled();
 
     const history = await agent.assertion.history(CG_ID, name);
     expect(history?.state).toBe('published');
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
     expect(history?.status).toBe('vm-confirmed');
     expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
-    expect(history?.publishedUal).toBe(confirmed.ual);
+    expect(history?.publishedUal).toBe(receiptUal);
+    expect(history?.assertionGraph).toBe(contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.VerifiableMemory,
+      queuedScope.agentAddress,
+      BigInt(queuedScope.kaNumber),
+    ));
+    expect(intent.accessPolicy).toBe('public');
+    const recoveredAccessPolicy = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${intent.kaUal}> <${DKG}accessPolicy> "public" .
+    } }`);
+    expect(recoveredAccessPolicy).toMatchObject({ type: 'boolean', value: true });
 
     const receipt = await store.query(`ASK { GRAPH <${metaGraph}> {
       <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> "${txHash}" .

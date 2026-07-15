@@ -1,9 +1,12 @@
 import { parentPort } from 'node:worker_threads';
 import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
+import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, DurableBatchVerificationMode, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
-import { selectVerifiedDurableSyncQuads } from './sync/durable-integrity.js';
+import {
+  selectVerifiedDurableSyncQuads,
+  type DurableIntegrityVerificationMode,
+} from './sync/durable-integrity.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -30,8 +33,18 @@ parentPort?.on('message', async (message: { id: number; method: string; args: un
       return;
     }
     if (message.method === 'processDurableBatch') {
-      const [dataQuads, metaQuads, acceptUnverified] = message.args as [Quad[], Quad[], boolean];
-      const result = processDurableBatchForWire(dataQuads, metaQuads, acceptUnverified);
+      const [dataQuads, metaQuads, acceptUnverified, mode] = message.args as [
+        Quad[],
+        Quad[],
+        boolean,
+        DurableBatchVerificationMode | undefined,
+      ];
+      const result = processDurableBatchForWire(
+        dataQuads,
+        metaQuads,
+        acceptUnverified,
+        mode,
+      );
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -62,28 +75,16 @@ export function verifySyncedData(
   return verifySyncedDataImpl(dataQuads, metaQuads, acceptUnverified);
 }
 
-type VerifiedSelectionIndexes = {
-  data: number[];
-  meta: number[];
-  verifiedZeroPublicAssets: number;
-};
-
 function verifySyncedDataImpl(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified = false,
-  recordSelection?: (indexes: VerifiedSelectionIndexes) => void,
 ): SyncVerifyResult {
   const selection = selectVerifiedDurableSyncQuads(
     dataQuads,
     metaQuads,
     acceptUnverified,
   );
-  recordSelection?.({
-    data: selection.dataIndexes,
-    meta: selection.metaIndexes,
-    verifiedZeroPublicAssets: selection.verifiedZeroPublicAssets,
-  });
   return {
     data: selection.dataIndexes.map((index) => dataQuads[index]!),
     meta: selection.metaIndexes.map((index) => metaQuads[index]!),
@@ -292,6 +293,7 @@ function processDurableBatch(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
+  mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
 ): DurableBatchSelectionResult {
   const logs: SyncVerifyLogEntry[] = [];
   const totalFetchedDataQuads = dataQuads.length;
@@ -303,6 +305,8 @@ function processDurableBatch(
       verifiedMeta: [],
       verifiedDataIndexes: [],
       verifiedMetaIndexes: [],
+      verifiedGraphScopedDataGraphs: [],
+      verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -323,6 +327,8 @@ function processDurableBatch(
       verifiedMeta: [],
       verifiedDataIndexes: [],
       verifiedMetaIndexes: [],
+      verifiedGraphScopedDataGraphs: [],
+      verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -333,24 +339,34 @@ function processDurableBatch(
     };
   }
 
-  let verifiedIndexes: VerifiedSelectionIndexes = { data: [], meta: [], verifiedZeroPublicAssets: 0 };
-  const verified = verifySyncedDataImpl(
+  const integrityMode = durableIntegrityMode(mode);
+  const verifiedSelection = selectVerifiedDurableSyncQuads(
     dataQuads,
     metaQuads,
     acceptUnverified,
-    (indexes) => { verifiedIndexes = indexes; },
+    integrityMode,
   );
   // A fully-private V2 KA legitimately has an empty public assertion graph.
   // Its metadata commits the private root and declares publicTripleCount=0,
   // so exact verification is enough to advance both durable cursors. Keep
   // treating every other meta-without-data response as potentially pruned.
   const verifiedFullyPrivateResponse = totalFetchedDataQuads === 0
-    && verified.rejected === 0
-    && verifiedIndexes.verifiedZeroPublicAssets > 0;
+    && verifiedSelection.rejected === 0
+    && verifiedSelection.verifiedZeroPublicAssets > 0;
+  // A since-batch response legitimately carries the full metadata phase even
+  // when no asset is newer than the watermark. Once every descriptor was
+  // cleanly classified out of scope, an empty DATA phase is clean delta
+  // completion—not evidence of a pruned graph that should pin the cursor.
+  const cleanEmptySinceBatchDelta = mode.kind === 'sinceBatchId'
+    && totalFetchedDataQuads === 0
+    && verifiedSelection.rejected === 0
+    && verifiedSelection.dataIndexes.length === 0
+    && verifiedSelection.verifiedZeroPublicAssets === 0;
   const metaOnlyResponses = !acceptUnverified
     && totalFetchedMetaQuads > 0
     && totalFetchedDataQuads === 0
     && !verifiedFullyPrivateResponse
+    && !cleanEmptySinceBatchDelta
     ? 1
     : 0;
   if (metaOnlyResponses > 0) {
@@ -360,29 +376,50 @@ function processDurableBatch(
     });
   }
   return {
-    verifiedData: verified.data,
-    verifiedMeta: verified.meta,
-    verifiedDataIndexes: verifiedIndexes.data,
-    verifiedMetaIndexes: verifiedIndexes.meta,
+    verifiedData: verifiedSelection.dataIndexes.map((index) => dataQuads[index]!),
+    verifiedMeta: verifiedSelection.metaIndexes.map((index) => metaQuads[index]!),
+    verifiedDataIndexes: verifiedSelection.dataIndexes,
+    verifiedMetaIndexes: verifiedSelection.metaIndexes,
+    verifiedGraphScopedDataGraphs: verifiedSelection.verifiedGraphScopedDataGraphs,
+    verifiedPrivateOnlyResponses: verifiedFullyPrivateResponse ? 1 : 0,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
-    rejectedKcs: verified.rejected,
+    rejectedKcs: verifiedSelection.rejected,
     emptyResponses: 0,
     metaOnlyResponses,
     dataRejectedMissingMeta: 0,
-    logs: [...logs, ...verified.logs],
+    logs: [...logs, ...verifiedSelection.logs],
   };
+}
+
+function durableIntegrityMode(mode: DurableBatchVerificationMode): DurableIntegrityVerificationMode {
+  if (mode.kind === 'fullSnapshot') return mode;
+  if (mode.kind === 'changelogPage') {
+    return { kind: 'changelogPage', changedDataGraphs: new Set(mode.changedDataGraphs) };
+  }
+  if (!/^\d+$/.test(mode.sinceBatchId)) {
+    throw new Error(`Invalid sinceBatchId verification scope: ${mode.sinceBatchId}`);
+  }
+  return { kind: 'sinceBatchId', sinceBatchId: BigInt(mode.sinceBatchId) };
 }
 
 export function processDurableBatchForWire(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
+  mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
 ): DurableBatchProcessWireResult {
-  const result = processDurableBatch(dataQuads, metaQuads, acceptUnverified);
+  const result = processDurableBatch(
+    dataQuads,
+    metaQuads,
+    acceptUnverified,
+    mode,
+  );
   const {
     verifiedDataIndexes,
     verifiedMetaIndexes,
+    verifiedGraphScopedDataGraphs,
+    verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs,
@@ -396,6 +433,8 @@ export function processDurableBatchForWire(
   return {
     verifiedDataIndexes,
     verifiedMetaIndexes,
+    verifiedGraphScopedDataGraphs,
+    verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs,

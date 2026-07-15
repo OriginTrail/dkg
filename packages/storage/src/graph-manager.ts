@@ -18,6 +18,7 @@ import {
   isSafeIri,
   assertSafeIri,
   sparqlString,
+  validateNewContextGraphId,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
@@ -810,6 +811,23 @@ export class ContextGraphManager {
     await this.store.createGraph(this.subGraphPrivateUri(contextGraphId, subGraphName));
     await this.store.createGraph(contextGraphSharedMemoryUri(contextGraphId, subGraphName));
     await this.store.createGraph(contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName));
+  }
+
+  /** Reject an ID that would alias one of the storage-owned partitions. */
+  assertNewContextGraphId(contextGraphId: string): void {
+    const validation = validateNewContextGraphId(contextGraphId);
+    if (!validation.valid) {
+      throw new Error(`Invalid context graph ID: ${validation.reason}`);
+    }
+  }
+
+  /**
+   * Create the storage partitions for a newly-authored context graph.
+   * Existing read and sync paths intentionally keep using ensureContextGraph.
+   */
+  async ensureNewContextGraph(contextGraphId: string): Promise<void> {
+    this.assertNewContextGraphId(contextGraphId);
+    await this.ensureContextGraph(contextGraphId);
   }
 
   async ensureContextGraph(contextGraphId: string): Promise<void> {

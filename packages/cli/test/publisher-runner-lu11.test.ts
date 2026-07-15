@@ -7,9 +7,9 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
-  TripleStoreAsyncLiftPublisher,
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
+import { seedLegacyRawLiftTestJob } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
@@ -66,9 +66,7 @@ describe('publisher runner LU-11 runtime wiring', () => {
       },
     });
 
-    const jobId = await new TripleStoreAsyncLiftPublisher(store, {
-      legacyRawLiftWriteCapability: 'migration-only',
-    }).lift({
+    const jobId = await seedLegacyRawLiftTestJob(store, {
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],

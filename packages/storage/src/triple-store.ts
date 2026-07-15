@@ -76,6 +76,11 @@ export interface QueryOptions {
    * dispatching or after returning from their blocking native call.
    */
   signal?: AbortSignal;
+  /**
+   * Optional pre-parse cap for remote response bodies. HTTP adapters stream
+   * and reject above this bound before JSON/N-Quads materialization.
+   */
+  maxResponseBytes?: number;
 }
 
 export type TripleStoreQueryOptions = QueryOptions;

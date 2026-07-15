@@ -133,6 +133,9 @@ import {
   skolemizeKnowledgeAsset,
   skolemizeKnowledgeAssetParts,
   assertNoKnowledgeAssetPayloadNamedGraphs,
+  assertValidPrecomputedUpdateAttestation,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
   isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
@@ -140,6 +143,7 @@ import {
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
+  resolveKnowledgeAssetWorkspaceHead,
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
   TripleStoreAsyncLiftPublisher,
@@ -173,6 +177,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
+import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -441,8 +446,8 @@ export const SEAL_CAPABILITY_GAP_CODE = 'SEAL_CAPABILITY_GAP';
 const ROOTLESS_UPDATE_DKG_NS = 'http://dkg.io/ontology/';
 const ROOTLESS_UPDATE_XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
-function rootlessUpdateError(code: string, message: string): Error {
-  return Object.assign(new Error(message), { code });
+function rootlessUpdateError(code: RootlessUpdateErrorCode, message: string): Error {
+  return new RootlessUpdateError(code, message);
 }
 
 function distinctMetadataObjects(
@@ -605,7 +610,7 @@ export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri
     .map((quad) => ({ ...quad, graph: '' }));
 }
 
-function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
+export function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
   contextGraphId: string;
   snapshotQuads: readonly Quad[];
   onChainContextGraphId?: string;
@@ -622,9 +627,13 @@ function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
 > {
   const encryptionOptions = {
     encryptInlinePayload:
-      input.resolvedEncryptInlinePayload ?? input.queuedEncryptInlinePayload,
+      input.onChainContextGraphId
+        ? input.resolvedEncryptInlinePayload
+        : input.queuedEncryptInlinePayload,
     encryptInlineChunked:
-      input.resolvedEncryptInlineChunked ?? input.queuedEncryptInlineChunked,
+      input.onChainContextGraphId
+        ? input.resolvedEncryptInlineChunked
+        : input.queuedEncryptInlineChunked,
   };
   if (!input.onChainContextGraphId || !input.resolvedEncryptInlinePayload) {
     return { quads: [...input.snapshotQuads], ...encryptionOptions };
@@ -638,6 +647,15 @@ function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
     ...encryptionOptions,
     trustedNonManifestCatalogTriples:
       generatedPrivateCatalogTripleKeys(input.contextGraphId),
+  };
+}
+
+export function queuedKnowledgeAssetAccessEnvelope(
+  request: Pick<KnowledgeAssetVmPublishRequest, 'accessPolicy' | 'allowedPeers'>,
+): Pick<PublishOptions, 'accessPolicy' | 'allowedPeers'> {
+  return {
+    accessPolicy: request.accessPolicy,
+    allowedPeers: request.allowedPeers ? [...request.allowedPeers] : undefined,
   };
 }
 
@@ -1276,13 +1294,18 @@ export class PublishMethods extends DKGAgentBase {
     rejectOversizedRdfLiterals(publicQuads, 'publishAsync.publicQuads');
     rejectOversizedRdfLiterals(privateQuads, 'publishAsync.privateQuads');
 
-    if (opts?.transitionType !== undefined && opts.transitionType !== 'CREATE') {
+    if (opts?.transitionType !== undefined) {
       throw new InvalidContentError(
-        'publishAsync creates one new atomic Knowledge Asset; use the KA update API for MUTATE or REVOKE',
+        'publishAsync no longer accepts transitionType; use the named KA mutation API for updates or revocation',
       );
     }
     if (opts?.priorVersion !== undefined) {
       throw new InvalidContentError('publishAsync priorVersion is only valid for the legacy root-lift path');
+    }
+    if (opts?.entityProofs === true) {
+      throw new InvalidContentError(
+        'publishAsync does not support entityProofs for graph-scoped Knowledge Assets',
+      );
     }
     if (opts?.namespace !== undefined || opts?.scope !== undefined || opts?.authority !== undefined) {
       throw new InvalidContentError(
@@ -1304,7 +1327,7 @@ export class PublishMethods extends DKGAgentBase {
       ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const allowedPeers = [...new Set(
       (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
-    )];
+    )].sort();
     if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
       throw new InvalidContentError('publishAsync allowList policy requires allowedPeers');
     }
@@ -1665,6 +1688,7 @@ export class PublishMethods extends DKGAgentBase {
     await this.broadcastPublish(contextGraphId, result, ctx, {
       accessPolicy: opts?.accessPolicy,
       allowedPeers: opts?.allowedPeers,
+      curated: trustedNonManifestCatalogTriples !== undefined,
     });
     onPhase?.('broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kaId=${result.kaId}`);
@@ -1778,6 +1802,8 @@ export class PublishMethods extends DKGAgentBase {
       privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
       privateTripleCount?: PublishOptions['privateTripleCount'];
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
+      accessPolicy?: PublishOptions['accessPolicy'];
+      allowedPeers?: PublishOptions['allowedPeers'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
@@ -1825,6 +1851,17 @@ export class PublishMethods extends DKGAgentBase {
           `update payload yielded ${ethers.hexlify(canonicalMerkleRoot)}.`,
       );
     }
+
+    // Authentication is a rejectable publisher precondition, so run the
+    // publisher-owned verifier before replacing either private content or the
+    // canonical SWM graph. The publisher repeats the same check immediately
+    // before chain submission as defense in depth.
+    await assertValidPrecomputedUpdateAttestation(
+      this.chain,
+      kaId,
+      canonicalMerkleRoot,
+      opts.precomputedUpdateAttestation,
+    );
 
     const updateScope = await resolveDirectRootlessUpdateScope(
       this,
@@ -1936,6 +1973,40 @@ export class PublishMethods extends DKGAgentBase {
     for (const graph of priorSwmGraphs) {
       if (graph !== canonicalSwmGraph) await this.store.dropGraph(graph);
     }
+
+    // Persist the exact update snapshot and monotonic SWM head before the
+    // publisher can cross the chain write-ahead boundary. If the process dies
+    // after the transaction lands but before local VM materialization, chain
+    // reconciliation can now resolve the staged version, counts, private
+    // commitment, publisher, and immutable public payload without guessing.
+    const updateOperationId = ctx.operationId;
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: this.store,
+      graphManager,
+      contextGraphId,
+      shareOperationId: updateOperationId,
+      kaUal: updateScope.ual,
+      assertionVersion: updateScope.assertionVersion,
+      quads: canonicalParts.publicQuads,
+      ...(canonicalPrivateMerkleRoot
+        ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
+        : {}),
+      privateTripleCount: canonicalParts.privateQuads.length,
+      publisherPeerId: this.node.peerId.toString(),
+      agentAddress: updateScope.agentAddress,
+      subGraphName: opts?.subGraphName,
+      timestamp: new Date(),
+      publicSnapshotStore: this.publicSnapshotStore,
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager,
+      contextGraphId,
+      kaUal: updateScope.ual,
+      assertionVersion: updateScope.assertionVersion,
+      shareOperationId: updateOperationId,
+      subGraphName: opts?.subGraphName,
+    });
     // GH #842: thread the on-chain cgId so the publisher can promote the update
     // payload into the per-cgId partition the RS prover reads. Without it,
     // updated KAs stay unprovable (data-corrupted / leaf-count-mismatch).
@@ -2033,6 +2104,8 @@ export class PublishMethods extends DKGAgentBase {
         ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
         : {}),
       privateTripleCount: canonicalParts.privateQuads.length,
+      accessPolicy: opts?.accessPolicy,
+      allowedPeers: opts?.allowedPeers,
       trustedNonManifestCatalogTriples:
         trustedUpdateCatalogTriples,
       v10UpdateACKProvider,
@@ -2364,6 +2437,40 @@ export class PublishMethods extends DKGAgentBase {
       createOperationContext('share'),
       `Implicitly registered public context graph "${contextGraphId}" from first SWM write`,
     );
+  }
+
+  /**
+   * Prepare the only valid graph-scoped share mode. Mutable WM content is
+   * finalized here; a draft-free retry is left untouched for assertionPromote
+   * to validate against its durable exact SWM/VM state.
+   */
+  async prepareAtomicAssertionShare(
+    this: DKGAgent,
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    opts?: {
+      subGraphName?: string;
+      authorAgentAddress?: string;
+      preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+    },
+  ): Promise<void> {
+    const [publicDraft, privateDraft] = await Promise.all([
+      this.publisher.assertionQuery(
+        contextGraphId,
+        name,
+        agentAddress,
+        opts?.subGraphName,
+      ),
+      this.publisher.assertionQueryPrivate(
+        contextGraphId,
+        name,
+        agentAddress,
+        opts?.subGraphName,
+      ),
+    ]);
+    if (publicDraft.length === 0 && privateDraft.length === 0) return;
+    await this.assertionFinalize(contextGraphId, name, agentAddress, opts);
   }
 
   /**
@@ -4042,16 +4149,8 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
     }
-    const accessPolicy = opts?.accessPolicy
-      ?? (seal.privateTripleCount > 0 ? 'ownerOnly' : 'public');
-    const allowedPeers = [...new Set(
-      (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
-    )];
-    if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
-      throw new Error('Queued Knowledge Asset allowList policy requires allowedPeers');
-    }
-    if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
-      throw new Error('Queued Knowledge Asset allowedPeers requires allowList policy');
+    if (opts?.entityProofs === true) {
+      throw new Error('Graph-scoped async publish does not support entityProofs');
     }
     const latestPromote = [...history.events]
       .reverse()
@@ -4062,6 +4161,45 @@ export class PublishMethods extends DKGAgentBase {
         new Error(
           `Cannot publish "${name}" asynchronously: the current SWM share is missing a shareOperationId. ` +
             `Re-share the asset through /api/knowledge-assets/${encodeURIComponent(name)}/swm/share before publishing.`,
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: new GraphManager(this.store),
+      contextGraphId,
+      kaUal: seal.kaUal,
+      subGraphName: opts?.subGraphName,
+    });
+    if (
+      !head
+      || head.shareOperationId !== shareOperationId
+      || head.assertionVersion !== seal.assertionVersion
+      || head.accessPolicy === undefined
+    ) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" asynchronously: the current SWM head does not match the sealed share operation. ` +
+            'Re-share the knowledge asset before publishing.',
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+    const accessPolicy = head.accessPolicy;
+    const allowedPeers = [...new Set(head.allowedPeers.map((peerId) => peerId.trim()).filter(Boolean))].sort();
+    const explicitAllowedPeers = [...new Set(
+      (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )].sort();
+    if (
+      (opts?.accessPolicy !== undefined && opts.accessPolicy !== accessPolicy)
+      || (opts?.allowedPeers !== undefined
+        && JSON.stringify(explicitAllowedPeers) !== JSON.stringify(allowedPeers))
+    ) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" asynchronously: the requested access envelope does not match the immutable SWM share.`,
         ),
         { code: 'PUBLISH_INTENT_STALE' },
       );
@@ -4302,6 +4440,33 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    const liveHead = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: new GraphManager(this.store),
+      contextGraphId: request.contextGraphId,
+      kaUal: request.kaUal,
+      subGraphName: request.subGraphName,
+    });
+    const queuedAllowedPeers = [...new Set(
+      (request.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )].sort();
+    const liveAllowedPeers = [...new Set(
+      (liveHead?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )].sort();
+    if (
+      !liveHead
+      || liveHead.shareOperationId !== request.shareOperationId
+      || liveHead.assertionVersion !== request.assertionVersion
+      || liveHead.accessPolicy === undefined
+      || liveHead.accessPolicy !== request.accessPolicy
+      || JSON.stringify(liveAllowedPeers) !== JSON.stringify(queuedAllowedPeers)
+    ) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          'the immutable SWM access envelope no longer matches the queued request.',
+      );
+    }
+
     if (history.kaNumber && request.kaNumber && history.kaNumber !== request.kaNumber) {
       throw stale(
         `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
@@ -4391,10 +4556,6 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
-    const queuedScope = createGraphKnowledgeAssetScope(
-      request.kaUal,
-      request.assertionVersion,
-    );
     const recovered = await normalizeRecoveredNamedKaPublish({
       request,
       job,
@@ -4418,13 +4579,22 @@ export class PublishMethods extends DKGAgentBase {
     const materialization = await this.getOrCreateFinalizationHandler().handleChainReconciledKC({
       contextGraphId: request.contextGraphId,
       onChainCgId,
-      ual: recovered.ual,
+      ual: recovered.localUal,
       merkleRoot: ethers.getBytes(recovered.materialization.merkleRoot),
       publisherAddress: recovered.materialization.publisherAddress,
       kaId: recovered.reservedKaId,
       versionBlock: recovered.materialization.versionBlock,
       authorAddress: recovered.materialization.authorAddress,
       subGraphName: request.subGraphName,
+      ...(!recovered.materialization.superseded
+        ? {
+          trustedAssertionEvidence: {
+            assertionVersion: request.assertionVersion,
+            accessPolicy: request.accessPolicy ?? 'ownerOnly',
+            allowedPeers: [...(request.allowedPeers ?? [])],
+          },
+        }
+        : {}),
     }, ctx);
     if (
       materialization !== 'promoted' &&
@@ -4453,48 +4623,19 @@ export class PublishMethods extends DKGAgentBase {
     if (materialization !== 'stale-target') {
       await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
         request,
-        recovered.ual,
+        recovered.receiptUal,
         recovered.reservedKaId,
         recovered.materialization.merkleRoot,
       );
     }
 
-    if (!recovered.materialization.superseded) {
-      const publisher = input.publisher ?? this.publisher;
-      const sharedMemoryScope: SharedMemoryGraphScope = {
-        kind: 'named-lifecycle',
-        identity: {
-          agentAddress: queuedScope.agentAddress,
-          kaNumber: BigInt(queuedScope.kaNumber),
-        },
-      };
-      try {
-        await publisher.clearPublishedKnowledgeAssetSwm(
-          request.contextGraphId,
-          sharedMemoryScope,
-          request.subGraphName,
-          ctx,
-        );
-        if (request.clearSharedMemoryAfter === true) {
-          await publisher.clearRemainingSharedMemory(request.contextGraphId, request.subGraphName, ctx);
-        }
-        await publisher.clearSwmShareComplete(
-          request.contextGraphId,
-          request.name,
-          request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
-          request.subGraphName,
-        );
-      } catch (error) {
-        this.log.warn(
-          ctx,
-          `Recovered named KA ${request.name}, but post-finalization SWM cleanup was incomplete: ` +
-            (error instanceof Error ? error.message : String(error)),
-        );
-      }
-    }
+    // SWM-source materialization owns its exact transition. VM-only recovery
+    // must not run a second, unlocked cleanup: a newer unpublished assertion
+    // can already occupy the same per-KA SWM graph. Publisher lifecycle owns
+    // the shared writer-lock cleanup needed to close that wider race.
     this.log.info(
       ctx,
-      `Recovered confirmed named KA publish ${recovered.ual} from ${job.status} job ${job.jobId}` +
+      `Recovered confirmed named KA publish ${recovered.receiptUal} from ${job.status} job ${job.jobId}` +
         (recovered.materialization.superseded ? ' (materialized current superseding version)' : ''),
     );
   }
@@ -4736,6 +4877,7 @@ export class PublishMethods extends DKGAgentBase {
           ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
           privateTripleCount: seal.privateTripleCount,
           [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true,
+          ...queuedKnowledgeAssetAccessEnvelope(request),
         },
       );
 

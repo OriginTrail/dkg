@@ -1044,6 +1044,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }
 
     const gm = new GraphManager(this.store);
+    gm.assertNewContextGraphId(opts.id);
     const contextGraphUri = contextGraphDataGraphUri(opts.id);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
@@ -1089,7 +1090,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     await this.store.insert(quads);
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
-    await gm.ensureContextGraph(opts.id);
+    await gm.ensureNewContextGraph(opts.id);
 
     this.subscribeToContextGraph(opts.id);
     this.setContextGraphSubscription(opts.id, {

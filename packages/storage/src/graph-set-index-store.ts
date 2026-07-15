@@ -10,7 +10,10 @@ import type {
   UpdateOptions,
 } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
-import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import {
+  UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphCapabilityRefusal,
+} from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
@@ -344,7 +347,19 @@ export class GraphSetIndexStore implements TripleStore {
       await this.inner.replaceGraph(graphUri, quads, options);
       return;
     }
-    await this.inner.replaceGraph(graphUri, quads, options);
+    try {
+      await this.inner.replaceGraph(graphUri, quads, options);
+    } catch (error) {
+      // The replaceGraph contract allows a rejected call to have committed the
+      // complete new graph (or dropped the old one). Serving the cached graph
+      // set would then hide a committed KA graph from enumeration, so mark the
+      // index dirty for a lazy rebuild — unless this was a clean preflight
+      // capability refusal, where nothing was mutated.
+      if (!isReplaceGraphCapabilityRefusal(error)) {
+        this.scheduleFullRefresh('replaceGraph');
+      }
+      throw error;
+    }
     this.bumpMutation();
     await this.maintainTouchedGraphs([graphUri], 'replaceGraph', options);
   }

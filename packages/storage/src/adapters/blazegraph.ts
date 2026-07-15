@@ -29,6 +29,8 @@ import {
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import { quadToNQuad } from '../bounded-rdf.js';
+import { readResponseTextBounded } from '../http-response-limit.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -359,7 +361,7 @@ export class BlazegraphStore implements TripleStore {
       const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
 
       if (isConstruct) {
-        return this.queryConstruct(trimmed, deadline);
+        return this.queryConstruct(trimmed, deadline, options);
       }
 
       // Direct POST (W3C SPARQL 1.1 Protocol): send the query as the raw
@@ -380,13 +382,20 @@ export class BlazegraphStore implements TripleStore {
         signal: deadline.signal,
       }));
       if (!res.ok) {
-        const text = await deadline.waitFor(res.text().catch(() => ''));
+        const text = await deadline.waitFor((options?.maxResponseBytes === undefined
+          ? res.text()
+          : readResponseTextBounded(res, options.maxResponseBytes)
+        ).catch(() => ''));
         throw new Error(`Blazegraph query failed (${res.status}): ${text.slice(0, 300)}`);
       }
 
-      const json = await deadline.waitFor(
-        res.json() as Promise<AdapterSparqlJsonSelectResponse | BlazeAskResponse>,
-      );
+      const json = options?.maxResponseBytes === undefined
+        ? await deadline.waitFor(
+            res.json() as Promise<AdapterSparqlJsonSelectResponse | BlazeAskResponse>,
+          )
+        : JSON.parse(await deadline.waitFor(
+            readResponseTextBounded(res, options.maxResponseBytes),
+          )) as AdapterSparqlJsonSelectResponse | BlazeAskResponse;
 
       if (isAsk || 'boolean' in json) {
         return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
@@ -400,6 +409,7 @@ export class BlazegraphStore implements TripleStore {
   private async queryConstruct(
     sparql: string,
     deadline: StoreOperationDeadline,
+    options?: TripleStoreQueryOptions,
   ): Promise<ConstructResult> {
     const res = await deadline.waitFor(fetch(this.url, {
       method: 'POST',
@@ -411,10 +421,15 @@ export class BlazegraphStore implements TripleStore {
       signal: deadline.signal,
     }));
     if (!res.ok) {
-      const text = await deadline.waitFor(res.text().catch(() => ''));
+      const text = await deadline.waitFor((options?.maxResponseBytes === undefined
+        ? res.text()
+        : readResponseTextBounded(res, options.maxResponseBytes)
+      ).catch(() => ''));
       throw new Error(`Blazegraph construct failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    const text = await deadline.waitFor(res.text());
+    const text = await deadline.waitFor(options?.maxResponseBytes === undefined
+      ? res.text()
+      : readResponseTextBounded(res, options.maxResponseBytes));
     const quads = parseNQuadsText(text);
     deadline.check();
     return { type: 'quads', quads };
@@ -527,14 +542,6 @@ interface BlazeAskResponse {
 // =====================================================================
 // N-Quad serialisation / parsing helpers (shared with oxigraph adapter)
 // =====================================================================
-
-function quadToNQuad(q: DKGQuad): string {
-  const s = formatTerm(q.subject);
-  const p = `<${q.predicate}>`;
-  const o = formatTerm(q.object);
-  const g = q.graph ? ` <${q.graph}>` : '';
-  return `${s} ${p} ${o}${g} .`;
-}
 
 /**
  * N-Quads serializer for Blazegraph's bulk-insert wire format: a standard
