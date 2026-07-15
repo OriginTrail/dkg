@@ -4537,6 +4537,15 @@ export class PublishMethods extends DKGAgentBase {
       versionBlock: recovered.materialization.versionBlock,
       authorAddress: recovered.materialization.authorAddress,
       subGraphName: request.subGraphName,
+      ...(!recovered.materialization.superseded
+        ? {
+          trustedAssertionEvidence: {
+            assertionVersion: request.assertionVersion,
+            accessPolicy: request.accessPolicy ?? 'ownerOnly',
+            allowedPeers: [...(request.allowedPeers ?? [])],
+          },
+        }
+        : {}),
     }, ctx);
     if (
       materialization !== 'promoted' &&

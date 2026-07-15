@@ -778,6 +778,11 @@ describe('rootless graph-scoped KA lifecycle', () => {
       queuedScope.agentAddress,
       BigInt(queuedScope.kaNumber),
     ));
+    expect(intent.accessPolicy).toBe('public');
+    const recoveredAccessPolicy = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${intent.kaUal}> <${DKG}accessPolicy> "public" .
+    } }`);
+    expect(recoveredAccessPolicy).toMatchObject({ type: 'boolean', value: true });
 
     const receipt = await store.query(`ASK { GRAPH <${metaGraph}> {
       <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> "${txHash}" .
