@@ -165,14 +165,14 @@ def write_and_share_ka(cg, name, sg, triples):
 
 A 10,000-partition import that fails on partition 7,453 must not start over
 from partition 1, but the repository's current
-[`scripts/lib/manifest.mjs`](../../../../scripts/lib/manifest.mjs) helper is
-**not compatible with atomic whole-KA sharing**. It writes one monolithic
-manifest and historically sent entity arrays for declaration and status
-updates. `createImportManifest` and `markPartitionStatus` now fail fast with
+[`scripts/lib/manifest.mjs`](../../../../scripts/lib/manifest.mjs) is now an
+explicitly read-only compatibility module for manifests created by older
+nodes. The retired `createImportManifest` and `markPartitionStatus` names live
+only in `scripts/lib/manifest-mutations-compat.mjs`, where they fail fast with
 `KA_ATOMIC_MANIFEST_UNSUPPORTED` before any daemon read or mutation.
 
-Until that helper is redesigned, do not call its mutation helpers and do not
-build new importers on it. `loadImportManifest` is read-only compatibility for
+Until the manifest is redesigned, do not call the compatibility mutation names
+and do not build new importers on them. `loadImportManifest` is compatibility for
 manifests created by older nodes, not a way to create new state. Persist
 partition state in an external durable store, including each KA
 name, source range, write status, share job ID, and terminal share result.
@@ -517,10 +517,11 @@ stays `in_progress` while its job is queued or running.
 - **Don't use `entities` arrays to split one KA at share time.** They are
   rejected. Partition the source into multiple named KAs before creating or
   writing any oversized content, then share each KA in full.
-- **Don't use the legacy in-tree manifest helper with atomic sharing.** It sends
-  entity arrays and fails after writing WM. Use external durable import state
-  until the helper is redesigned; otherwise a laptop nap turns into an
-  archaeological dig through half-finished drafts.
+- **Don't use legacy manifest compatibility mutations for new state.** The
+  primary module is read-only; the explicit compatibility shim fails before
+  daemon access. Use external durable import state until an atomic manifest is
+  redesigned; otherwise a laptop nap turns into an archaeological dig through
+  half-finished drafts.
 - **Don't `await Promise.all(partitions.map(importOne))` with N > 4.** The
   daemon serialises intra-assertion writes anyway; >4 concurrent assertions
   just inflates memory pressure without throughput gain.
@@ -543,7 +544,7 @@ stays `in_progress` while its job is queued or running.
 
 ```
 1. Decide your import id and partition the source into uniquely named KAs that each fit the whole-KA gossip ceiling.
-2. Create external durable state for each partition; do not use the legacy in-tree manifest helper.
+2. Create external durable state for each partition; use the legacy manifest module only for reads.
 3. For each partition (≤ 4 concurrent):
    a. Record `in_progress` externally.
    b. POST /api/knowledge-assets   { name, subGraphName, contextGraphId }
@@ -559,7 +560,7 @@ stays `in_progress` while its job is queued or running.
 
 ```
 1. Decide your import id and partition the source into uniquely named KAs that each fit the whole-KA gossip ceiling.
-2. Create external durable state for each partition; do not use the legacy in-tree manifest helper.
+2. Create external durable state for each partition; use the legacy manifest module only for reads.
 3. For each partition (≤ 4 concurrent):
    a. Record `in_progress` externally.
    b. POST /api/knowledge-assets   { name, subGraphName, contextGraphId }
@@ -581,7 +582,8 @@ stays `in_progress` while its job is queued or running.
 - [ADR 0002 — Importer chunking contract](../../../../docs/adr/0002-importer-chunking-contract.md)
 - [ADR 0003 — Code-graph ontology convergence](../../../../docs/adr/0003-code-graph-ontology-convergence.md)
 - [SPEC — Async promote queue (WM → SWM)](../../../../docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md)
-- [`scripts/lib/manifest.mjs`](../../../../scripts/lib/manifest.mjs) — legacy helper; incompatible with atomic sharing until redesigned
+- [`scripts/lib/manifest.mjs`](../../../../scripts/lib/manifest.mjs) — read-only compatibility for manifests created by older nodes
+- [`scripts/lib/manifest-mutations-compat.mjs`](../../../../scripts/lib/manifest-mutations-compat.mjs) — explicit fail-fast compatibility names; never use for new state
 - [`scripts/lib/dkg-daemon.mjs`](../../../../scripts/lib/dkg-daemon.mjs) — `DkgClient` with built-in chunking
 - [`scripts/lib/ontology.mjs`](../../../../scripts/lib/ontology.mjs) — canonical `code:*` ontology constants
 - [`packages/cli/skills/dkg-node/SKILL.md`](../dkg-node/SKILL.md) — node API surface (auth, CGs, SWM/VM, SPARQL), incl. §8 async promote queue worker config

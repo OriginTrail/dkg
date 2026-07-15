@@ -209,7 +209,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
   it('swm/share: UNSEALED_SHARE_BLOCKED → 409 { code, error, recovery }', async () => {
     await startWith({
-      promote: async () => {
+      shareWholeKnowledgeAsset: async () => {
         throw Object.assign(
           new Error('Cannot seal "seal-asset" for sharing to Shared Memory — the asset would be left unpublishable and Working Memory was NOT emptied. no local signing key'),
           {
@@ -229,7 +229,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
   it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {
     await startWith({
-      promote: async () => {
+      shareWholeKnowledgeAsset: async () => {
         throw Object.assign(
           new Error('Knowledge Asset contains RDF named-graph quads'),
           {
@@ -276,7 +276,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
   ])('swm/share rejects $label before lifecycle mutation', async ({ body, code, message }) => {
     let promoteCalls = 0;
     await startWith({
-      promote: async () => {
+      shareWholeKnowledgeAsset: async () => {
         promoteCalls += 1;
         return { promotedCount: 1 };
       },
@@ -293,11 +293,11 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
   it.each([
     { label: 'omitted selector', body: {} },
     { label: 'legacy all selector', body: { entities: 'all' } },
-  ])('swm/share translates $label to the legacy whole-KA selector only at the engine edge', async ({ body }) => {
-    const promoteOptions: Array<Record<string, unknown>> = [];
+  ])('swm/share sends $label through the selector-free whole-KA lifecycle interface', async ({ body }) => {
+    const shareOptions: Array<Record<string, unknown>> = [];
     await startWith({
-      promote: async (_contextGraphId: string, _name: string, options: Record<string, unknown>) => {
-        promoteOptions.push(options);
+      shareWholeKnowledgeAsset: async (_contextGraphId: string, _name: string, options: Record<string, unknown>) => {
+        shareOptions.push(options);
         return { promotedCount: 1 };
       },
     });
@@ -305,8 +305,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const res = await post('swm/share', { contextGraphId: CG_ID, ...body });
 
     expect(res.status).toBe(200);
-    expect(promoteOptions).toHaveLength(1);
-    expect(promoteOptions[0]?.entities).toBe('all');
+    expect(shareOptions).toHaveLength(1);
+    expect(shareOptions[0]).not.toHaveProperty('entities');
   });
 
   it('wm/finalize (layer:swm): forwards layer:"swm" to the engine AND maps SWM_SUBSET_NOT_SEALABLE → 409', async () => {
@@ -445,7 +445,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     // Guard: the new 409 branch must only catch UNSEALED_SHARE_BLOCKED. Any
     // other error rethrows to the outer handler (→ 500 here).
     await startWith({
-      promote: async () => {
+      shareWholeKnowledgeAsset: async () => {
         throw new Error('some unrelated engine failure');
       },
     });
@@ -944,7 +944,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         create: async () => { mutations += 1; },
         write: async () => { mutations += 1; },
         finalize: async () => { mutations += 1; },
-        promote: async () => { mutations += 1; },
+        shareWholeKnowledgeAsset: async () => { mutations += 1; },
       });
 
       const res = await postRoot({
@@ -1254,7 +1254,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       daemonState.promoteWorkerAvailable = true;
       let promoteAsyncCalls = 0;
       await startWith({
-        promoteAsync: async () => {
+        shareWholeKnowledgeAssetAsync: async () => {
           promoteAsyncCalls += 1;
           return { jobId: 'should-not-reach' };
         },
@@ -1270,7 +1270,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       daemonState.promoteWorkerAvailable = true;
       let promoteAsyncCalls = 0;
       await startWith({
-        promoteAsync: async () => {
+        shareWholeKnowledgeAssetAsync: async () => {
           promoteAsyncCalls += 1;
           return { jobId: 'job-123' };
         },

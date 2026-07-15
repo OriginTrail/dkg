@@ -976,6 +976,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
   it('knowledgeAssetShare → swm/share, knowledgeAssetPublish → vm/publish', async () => {
     let calls = track({ swmShared: true, promotedCount: 2 });
     await client.knowledgeAssetShare('cg', 'f', {
+      entities: 'all',
       subGraphName: 'notes',
       awaitCuratorAck: true,
     });
@@ -985,6 +986,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       subGraphName: 'notes',
       awaitCuratorAck: true,
     });
+    expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('entities');
 
     calls = track({ kaId: '7', status: 'confirmed' });
     await client.knowledgeAssetPublish('cg', 'f', {
@@ -1049,7 +1051,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       contextGraphId: 'cg',
       entities: 'all',
       subGraphName: 'notes',
-    } as any);
+    });
 
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share`);
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({
@@ -1072,6 +1074,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
   it('knowledgeAssetShareAsync and share job helpers use lifecycle routes', async () => {
     let calls = track({ jobId: 'share-job-1', state: 'queued' });
     await client.knowledgeAssetShareAsync('cg', 'f', {
+      entities: 'all',
       subGraphName: 'notes',
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share-async`);
@@ -1079,6 +1082,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       contextGraphId: 'cg',
       subGraphName: 'notes',
     });
+    expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('entities');
 
     calls = track({ jobs: [] });
     await client.knowledgeAssetShareJobs({

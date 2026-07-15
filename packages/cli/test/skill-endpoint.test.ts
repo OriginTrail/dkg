@@ -276,12 +276,13 @@ describe('dkg-importer/SKILL.md file', () => {
     expect(importerContent).not.toContain('ROOT_CHUNK');
   });
 
-  it('fails closed on the legacy selector-based manifest helper', () => {
-    expect(importerContent).toContain('not compatible with atomic whole-KA sharing');
+  it('separates legacy manifest reads from fail-fast mutation compatibility', () => {
+    expect(importerContent).toContain('explicitly read-only compatibility module');
+    expect(importerContent).toContain('manifest-mutations-compat.mjs');
     expect(importerContent).toContain('KA_ATOMIC_MANIFEST_UNSUPPORTED');
     expect(importerContent).toContain('before any daemon read or mutation');
     expect(importerContent).toContain('external durable state');
-    expect(importerContent).toContain('do not call its mutation helpers');
+    expect(importerContent).toContain('do not call the compatibility mutation names');
   });
 
   it('documents the three known daemon caps with verbatim error strings', () => {

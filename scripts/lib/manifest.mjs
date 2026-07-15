@@ -1,11 +1,11 @@
 /**
- * Legacy resumable-import manifest helpers.
+ * Read-only compatibility helpers for legacy resumable-import manifests.
  *
  * Atomic whole-KA sharing cannot safely update the original monolithic
- * selector-based manifest. The exported mutation helpers therefore fail with
- * `KA_ATOMIC_MANIFEST_UNSUPPORTED` before calling the daemon. Read-only URI,
- * parsing, and `loadImportManifest` helpers remain available for inspecting
- * manifests created by older nodes.
+ * selector-based manifest. This module therefore exposes only URI, parsing,
+ * query, and `loadImportManifest` helpers for inspecting manifests created by
+ * older nodes. Deprecated mutation names live in
+ * `manifest-mutations-compat.mjs` and always fail before daemon access.
  *
  * An "Import" is a logical bulk-write operation that splits itself into
  * "Partitions" — typically one partition per source artefact (e.g. one
@@ -28,15 +28,6 @@
 import { createHash } from 'node:crypto';
 
 export const IMPORT_NS = 'https://ontology.dkg.io/import#';
-export const ATOMIC_MANIFEST_UNSUPPORTED_CODE = 'KA_ATOMIC_MANIFEST_UNSUPPORTED';
-
-function atomicManifestUnsupportedError() {
-  const error = new Error(
-    'The legacy resumable-import manifest is not compatible with atomic whole-KA sharing; use external durable state until the manifest is redesigned.',
-  );
-  error.code = ATOMIC_MANIFEST_UNSUPPORTED_CODE;
-  return error;
-}
 
 export const IMPORT_T = {
   Import: IMPORT_NS + 'Import',
@@ -54,9 +45,6 @@ export const IMPORT_P = {
   status: IMPORT_NS + 'status',
   recordedAt: IMPORT_NS + 'recordedAt',
 };
-
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 
 /** Stable URI for an Import. Slug is `encodeURIComponent`'d. */
 export function importUri(importId) {
@@ -181,52 +169,6 @@ export async function partitionDeclared({
   return bindings.length > 0;
 }
 
-// Per-process monotonic counter for StatusEvent IRIs. Two events that land in
-// the same millisecond would otherwise tie on `recordedAt` AND tie on a random
-// suffix, leaving the SPARQL "latest event" lookup non-deterministic. Putting
-// a zero-padded counter BEFORE the random suffix in the IRI guarantees
-// lexicographic ordering matches call order for same-ms events within this
-// process. Across processes the millisecond timestamp + cross-process random
-// suffix remain the disambiguators; in practice two daemons promoting the same
-// manifest in the same ms is a pathological case the random suffix is already
-// the right answer for.
-let _statusEventCounter = 0;
-
-/** Legacy StatusEvent URI generator for migration tooling; never promote it independently. */
-export function statusEventUri(importId, key) {
-  const ts = Date.now();
-  const seq = String(++_statusEventCounter).padStart(12, '0');
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${partitionUri(importId, key)}/event/${ts}-${seq}-${rand}`;
-}
-
-function lit(value) {
-  const s = String(value).replace(/["\\\t\b\n\r\f]|[\u0000-\u001F\u007F]/g, (ch) => {
-    switch (ch) {
-      case '"': return '\\"';
-      case '\\': return '\\\\';
-      case '\t': return '\\t';
-      case '\b': return '\\b';
-      case '\n': return '\\n';
-      case '\r': return '\\r';
-      case '\f': return '\\f';
-      default: {
-        const code = ch.codePointAt(0) ?? 0;
-        return `\\u${code.toString(16).toUpperCase().padStart(4, '0')}`;
-      }
-    }
-  });
-  return `"${s}"`;
-}
-
-function dt(iso) {
-  return `${lit(iso)}^^<${XSD_DATETIME}>`;
-}
-
-function uri(s) {
-  return `<${s}>`;
-}
-
 /**
  * Normalise a SELECT-binding term to a plain string value.
  *
@@ -300,50 +242,6 @@ function bareUri(v) {
     return typeof inner === 'string' ? inner : String(inner ?? '');
   }
   return typeof v === 'string' ? v : String(v ?? '');
-}
-
-/**
- * Build the initial set of triples for a fresh Import manifest.
- *
- * @param {string} importId
- * @param {string[]} partitions  Partition keys (caller-defined, e.g. file paths)
- * @param {string} startedAtIso  ISO-8601 timestamp
- * @returns {{subject:string,predicate:string,object:string}[]}
- */
-export function buildInitialManifestTriples(importId, partitions, startedAtIso) {
-  const importIri = importUri(importId);
-  const triples = [
-    { subject: importIri, predicate: RDF_TYPE, object: uri(IMPORT_T.Import) },
-    { subject: importIri, predicate: IMPORT_P.startedAt, object: dt(startedAtIso) },
-  ];
-  for (const key of partitions) {
-    const partIri = partitionUri(importId, key);
-    triples.push(
-      { subject: importIri, predicate: IMPORT_P.partition, object: partIri },
-      { subject: partIri, predicate: RDF_TYPE, object: uri(IMPORT_T.Partition) },
-      { subject: partIri, predicate: IMPORT_P.key, object: lit(key) },
-      { subject: partIri, predicate: IMPORT_P.initialStatus, object: lit('pending') },
-    );
-  }
-  return triples;
-}
-
-/**
- * Disabled legacy mutation entrypoint. Always throws
- * `KA_ATOMIC_MANIFEST_UNSUPPORTED` before reading or mutating daemon state.
- * @returns {Promise<never>}
- */
-export async function createImportManifest() {
-  throw atomicManifestUnsupportedError();
-}
-
-/**
- * Disabled legacy mutation entrypoint. Always throws
- * `KA_ATOMIC_MANIFEST_UNSUPPORTED` before reading or mutating daemon state.
- * @returns {Promise<never>}
- */
-export async function markPartitionStatus() {
-  throw atomicManifestUnsupportedError();
 }
 
 /**

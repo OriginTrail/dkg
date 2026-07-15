@@ -12,10 +12,10 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import type { KnowledgeAssetContentEnvelope } from './knowledge-asset-content-envelope.js';
+import type { KnowledgeAssetContentEnvelope } from '@origintrail-official/dkg-publisher';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
-export type { KnowledgeAssetContentEnvelope } from './knowledge-asset-content-envelope.js';
+export type { KnowledgeAssetContentEnvelope } from '@origintrail-official/dkg-publisher';
 
 export type ContextGraphJoinPolicyMode = 'manual' | 'open';
 
@@ -110,6 +110,8 @@ export interface KnowledgeAssetShareResponse {
 
 export interface KnowledgeAssetShareTargetOptions {
   subGraphName?: string;
+  /** @deprecated Atomic sharing always means the complete Knowledge Asset. */
+  entities?: 'all';
 }
 
 export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOptions {
@@ -137,7 +139,7 @@ export interface KnowledgeAssetLifecycleError {
   [key: string]: unknown;
 }
 
-export interface KnowledgeAssetPublishAsyncResponse extends KnowledgeAssetContentEnvelope {
+export type KnowledgeAssetPublishAsyncResponse = KnowledgeAssetContentEnvelope & {
   jobId: string;
   status: string;
   contextGraphId: string;
@@ -147,7 +149,7 @@ export interface KnowledgeAssetPublishAsyncResponse extends KnowledgeAssetConten
   sealMerkleRoot?: string;
   intentKey?: string;
   rootsCount?: number;
-}
+};
 
 export type KnowledgeAssetShareJobState =
   | 'queued'
@@ -1917,6 +1919,8 @@ export class ApiClient {
 
   async promoteAssertion(name: string, request: {
     contextGraphId: string;
+    /** @deprecated Atomic sharing always means the complete Knowledge Asset. */
+    entities?: 'all';
     subGraphName?: string;
   }): Promise<{
     promoted?: boolean;

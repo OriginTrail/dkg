@@ -7,10 +7,6 @@ import {
   IMPORT_P,
   importUri,
   partitionUri,
-  statusEventUri,
-  buildInitialManifestTriples,
-  createImportManifest,
-  markPartitionStatus,
   loadImportManifest,
   pendingPartitions,
   defaultManifestAssertionName,
@@ -34,39 +30,6 @@ test('manifest ontology constants retain their public shape', () => {
   assert.equal(IMPORT_P.statusEvent, 'https://ontology.dkg.io/import#statusEvent');
 });
 
-test('buildInitialManifestTriples emits deterministic import and partition declarations', () => {
-  const startedAt = '2026-01-15T09:00:00.000Z';
-  const first = buildInitialManifestTriples('my-corpus', ['a.ts', 'b.ts'], startedAt);
-  const second = buildInitialManifestTriples('my-corpus', ['a.ts', 'b.ts'], startedAt);
-
-  assert.deepEqual(first, second);
-  assert.equal(first.length, 10);
-  assert.ok(first.some((triple) => (
-    triple.subject === 'urn:dkg:import:my-corpus'
-    && triple.predicate === IMPORT_P.startedAt
-    && triple.object.startsWith(`"${startedAt}"^^`)
-  )));
-  for (const key of ['a.ts', 'b.ts']) {
-    const part = partitionUri('my-corpus', key);
-    assert.ok(first.some((triple) => (
-      triple.subject === part
-      && triple.predicate === IMPORT_P.key
-      && triple.object === `"${key}"`
-    )));
-    assert.ok(first.some((triple) => (
-      triple.subject === part
-      && triple.predicate === IMPORT_P.initialStatus
-      && triple.object === '"pending"'
-    )));
-  }
-});
-
-test('statusEventUri is unique and strictly ordered for same-millisecond writes', () => {
-  const values = Array.from({ length: 20 }, () => statusEventUri('corpus', 'part'));
-  assert.equal(new Set(values).size, values.length);
-  assert.deepEqual([...values].sort(), values);
-});
-
 test('defaultManifestAssertionName sanitizes unsafe and oversized import ids', () => {
   assert.equal(defaultManifestAssertionName('plain-id'), 'import-manifest-plain-id');
   assert.match(defaultManifestAssertionName('with/slash'), /^import-manifest-with-slash-[0-9a-f]{12}$/);
@@ -76,7 +39,17 @@ test('defaultManifestAssertionName sanitizes unsafe and oversized import ids', (
   assert.match(oversized, /-[0-9a-f]{12}$/);
 });
 
-test('legacy manifest mutation helpers fail before touching the daemon', async () => {
+test('the primary manifest module is read-only and compatibility mutations fail before daemon access', async () => {
+  const reader = await import('../manifest.mjs');
+  assert.equal('createImportManifest' in reader, false);
+  assert.equal('markPartitionStatus' in reader, false);
+  assert.equal('buildInitialManifestTriples' in reader, false);
+  assert.equal('statusEventUri' in reader, false);
+
+  const {
+    createImportManifest,
+    markPartitionStatus,
+  } = await import('../manifest-mutations-compat.mjs');
   const calls = [];
   const client = new Proxy({ cgId: 'atomic-cg' }, {
     get(target, property, receiver) {

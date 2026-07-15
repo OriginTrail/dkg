@@ -3,14 +3,14 @@ import type { SourceWorkerJobFailureDetails, SourceWorkerJobStatusResult } from 
 import {
   decodeKnowledgeAssetContentEnvelope,
   type KnowledgeAssetContentEnvelope,
-} from './knowledge-asset-content-envelope.js';
+} from '@origintrail-official/dkg-publisher';
 
-export interface KnowledgeAssetLifecyclePublishAsyncResponse extends KnowledgeAssetContentEnvelope {
+export type KnowledgeAssetLifecyclePublishAsyncResponse = KnowledgeAssetContentEnvelope & {
   jobId: string;
   shareOperationId?: string;
   intentKey?: string;
   rootsCount?: number;
-}
+};
 
 export interface KnowledgeAssetLifecycleClient {
   createAndShare(

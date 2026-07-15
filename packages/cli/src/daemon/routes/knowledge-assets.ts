@@ -71,7 +71,11 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
+import {
+  AsyncLiftJobConflictError,
+  PromoteJobConflictError,
+  serializeKnowledgeAssetContentEnvelope,
+} from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
 import {
@@ -79,7 +83,6 @@ import {
   parseHttpFinalizedPublishOptions,
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
-import { serializeKnowledgeAssetContentEnvelope } from "../../knowledge-asset-content-envelope.js";
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -230,12 +233,6 @@ function hex(bytes: Uint8Array): string {
 type AtomicShareRequest = {
   skipSeal?: false;
 };
-
-function wholeKnowledgeAssetEngineShare<T extends Record<string, unknown>>(
-  options: T,
-): T & { entities: "all" } {
-  return { ...options, entities: "all" };
-}
 
 function parseAtomicShareRequest(
   parsed: any,
@@ -943,12 +940,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           // Carry the same resolved author into the share. The asset is already
           // sealed (finalize above), so promote shares the existing seal verbatim
           // and passing the author keeps the whole atomic flow in one namespace.
-          const share = await agent.assertion.promote(resolvedContextGraphId, name, wholeKnowledgeAssetEngineShare({
+          const share = await agent.assertion.shareWholeKnowledgeAsset(resolvedContextGraphId, name, {
             subGraphName,
             ...atomicAuthorLane,
             awaitCuratorAck,
             ...(resolvedAuthorAgentAddress ? { authorAgentAddress: resolvedAuthorAgentAddress } : {}),
-          }));
+          });
           result.swmShared = true;
           result.promotedCount = share.promotedCount;
           result.sealed = share.sealed;
@@ -1292,12 +1289,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       const shareRequest = parseAtomicShareRequest(parsed, res, "sync");
       if (!shareRequest) return;
       try {
-        const share = await agent.assertion.promote(contextGraphId, name, wholeKnowledgeAssetEngineShare({
+        const share = await agent.assertion.shareWholeKnowledgeAsset(contextGraphId, name, {
           subGraphName,
           awaitCuratorAck,
           skipSeal: shareRequest.skipSeal,
           ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
-        }));
+        });
         if (share.promotedCount !== 0) {
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
           recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
@@ -1347,10 +1344,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       const shareRequest = parseAtomicShareRequest(parsed, res, "async");
       if (!shareRequest) return;
       try {
-        const result = await agent.assertion.promoteAsync(contextGraphId, name, wholeKnowledgeAssetEngineShare({
+        const result = await agent.assertion.shareWholeKnowledgeAssetAsync(contextGraphId, name, {
           subGraphName,
           ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
-        }));
+        });
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
