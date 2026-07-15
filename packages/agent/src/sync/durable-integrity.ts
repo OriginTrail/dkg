@@ -50,6 +50,17 @@ const DURABLE_INTEGRITY_META_PREDICATE_SET: ReadonlySet<string> = new Set(
   DURABLE_INTEGRITY_META_PREDICATES,
 );
 
+/**
+ * Peer-supplied fields that drive durable delta selection or graph routing.
+ * Unlike descriptive metadata, these controls are safe to persist only when
+ * their subject belongs to an integrity envelope admitted by this batch.
+ */
+const DURABLE_SYNC_CONTROL_PREDICATE_SET: ReadonlySet<string> = new Set([
+  BATCH_ID,
+  ASSERTION_GRAPH,
+  ASSERTION_VERSION,
+]);
+
 export interface DurableMetaGraphClassification {
   hasMerkleRoot: boolean;
   hasIntegrityEnvelope: boolean;
@@ -133,6 +144,7 @@ interface IntegrityMetadataRead {
 interface GraphScopedVerificationOutcome {
   hasGraphScopedCandidates: boolean;
   admittedMetadataUals: Set<string>;
+  authenticatedMetadataUals: Set<string>;
   rejectedKcUals: Set<string>;
   graphVerification: Map<string, boolean>;
   verifiedGraphScopedDataGraphs: Set<string>;
@@ -143,6 +155,7 @@ interface GraphScopedVerificationOutcome {
 
 interface LegacyVerificationOutcome {
   verifiedKcUals: Set<string>;
+  authenticatedKcUals: Set<string>;
   rejectedKcUals: Set<string>;
   kaToKc: Map<string, string>;
   kcRootEntities: Map<string, string[]>;
@@ -153,6 +166,7 @@ interface LegacyVerificationOutcome {
 interface IntegrityVerificationOutcome {
   hasGraphScopedCandidates: boolean;
   admittedMetadataUals: Set<string>;
+  authenticatedMetadataUals: Set<string>;
   rejectedKcUals: Set<string>;
   graphVerification: Map<string, boolean>;
   verifiedGraphScopedDataGraphs: Set<string>;
@@ -216,9 +230,17 @@ export function selectVerifiedDurableSyncQuads(
         logs,
       };
     }
+    const selectedMetadata = selectAdmittedMetadataIndexes(
+      metaQuads,
+      metadata,
+      new Set(),
+      new Map(),
+      new Set(),
+    );
+    logDroppedSyncControls(logs, selectedMetadata.droppedControls);
     return {
       dataIndexes: allIndexes(dataQuads),
-      metaIndexes: allIndexes(metaQuads),
+      metaIndexes: selectedMetadata.indexes,
       rejected: 0,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
@@ -247,6 +269,10 @@ export function selectVerifiedDurableSyncQuads(
     admittedMetadataUals: new Set([
       ...graphScoped.admittedMetadataUals,
       ...legacy.verifiedKcUals,
+    ]),
+    authenticatedMetadataUals: new Set([
+      ...graphScoped.authenticatedMetadataUals,
+      ...legacy.authenticatedKcUals,
     ]),
     rejectedKcUals: new Set([...graphScoped.rejectedKcUals, ...legacy.rejectedKcUals]),
     graphVerification: graphScoped.graphVerification,
@@ -424,6 +450,7 @@ function verifyGraphScopedCandidates(
     (candidate): candidate is GraphScopedCandidate => candidate.kind === 'graph-scoped',
   );
   const admittedMetadataUals = new Set<string>();
+  const authenticatedMetadataUals = new Set<string>();
   const rejectedKcUals = new Set<string>(parsed.invalidKcUals);
   const graphVerification = new Map<string, boolean>();
   const verifiedGraphScopedDataGraphs = new Set<string>();
@@ -476,6 +503,7 @@ function verifyGraphScopedCandidates(
     graphVerification.set(descriptor.assertionGraph, verified);
     if (verified) {
       admittedMetadataUals.add(ual);
+      authenticatedMetadataUals.add(ual);
       verifiedGraphScopedDataGraphs.add(descriptor.assertionGraph);
       if (descriptor.publicTripleCount === 0) verifiedZeroPublicAssets += 1;
       continue;
@@ -494,6 +522,7 @@ function verifyGraphScopedCandidates(
   return {
     hasGraphScopedCandidates: graphScopedCandidates.length > 0,
     admittedMetadataUals,
+    authenticatedMetadataUals,
     rejectedKcUals,
     graphVerification,
     verifiedGraphScopedDataGraphs,
@@ -517,6 +546,7 @@ function verifyLegacyCandidates(
       .map((candidate) => candidate.ual),
   );
   const verifiedKcUals = new Set<string>();
+  const authenticatedKcUals = new Set<string>();
   const rejectedKcUals = new Set<string>();
   let fatalUnscopedFailure = false;
   const logs: DurableIntegrityLogEntry[] = [];
@@ -635,6 +665,7 @@ function verifyLegacyCandidates(
       }
       if (overlappingLegacyKcs.has(kcUal)) {
         verifiedKcUals.add(kcUal);
+        authenticatedKcUals.add(kcUal);
         logs.push({
           level: 'debug',
           message: `Skipping legacy Merkle check for ${kcUal}: root entity is shared across versions`,
@@ -647,6 +678,7 @@ function verifyLegacyCandidates(
       const computedHex = toHex(computeStructuredKCRoot(publicQuads, privateRoots));
       if (computedHex === claimedRoots[0]) {
         verifiedKcUals.add(kcUal);
+        authenticatedKcUals.add(kcUal);
       } else {
         rejectedKcUals.add(kcUal);
         logs.push({
@@ -665,6 +697,7 @@ function verifyLegacyCandidates(
 
   return {
     verifiedKcUals,
+    authenticatedKcUals,
     rejectedKcUals,
     kaToKc,
     kcRootEntities,
@@ -781,9 +814,16 @@ function selectVerifiedQuads(
     // Preserve the established audit wording consumed by worker/runtime
     // diagnostics while the verifier supports both legacy KCs and V2 KAs.
     logs.push({ level: 'debug', message: `Accepting ${rejected} unverified KC(s) (system context graph)` });
+    const selectedMetadata = selectSystemOverrideMetadataIndexes(
+      metaQuads,
+      metadata,
+      outcome.authenticatedMetadataUals,
+      outcome.kaToKc,
+    );
+    logDroppedSyncControls(logs, selectedMetadata.droppedControls);
     return {
       dataIndexes: allIndexes(dataQuads),
-      metaIndexes: allIndexes(metaQuads),
+      metaIndexes: selectedMetadata.indexes,
       rejected: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
@@ -801,28 +841,162 @@ function selectVerifiedQuads(
     };
   }
 
-  const metaIndexes: number[] = [];
+  const selectedMetadata = selectAdmittedMetadataIndexes(
+    metaQuads,
+    metadata,
+    outcome.admittedMetadataUals,
+    outcome.kaToKc,
+    outcome.authenticatedMetadataUals,
+  );
+  logDroppedSyncControls(logs, selectedMetadata.droppedControls);
+
+  return {
+    dataIndexes,
+    metaIndexes: selectedMetadata.indexes,
+    rejected,
+    verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
+    verifiedGraphScopedDataGraphs,
+    logs,
+  };
+}
+
+function selectAdmittedMetadataIndexes(
+  metaQuads: readonly Quad[],
+  metadata: IntegrityMetadataIndex,
+  admittedMetadataUals: ReadonlySet<string>,
+  kaToKc: ReadonlyMap<string, string>,
+  authenticatedMetadataUals: ReadonlySet<string>,
+): { indexes: number[]; droppedControls: number } {
+  const indexes: number[] = [];
+  let droppedControls = 0;
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
     if (
       metadata.merkleSubjects.has(quad.subject)
       || metadata.markerSubjects.has(quad.subject)
     ) {
-      if (outcome.admittedMetadataUals.has(quad.subject)) metaIndexes.push(index);
+      if (admittedMetadataUals.has(quad.subject)) {
+        if (
+          DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
+          && !authenticatedMetadataUals.has(quad.subject)
+        ) {
+          droppedControls += 1;
+        } else {
+          indexes.push(index);
+        }
+      }
       continue;
     }
-    const owner = outcome.kaToKc.get(quad.subject);
-    if (!owner || outcome.admittedMetadataUals.has(owner)) metaIndexes.push(index);
-  }
 
-  return {
-    dataIndexes,
-    metaIndexes,
-    rejected,
-    verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
-    verifiedGraphScopedDataGraphs,
-    logs,
-  };
+    const owner = kaToKc.get(quad.subject);
+    if (owner) {
+      if (admittedMetadataUals.has(owner)) {
+        if (
+          DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
+          && !authenticatedMetadataUals.has(owner)
+        ) {
+          droppedControls += 1;
+        } else {
+          indexes.push(index);
+        }
+      }
+      continue;
+    }
+
+    if (DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)) {
+      if (isAuthenticatedSyncControl(
+        quad,
+        metadata,
+        authenticatedMetadataUals,
+        kaToKc,
+      )) {
+        indexes.push(index);
+      } else {
+        droppedControls += 1;
+      }
+      continue;
+    }
+    indexes.push(index);
+  }
+  return { indexes, droppedControls };
+}
+
+function selectSystemOverrideMetadataIndexes(
+  metaQuads: readonly Quad[],
+  metadata: IntegrityMetadataIndex,
+  authenticatedMetadataUals: ReadonlySet<string>,
+  kaToKc: ReadonlyMap<string, string>,
+): { indexes: number[]; droppedControls: number } {
+  const indexes: number[] = [];
+  let droppedControls = 0;
+  for (let index = 0; index < metaQuads.length; index++) {
+    const quad = metaQuads[index]!;
+    if (
+      DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
+      && !isAuthenticatedSyncControl(
+        quad,
+        metadata,
+        authenticatedMetadataUals,
+        kaToKc,
+      )
+    ) {
+      droppedControls += 1;
+      continue;
+    }
+    indexes.push(index);
+  }
+  return { indexes, droppedControls };
+}
+
+function isAuthenticatedSyncControl(
+  quad: Quad,
+  metadata: IntegrityMetadataIndex,
+  authenticatedMetadataUals: ReadonlySet<string>,
+  kaToKc: ReadonlyMap<string, string>,
+): boolean {
+  if (authenticatedMetadataUals.has(quad.subject)) return true;
+  const legacyOwner = kaToKc.get(quad.subject);
+  if (legacyOwner && authenticatedMetadataUals.has(legacyOwner)) return true;
+  if (quad.predicate === BATCH_ID) return false;
+
+  // V2 lifecycle/seal rows may repeat graph scope away from the UAL subject.
+  // Admit only an exact copy of one verified descriptor's immutable scope;
+  // a peer cannot use this path to introduce a different graph or version.
+  const rows = metadata.metaBySubject.get(quad.subject) ?? [];
+  const owners = distinctObjects(rows, KA_UAL).map(stripLiteral);
+  if (owners.length !== 1 || !authenticatedMetadataUals.has(owners[0]!)) return false;
+  const descriptorRows = metadata.metaBySubject.get(owners[0]!) ?? [];
+  try {
+    const scopeVersions = distinctObjects(rows, CONTENT_SCOPE_VERSION)
+      .map((value) => parseInteger(value, 'contentScopeVersion'));
+    const repeatedVersions = distinctObjects(rows, ASSERTION_VERSION)
+      .map((value) => parseInteger(value, 'assertionVersion'));
+    const descriptorVersions = distinctObjects(descriptorRows, ASSERTION_VERSION)
+      .map((value) => parseInteger(value, 'assertionVersion'));
+    const repeatedGraphs = distinctObjects(rows, ASSERTION_GRAPH).map(stripLiteral);
+    const descriptorGraphs = distinctObjects(descriptorRows, ASSERTION_GRAPH).map(stripLiteral);
+    return scopeVersions.length === 1
+      && scopeVersions[0] === BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)
+      && repeatedVersions.length === 1
+      && descriptorVersions.length === 1
+      && repeatedVersions[0] === descriptorVersions[0]
+      && repeatedGraphs.length === 1
+      && descriptorGraphs.length === 1
+      && repeatedGraphs[0] === descriptorGraphs[0];
+  } catch {
+    return false;
+  }
+}
+
+function logDroppedSyncControls(
+  logs: DurableIntegrityLogEntry[],
+  droppedControls: number,
+): void {
+  if (droppedControls === 0) return;
+  logs.push({
+    level: 'warn',
+    message: `Dropped ${droppedControls} unverified durable sync control metadata triple(s)`,
+  });
 }
 
 function isDetachedLegacyProjectionGraph(graph: string): boolean {
