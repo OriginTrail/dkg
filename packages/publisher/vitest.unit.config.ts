@@ -13,6 +13,7 @@ export default defineConfig({
       'test/verify-proposal-handler.test.ts',
       'test/views-min-trust-extra.test.ts',
       'test/async-lift-validation.test.ts',
+      'test/legacy-raw-lift-import.test.ts',
       'test/async-lift-ka-broadcast-progress.test.ts',
       'test/async-lift-publish-options.test.ts',
       'test/async-promote-queue.test.ts',
