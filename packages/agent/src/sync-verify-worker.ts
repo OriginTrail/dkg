@@ -46,6 +46,8 @@ export interface DurableBatchProcessResult {
   verifiedData: Quad[];
   verifiedMeta: Quad[];
   verifiedGraphScopedDataGraphs: string[];
+  /** Metadata controls deliberately consumed after failing authentication. */
+  droppedSyncControlTriples: number;
   /** Clean batches containing verified V2 assets with no public assertion triples. */
   verifiedPrivateOnlyResponses: number;
   totalFetchedDataQuads: number;

@@ -86,6 +86,7 @@ interface DurableSyncContext {
     verifiedData: Quad[];
     verifiedMeta: Quad[];
     verifiedGraphScopedDataGraphs?: string[];
+    droppedSyncControlTriples?: number;
     totalFetchedDataQuads: number;
     totalFetchedMetaQuads: number;
     rejectedKcs: number;
@@ -302,9 +303,19 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       };
 
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
+      const droppedSyncControlTriples = processed.droppedSyncControlTriples ?? 0;
+      const discardedOnlyMetadataResponse = metadataOnlyResponse
+        && processed.verifiedData.length === 0
+        && processed.verifiedMeta.length === 0
+        && droppedSyncControlTriples > 0
+        && droppedSyncControlTriples === processed.totalFetchedMetaQuads;
       const updateMetaCheckpoint = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
-        && (!metadataOnlyResponse || processed.verifiedMeta.length > 0);
+        && (
+          !metadataOnlyResponse
+          || processed.verifiedMeta.length > 0
+          || discardedOnlyMetadataResponse
+        );
       const updateDataCheckpoint = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
         && !metadataOnlyResponse;

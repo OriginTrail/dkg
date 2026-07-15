@@ -17,6 +17,7 @@ const CONTEXT_GRAPH_ID = 'sync-control-admission';
 const CONTEXT_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`;
 const META_GRAPH = `${CONTEXT_GRAPH}/_meta`;
 const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/41';
+const UAL_B = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/42';
 
 function quad(subject: string, predicate: string, object: string, graph = META_GRAPH): Quad {
   return { subject, predicate, object, graph };
@@ -99,7 +100,9 @@ describe('durable sync control metadata admission', () => {
       quad(subject, `${DKG}assertionVersion`, integer(999n)),
     ];
 
-    expect(selectedMeta([], meta, true)).toEqual([descriptive]);
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([descriptive]);
+    expect(selection.droppedSyncControlTriples).toBe(3);
   });
 
   it('does not authenticate out-of-scope system delta controls from descriptor shape alone', () => {
@@ -159,6 +162,22 @@ describe('durable sync control metadata admission', () => {
       quad(UAL, `${DKG}batchId`, integer(41n)),
       quad(child, `${DKG}partOf`, UAL),
       quad(child, `${DKG}batchId`, integer(41n)),
+    ];
+
+    expect(selectedMeta(data, meta)).toEqual(meta);
+  });
+
+  it('preserves controls for overlapping legacy envelopes sharing one root', () => {
+    const root = 'urn:legacy:shared-root';
+    const data = [quad(root, 'urn:example:value', '"shared"', CONTEXT_GRAPH)];
+    const merkleRoot = `"${toHex(computeFlatKCRootV10(data, []))}"`;
+    const meta = [
+      quad(UAL, `${DKG}merkleRoot`, merkleRoot),
+      quad(UAL, `${DKG}rootEntity`, root),
+      quad(UAL, `${DKG}batchId`, integer(41n)),
+      quad(UAL_B, `${DKG}merkleRoot`, merkleRoot),
+      quad(UAL_B, `${DKG}rootEntity`, root),
+      quad(UAL_B, `${DKG}batchId`, integer(42n)),
     ];
 
     expect(selectedMeta(data, meta)).toEqual(meta);

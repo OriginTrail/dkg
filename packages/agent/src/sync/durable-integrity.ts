@@ -99,6 +99,8 @@ export interface DurableIntegritySelection {
   dataIndexes: number[];
   metaIndexes: number[];
   rejected: number;
+  /** Unauthenticated cursor/routing rows deliberately consumed but not persisted. */
+  droppedSyncControlTriples: number;
   /** Verified V2 assets whose exact public assertion graph is intentionally empty. */
   verifiedZeroPublicAssets: number;
   /** Exact assertion graphs whose V2 descriptors and fetched payload verified. */
@@ -199,6 +201,7 @@ export function selectVerifiedDurableSyncQuads(
         dataIndexes: [],
         metaIndexes: [],
         rejected: 1,
+        droppedSyncControlTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -208,6 +211,7 @@ export function selectVerifiedDurableSyncQuads(
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: [],
       rejected: 0,
+      droppedSyncControlTriples: 0,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
@@ -225,6 +229,7 @@ export function selectVerifiedDurableSyncQuads(
         dataIndexes: [],
         metaIndexes: [],
         rejected: 1,
+        droppedSyncControlTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -242,6 +247,7 @@ export function selectVerifiedDurableSyncQuads(
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: selectedMetadata.indexes,
       rejected: 0,
+      droppedSyncControlTriples: selectedMetadata.droppedControls,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
@@ -825,6 +831,7 @@ function selectVerifiedQuads(
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: selectedMetadata.indexes,
       rejected: 0,
+      droppedSyncControlTriples: selectedMetadata.droppedControls,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
       logs,
@@ -835,6 +842,7 @@ function selectVerifiedQuads(
       dataIndexes: [],
       metaIndexes: [],
       rejected,
+      droppedSyncControlTriples: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
       logs,
@@ -854,6 +862,7 @@ function selectVerifiedQuads(
     dataIndexes,
     metaIndexes: selectedMetadata.indexes,
     rejected,
+    droppedSyncControlTriples: selectedMetadata.droppedControls,
     verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
     verifiedGraphScopedDataGraphs,
     logs,
