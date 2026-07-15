@@ -65,6 +65,33 @@ describe('graph-scoped private content', () => {
     ).resolves.toEqual([]);
   });
 
+  it('fails closed when the store cannot atomically replace private graphs', async () => {
+    // The private graph is the Merkle commitment boundary: without atomic
+    // whole-graph replacement the writer must reject rather than fall back to
+    // a non-atomic write or silently no-op.
+    const nonAtomic = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'replaceGraph') return undefined;
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as OxigraphStore;
+    const guarded = new PrivateContentStore(nonAtomic, new GraphManager(nonAtomic));
+    const scope = createGraphKnowledgeAssetScope(UAL, 9);
+
+    await expect(
+      guarded.replaceKnowledgeAssetPrivateTriples(
+        CONTEXT_GRAPH,
+        scope,
+        [quad('urn:private:rejected', '"never-stored"')],
+      ),
+    ).rejects.toMatchObject({ code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED' });
+
+    await expect(
+      guarded.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope),
+    ).resolves.toEqual([]); // nothing materialized behind the rejection
+  });
+
   it('atomically replaces one assertion without leaking stale triples', async () => {
     const scope = createGraphKnowledgeAssetScope(UAL, 3);
     await privateStore.replaceKnowledgeAssetPrivateTriples(

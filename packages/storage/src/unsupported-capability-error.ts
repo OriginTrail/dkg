@@ -24,3 +24,16 @@ export class UnsupportedTripleStoreCapabilityError extends Error {
     this.storeName = storeName;
   }
 }
+
+/**
+ * A capability refusal is a clean preflight outcome — the contract requires it
+ * to be raised before the operation starts — so decorators that treat a failed
+ * `replaceGraph` as an indeterminate (possibly committed) mutation must exempt
+ * it from cache-dirtying and reconcile flagging.
+ */
+export function isReplaceGraphCapabilityRefusal(error: unknown): boolean {
+  return (
+    error instanceof UnsupportedTripleStoreCapabilityError &&
+    error.capability === 'replaceGraph'
+  );
+}

@@ -10,6 +10,7 @@ import {
   OxigraphStore,
   OxigraphWorkerStore,
   SharedMemoryLiteralBlobStore,
+  UnsupportedTripleStoreCapabilityError,
   buildAtomicGraphReplaceUpdate,
   tryReplaceGraphAtomically,
   type Quad,
@@ -220,6 +221,81 @@ describe('atomic named-graph replacement', () => {
     expect(target.type).toBe('bindings');
     if (target.type !== 'bindings') throw new Error('expected bindings');
     expect(target.bindings).toEqual([{ o: '"new-1"' }]); // replacement committed
+    await base.close();
+  });
+
+  it('does not flag reconcile when replaceGraph is refused before any mutation', async () => {
+    // A capability refusal is a clean preflight outcome (nothing was mutated),
+    // not an indeterminate commit — it must not put the node into reconcile.
+    const base = new OxigraphStore();
+    const inner = overrideStore(base, {
+      replaceGraph: async () => {
+        throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'NonAtomicStore');
+      },
+    });
+    const log = new ChangelogStore(inner);
+    await log.insert([quad('urn:old:1', '"old-1"')]);
+
+    await expect(
+      tryReplaceGraphAtomically(log, TARGET, [quad('urn:new:1', '"new-1"')]),
+    ).resolves.toBe(false);
+
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+
+  it('drops the cached graph set when replaceGraph fails indeterminately', async () => {
+    // A rejected replaceGraph may still have committed the new graph. A warm
+    // GraphSetIndexStore that keeps serving its cached membership would hide
+    // the committed KA graph from sync/reconcile enumeration.
+    const base = new OxigraphStore();
+    let failAfterCommit = false;
+    const inner = overrideStore(base, {
+      replaceGraph: async (graphUri: string, quads: Quad[], options?: QueryOptions) => {
+        await base.replaceGraph!(graphUri, quads, options); // backend committed…
+        if (failAfterCommit) throw new Error('response lost after commit');
+      },
+    });
+    const indexed = new GraphSetIndexStore(inner, { revalidateMs: 60_000 });
+    await indexed.insert([quad('urn:other', '"keep"', OTHER)]);
+    expect(await indexed.listGraphs()).toEqual([OTHER]); // warm the index
+
+    failAfterCommit = true;
+    await expect(
+      indexed.replaceGraph!(TARGET, [quad('urn:new:1', '"new-1"')]),
+    ).rejects.toThrow(/response lost/);
+    failAfterCommit = false;
+
+    expect(await indexed.listGraphs()).toContain(TARGET); // rebuilt, not stale
+    await base.close();
+  });
+
+  it('hides an orphaned staging graph from every graph-enumeration surface', async () => {
+    // A failed/indeterminate replacement can leave the staging graph behind.
+    // The successful-replace tests cannot prove the enumeration filters exist
+    // (MOVE already removed the staging graph there), so plant an orphan
+    // directly and check each surface.
+    const base = new OxigraphStore();
+    const orphan = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}leftover`;
+    await base.insert([
+      quad('urn:s', '"data"'),
+      quad('urn:orphan', '"stuck"', orphan),
+    ]);
+
+    expect(await base.listGraphs()).toEqual([TARGET]); // raw adapter filter
+
+    const indexed = new GraphSetIndexStore(base, { revalidateMs: 60_000 });
+    expect(await indexed.listGraphs()).toEqual([TARGET]); // full-scan seed filter
+    expect(await indexed.listGraphsByPrefix(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX)).toEqual([]);
+    expect(await indexed.hasGraph(orphan)).toBe(false);
+
+    const passthrough = new GraphSetIndexStore(base, { enabled: false });
+    expect(await passthrough.listGraphs()).toEqual([TARGET]);
+    expect(await passthrough.listGraphsByPrefix(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX)).toEqual([]);
+    expect(await passthrough.hasGraph(orphan)).toBe(false);
+
+    const log = new ChangelogStore(base);
+    expect(await log.listGraphs()).toEqual([TARGET]);
     await base.close();
   });
 
