@@ -822,31 +822,42 @@ export const knowledgeAssetWrite = (
     { contextGraphId: normalizeContextGraphId(contextGraphId), quads, ...opts },
   );
 
+export interface KnowledgeAssetFinalizeOptions {
+  subGraphName?: string;
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+  /** Deprecated neutral compatibility value; never serialized. */
+  layer?: 'wm';
+}
+
 /** Seal the WM draft — computes the merkle root + signs the seal (git commit). */
 export const knowledgeAssetFinalize = (
   contextGraphId: string,
   name: string,
-  opts: {
-    subGraphName?: string;
-    authorAgentAddress?: string;
-    preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
-    schemeVersion?: number;
-    /** @deprecated Only Working Memory finalization is supported. */
-    layer?: 'wm' | 'swm';
-  } = {},
+  opts: KnowledgeAssetFinalizeOptions = {},
 ) => {
   assertExclusiveAuthorFields(opts);
-  if (opts.layer === 'swm') {
+  const legacyLayer = (opts as { layer?: unknown }).layer;
+  if (legacyLayer === 'swm') {
     throw Object.assign(new Error('Legacy root-scoped Knowledge Assets are read-only'), {
       code: 'LEGACY_KA_READ_ONLY',
     });
   }
-  if (opts.layer !== undefined && opts.layer !== 'wm') {
+  if (legacyLayer !== undefined && legacyLayer !== 'wm') {
     throw new TypeError('Only Working Memory finalization is supported');
   }
   return post<{ merkleRoot: string; eip712Digest: string }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,
-    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
+    {
+      contextGraphId: normalizeContextGraphId(contextGraphId),
+      ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+      ...(opts.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
+      ...(opts.preSignedAuthorAttestation
+        ? { preSignedAuthorAttestation: opts.preSignedAuthorAttestation }
+        : {}),
+      ...(opts.schemeVersion !== undefined ? { schemeVersion: opts.schemeVersion } : {}),
+    },
   );
 };
 
@@ -873,18 +884,24 @@ export const knowledgeAssetPullFrom = (
     { contextGraphId: normalizeContextGraphId(contextGraphId), layer, ...opts },
   );
 
-/** Atomically seal and share the complete WM Knowledge Asset to SWM. */
-export const knowledgeAssetShare = (
-  contextGraphId: string,
-  name: string,
-  opts: {
-    subGraphName?: string;
-    /** @deprecated Knowledge Assets are shared atomically. */
-    entities?: string[] | 'all';
-    /** @deprecated Unsealed Knowledge Asset shares are unsupported. */
-    skipSeal?: boolean;
-  } = {},
-) => {
+export interface AtomicShareOptions {
+  subGraphName?: string;
+}
+
+type LegacyAtomicShareOptions = AtomicShareOptions & {
+  entities?: string[] | 'all';
+  skipSeal?: boolean;
+};
+
+export interface AtomicShareResult {
+  swmShared: boolean;
+  promotedCount: number;
+  sealed: boolean;
+  publishReady: boolean;
+}
+
+function normalizeAtomicShareOptions(raw: AtomicShareOptions): AtomicShareOptions {
+  const opts = raw as LegacyAtomicShareOptions;
   if (Array.isArray(opts.entities)) {
     throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
@@ -903,7 +920,17 @@ export const knowledgeAssetShare = (
   if (opts.skipSeal !== undefined && opts.skipSeal !== false) {
     throw new TypeError('skipSeal must be false or omitted');
   }
-  return post<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }>(
+  return opts.subGraphName ? { subGraphName: opts.subGraphName } : {};
+}
+
+/** Atomically seal and share the complete WM Knowledge Asset to SWM. */
+export const knowledgeAssetShare = (
+  contextGraphId: string,
+  name: string,
+  rawOptions: AtomicShareOptions = {},
+) => {
+  const opts = normalizeAtomicShareOptions(rawOptions);
+  return post<AtomicShareResult>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
     {
       contextGraphId: normalizeContextGraphId(contextGraphId),
@@ -913,13 +940,15 @@ export const knowledgeAssetShare = (
 };
 
 /** Publish to VM — mint or update on chain (git push origin main). */
+export type KnowledgeAssetPublishResult = Record<string, unknown> & { contextGraphError?: string };
+
 export const knowledgeAssetPublish = (
   contextGraphId: string,
   name: string,
   opts: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions = {},
 ) => {
   const publishOptions = finalizedPublishOptionsPayload(opts, ['subGraphName']);
-  return post<Record<string, unknown>>(
+  return post<KnowledgeAssetPublishResult>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
     {
       contextGraphId: normalizeContextGraphId(contextGraphId),
@@ -941,13 +970,8 @@ export const knowledgeAssetPublish = (
  * longer finalizes or mutates SWM: legacy root-scoped SWM assets are read-only,
  * and a publish precondition is surfaced to the caller without retrying.
  */
-export async function knowledgeAssetPublishWithSeal(
-  contextGraphId: string,
-  name: string,
-  opts: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions = {},
-): Promise<Record<string, unknown> & { contextGraphError?: string }> {
-  return knowledgeAssetPublish(contextGraphId, name, opts);
-}
+/** @deprecated Use `knowledgeAssetPublish`; retained only as an external source alias. */
+export const knowledgeAssetPublishWithSeal = knowledgeAssetPublish;
 
 /**
  * Aggregate result of a batch SWM→VM publish. Shared so every batch-publish CTA reports
@@ -972,7 +996,7 @@ export interface BatchPublishResult {
 
 /**
  * Publish each named SWM assertion to Verifiable Memory through
- * `knowledgeAssetPublishWithSeal` (direct publish + 207 partial handling), aggregating
+ * `knowledgeAssetPublish` (direct publish + 207 partial handling), aggregating
  * into ONE `BatchPublishResult`. The canonical batch-publish loop reused by every CTA
  * (MemoryLayerView / entities / layer-widgets) so the partial-detail, sample, and per-KA
  * error accounting cannot drift between them. Per-KA failures are collected into
@@ -1001,7 +1025,7 @@ export async function publishAssertionsToVm(
   let sameCoveredEpoch = true;
   for (const a of items) {
     try {
-      const res = await knowledgeAssetPublishWithSeal(
+      const res = await knowledgeAssetPublish(
         contextGraphId,
         a.name,
         a.subGraph ? { subGraphName: a.subGraph } : {},
@@ -1385,6 +1409,8 @@ export async function listAssertions(
 }
 
 /**
+ * @deprecated Use `knowledgeAssetShare`; retained as a positional compatibility adapter.
+ *
  * Atomically seal and share a complete assertion from WM to SWM.
  *
  * `subGraphName` is part of the daemon lookup key alongside
@@ -1396,7 +1422,7 @@ export async function listAssertions(
 export const promoteAssertion = (
   contextGraphId: string,
   assertionName: string,
-  optionsOrLegacyEntities: { subGraphName?: string } | string | string[] | undefined = {},
+  optionsOrLegacyEntities?: AtomicShareOptions | string | string[],
   legacySubGraphName?: string,
 ) => {
   if (Array.isArray(optionsOrLegacyEntities)) {
@@ -1410,16 +1436,10 @@ export const promoteAssertion = (
     });
   }
   const subGraphName =
-    typeof optionsOrLegacyEntities === 'string'
+    optionsOrLegacyEntities === undefined || typeof optionsOrLegacyEntities === 'string'
       ? legacySubGraphName
-      : optionsOrLegacyEntities?.subGraphName ?? legacySubGraphName;
-  return post<{ promotedCount: number; sealed: boolean; publishReady: boolean }>(
-    `/api/knowledge-assets/${encodeURIComponent(assertionName)}/swm/share`,
-    {
-      contextGraphId: normalizeContextGraphId(contextGraphId),
-      ...(subGraphName ? { subGraphName } : {}),
-    },
-  );
+      : optionsOrLegacyEntities.subGraphName ?? legacySubGraphName;
+  return knowledgeAssetShare(contextGraphId, assertionName, { subGraphName });
 };
 
 // Issue #864 — central UI translator for `promoteAssertion` outcomes so
@@ -1452,12 +1472,12 @@ export function describePromoteResult(
     return {
       kind: 'success',
       promotedCount: res.promotedCount,
-      message: `Promoted ${res.promotedCount} triple${res.promotedCount === 1 ? '' : 's'} from ${assertionName} to Shared Working Memory.`,
+      message: `Shared the complete Knowledge Asset ${assertionName} to Shared Working Memory (${res.promotedCount} triple${res.promotedCount === 1 ? '' : 's'}).`,
     };
   }
   return {
     kind: 'noop',
-    message: `${assertionName} had no triples to promote. It may already be in Shared Working Memory, or the extracted content is still being committed — refresh and try again.`,
+    message: `${assertionName} was not newly shared. Its complete Knowledge Asset may already be in Shared Working Memory, or its content is still being committed — refresh and try again.`,
   };
 }
 
@@ -1473,14 +1493,11 @@ export function describePromoteError(
       hint?: string;
     } | undefined;
     if (body?.code === 'SWM_GOSSIP_PAYLOAD_TOO_LARGE') {
-      const hint = typeof body.hint === 'string' && body.hint.length > 0
-        ? body.hint
-        : 'Promote fewer entities per call or split the assertion into smaller root-entity batches.';
       return {
         kind: 'payload-too-large',
         actualBytes: typeof body.actualBytes === 'number' ? body.actualBytes : undefined,
         limitBytes: typeof body.limitBytes === 'number' ? body.limitBytes : undefined,
-        message: `${assertionName} is too large to promote to Shared Working Memory. ${hint}`,
+        message: `${assertionName} is too large to share atomically. Split its content into smaller Knowledge Assets before sharing.`,
       };
     }
   }
