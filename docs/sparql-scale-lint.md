@@ -64,6 +64,9 @@ deliberately a diffable code change: allowing a scan is a reviewed decision.
   (duplicate-copy blocking, reindent grandfathering, new-shape blocking)
   before every CI scan; a broken scanner fails loudly instead of passing
   silently.
+- Source extraction uses the TypeScript compiler API (already a root
+  devDependency), so template-literal parsing is exact; only the SPARQL-shape
+  analysis is heuristic.
 - Local usage:
   - `node scripts/sparql-scale-lint.mjs --diff origin/main HEAD` — what CI runs
   - `node scripts/sparql-scale-lint.mjs --all` — full-tree debt audit

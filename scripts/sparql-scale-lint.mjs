@@ -50,8 +50,9 @@
  *   node scripts/sparql-scale-lint.mjs --files a.ts b.ts            (spot)
  *   node scripts/sparql-scale-lint.mjs --self-test                  (fixtures)
  *
- * Zero dependencies; plain string analysis (queries here are TS template
- * literals full of ${…}, so a real SPARQL parser cannot see them anyway).
+ * Extraction uses the TypeScript compiler API (already a root devDependency);
+ * the SPARQL-shape analysis itself is plain string analysis, because the
+ * queries are template literals full of ${…} that no SPARQL parser accepts.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -60,6 +61,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
+import ts from 'typescript';
 
 const SCANNED_EXTENSIONS = /\.(ts|mts|cts|js|mjs|cjs)$/;
 const EXCLUDED_PATH = /(^|\/)(node_modules|dist|coverage|bench|e2e)\/|(^|\/)test(s)?\/|\.(test|spec|bench)\.[a-z]+$|^docs\/|^scripts\/sparql-scale-lint\.mjs$/;
@@ -109,126 +111,46 @@ const UNBOUNDED_GRAPH_LITERAL = /(\/_shared_memory|\/_shared_memory_meta|\/_meta
  * Returns { raw, parts, exprs, startLine } where `parts` is the literal text
  * with each interpolation replaced by `⟪i⟫` (index into exprs).
  */
-const REGEX_PRECEDING_KEYWORD = /(^|[^\w$])(return|typeof|instanceof|in|of|new|delete|void|do|else|case|yield|await)\s*$/;
-
-export function extractTemplateLiterals(source) {
+/**
+ * Extract every template literal from JS/TS source using the TypeScript
+ * compiler API (a root devDependency — no new install weight). Each literal
+ * is returned as { text, exprs, startLine } with interpolations replaced by
+ * `⟪i⟫` placeholders (index into exprs, which hold the expression source
+ * text for the R4 graph-family heuristic).
+ *
+ * A real parser here is load-bearing: a hand lexer must re-solve JS
+ * tokenization (regex-vs-division, nested templates, escapes) and an early
+ * version of this tool was desynced by an IRI-safety regex containing a
+ * quote. Template literals nested inside interpolations are visited as their
+ * own nodes, so SPARQL built inside SPARQL is analyzed too.
+ */
+export function extractTemplateLiterals(source, fileName = 'source.ts') {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    ts.ScriptKind.TS,
+  );
   const literals = [];
-  let i = 0;
-  let line = 1;
-  let lastSignificant = ''; // trailing window of code, for regex-vs-division
-  const n = source.length;
-  const note = (ch) => {
-    if (!/\s/.test(ch)) lastSignificant = (lastSignificant + ch).slice(-24);
-  };
-  while (i < n) {
-    const ch = source[i];
-    if (ch === '\n') { line++; i++; continue; }
-    // Skip line comments, block comments, normal string literals, and REGEX
-    // literals so quotes/backticks inside them cannot open phantom strings
-    // (an IRI-safety regex like /[<>"{}|^`\\]/ otherwise poisons the walk).
-    if (ch === '/' && source[i + 1] === '/') {
-      while (i < n && source[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '/' && source[i + 1] === '*') {
-      i += 2;
-      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) {
-        if (source[i] === '\n') line++;
-        i++;
-      }
-      i += 2;
-      continue;
-    }
-    if (ch === '/') {
-      // Regex when the previous significant token cannot end an expression;
-      // otherwise it is division. Operators/keywords start expression position.
-      const prev = lastSignificant.slice(-1);
-      const regexPosition = prev === '' ||
-        '(,=:[!&|?{};+-*%<>~^'.includes(prev) ||
-        REGEX_PRECEDING_KEYWORD.test(lastSignificant);
-      if (regexPosition) {
-        i++;
-        let inClass = false;
-        while (i < n) {
-          const r = source[i];
-          if (r === '\\') { i += 2; continue; }
-          if (r === '\n') { line++; break; } // not a regex after all — bail
-          if (r === '[') inClass = true;
-          else if (r === ']') inClass = false;
-          else if (r === '/' && !inClass) { i++; break; }
-          i++;
-        }
-        while (i < n && /[a-z]/i.test(source[i])) i++; // flags
-        lastSignificant = (lastSignificant + '/').slice(-24);
-        continue;
-      }
-      note(ch);
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      const quote = ch;
-      i++;
-      while (i < n && source[i] !== quote) {
-        if (source[i] === '\\') i++;
-        else if (source[i] === '\n') line++; // unterminated/JSX edge — bail per line
-        i++;
-      }
-      i++;
-      note(quote);
-      continue;
-    }
-    if (ch === '`') {
-      const startLine = line;
-      i++;
-      let text = '';
+  const startLineOf = (node) =>
+    sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+  const visit = (node) => {
+    if (ts.isNoSubstitutionTemplateLiteral(node)) {
+      literals.push({ text: node.text, exprs: [], startLine: startLineOf(node) });
+    } else if (ts.isTemplateExpression(node)) {
+      let text = node.head.text;
       const exprs = [];
-      let closed = false;
-      while (i < n) {
-        const c = source[i];
-        if (c === '\\') {
-          text += source.slice(i, i + 2);
-          i += 2;
-          continue;
-        }
-        if (c === '`') { i++; closed = true; break; }
-        if (c === '$' && source[i + 1] === '{') {
-          // capture the expression with brace/backtick awareness
-          let depth = 1;
-          let j = i + 2;
-          let expr = '';
-          while (j < n && depth > 0) {
-            const e = source[j];
-            if (e === '{') depth++;
-            else if (e === '}') { depth--; if (depth === 0) break; }
-            else if (e === '`') {
-              // nested template: skip it wholesale (rare in this codebase)
-              j++;
-              while (j < n && source[j] !== '`') {
-                if (source[j] === '\\') j++;
-                if (source[j] === '\n') line++;
-                j++;
-              }
-            } else if (e === '\n') line++;
-            expr += e;
-            j++;
-          }
-          text += `⟪${exprs.length}⟫`;
-          exprs.push(expr.trim());
-          i = j + 1;
-          continue;
-        }
-        if (c === '\n') line++;
-        text += c;
-        i++;
+      for (const span of node.templateSpans) {
+        text += `⟪${exprs.length}⟫`;
+        exprs.push(span.expression.getText(sourceFile).trim());
+        text += span.literal.text;
       }
-      if (closed) literals.push({ text, exprs, startLine });
-      note('`');
-      continue;
+      literals.push({ text, exprs, startLine: startLineOf(node) });
     }
-    note(ch);
-    i++;
-  }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
   return literals;
 }
 
