@@ -317,7 +317,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       publisherNodeIdentityIdOverride: '42',
       accessPolicy: 'allowList',
       allowedPeers: ['peer-a', 'peer-b'],
-      entityProofs: true,
+      entityProofs: false,
     }));
     const job = await publisher.getStatus(jobId);
 
@@ -357,7 +357,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       reservedUal: ROOTLESS_UAL,
       accessPolicy: 'allowList',
       allowedPeers: ['peer-a', 'peer-b'],
-      entityProofs: true,
+      entityProofs: false,
       publishEpochs: 3,
       clearSharedMemoryAfter: false,
       publisherNodeIdentityIdOverride: '42',
@@ -365,6 +365,15 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect((job?.request as any).scope).toBeUndefined();
     expect((job?.request as any).namespace).toBeUndefined();
     expect((job?.request as any).authority).toBeUndefined();
+  });
+
+  it('rejects unsupported entity proofs before persisting a graph-scoped job', async () => {
+    const publisher = createPublisher();
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ entityProofs: true })),
+    ).rejects.toThrow(/does not support entityProofs/);
+    expect(await publisher.list()).toEqual([]);
   });
 
   it('rejects duplicate active knowledge asset VM publish jobs', async () => {

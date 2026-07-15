@@ -74,6 +74,7 @@ export default defineConfig({
       "test/direct-rootless-publish.test.ts",
       "test/rootless-update-boundary.test.ts",
       "test/encrypt-inline-policy.test.ts",
+      "test/queued-publish-options.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
       "test/network-identity-proof.test.ts",

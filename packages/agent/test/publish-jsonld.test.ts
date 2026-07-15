@@ -297,7 +297,11 @@ describe('publishJsonLd', () => {
           'name': 'Private Async',
         },
       },
-      { localOnly: true, accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
+      {
+        localOnly: true,
+        accessPolicy: 'allowList',
+        allowedPeers: [' peer-b ', 'peer-a', 'peer-b'],
+      },
     );
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
@@ -307,7 +311,19 @@ describe('publishJsonLd', () => {
     expect(request.contentScopeVersion).toBe(2);
     expect(request.kaUal).toMatch(/^did:dkg:[^/]+\/0x[0-9a-f]{40}\/\d+$/);
     expect(request.accessPolicy).toBe('allowList');
-    expect(request.allowedPeers).toEqual(['peer-a']);
+    expect(request.allowedPeers).toEqual(['peer-a', 'peer-b']);
+    const reResolved = await agent.resolveFinalizedAssertionVmPublishIntent(
+      'did:dkg:context-graph:async-priv-only',
+      request.name,
+      {
+        agentAddress: request.agentAddress,
+        accessPolicy: 'allowList',
+        allowedPeers: ['peer-b', 'peer-a'],
+      },
+    );
+    expect(reResolved.accessPolicy).toBe('allowList');
+    expect(reResolved.allowedPeers).toEqual(['peer-a', 'peer-b']);
+    expect(reResolved.intentKey).toBe(request.intentKey);
     // Keep this resilient to control-plane tuning (defaults changed in main).
     expect(job?.retries.maxRetries).toBeGreaterThan(0);
 
@@ -835,6 +851,84 @@ describe('publishJsonLd', () => {
     expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
+  it('async publish accepts a valid off-node pre-signed author attestation unchanged', async () => {
+    const externalAuthor = ethers.Wallet.createRandom();
+    const content = {
+      public: {
+        '@context': 'http://schema.org/',
+        '@id': 'http://example.org/ValidPreSignedEntity',
+        '@type': 'Thing',
+        'name': 'Valid PreSigned',
+      },
+    };
+
+    // Produce the canonical seal through the callback signing path. Each test
+    // agent has a fresh deterministic KA allocator, so the second agent derives
+    // the same author-scoped UAL and can exercise the pre-signed input path.
+    const source = await createAgent('AsyncValidPreSignedSourceBot');
+    await source.agent.createContextGraph({
+      id: 'async-valid-presigned-source',
+      name: 'AsyncValidPreSignedSource',
+      description: '',
+    });
+    await source.agent.registerContextGraph('async-valid-presigned-source');
+    const sourceCapture = await source.agent.publishAsync(
+      'did:dkg:context-graph:async-valid-presigned-source',
+      content,
+      {
+        localOnly: true,
+        authorAgentAddress: externalAuthor.address,
+        authorSignTypedData: async (typedData) => {
+          const signature = ethers.Signature.from(await externalAuthor.signTypedData(
+            typedData.domain,
+            typedData.types,
+            typedData.message,
+          ));
+          return {
+            r: ethers.getBytes(signature.r),
+            vs: ethers.getBytes(signature.yParityAndS),
+          };
+        },
+      },
+    );
+    const sourceQueue = new TripleStoreAsyncLiftPublisher(source.store);
+    const sourceRequest = expectQueuedKaRequest(
+      await sourceQueue.getStatus(sourceCapture.captureID),
+    );
+
+    const target = await createAgent('AsyncValidPreSignedTargetBot');
+    await target.agent.createContextGraph({
+      id: 'async-valid-presigned-target',
+      name: 'AsyncValidPreSignedTarget',
+      description: '',
+    });
+    await target.agent.registerContextGraph('async-valid-presigned-target');
+    const targetCapture = await target.agent.publishAsync(
+      'did:dkg:context-graph:async-valid-presigned-target',
+      content,
+      {
+        localOnly: true,
+        preSignedAuthorAttestation: {
+          expectedMerkleRoot: ethers.getBytes(sourceRequest.seal.merkleRoot),
+          authorAddress: sourceRequest.seal.authorAddress,
+          signature: {
+            r: ethers.getBytes(sourceRequest.seal.signature.r),
+            vs: ethers.getBytes(sourceRequest.seal.signature.vs),
+          },
+          schemeVersion: sourceRequest.seal.schemeVersion,
+          reservedKaId: BigInt(sourceRequest.seal.reservedKaId!),
+        },
+      },
+    );
+    const targetQueue = new TripleStoreAsyncLiftPublisher(target.store);
+    const targetRequest = expectQueuedKaRequest(
+      await targetQueue.getStatus(targetCapture.captureID),
+    );
+
+    expect(targetRequest.seal).toEqual(sourceRequest.seal);
+    expect(targetRequest.seal.authorAddress).toBe(externalAuthor.address);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
+
   it('async publish rejects preSignedAuthorAttestation + authorAgentAddress as mutually exclusive', async () => {
     // Sync parity: pick one signing path (caller-provided seal OR daemon custodial).
     const { agent } = await createAgent('AsyncSealMutexBot');
@@ -1096,31 +1190,31 @@ describe('publishJsonLd', () => {
     expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish threads opts.entityProofs into the queued KA snapshot', async () => {
-    // V10 selective-disclosure flag persists through enqueue.
+  it('async publish rejects unsupported graph-scoped entity proofs before enqueue', async () => {
     const { agent, store } = await createAgent('AsyncEntityProofsBot');
     await agent.createContextGraph({ id: 'async-entity-proofs', name: 'AsyncEntityProofs', description: '' });
     await agent.registerContextGraph('async-entity-proofs');
 
-    const { captureID } = await agent.publishAsync(
-      'did:dkg:context-graph:async-entity-proofs',
-      {
-        public: {
-          '@context': 'http://schema.org/',
-          '@id': 'http://example.org/EntityProofsRoot',
-          '@type': 'Thing',
-          'name': 'EntityProofs',
+    await expect(
+      agent.publishAsync(
+        'did:dkg:context-graph:async-entity-proofs',
+        {
+          public: {
+            '@context': 'http://schema.org/',
+            '@id': 'http://example.org/EntityProofsRoot',
+            '@type': 'Thing',
+            'name': 'EntityProofs',
+          },
         },
-      },
-      {
-        localOnly: true,
-        entityProofs: true,
-      },
-    );
+        {
+          localOnly: true,
+          entityProofs: true,
+        },
+      ),
+    ).rejects.toThrow(/does not support entityProofs/);
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
-    const job = await asyncPublisher.getStatus(captureID);
-    expect(expectQueuedKaRequest(job).entityProofs).toBe(true);
+    expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish snapshots publisherNodeIdentityIdOverride as a bigint string', async () => {

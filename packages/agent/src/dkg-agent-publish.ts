@@ -140,6 +140,7 @@ import {
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
+  resolveKnowledgeAssetWorkspaceHead,
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
   TripleStoreAsyncLiftPublisher,
@@ -605,7 +606,7 @@ export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri
     .map((quad) => ({ ...quad, graph: '' }));
 }
 
-function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
+export function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
   contextGraphId: string;
   snapshotQuads: readonly Quad[];
   onChainContextGraphId?: string;
@@ -622,9 +623,13 @@ function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
 > {
   const encryptionOptions = {
     encryptInlinePayload:
-      input.resolvedEncryptInlinePayload ?? input.queuedEncryptInlinePayload,
+      input.onChainContextGraphId
+        ? input.resolvedEncryptInlinePayload
+        : input.queuedEncryptInlinePayload,
     encryptInlineChunked:
-      input.resolvedEncryptInlineChunked ?? input.queuedEncryptInlineChunked,
+      input.onChainContextGraphId
+        ? input.resolvedEncryptInlineChunked
+        : input.queuedEncryptInlineChunked,
   };
   if (!input.onChainContextGraphId || !input.resolvedEncryptInlinePayload) {
     return { quads: [...input.snapshotQuads], ...encryptionOptions };
@@ -638,6 +643,15 @@ function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
     ...encryptionOptions,
     trustedNonManifestCatalogTriples:
       generatedPrivateCatalogTripleKeys(input.contextGraphId),
+  };
+}
+
+export function queuedKnowledgeAssetAccessEnvelope(
+  request: Pick<KnowledgeAssetVmPublishRequest, 'accessPolicy' | 'allowedPeers'>,
+): Pick<PublishOptions, 'accessPolicy' | 'allowedPeers'> {
+  return {
+    accessPolicy: request.accessPolicy,
+    allowedPeers: request.allowedPeers ? [...request.allowedPeers] : undefined,
   };
 }
 
@@ -1284,6 +1298,11 @@ export class PublishMethods extends DKGAgentBase {
     if (opts?.priorVersion !== undefined) {
       throw new InvalidContentError('publishAsync priorVersion is only valid for the legacy root-lift path');
     }
+    if (opts?.entityProofs === true) {
+      throw new InvalidContentError(
+        'publishAsync does not support entityProofs for graph-scoped Knowledge Assets',
+      );
+    }
     if (opts?.namespace !== undefined || opts?.scope !== undefined || opts?.authority !== undefined) {
       throw new InvalidContentError(
         'publishAsync no longer accepts legacy root-lift namespace, scope, or authority metadata',
@@ -1304,7 +1323,7 @@ export class PublishMethods extends DKGAgentBase {
       ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const allowedPeers = [...new Set(
       (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
-    )];
+    )].sort();
     if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
       throw new InvalidContentError('publishAsync allowList policy requires allowedPeers');
     }
@@ -1779,6 +1798,8 @@ export class PublishMethods extends DKGAgentBase {
       privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
       privateTripleCount?: PublishOptions['privateTripleCount'];
       [INTERNAL_ROOTLESS_UPDATE_ORIGIN]?: true;
+      accessPolicy?: PublishOptions['accessPolicy'];
+      allowedPeers?: PublishOptions['allowedPeers'];
     },
   ): Promise<PublishResult> {
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
@@ -2034,6 +2055,8 @@ export class PublishMethods extends DKGAgentBase {
         ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
         : {}),
       privateTripleCount: canonicalParts.privateQuads.length,
+      accessPolicy: opts?.accessPolicy,
+      allowedPeers: opts?.allowedPeers,
       trustedNonManifestCatalogTriples:
         trustedUpdateCatalogTriples,
       v10UpdateACKProvider,
@@ -4043,16 +4066,8 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
     }
-    const accessPolicy = opts?.accessPolicy
-      ?? (seal.privateTripleCount > 0 ? 'ownerOnly' : 'public');
-    const allowedPeers = [...new Set(
-      (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
-    )];
-    if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
-      throw new Error('Queued Knowledge Asset allowList policy requires allowedPeers');
-    }
-    if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
-      throw new Error('Queued Knowledge Asset allowedPeers requires allowList policy');
+    if (opts?.entityProofs === true) {
+      throw new Error('Graph-scoped async publish does not support entityProofs');
     }
     const latestPromote = [...history.events]
       .reverse()
@@ -4063,6 +4078,45 @@ export class PublishMethods extends DKGAgentBase {
         new Error(
           `Cannot publish "${name}" asynchronously: the current SWM share is missing a shareOperationId. ` +
             `Re-share the asset through /api/knowledge-assets/${encodeURIComponent(name)}/swm/share before publishing.`,
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: new GraphManager(this.store),
+      contextGraphId,
+      kaUal: seal.kaUal,
+      subGraphName: opts?.subGraphName,
+    });
+    if (
+      !head
+      || head.shareOperationId !== shareOperationId
+      || head.assertionVersion !== seal.assertionVersion
+      || head.accessPolicy === undefined
+    ) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" asynchronously: the current SWM head does not match the sealed share operation. ` +
+            'Re-share the knowledge asset before publishing.',
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+    const accessPolicy = head.accessPolicy;
+    const allowedPeers = [...new Set(head.allowedPeers.map((peerId) => peerId.trim()).filter(Boolean))].sort();
+    const explicitAllowedPeers = [...new Set(
+      (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )].sort();
+    if (
+      (opts?.accessPolicy !== undefined && opts.accessPolicy !== accessPolicy)
+      || (opts?.allowedPeers !== undefined
+        && JSON.stringify(explicitAllowedPeers) !== JSON.stringify(allowedPeers))
+    ) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" asynchronously: the requested access envelope does not match the immutable SWM share.`,
         ),
         { code: 'PUBLISH_INTENT_STALE' },
       );
@@ -4300,6 +4354,33 @@ export class PublishMethods extends DKGAgentBase {
       throw stale(
         `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
           `shareOperationId is ${liveShareOperationId ?? 'none'}, queued shareOperationId was ${request.shareOperationId}.`,
+      );
+    }
+
+    const liveHead = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: new GraphManager(this.store),
+      contextGraphId: request.contextGraphId,
+      kaUal: request.kaUal,
+      subGraphName: request.subGraphName,
+    });
+    const queuedAllowedPeers = [...new Set(
+      (request.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )].sort();
+    const liveAllowedPeers = [...new Set(
+      (liveHead?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )].sort();
+    if (
+      !liveHead
+      || liveHead.shareOperationId !== request.shareOperationId
+      || liveHead.assertionVersion !== request.assertionVersion
+      || liveHead.accessPolicy === undefined
+      || liveHead.accessPolicy !== request.accessPolicy
+      || JSON.stringify(liveAllowedPeers) !== JSON.stringify(queuedAllowedPeers)
+    ) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          'the immutable SWM access envelope no longer matches the queued request.',
       );
     }
 
@@ -4737,6 +4818,7 @@ export class PublishMethods extends DKGAgentBase {
           ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
           privateTripleCount: seal.privateTripleCount,
           [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true,
+          ...queuedKnowledgeAssetAccessEnvelope(request),
         },
       );
 
