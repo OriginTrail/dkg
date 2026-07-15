@@ -223,11 +223,11 @@ const GLOBAL_FULL_PATHS = new Set([
   'vitest.evm-integration.ts',
 ]);
 
-// Preserve the independent Solidity gate that existed before delta CI. A PR
-// can be promoted to full Node/EVM CI for many reasons (audit sample, label,
-// unknown path, disabled rollout) without making a four-shard Hardhat run
-// relevant. These paths intentionally mirror the former dorny/paths-filter
-// allowlist in .github/workflows/ci.yml.
+// Preserve the independent Solidity gate that existed before delta CI, while
+// also covering Hardhat-loaded support code that the former paths-filter
+// missed. A PR can be promoted to full Node/EVM CI for many reasons without
+// making a four-shard Hardhat run relevant, but any production input inside
+// evm-module can affect compilation, deployment, or the test environment.
 const SOLIDITY_RELEVANT_PATHS = new Set([
   'packages/evm-module/package.json',
   'packages/evm-module/slither.config.json',
@@ -241,9 +241,21 @@ const SOLIDITY_RELEVANT_PATHS = new Set([
 ]);
 
 function isSolidityRelevantPath(filePath) {
-  return SOLIDITY_RELEVANT_PATHS.has(filePath)
+  if (
+    SOLIDITY_RELEVANT_PATHS.has(filePath)
     || /^packages\/evm-module\/(?:contracts|test|deploy|scripts)\//.test(filePath)
-    || /^packages\/evm-module\/hardhat\.[^/]+$/.test(filePath);
+    || /^packages\/evm-module\/hardhat\.[^/]+$/.test(filePath)
+  ) {
+    return true;
+  }
+
+  if (!filePath.startsWith('packages/evm-module/')) return false;
+
+  // Committed ABIs are runtime inputs for Node/EVM integration lanes, but they
+  // do not alter Hardhat compile/test behavior. Package documentation is also
+  // intentionally excluded unless it lives under a legacy matched directory.
+  return !filePath.startsWith('packages/evm-module/abi/')
+    && !isDocumentationOnlyPath(filePath);
 }
 
 const BLAZEGRAPH_ARM64_PATHS = new Set([

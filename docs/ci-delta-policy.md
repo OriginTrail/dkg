@@ -6,9 +6,10 @@ Use affected-lane CI for pull-request feedback, then run every Node/EVM lane
 against the exact merge candidate in GitHub's merge queue. Keep full CI on
 protected-branch pushes and manual dispatches. Solidity remains independently
 path-gated on pull requests: contract-relevant PRs run the four Hardhat shards,
-while protected pushes run the full coverage ratchet after merge. Do not add a
-`develop` branch solely for CI: that would postpone integration failures and
-collect unrelated changes into a large `develop -> main` batch.
+merge candidates rerun them against the exact combined commit, and protected
+pushes run the full coverage ratchet after merge. Do not add a `develop` branch
+solely for CI: that would postpone integration failures and collect unrelated
+changes into a large `develop -> main` batch.
 
 The delta planner is deliberately conservative. It selects the changed
 workspace's owning lane plus known downstream consumers, and falls back to full
@@ -28,7 +29,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | More than 100 production files or at least 4 workspaces | Full CI |
 | PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
 | Deterministic 5% PR audit sample | Full Node/EVM CI; Solidity remains path-gated |
-| Merge queue | Every Node/EVM lane; no duplicate Solidity run |
+| Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |
 | Protected-branch push or manual dispatch | Full CI, including Solidity coverage |
 
 The planner reads `git diff --name-status -z`, so spaces and other shell-hostile
@@ -47,10 +48,9 @@ file names cannot alter the decision. Its routing table lives in
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
   selected job was accidentally skipped, failed, or was cancelled.
-- The merge queue tests every Node/EVM lane against the exact combined commit
-  before it lands. Contract-relevant PRs have already run the sharded Solidity
-  suite, and protected-branch Solidity coverage remains the post-merge safety
-  net.
+- The merge queue tests every Node/EVM lane and the sharded Solidity suite
+  against the exact combined commit before it lands. Protected-branch Solidity
+  coverage remains the post-merge safety net.
 - Five percent of PR commits run full CI even when delta would be possible. This
   continuously audits the routing model and exposes a missing dependency edge.
 - The routing tests enumerate all package/demo workspaces with a `test` script.

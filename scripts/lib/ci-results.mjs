@@ -98,11 +98,12 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
 
   const contracts = Boolean(plan.lanes?.contracts);
   requireSuccess(needs, 'abi-freshness', contracts, errors);
-  requireSuccess(needs, 'solidity', eventName === 'pull_request' && contracts, errors);
+  const candidateEvent = eventName === 'pull_request' || eventName === 'merge_group';
+  requireSuccess(needs, 'solidity', candidateEvent && contracts, errors);
   requireSuccess(
     needs,
     'solidity-coverage',
-    eventName !== 'pull_request' && eventName !== 'merge_group',
+    !candidateEvent,
     errors,
   );
   requireSuccess(

@@ -74,7 +74,7 @@ test('five percent of PR SHAs are deterministic full-CI audit samples', () => {
   assert.equal(normal.fullCi, false);
 });
 
-test('full PR plans preserve the pre-delta Solidity path filter', () => {
+test('full PR plans preserve legacy Solidity paths and cover Hardhat support code', () => {
   const solidityRelevantPaths = [
     'packages/evm-module/contracts/KnowledgeAssets.sol',
     'packages/evm-module/test/KnowledgeAssets.test.ts',
@@ -91,7 +91,18 @@ test('full PR plans preserve the pre-delta Solidity path filter', () => {
     'pnpm-lock.yaml',
     'pnpm-workspace.yaml',
     '.github/workflows/ci.yml',
+    'packages/evm-module/utils/helpers.ts',
+    'packages/evm-module/utils/network.ts',
+    'packages/evm-module/tasks/send_neuro.ts',
+    'packages/evm-module/tsconfig.json',
+    'packages/evm-module/deployments/parameters.json',
   ];
+
+  const hardhatSupport = pullRequestPlan([
+    change('packages/evm-module/utils/helpers.ts'),
+  ]);
+  assert.equal(hardhatSupport.mode, 'full');
+  assert.equal(hardhatSupport.lanes.contracts, true);
 
   for (const filePath of solidityRelevantPaths) {
     const plan = pullRequestPlan([change(filePath)], { labels: ['ci:full'] });
@@ -101,7 +112,8 @@ test('full PR plans preserve the pre-delta Solidity path filter', () => {
 
   const nonSolidityPaths = [
     'packages/evm-module/abi/KnowledgeAssets.json',
-    'packages/evm-module/hardhat/config.ts',
+    'packages/evm-module/README.md',
+    'packages/evm-module/docs/greenfield-ka-ual.md',
     'packages/agent/package.json',
     '.github/workflows/evm-integration.yml',
     'scripts/ci/plan-ci.mjs',
@@ -660,8 +672,14 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
   );
 
   const mergeNeeds = structuredClone(fullNeeds);
-  mergeNeeds.solidity.result = 'skipped';
   mergeNeeds['solidity-coverage'].result = 'skipped';
+  assert.match(validatePrimaryResults({
+    eventName: 'merge_group',
+    plan: full,
+    needs: mergeNeeds,
+  }).join('\n'), /solidity was selected but ended with skipped/);
+
+  mergeNeeds.solidity.result = 'success';
   assert.deepEqual(validatePrimaryResults({
     eventName: 'merge_group',
     plan: full,
