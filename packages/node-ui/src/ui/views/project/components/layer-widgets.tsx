@@ -1,6 +1,6 @@
 import React, { useId, useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
-import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning, type ConvictionCostCovered } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
@@ -188,26 +188,20 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     let currentAssertion: string | null = null;
     void run(
       async () => {
-        // Seal each draft before sharing — promote moves content OUT of Working Memory, after
-        // which it can no longer be finalized, and a later vm/publish requires a finalized
-        // assertion. The seal is CG-independent (#1116) and promote is off-chain, so no
-        // client-side CG pre-registration is needed. (See OT-RFC-44 Design B.)
+        // The share route seals and transfers each complete KA atomically. It is
+        // off-chain, so no client-side CG pre-registration is needed.
         const assertions = await listAssertions(contextGraphId, 'wm');
         let promoted = 0;
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
-          // Seal the draft first; tolerate already-sealed / nothing-to-seal so re-runs and
-          // empty drafts don't abort the batch (surface real errors).
-          try {
-            await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
-          } catch (e: any) {
-            const m = String(e?.message ?? '');
-            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
-          }
           // PR #710 — thread `subGraph` so sub-graph-scoped assertions hit the correct
           // daemon lookup key `(cg, name, subGraph)`.
-          const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
+          const res = await promoteAssertion(
+            contextGraphId,
+            a.name,
+            a.subGraph ? { subGraphName: a.subGraph } : {},
+          );
           promoted += res.promotedCount;
           if (res.promotedCount === 0) noopCount += 1;
         }
@@ -376,8 +370,8 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
             layer === 'wm'
               ? 'Import data or chat with agents to populate Working Memory.'
               : layer === 'swm'
-                ? 'Promote entities from Working Memory to share them with the team.'
-                : 'Publish entities from Shared Working Memory to verify them on-chain.'
+                ? 'Seal and share complete Knowledge Assets from Working Memory with the team.'
+                : 'Publish complete Knowledge Assets from Shared Working Memory to verify them on-chain.'
           }
         />
       </div>

@@ -41,9 +41,9 @@ import {
   knowledgeAssetPublish,
   knowledgeAssetPublishWithSeal,
   publishAssertionsToVm,
-  SwmSubsetNotSealableError,
   partialPublishWarning,
   knowledgeAssetFinalize,
+  knowledgeAssetShare,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -51,9 +51,8 @@ let baseUrl: string;
 const requestLog: Array<{ url: string; method: string; body: string }> = [];
 let queryBindings: any[] = [];
 // Scripted per-call responses (status + body) for tests that need a non-200
-// reply, e.g. the knowledgeAssetPublishWithSeal recovery contract. Each entry
-// is consumed on first match (FIFO), so a test can sequence "first call 409,
-// next call 200". Cleared in beforeEach.
+// reply, e.g. a fail-closed publish precondition. Each entry is consumed on
+// first match (FIFO). Cleared in beforeEach.
 type ResponseOverride = {
   match: (url: string, method: string, body: string) => boolean;
   status: number;
@@ -72,7 +71,7 @@ function startTestServer(): Promise<void> {
         requestLog.push({ url: reqUrl, method: reqMethod, body });
 
         // Scripted override (consumed on first match) — lets a test return a
-        // 409 then a 200 to exercise the catch→seal→retry path.
+        // specific failure or partial-success response.
         const ovIdx = responseOverrides.findIndex(o => o.match(reqUrl, reqMethod, body));
         if (ovIdx !== -1) {
           const [ov] = responseOverrides.splice(ovIdx, 1);
@@ -355,51 +354,23 @@ describe('UI API tests', () => {
       expect(requestLog.some(r => r.url.includes('/api/shared-memory/publish'))).toBe(false);
     });
 
-    it('knowledgeAssetPublishWithSeal seals in SWM (layer:swm + subGraphName) then retries on a VM_PUBLISH_PRECONDITION 409', async () => {
-      // VM_PUBLISH_PRECONDITION is the SEALABLE 409 — an unsealed full share. The
-      // wrapper seals in place (wm/finalize {layer:"swm"}, forwarding subGraphName) and
-      // retries the publish once. (A PUBLISH_NOT_FULL_SHARE 409 is NOT sealable: the
-      // full-share marker is missing, so finalize(layer:"swm") returns
-      // SWM_SUBSET_NOT_SEALABLE — that path is covered by the throws-no-retry test below.)
+    it('knowledgeAssetPublishWithSeal surfaces a VM_PUBLISH_PRECONDITION without mutating SWM or retrying', async () => {
       responseOverrides.push({
         match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/a/vm/publish'),
         status: 409,
         body: { code: 'VM_PUBLISH_PRECONDITION', error: 'is not finalized' },
       });
 
-      const res = await knowledgeAssetPublishWithSeal('cg-1', 'a', { subGraphName: 'sg' });
+      await expect(
+        knowledgeAssetPublishWithSeal('cg-1', 'a', { subGraphName: 'sg' }),
+      ).rejects.toMatchObject({
+        status: 409,
+        body: { code: 'VM_PUBLISH_PRECONDITION' },
+      });
 
-      const finalize = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets/a/wm/finalize'));
-      expect(finalize, 'must seal in SWM after the 409').toBeTruthy();
-      expect(JSON.parse(finalize!.body).layer).toBe('swm');
-      expect(JSON.parse(finalize!.body).subGraphName).toBe('sg');
-      // Exactly two publish attempts: the failing one + the post-seal retry.
+      expect(requestLog.some(r => r.url.includes('/wm/finalize'))).toBe(false);
       const publishCalls = requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'));
-      expect(publishCalls).toHaveLength(2);
-      // `sealed` flag tells the caller a seal step ran (surface "sealing then publishing").
-      expect(res.sealed).toBe(true);
-    });
-
-    it('knowledgeAssetPublishWithSeal throws SwmSubsetNotSealableError and does NOT retry on SWM_SUBSET_NOT_SEALABLE', async () => {
-      // Publish 409s as not-finalized, but the in-place seal is rejected because
-      // only a subset was shared — surface the typed error, never loop.
-      responseOverrides.push({
-        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/c/vm/publish'),
-        status: 409,
-        body: { code: 'PUBLISH_NOT_FULL_SHARE', error: 'requires a complete full share' },
-      });
-      responseOverrides.push({
-        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/c/wm/finalize'),
-        status: 409,
-        body: { code: 'SWM_SUBSET_NOT_SEALABLE', error: 'share the full asset first' },
-      });
-
-      await expect(knowledgeAssetPublishWithSeal('cg-1', 'c')).rejects.toBeInstanceOf(SwmSubsetNotSealableError);
-
-      // The seal was attempted exactly once and the publish was NOT retried
-      // after the seal failed (one failing publish, no second attempt).
-      expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets/c/wm/finalize'))).toHaveLength(1);
-      expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'))).toHaveLength(1);
+      expect(publishCalls).toHaveLength(1);
     });
 
     it('knowledgeAssetPublishWithSeal surfaces a 207 partial publish (contextGraphError) without throwing', async () => {
@@ -418,7 +389,7 @@ describe('UI API tests', () => {
       expect(res.status).toBe('confirmed');
       expect(res.txHash).toBe('0xdeadbeef');
       expect(res.contextGraphError).toBe('binding failed');
-      // No seal/retry — a 207 is not a 409 precondition.
+      // A 207 is returned directly without any SWM mutation.
       expect(requestLog.some(r => r.url.includes('/wm/finalize'))).toBe(false);
       expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'))).toHaveLength(1);
     });
@@ -592,6 +563,52 @@ describe('UI API tests', () => {
           preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
         }),
       ).toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetFinalize rejects legacy SWM finalization before POSTing', () => {
+      expect(() =>
+        knowledgeAssetFinalize('cg-1', 'legacy', { layer: 'swm' }),
+      ).toThrow('Legacy root-scoped Knowledge Assets are read-only');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetShare sends only atomic scope and rejects root-entity subsets before POSTing', async () => {
+      await knowledgeAssetShare('cg-1', 'asset', {
+        subGraphName: 'sg',
+        entities: 'all', // compatibility-only neutral value
+      });
+      const call = requestLog.find(r => r.url.includes('/api/knowledge-assets/asset/swm/share'));
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-1', subGraphName: 'sg' });
+
+      requestLog.length = 0;
+      expect(() =>
+        knowledgeAssetShare('cg-1', 'asset', { entities: ['urn:root'] }),
+      ).toThrow('root-entity selection is not supported');
+      expect(requestLog).toHaveLength(0);
+
+      expect(() =>
+        knowledgeAssetShare('cg-1', 'asset', { skipSeal: true }),
+      ).toThrow('always sealed before sharing');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('promoteAssertion shares the complete owning KA and never silently widens a legacy subset', async () => {
+      await promoteAssertion('cg-1', 'asset', { subGraphName: 'sg' });
+      const call = requestLog.find(r => r.url.includes('/api/knowledge-assets/asset/swm/share'));
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-1', subGraphName: 'sg' });
+
+      requestLog.length = 0;
+      await promoteAssertion('cg-1', 'legacy-caller', 'all', 'sg-legacy');
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg-legacy',
+      });
+
+      requestLog.length = 0;
+      expect(() => promoteAssertion('cg-1', 'asset', ['urn:root'])).toThrow(
+        'root-entity selection is not supported',
+      );
       expect(requestLog).toHaveLength(0);
     });
 

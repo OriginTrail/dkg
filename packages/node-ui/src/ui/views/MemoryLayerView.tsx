@@ -475,7 +475,11 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       // PR #710 Fix A — thread `subGraph` so the daemon's
       // `(cg, name, subGraph)` lookup hits the right partition;
       // mirrors the AssertionsList fix in components.tsx.
-      const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
+      const res = await promoteAssertion(
+        contextGraphId,
+        assertion.name,
+        assertion.subGraph ? { subGraphName: assertion.subGraph } : {},
+      );
       const outcome = describePromoteResult(assertion.name, res);
       setPromoteResult({
         message: outcome.message + (assertion.subGraph ? ` (in ${assertion.subGraph})` : ''),
@@ -513,7 +517,11 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       for (const a of assertions) {
         currentAssertion = a.name;
         // PR #710 — see comment on the single-row handler above.
-        const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
+        const res = await promoteAssertion(
+          contextGraphId,
+          a.name,
+          a.subGraph ? { subGraphName: a.subGraph } : {},
+        );
         totalPromoted += res.promotedCount;
         if (res.promotedCount === 0) noopCount += 1;
       }
@@ -664,7 +672,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   }, [allSelected, allKeys]);
 
   // Publish a set of named SWM assertions, each as its own KA via the canonical
-  // /vm/publish (with the §4.4 catch→seal→retry safety net). We do NOT pre-
+  // /vm/publish (direct and fail-closed). We do NOT pre-
   // register the CG on-chain: the daemon's /vm/publish runs the local
   // preconditions FIRST and only auto-registers (preserving the stored publish
   // policy) on the `CG_NOT_REGISTERED` retry path — so a doomed publish never
@@ -780,7 +788,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
       </div>
 
       {publishResult && (() => {
-        const { published, total, sealed, partial, partialError, failures, sample, convictionCostCovered } = publishResult;
+        const { published, total, partial, partialError, failures, sample, convictionCostCovered } = publishResult;
         // "Clean" only when every asset published AND none came back as a 207
         // partial (minted on-chain but the CG binding failed).
         const allOk = published === total && published > 0 && partial === 0;
@@ -792,11 +800,6 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
                 ? `Published ${published} of ${total} knowledge asset${total === 1 ? '' : 's'} to Verifiable Memory`
                 : 'NOT published to Verifiable Memory'}
             </div>
-            {sealed > 0 && (
-              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
-                {sealed} asset{sealed === 1 ? ' was' : 's were'} sealed in Shared Memory before publishing.
-              </div>
-            )}
             {partial > 0 && (
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
                 ⚠ {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}

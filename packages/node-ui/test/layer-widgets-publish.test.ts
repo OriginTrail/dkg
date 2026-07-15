@@ -71,7 +71,7 @@ afterEach(() => { document.body.innerHTML = ''; });
 describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
   it('renders the badge from the BATCH convictionCostCovered even when the clean sample has none', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
-      published: 1, total: 1, sealed: 0, partial: 0, failures: [],
+      published: 1, total: 1, partial: 0, failures: [],
       sample: { status: 'confirmed', txHash: '0xtx', kaId: '0xka' }, // clean, NO discount on the sample
       convictionCostCovered: { accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0' },
     });
@@ -89,7 +89,7 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
 
   it('renders NO badge when the batch drew no discount (degrade-hidden #9)', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
-      published: 1, total: 1, sealed: 0, partial: 0, failures: [],
+      published: 1, total: 1, partial: 0, failures: [],
       sample: { status: 'confirmed', txHash: '0xtx', kaId: '0xka' },
       // no convictionCostCovered on the batch
     });
@@ -271,21 +271,19 @@ describe('PromoteWidget — promote flow (#1382)', () => {
   const clickPromote = async (c: HTMLElement) =>
     act(async () => { (c.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement).click(); });
 
-  it('seals (finalize) each draft BEFORE promoting, threading subGraph through both calls', async () => {
+  it('uses one atomic share per draft and threads subGraph without a separate finalize call', async () => {
     const order: string[] = [];
     apiMocks.listAssertions.mockResolvedValue([{ name: 'a1', subGraph: 'sg1' }]);
-    apiMocks.knowledgeAssetFinalize.mockImplementation(async () => { order.push('finalize'); });
+    apiMocks.knowledgeAssetFinalize.mockRejectedValue(new Error('redundant finalize must not run'));
     apiMocks.promoteAssertion.mockImplementation(async () => { order.push('promote'); return { promotedCount: 3 }; });
     const { container, unmount } = await render(
       React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }),
     );
     await clickPromote(container);
-    for (let i = 0; i < 30 && order.length < 2; i++) await flush();
-    // finalize precedes promote for the draft (a dropped seal would fail this).
-    expect(order).toEqual(['finalize', 'promote']);
-    // subGraph threaded through BOTH calls (a dropped passthrough would fail this).
-    expect(apiMocks.knowledgeAssetFinalize).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
-    expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', 'all', 'sg1');
+    for (let i = 0; i < 30 && order.length < 1; i++) await flush();
+    expect(order).toEqual(['promote']);
+    expect(apiMocks.knowledgeAssetFinalize).not.toHaveBeenCalled();
+    expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
     expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
     await unmount();
   });
@@ -350,7 +348,7 @@ describe('LayerWidgetStrip — action-result survives the widget unmount (OVzK3)
   });
 
   it('keeps the "Published N knowledge assets" feedback after publish empties the swm layer', async () => {
-    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 2, total: 2, sealed: 0, partial: 0, failures: [] });
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 2, total: 2, partial: 0, failures: [] });
     const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
     expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeTruthy();
     await clickBtn(container, 'widget-publish-vm-btn');

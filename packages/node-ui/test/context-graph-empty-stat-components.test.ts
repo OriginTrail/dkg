@@ -20,10 +20,8 @@ vi.mock('../src/ui/api.js', () => ({
   writeProfileQueryCatalog: vi.fn(),
   fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })),
   // ka.tsx (pulled in transitively via the components barrel) imports these —
-  // they must exist on the full mock or module-load fails. SwmSubsetNotSealableError
-  // is a real class because ka.tsx uses it in an `instanceof` check.
+  // they must exist on the full mock or module-load fails.
   knowledgeAssetPublishWithSeal: vi.fn(),
-  SwmSubsetNotSealableError: class SwmSubsetNotSealableError extends Error {},
   partialPublishWarning: vi.fn(() => ''),
   PARTIAL_PUBLISH_STATUS_SUFFIX: 'binding incomplete',
 }));
