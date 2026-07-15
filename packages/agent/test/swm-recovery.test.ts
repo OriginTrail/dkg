@@ -18,6 +18,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { deletePriorGraphScopedSwmRecoveryMetadata } from '../src/sync/requester/graph-scoped-swm-meta-replace.js';
+import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 
 /**
  * integration. `recoverContextGraphSwm` fetches a CG's
@@ -35,6 +36,7 @@ const ctx: OperationContext = { operationId: 'test', operationName: 'sync' } as 
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7';
+const SECOND_UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/8';
 
 class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
   readonly snapshots = new Map<string, Quad[]>();
@@ -52,6 +54,51 @@ class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
 function page(quads: Quad[], completed = true): SyncPageResult {
   return { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k', completed };
 }
+
+function graphBackedFixture(params: {
+  ual: string;
+  operationId: string;
+  payload: Quad[];
+  subGraphName?: string;
+}) {
+  const scope = createGraphKnowledgeAssetScope(params.ual, 1);
+  const metaGraph = params.subGraphName
+    ? `did:dkg:context-graph:${CG}/${params.subGraphName}/_shared_memory_meta`
+    : WS_META;
+  const assertionGraph = knowledgeAssetLayerGraphUri(
+    CG,
+    MemoryLayer.SharedWorkingMemory,
+    scope,
+    params.subGraphName,
+  );
+  const operationSubject = `urn:dkg:share:${CG}:${params.operationId}`;
+  const headSubject = `${params.ual}#dkg-swm-head`;
+  const snapshotGraph =
+    `did:dkg:context-graph:${encodeURIComponent(CG)}/_shared_memory_snapshots/` +
+    `${encodeURIComponent(params.subGraphName ?? '_')}/${encodeURIComponent(params.operationId)}/ka`;
+  const meta: Quad[] = [
+    ...generateKnowledgeAssetShareMetadata({
+      shareOperationId: params.operationId,
+      contextGraphId: CG,
+      kaUal: params.ual,
+      assertionVersion: 1,
+      publicTripleCount: params.payload.length,
+      privateTripleCount: 0,
+      publisherPeerId: 'peer-source',
+      timestamp: new Date(0),
+      ...(params.subGraphName ? { subGraphName: params.subGraphName } : {}),
+    }, metaGraph),
+    { subject: operationSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${workspacePublicQuadsDigest(params.payload)}"`, graph: metaGraph },
+    { subject: operationSubject, predicate: `${DKG}publicSnapshotGraph`, object: snapshotGraph, graph: metaGraph },
+    { subject: headSubject, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, graph: metaGraph },
+    { subject: headSubject, predicate: `${DKG}kaUal`, object: params.ual, graph: metaGraph },
+    { subject: headSubject, predicate: `${DKG}assertionVersion`, object: `"1"^^<${XSD_INTEGER}>`, graph: metaGraph },
+    { subject: headSubject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: metaGraph },
+    { subject: headSubject, predicate: `${DKG}shareOperationId`, object: `"${params.operationId}"`, graph: metaGraph },
+  ];
+  return { assertionGraph, headSubject, meta, metaGraph, operationSubject, snapshotGraph };
+}
+
 async function statusValues(store: OxigraphStore): Promise<string[]> {
   const r = await store.query(`SELECT ?o WHERE { GRAPH <${WS}> { <${SUBJ}> <${STATUS}> ?o } }`);
   return r.type === 'bindings' ? r.bindings.map((b) => b['o']) : [];
@@ -59,7 +106,13 @@ async function statusValues(store: OxigraphStore): Promise<string[]> {
 
 describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
   const stores: OxigraphStore[] = [];
-  afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
+  const workers: SyncVerifyWorker[] = [];
+  afterEach(async () => {
+    await Promise.all([
+      ...stores.splice(0).map((s) => s.close().catch(() => {})),
+      ...workers.splice(0).map((worker) => worker.close().catch(() => {})),
+    ]);
+  });
 
   function makeDeps(store: OxigraphStore, sourceData: Quad[], sourceMeta: Quad[] = []) {
     return {
@@ -445,6 +498,8 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       { subject: headSubject, predicate: `${DKG}shareOperationId`, object: `"${operationId}"`, graph: subMetaGraph },
     ];
     let verifierRegistered: readonly string[] | undefined;
+    const verifier = new SyncVerifyWorker();
+    workers.push(verifier);
 
     const result = await recoverContextGraphSwm({
       ctx,
@@ -463,14 +518,15 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         }
         return page(payload);
       },
-      processSharedMemoryBatch: async (_dataQuads, metaQuads, _cg, registered) => {
+      processSharedMemoryBatch: async (dataQuads, metaQuads, cgId, registered, excluded) => {
         verifierRegistered = registered;
-        return {
-          verifiedData: [],
-          verifiedMeta: metaQuads,
-          entityCreators: [],
-          droppedDataTriples: 1,
-        };
+        return verifier.processSharedMemoryBatch(
+          dataQuads,
+          metaQuads,
+          cgId,
+          registered,
+          excluded,
+        );
       },
       store,
       replaceMetaForGraphAssets: async () => {},
@@ -487,6 +543,134 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     );
     expect(recovered.type === 'bindings' ? recovered.bindings.map((row) => row['o']) : [])
       .toEqual(['"recovered"']);
+    const recoveredHead = await store.query(
+      `SELECT ?shareId WHERE { GRAPH <${subMetaGraph}> { <${headSubject}> <${DKG}shareOperationId> ?shareId } }`,
+    );
+    expect(recoveredHead.type === 'bindings'
+      ? recoveredHead.bindings.map((row) => row['shareId'])
+      : []).toEqual([`"${operationId}"`]);
+    const recoveredOperation = await store.query(
+      `SELECT ?digest WHERE { GRAPH <${subMetaGraph}> { <${operationSubject}> <${DKG}publicQuadsDigest> ?digest } }`,
+    );
+    expect(recoveredOperation.type === 'bindings'
+      ? recoveredOperation.bindings.map((row) => row['digest'])
+      : []).toEqual([`"${workspacePublicQuadsDigest(payload)}"`]);
+  });
+
+  it('does not mutate exact or legacy data when a graph-backed snapshot is incomplete', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const payload: Quad[] = [
+      { subject: 'urn:rootless:partial', predicate: STATUS, object: '"fresh"', graph: '' },
+    ];
+    const fixture = graphBackedFixture({
+      ual: UAL,
+      operationId: 'rootless-partial-op',
+      payload,
+    });
+    await store.insert([
+      { subject: 'urn:rootless:partial', predicate: STATUS, object: '"stale-safe"', graph: fixture.assertionGraph },
+      { subject: SUBJ, predicate: STATUS, object: '"legacy-stale-safe"', graph: WS },
+    ]);
+    const deletedCheckpoints: string[] = [];
+
+    const result = await recoverContextGraphSwm({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => {
+        if (phase === 'meta') return page(fixture.meta);
+        if (phase === 'data') {
+          return page([{ subject: SUBJ, predicate: STATUS, object: '"legacy-new"', graph: WS }]);
+        }
+        return { ...page(payload, false), resumedFromOffset: 0, nextOffset: 1 };
+      },
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
+        verifiedData: dataQuads,
+        verifiedMeta: metaQuads,
+        entityCreators: [{ dataGraph: WS, entity: SUBJ, creator: 'peer-source' }],
+        droppedDataTriples: 0,
+      }),
+      store,
+      replaceMetaForGraphAssets: async () => {},
+      ensureContextGraph: async () => {},
+      setCheckpoint: () => {},
+      deleteCheckpoint: (key) => { deletedCheckpoints.push(key); },
+    });
+
+    expect(result).toMatchObject({ completed: false, replacedRoots: 0, replacedGraphs: 0 });
+    expect(deletedCheckpoints).toContain('k');
+    const exact = await store.query(
+      `SELECT ?o WHERE { GRAPH <${fixture.assertionGraph}> { <urn:rootless:partial> <${STATUS}> ?o } }`,
+    );
+    expect(exact.type === 'bindings' ? exact.bindings.map((row) => row['o']) : [])
+      .toEqual(['"stale-safe"']);
+    expect(await statusValues(store)).toEqual(['"legacy-stale-safe"']);
+  });
+
+  it('verifies every graph-scoped asset before mutating the first asset or legacy roots', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const firstPayload: Quad[] = [
+      { subject: 'urn:rootless:first', predicate: STATUS, object: '"first-fresh"', graph: '' },
+    ];
+    const secondPayload: Quad[] = [
+      { subject: 'urn:rootless:second', predicate: STATUS, object: '"second-fresh"', graph: '' },
+    ];
+    const first = graphBackedFixture({
+      ual: UAL,
+      operationId: 'rootless-first-op',
+      payload: firstPayload,
+    });
+    const second = graphBackedFixture({
+      ual: SECOND_UAL,
+      operationId: 'rootless-second-op',
+      payload: secondPayload,
+    });
+    await store.insert([
+      { subject: 'urn:rootless:first', predicate: STATUS, object: '"first-stale-safe"', graph: first.assertionGraph },
+      { subject: 'urn:rootless:second', predicate: STATUS, object: '"second-stale-safe"', graph: second.assertionGraph },
+      { subject: SUBJ, predicate: STATUS, object: '"legacy-stale-safe"', graph: WS },
+    ]);
+
+    await expect(recoverContextGraphSwm({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase, graphUri): Promise<SyncPageResult> => {
+        if (phase === 'meta') return page([...first.meta, ...second.meta]);
+        if (phase === 'data') {
+          return page([{ subject: SUBJ, predicate: STATUS, object: '"legacy-new"', graph: WS }]);
+        }
+        if (graphUri === first.snapshotGraph) return page(firstPayload);
+        return page([{ ...secondPayload[0]!, object: '"second-corrupt"' }]);
+      },
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
+        verifiedData: dataQuads,
+        verifiedMeta: metaQuads,
+        entityCreators: [{ dataGraph: WS, entity: SUBJ, creator: 'peer-source' }],
+        droppedDataTriples: 0,
+      }),
+      store,
+      replaceMetaForGraphAssets: async () => {},
+      ensureContextGraph: async () => {},
+      setCheckpoint: () => {},
+      deleteCheckpoint: () => {},
+    })).rejects.toThrow('failed integrity');
+
+    const firstAfter = await store.query(
+      `SELECT ?o WHERE { GRAPH <${first.assertionGraph}> { <urn:rootless:first> <${STATUS}> ?o } }`,
+    );
+    expect(firstAfter.type === 'bindings' ? firstAfter.bindings.map((row) => row['o']) : [])
+      .toEqual(['"first-stale-safe"']);
+    const secondAfter = await store.query(
+      `SELECT ?o WHERE { GRAPH <${second.assertionGraph}> { <urn:rootless:second> <${STATUS}> ?o } }`,
+    );
+    expect(secondAfter.type === 'bindings' ? secondAfter.bindings.map((row) => row['o']) : [])
+      .toEqual(['"second-stale-safe"']);
+    expect(await statusValues(store)).toEqual(['"legacy-stale-safe"']);
   });
 
   it('rejects a corrupt rootless snapshot before replacing the existing exact graph', async () => {

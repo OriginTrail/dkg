@@ -26,6 +26,8 @@ export interface SyncRequestEnvelope {
   requesterSignatureVS?: string;
   phase?: SyncPhase;
   snapshotRef?: string;
+  /** Explicit graph-backed snapshot target. `snapshotRef` remains the store-ref field. */
+  snapshotGraph?: string;
   authPurpose?: string;
   authSelector?: string;
   /**
@@ -70,6 +72,7 @@ interface BuildSyncRequestParams {
   requesterPeerId: string;
   phase?: SyncPhase;
   snapshotRef?: string;
+  snapshotGraph?: string;
   authPurpose?: string;
   authSelector?: string;
   sinceBatchId?: string;
@@ -129,6 +132,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     requesterPeerId,
     phase,
     snapshotRef,
+    snapshotGraph,
     authPurpose,
     authSelector,
     sinceBatchId,
@@ -159,7 +163,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     const phaseSuffix = phase === 'meta'
       ? '|meta'
       : phase === 'snapshot'
-        ? `|snapshot|${snapshotRef ?? ''}`
+        ? `|snapshot|${snapshotGraph ?? snapshotRef ?? ''}`
         : phase === 'catalog'
           // The public `_catalog` facet (§7) is open-served unauthenticated, so
           // it rides THIS text form. Emit the phase token in parts[3] (same slot
@@ -186,6 +190,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   };
   if (phase) request.phase = phase;
   if (snapshotRef) request.snapshotRef = snapshotRef;
+  if (snapshotGraph) request.snapshotGraph = snapshotGraph;
   if (authPurpose) request.authPurpose = authPurpose;
   if (authSelector) request.authSelector = authSelector;
   // Phase C: set AFTER digest computation below — it is intentionally outside

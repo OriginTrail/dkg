@@ -77,6 +77,7 @@ interface FetchSyncPagesParams {
   phase: SyncPhase;
   graphUri: string;
   snapshotRef?: string;
+  snapshotGraph?: string;
   deadline: number;
   syncPageTimeoutMs: number;
   syncRouterAttempts: number;
@@ -114,7 +115,7 @@ interface FetchSyncPagesParams {
    * members-only `isMemberRecoveryAuthorized`). Default false ⇒ normal sync.
    */
   recovery?: boolean;
-  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string, recovery?: boolean) => Promise<Uint8Array>;
+  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string, recovery?: boolean, snapshotGraph?: string) => Promise<Uint8Array>;
   /**
    * Phase C — optional, gap-safe delta-sync high-water mark. Forwarded to the
    * responder for the durable DATA phase so it returns only KAs with
@@ -184,6 +185,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     phase,
     graphUri,
     snapshotRef,
+    snapshotGraph,
     deadline,
     syncPageTimeoutMs,
     syncRouterAttempts,
@@ -273,7 +275,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // full rationale (codex review on #569 follow-ups #1, #4-#8).
         requestFactory: async () => {
           throwIfAborted(signal);
-          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
+          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery, snapshotGraph);
           throwIfAborted(signal);
           return request;
         },

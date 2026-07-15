@@ -154,6 +154,8 @@ export interface SyncRequestEnvelope {
   includeSharedMemory: boolean;
   phase?: SyncPhase;
   snapshotRef?: string;
+  /** Explicit graph-backed snapshot target; kept in lockstep with request-build.ts. */
+  snapshotGraph?: string;
   authPurpose?: string;
   authSelector?: string;
   targetPeerId?: string;

@@ -939,6 +939,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         includeSharedMemory: parsed.includeSharedMemory ?? false,
         phase: normalizeSyncPhase(parsed.phase),
         snapshotRef: typeof parsed.snapshotRef === 'string' ? parsed.snapshotRef : undefined,
+        snapshotGraph: typeof parsed.snapshotGraph === 'string' ? parsed.snapshotGraph : undefined,
         authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
         authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
         targetPeerId: parsed.targetPeerId,
@@ -1079,6 +1080,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     sinceBatchId?: string,
     syncSessionId?: string,
     recovery?: boolean,
+    snapshotGraph?: string,
   ): Promise<Uint8Array> {
     // Policy-read uncertainty must not abort bootstrap or downgrade it to the
     // public pipe encoding. Treat an unreadable policy as private; catalog is
@@ -1123,6 +1125,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       requesterPeerId: this.peerId,
       phase,
       snapshotRef,
+      snapshotGraph,
       // Phase C: only forwarded for the durable DATA phase — SWM has no
       // `dkg:batchId` (pre-chain) and meta must never be narrowed. The hint
       // is gap-safe only when it comes from a CONTIGUOUS watermark, so it is

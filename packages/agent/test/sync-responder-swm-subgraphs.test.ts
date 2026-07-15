@@ -414,6 +414,8 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
     const storeSnapshot = new OxigraphStore();
     const snapshotGraph =
       `${CG_PREFIX}/_shared_memory_snapshots/_/graph-backed-op/ka`;
+    const registeredSubGraphSnapshot =
+      `${CG_PREFIX}/_shared_memory_snapshots/${SUB_NAME}/graph-backed-op/ka`;
     const unregisteredSubGraphSnapshot =
       `${CG_PREFIX}/_shared_memory_snapshots/${OTHER_SUB}/graph-backed-op/ka`;
     await storeSnapshot.insert([
@@ -430,11 +432,18 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
         object: '"graph-backed-b"',
       },
       {
+        graph: registeredSubGraphSnapshot,
+        subject: 'urn:rootless:registered-subgraph',
+        predicate: 'http://schema.org/status',
+        object: '"registered-subgraph-snapshot"',
+      },
+      {
         graph: unregisteredSubGraphSnapshot,
         subject: 'urn:rootless:private-subgraph',
         predicate: 'http://schema.org/status',
         object: '"must-not-leak"',
       },
+      ...subGraphRegistrationQuads(CG_ID, SUB_NAME),
     ]);
     const capSnapshot = captureHandler();
     registerSyncHandler({
@@ -457,7 +466,7 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       limit: 1,
       includeSharedMemory: true,
       phase: 'snapshot',
-      snapshotRef: snapshotGraph,
+      snapshotGraph,
     });
     const secondPage = await capSnapshot.invoke({
       contextGraphId: CG_ID,
@@ -465,7 +474,7 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       limit: 1,
       includeSharedMemory: true,
       phase: 'snapshot',
-      snapshotRef: snapshotGraph,
+      snapshotGraph,
     });
     expect(firstPage.trim().split('\n')).toHaveLength(1);
     expect(secondPage.trim().split('\n')).toHaveLength(1);
@@ -475,13 +484,35 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
     expect(firstPage).not.toContain(snapshotGraph);
     expect(secondPage).not.toContain(snapshotGraph);
 
+    const registered = await capSnapshot.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: 5000,
+      includeSharedMemory: true,
+      phase: 'snapshot',
+      snapshotGraph: registeredSubGraphSnapshot,
+    });
+    expect(registered).toContain('"registered-subgraph-snapshot"');
+
+    // Rolling compatibility: old requesters encoded graph-backed intent in
+    // snapshotRef. The centralized target parser keeps accepting that form.
+    const legacy = await capSnapshot.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: 1,
+      includeSharedMemory: true,
+      phase: 'snapshot',
+      snapshotRef: snapshotGraph,
+    });
+    expect(legacy).not.toBe('');
+
     const denied = await capSnapshot.invoke({
       contextGraphId: CG_ID,
       offset: 0,
       limit: 5000,
       includeSharedMemory: true,
       phase: 'snapshot',
-      snapshotRef: unregisteredSubGraphSnapshot,
+      snapshotGraph: unregisteredSubGraphSnapshot,
     });
     expect(denied).toBe('');
     await storeSnapshot.close();

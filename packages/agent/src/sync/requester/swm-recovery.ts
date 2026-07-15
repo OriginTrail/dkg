@@ -79,6 +79,7 @@ export interface RecoverContextGraphSwmDeps {
     graphUri: string,
     deadline: number,
     snapshotRef?: string,
+    snapshotGraph?: string,
   ) => Promise<SyncPageResult>;
   readonly processSharedMemoryBatch: (
     wsDataQuads: Quad[],
@@ -202,6 +203,7 @@ async function fetchGraphBackedSnapshotQuads(
       'snapshot',
       descriptor.publicSnapshotGraph,
       deps.deadline,
+      descriptor.publicSnapshotGraph,
       descriptor.publicSnapshotGraph,
     );
     // Recovery has no durable cross-invocation snapshot accumulator. A resumed
@@ -346,6 +348,17 @@ export async function recoverContextGraphSwm(
     legacyDataQuads, meta.quads, deps.contextGraphId, registered, excluded,
   );
 
+  // Graph-scoped descriptor metadata has already passed its dedicated,
+  // graph-local validation above. Keep it out of the legacy verifier's remote
+  // lane admission (which must remain limited to locally registered
+  // subgraphs), then merge it back into the final metadata apply set. Without
+  // this split, a bootstrapped subgraph recovers its exact data graph but loses
+  // the active head and WorkspaceOperation rows needed to resolve it later.
+  const verifiedMeta = distinctQuads([
+    ...processed.verifiedMeta,
+    ...graphScopedDescriptors.flatMap((descriptor) => descriptor.metadataQuads),
+  ]);
+
   // Build the complete exact-graph apply plan before the first store mutation.
   // A corrupt graph-scoped snapshot must not leave already-replaced legacy
   // roots or an earlier exact graph behind.
@@ -391,8 +404,8 @@ export async function recoverContextGraphSwm(
   if (graphScopedDescriptors.length > 0) {
     await deps.replaceMetaForGraphAssets(graphScopedDescriptors);
   }
-  if (processed.verifiedMeta.length > 0) {
-    await deps.store.insert([...processed.verifiedMeta]);
+  if (verifiedMeta.length > 0) {
+    await deps.store.insert(verifiedMeta);
   }
 
   // R2 — hydrate the Rule-4 ownership cache for the recovered roots (parity with
@@ -415,15 +428,27 @@ export async function recoverContextGraphSwm(
     deps.ctx,
     `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: replaced ${applied.replacedRoots} roots, ` +
     `${replacedGraphs} exact graphs, ${applied.insertedQuads + insertedGraphQuads} data + ` +
-    `${processed.verifiedMeta.length} meta triples`,
+    `${verifiedMeta.length} meta triples`,
   );
 
   return {
     replacedRoots: applied.replacedRoots,
     replacedGraphs,
     insertedDataQuads: applied.insertedQuads + insertedGraphQuads,
-    insertedMetaQuads: processed.verifiedMeta.length,
+    insertedMetaQuads: verifiedMeta.length,
     droppedDataTriples: processed.droppedDataTriples,
     completed: true,
   };
+}
+
+function distinctQuads(quads: readonly Quad[]): Quad[] {
+  const seen = new Set<string>();
+  const result: Quad[] = [];
+  for (const quad of quads) {
+    const key = `${quad.graph}\u0000${quad.subject}\u0000${quad.predicate}\u0000${quad.object}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(quad);
+  }
+  return result;
 }

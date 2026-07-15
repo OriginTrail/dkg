@@ -482,6 +482,7 @@ function syncPageFetchCoalescingKey(params: {
   graphUri: string;
   deadline: number;
   snapshotRef?: string;
+  snapshotGraph?: string;
   sinceBatchId?: string;
   recovery?: boolean;
   forceFreshSession?: boolean;
@@ -494,6 +495,7 @@ function syncPageFetchCoalescingKey(params: {
     params.graphUri,
     params.deadline,
     params.snapshotRef ?? null,
+    params.snapshotGraph ?? null,
     params.sinceBatchId ?? null,
     params.recovery === true,
     params.forceFreshSession === true,
@@ -4249,6 +4251,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Authoritative snapshot callers must rotate the responder session even
     // when an unfinished offset-zero requester session is still cached.
     forceFreshSession?: boolean,
+    // Explicit target for graph-backed SWM snapshots. Kept separate from
+    // content-addressed snapshotRef while legacy URI-shaped refs remain readable.
+    snapshotGraph?: string,
   ): Promise<SyncPageResult> {
     const coalescingKey = syncPageFetchCoalescingKey({
       remotePeerId,
@@ -4258,6 +4263,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       graphUri,
       deadline,
       snapshotRef,
+      snapshotGraph,
       sinceBatchId,
       recovery,
       forceFreshSession,
@@ -4295,6 +4301,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       phase,
       graphUri,
       snapshotRef,
+      snapshotGraph,
       sinceBatchId,
       deadline,
       recovery,
@@ -4323,7 +4330,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       buildSyncRequest: this.buildSyncRequest.bind(this),
       parseAndFilter: (nquadsText, targetGraphUri, targetContextGraphId) => {
         if (phase === 'snapshot') {
-          const quads = parseWorkspacePublicSnapshotNQuads(nquadsText, snapshotRef ?? 'unknown');
+          const quads = parseWorkspacePublicSnapshotNQuads(nquadsText, snapshotRef ?? snapshotGraph ?? 'unknown');
           return Promise.resolve({ quads, totalQuads: quads.length });
         }
         return this.getOrCreateSyncVerifyWorker().parseAndFilter(nquadsText, targetGraphUri, targetContextGraphId);
@@ -4451,8 +4458,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         store: this.store,
         listSubGraphs: (id) => this.listSubGraphs(id),
         createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),
-        fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
-          this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
+        fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, snapshotGraph) =>
+          this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true, undefined, snapshotGraph),
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
           this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
         publicSnapshotStore: this.publicSnapshotStore,
@@ -4663,8 +4670,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           store: this.store,
           listSubGraphs: (id) => this.listSubGraphs(id),
           createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),
-          fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
-            this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
+          fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, snapshotGraph) =>
+            this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true, undefined, snapshotGraph),
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
           publicSnapshotStore: this.publicSnapshotStore,

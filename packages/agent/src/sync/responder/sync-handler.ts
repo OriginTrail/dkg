@@ -11,6 +11,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
+import { parseSnapshotTarget } from '../snapshot-target.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
@@ -580,12 +581,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (isWorkspace) {
         const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
         if (phase === 'snapshot') {
-          const snapshotRef = request.snapshotRef?.trim();
-          if (!snapshotRef) {
+          const snapshotTarget = parseSnapshotTarget(request);
+          if (!snapshotTarget) {
             return new TextEncoder().encode('');
           }
           let snapshot: Quad[];
-          if (snapshotRef.startsWith('did:dkg:context-graph:')) {
+          if (snapshotTarget.kind === 'graphBacked') {
             const rows = await readGraphBackedSwmSnapshotPage({
               store,
               graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
@@ -594,7 +595,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
                 { refresh: offset === 0, signal },
               ),
               contextGraphId,
-              snapshotGraph: snapshotRef,
+              snapshotGraph: snapshotTarget.graph,
               offset,
               limit,
               signal,
@@ -607,7 +608,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             }));
           } else {
             if (!publicSnapshotStore) return new TextEncoder().encode('');
-            const stored = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal);
+            const stored = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotTarget.ref), signal);
             if (!stored) return new TextEncoder().encode('');
             snapshot = stored.slice(offset, offset + limit);
           }
@@ -615,7 +616,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             return new TextEncoder().encode('');
           }
           nquads.push(serializeWorkspacePublicSnapshotQuads(snapshot).trimEnd());
-          logFirstPageDetail(() => `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${snapshot.length}`);
+          const targetLabel = snapshotTarget.kind === 'graphBacked'
+            ? `graph=${snapshotTarget.graph}`
+            : `ref=${snapshotTarget.ref}`;
+          logFirstPageDetail(() => `Sync responder SWM snapshot for "${contextGraphId}" ${targetLabel}: auth=${authDurationMs}ms quads=${snapshot.length}`);
         } else if (phase === 'meta') {
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(

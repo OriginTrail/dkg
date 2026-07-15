@@ -10,6 +10,16 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { stripLiteral } from '../dkg-agent-utils.js';
+import {
+  distinctRdfObjects,
+  optionalRdfLiteral,
+  optionalRdfObject,
+  requireRdfLiteral,
+  requireRdfObject,
+  requireRdfPositiveIntegerString,
+  requireRdfSafeInteger,
+} from './rdf-metadata.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -147,12 +157,12 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     }
 
     const kaUalFromHead = headSubject.slice(0, -HEAD_SUFFIX.length);
-    const scopeVersion = requireSafeInteger(headRows, CONTENT_SCOPE_VERSION, 'contentScopeVersion');
+    const scopeVersion = requireRdfSafeInteger(headRows, CONTENT_SCOPE_VERSION, 'contentScopeVersion');
     if (scopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new Error(`Graph-scoped SWM head ${headSubject} has unsupported contentScopeVersion ${scopeVersion}`);
     }
-    const kaUal = requireSingle(headRows, KA_UAL, 'kaUal');
-    const assertionVersion = requirePositiveInteger(headRows, ASSERTION_VERSION, 'assertionVersion');
+    const kaUal = requireRdfObject(headRows, KA_UAL, 'kaUal');
+    const assertionVersion = requireRdfPositiveIntegerString(headRows, ASSERTION_VERSION, 'assertionVersion');
     const scope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
     if (scope.ual !== kaUal || scope.ual !== kaUalFromHead) {
       throw new Error(`Graph-scoped SWM head ${headSubject} has a non-canonical or mismatched kaUal`);
@@ -165,7 +175,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       scope,
       subGraphName,
     );
-    const assertionGraph = requireSingle(headRows, ASSERTION_GRAPH, 'assertionGraph');
+    const assertionGraph = requireRdfObject(headRows, ASSERTION_GRAPH, 'assertionGraph');
     if (assertionGraph !== expectedAssertionGraph) {
       throw new Error(
         `Graph-scoped SWM head ${headSubject} assertionGraph mismatch: ` +
@@ -173,7 +183,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       );
     }
 
-    const shareOperationId = requireLiteral(headRows, SHARE_OPERATION_ID, 'shareOperationId').trim();
+    const shareOperationId = requireRdfLiteral(headRows, SHARE_OPERATION_ID, 'shareOperationId').trim();
     if (!shareOperationId) throw new Error(`Graph-scoped SWM head ${headSubject} has an empty shareOperationId`);
     const operationSubject = `urn:dkg:share:${params.contextGraphId}:${shareOperationId}`;
     const operationRows = byGraphAndSubject.get(`${metaGraph}\u0000${operationSubject}`) ?? [];
@@ -188,7 +198,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       subGraphName,
     });
 
-    const publicQuadsDigest = requireLiteral(
+    const publicQuadsDigest = requireRdfLiteral(
       operationRows,
       PUBLIC_QUADS_DIGEST,
       'publicQuadsDigest',
@@ -196,7 +206,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     if (!/^sha256:[0-9a-f]{64}$/.test(publicQuadsDigest)) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publicQuadsDigest`);
     }
-    const publicQuadsCount = requireSafeInteger(
+    const publicQuadsCount = requireRdfSafeInteger(
       operationRows,
       PUBLIC_QUADS_COUNT,
       'publicQuadsCount',
@@ -204,7 +214,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     if (publicQuadsCount < 0) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has a negative publicQuadsCount`);
     }
-    const privateTripleCount = requireSafeInteger(
+    const privateTripleCount = requireRdfSafeInteger(
       operationRows,
       PRIVATE_TRIPLE_COUNT,
       'privateTripleCount',
@@ -212,7 +222,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     if (privateTripleCount < 0 || (privateTripleCount === 0 && publicQuadsCount === 0)) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has invalid public/private counts`);
     }
-    const privateRoot = optionalSingle(operationRows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot');
+    const privateRoot = optionalRdfObject(operationRows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot');
     if (
       (privateTripleCount > 0 && !/^0x[0-9a-fA-F]{64}$/.test(stripLiteral(privateRoot ?? '')))
       || (privateTripleCount === 0 && privateRoot !== undefined)
@@ -220,12 +230,12 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid private commitment`);
     }
 
-    const publicSnapshotGraph = optionalSingle(
+    const publicSnapshotGraph = optionalRdfObject(
       operationRows,
       PUBLIC_SNAPSHOT_GRAPH,
       'publicSnapshotGraph',
     );
-    const explicitSnapshotRef = optionalLiteral(
+    const explicitSnapshotRef = optionalRdfLiteral(
       operationRows,
       PUBLIC_SNAPSHOT_REF,
       'publicSnapshotRef',
@@ -253,7 +263,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publicSnapshotRef`);
     }
 
-    const publisherPeerId = requireLiteral(operationRows, PUBLISHER_PEER_ID, 'publisherPeerId').trim();
+    const publisherPeerId = requireRdfLiteral(operationRows, PUBLISHER_PEER_ID, 'publisherPeerId').trim();
     if (!publisherPeerId) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an empty publisherPeerId`);
     }
@@ -342,31 +352,31 @@ function validateOperationRows(params: {
   if (!rows.some((row) => row.predicate === RDF_TYPE && row.object === WORKSPACE_OPERATION)) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} is missing its type`);
   }
-  requireSingle(rows, PUBLISHED_AT, 'publishedAt');
-  if (requireSafeInteger(rows, CONTENT_SCOPE_VERSION, 'contentScopeVersion') !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+  requireRdfObject(rows, PUBLISHED_AT, 'publishedAt');
+  if (requireRdfSafeInteger(rows, CONTENT_SCOPE_VERSION, 'contentScopeVersion') !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid scope version`);
   }
-  if (requireLiteral(rows, CONTEXT_GRAPH_ID, 'contextGraphId') !== params.contextGraphId) {
+  if (requireRdfLiteral(rows, CONTEXT_GRAPH_ID, 'contextGraphId') !== params.contextGraphId) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has a contextGraphId mismatch`);
   }
-  if (requireLiteral(rows, SHARE_OPERATION_ID, 'shareOperationId') !== params.shareOperationId) {
+  if (requireRdfLiteral(rows, SHARE_OPERATION_ID, 'shareOperationId') !== params.shareOperationId) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has a shareOperationId mismatch`);
   }
-  if (requireSingle(rows, KA_UAL, 'kaUal') !== params.kaUal) {
+  if (requireRdfObject(rows, KA_UAL, 'kaUal') !== params.kaUal) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has a kaUal mismatch`);
   }
-  if (requirePositiveInteger(rows, ASSERTION_VERSION, 'assertionVersion') !== params.assertionVersion) {
+  if (requireRdfPositiveIntegerString(rows, ASSERTION_VERSION, 'assertionVersion') !== params.assertionVersion) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an assertionVersion mismatch`);
   }
-  const operationSubGraph = optionalLiteral(rows, SUB_GRAPH_NAME, 'subGraphName')?.trim();
+  const operationSubGraph = optionalRdfLiteral(rows, SUB_GRAPH_NAME, 'subGraphName')?.trim();
   if (operationSubGraph !== params.subGraphName) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has a subGraphName mismatch`);
   }
-  const accessPolicy = optionalLiteral(rows, ACCESS_POLICY, 'accessPolicy')?.trim();
+  const accessPolicy = optionalRdfLiteral(rows, ACCESS_POLICY, 'accessPolicy')?.trim();
   if (accessPolicy && !['public', 'ownerOnly', 'allowList'].includes(accessPolicy)) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid accessPolicy`);
   }
-  const allowedPeers = distinctObjects(rows, ALLOWED_PEER).map(stripLiteral).filter(Boolean);
+  const allowedPeers = distinctRdfObjects(rows, ALLOWED_PEER, { stripLiterals: true }).filter(Boolean);
   if (
     (accessPolicy === 'allowList' && allowedPeers.length === 0)
     || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
@@ -434,58 +444,4 @@ function groupByGraphAndSubject(quads: readonly Quad[]): Map<string, Quad[]> {
     else grouped.set(key, [quad]);
   }
   return grouped;
-}
-
-function distinctObjects(rows: readonly Quad[], predicate: string): string[] {
-  return [...new Set(rows.filter((row) => row.predicate === predicate).map((row) => row.object))];
-}
-
-function requireSingle(rows: readonly Quad[], predicate: string, field: string): string {
-  const values = distinctObjects(rows, predicate);
-  if (values.length !== 1) {
-    throw new Error(`${values.length === 0 ? 'missing' : 'ambiguous'} ${field}`);
-  }
-  return values[0]!;
-}
-
-function optionalSingle(rows: readonly Quad[], predicate: string, field: string): string | undefined {
-  const values = distinctObjects(rows, predicate);
-  if (values.length > 1) throw new Error(`ambiguous ${field}`);
-  return values[0];
-}
-
-function requireLiteral(rows: readonly Quad[], predicate: string, field: string): string {
-  return stripLiteral(requireSingle(rows, predicate, field));
-}
-
-function optionalLiteral(rows: readonly Quad[], predicate: string, field: string): string | undefined {
-  const value = optionalSingle(rows, predicate, field);
-  return value === undefined ? undefined : stripLiteral(value);
-}
-
-function requireSafeInteger(rows: readonly Quad[], predicate: string, field: string): number {
-  const raw = stripLiteral(requireSingle(rows, predicate, field));
-  if (!/^-?[0-9]+$/.test(raw)) throw new Error(`invalid ${field}`);
-  const parsed = Number(raw);
-  if (!Number.isSafeInteger(parsed)) throw new Error(`unsafe ${field}`);
-  return parsed;
-}
-
-function requirePositiveInteger(rows: readonly Quad[], predicate: string, field: string): string {
-  const raw = stripLiteral(requireSingle(rows, predicate, field));
-  if (!/^[0-9]+$/.test(raw)) throw new Error(`invalid ${field}`);
-  const parsed = BigInt(raw);
-  if (parsed < 1n) throw new Error(`${field} must be positive`);
-  return parsed.toString();
-}
-
-function stripLiteral(value: string): string {
-  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[-A-Za-z0-9]+|\^\^<[^>]+>)?$/);
-  if (!match) return value;
-  return match[1]!
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
-    .replace(/\\"/g, '"')
-    .replace(/\\\\/g, '\\');
 }
