@@ -64,6 +64,11 @@ class ProducerUpdateChain extends MockChainAdapter {
     super('otp:20430', AUTHOR);
   }
 
+  override async getKnowledgeAssetOwner(kaId: bigint): Promise<string> {
+    if (kaId === KA_ID) return AUTHOR;
+    return super.getKnowledgeAssetOwner(kaId);
+  }
+
   async getUpdateAckDigestFields() {
     return {
       contextGraphId: BigInt(TARGET_CG_ID),
