@@ -1839,6 +1839,7 @@ export class PublishMethods extends DKGAgentBase {
       kaId,
       canonicalMerkleRoot,
       opts.precomputedUpdateAttestation,
+      { requireLocalAuthorization: true },
     );
 
     const updateScope = await resolveDirectRootlessUpdateScope(

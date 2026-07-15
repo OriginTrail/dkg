@@ -142,15 +142,17 @@ function resolveCatalogProofMaterial(
  * Verify the off-band owner authorization before any update payload is staged.
  *
  * Both the agent's direct-update boundary and the publisher's final chain
- * submission call this helper. Keeping the verification here prevents the two
- * layers from drifting while allowing callers to reject an unauthorized update
- * before replacing local SWM or private state.
+ * submission call this helper. The agent requires every local authorization
+ * capability because it is about to mutate durable staging. Direct publisher
+ * callers may use older/custom adapters without the optional pre-read methods;
+ * in that case the on-chain update remains the final authorization boundary.
  */
 export async function assertValidPrecomputedUpdateAttestation(
   chain: ChainAdapter,
   kaId: bigint,
   merkleRoot: Uint8Array,
   updateSeal: NonNullable<PublishOptions['precomputedUpdateAttestation']>,
+  options: { requireLocalAuthorization?: boolean } = {},
 ): Promise<void> {
   const expected = updateSeal.expectedNewMerkleRoot;
   if (
@@ -193,19 +195,22 @@ export async function assertValidPrecomputedUpdateAttestation(
     : false;
   if (isContractAuthor) {
     if (typeof chain.verifyContractSignature !== 'function') {
-      throw new Error(
-        'V10 contract-author update authorization requires verifyContractSignature() on the chain adapter.',
+      if (options.requireLocalAuthorization) {
+        throw new Error(
+          'V10 contract-author update authorization requires verifyContractSignature() on the chain adapter.',
+        );
+      }
+    } else {
+      const valid = await chain.verifyContractSignature(
+        updateSeal.authorAddress,
+        digest,
+        signature.serialized,
       );
-    }
-    const valid = await chain.verifyContractSignature(
-      updateSeal.authorAddress,
-      digest,
-      signature.serialized,
-    );
-    if (!valid) {
-      throw new Error(
-        `precomputedUpdateAttestation contract signature is invalid for ${updateSeal.authorAddress}.`,
-      );
+      if (!valid) {
+        throw new Error(
+          `precomputedUpdateAttestation contract signature is invalid for ${updateSeal.authorAddress}.`,
+        );
+      }
     }
   } else {
     const recovered = ethers.recoverAddress(digest, signature);
@@ -218,9 +223,12 @@ export async function assertValidPrecomputedUpdateAttestation(
   }
 
   if (typeof chain.getKnowledgeAssetOwner !== 'function') {
-    throw new Error(
-      'V10 update authorization requires getKnowledgeAssetOwner() on the chain adapter.',
-    );
+    if (options.requireLocalAuthorization) {
+      throw new Error(
+        'V10 update authorization requires getKnowledgeAssetOwner() on the chain adapter.',
+      );
+    }
+    return;
   }
   const currentOwner = ethers.getAddress(await chain.getKnowledgeAssetOwner(kaId));
   const claimedAuthor = ethers.getAddress(updateSeal.authorAddress);

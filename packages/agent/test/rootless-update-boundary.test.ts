@@ -40,6 +40,7 @@ const ATTACKER_WALLET = new ethers.Wallet(
   '0x8b3a350cf5c34c9194ca3a545d05a0f4f70e6fb072cf5f77b905d8b317f2f3d0',
 );
 const CURRENT_OWNER = CURRENT_OWNER_WALLET.address;
+const CONTRACT_OWNER = '0x2222222222222222222222222222222222222222';
 const KA_NUMBER = 7n;
 const KA_ID = (BigInt(ORIGINAL_AUTHOR) << 96n) | KA_NUMBER;
 const UAL = `did:dkg:${CHAIN_ID}/${ORIGINAL_AUTHOR}/${KA_NUMBER.toString()}`;
@@ -352,6 +353,74 @@ describe('DKGAgent rootless update boundary', () => {
       swmScope,
     ))).toBe(0);
     expect(publisherCalls).toBe(0);
+  });
+
+  it('accepts a valid EIP-1271 owner signature and forwards the exact digest before staging', async () => {
+    const store = new OxigraphStore();
+    await seedConfirmedRootlessHead(store);
+    const publicQuads = [q('urn:update:contract-valid', 'urn:value', '"replacement"')];
+    const { canonical, attestation } = await updateAttestation(
+      publicQuads,
+      [],
+      CURRENT_OWNER_WALLET,
+      CONTRACT_OWNER,
+    );
+    const typedData = buildUpdateAuthorAttestationTypedData({
+      chainId: EVM_CHAIN_ID,
+      kav10Address: KAV_ADDRESS,
+      kaId: KA_ID,
+      newMerkleRoot: attestation.expectedNewMerkleRoot,
+      authorAddress: CONTRACT_OWNER,
+      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+    });
+    const expectedDigest = ethers.TypedDataEncoder.hash(
+      typedData.domain,
+      typedData.types,
+      typedData.message,
+    );
+    const expectedSignature = ethers.Signature.from({
+      r: ethers.hexlify(attestation.signature.r),
+      yParityAndS: ethers.hexlify(attestation.signature.vs),
+    }).serialized;
+    const contractVerificationCalls: Array<{
+      address: string;
+      digest: string;
+      signature: string;
+    }> = [];
+    let publisherCalls = 0;
+    const agent = makeAgentLike(store, async (kaId) => {
+      publisherCalls += 1;
+      return {
+        kaId,
+        ual: UAL,
+        merkleRoot: attestation.expectedNewMerkleRoot,
+        kaManifest: [],
+        status: 'tentative',
+        publicQuads: canonical.publicQuads,
+      };
+    }, CONTRACT_OWNER);
+    agent.chain.hasContractCode = async () => true;
+    agent.chain.verifyContractSignature = async (address: string, digest: string, signature: string) => {
+      contractVerificationCalls.push({ address, digest, signature });
+      return true;
+    };
+
+    const result = await (PublishMethods.prototype as any).update.call(
+      agent,
+      KA_ID,
+      CG,
+      publicQuads,
+      [],
+      { precomputedUpdateAttestation: attestation },
+    );
+
+    expect(result.status).toBe('tentative');
+    expect(publisherCalls).toBe(1);
+    expect(contractVerificationCalls).toEqual([{
+      address: CONTRACT_OWNER,
+      digest: expectedDigest,
+      signature: expectedSignature,
+    }]);
   });
 
   it('rejects a valid non-owner attestation before replacing existing SWM or private state', async () => {

@@ -711,10 +711,6 @@ class AdapterManagedUpdateChain implements ChainAdapter {
     return '0x000000000000000000000000000000000000c10a';
   }
 
-  async getKnowledgeAssetOwner(_kaId: bigint): Promise<string> {
-    return _SEAL_WALLET.address;
-  }
-
   async updateKnowledgeCollectionV10(params: V10UpdateKAParams): Promise<TxResult> {
     this.capturedPublisherAddress = params.publisherAddress;
     this.capturedPublisherNodeIdentityId = params.publisherNodeIdentityId;
@@ -1939,10 +1935,11 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(updated.onChainResult?.publisherAddress.toLowerCase()).toBe(wallet.address.toLowerCase());
   });
 
-  it('lets adapter-managed updates select their signer without local address discovery', async () => {
+  it('lets adapter-managed updates without owner lookup rely on chain authorization', async () => {
     const keypair = await generateEd25519Keypair();
     const wallet = new ethers.Wallet(TEST_KEY);
     const chain = new AdapterManagedUpdateChain(wallet.address);
+    expect((chain as ChainAdapter).getKnowledgeAssetOwner).toBeUndefined();
     const publisher = new DKGPublisher({
       store: new OxigraphStore(),
       chain,
