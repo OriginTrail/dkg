@@ -107,7 +107,7 @@ describe('rootless KA graph scope wire contract', () => {
     expectGraphScope(decoded);
   });
 
-  it('round-trips one KA scope through replica publish', () => {
+  it('round-trips one KA scope through receiving-node publish', () => {
     const decoded = decodePublishRequest(encodePublishRequest({
       ual: UAL,
       nquads: new TextEncoder().encode('<urn:s> <urn:p> "value" .'),

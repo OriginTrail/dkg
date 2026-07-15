@@ -29,6 +29,34 @@ export interface SkolemizedKnowledgeAssetParts {
 const PUBLIC_CANONICALIZATION_GRAPH = 'urn:dkg:ka-canonicalization:public';
 const PRIVATE_CANONICALIZATION_GRAPH = 'urn:dkg:ka-canonicalization:private';
 
+const CANONICAL_KA_SKOLEM_CAPTURE_RE = /^urn:dkg:ka-skolem:(c14n[0-9]+)$/;
+
+/**
+ * Restore canonical KA skolem IRIs to plain blank nodes for a re-opened draft.
+ *
+ * Stored assertions carry `urn:dkg:ka-skolem:c14nN` IRIs, which user-input
+ * guards rightly reject and which must never MIX with newly authored blank
+ * nodes at the next finalize. Converting them back to `_:c14nN` makes the
+ * draft fully unlabelled: an unmodified re-finalize re-derives the identical
+ * canonical labels (RDFC-1.0 is deterministic over graph structure), while an
+ * edited draft canonicalizes as one uniform blank-node set.
+ */
+export function deskolemizeKnowledgeAssetQuads(quads: readonly Quad[]): Quad[] {
+  return quads.map((quad) => {
+    const subjectMatch = CANONICAL_KA_SKOLEM_CAPTURE_RE.exec(unwrapIri(quad.subject));
+    const objectMatch = quad.object.startsWith('"')
+      ? null
+      : CANONICAL_KA_SKOLEM_CAPTURE_RE.exec(unwrapIri(quad.object));
+    if (!subjectMatch && !objectMatch) return { ...quad, graph: '' };
+    return {
+      ...quad,
+      subject: subjectMatch ? `_:${subjectMatch[1]}` : quad.subject,
+      object: objectMatch ? `_:${objectMatch[1]}` : quad.object,
+      graph: '',
+    };
+  });
+}
+
 /** Reject every user-authored occurrence of the protocol's KA-local namespace. */
 export function assertNoUserAuthoredKnowledgeAssetSkolemTerms(
   quads: readonly Quad[],

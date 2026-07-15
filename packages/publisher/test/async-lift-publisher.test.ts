@@ -13,6 +13,7 @@ import {
   QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
   createLiftJobFailureMetadata,
+  storeKnowledgeAssetOperationPublicQuads,
   type AsyncLiftPublisherConfig,
   type AsyncLiftPublisherRecoveryResult,
   type LiftRequest,
@@ -104,7 +105,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       contextGraphId: 'music-social',
       name: 'albums',
       shareOperationId: 'share-op-1',
-      roots: ['urn:album:one', 'urn:album:two'],
+      // Graph-scoped v2 envelope: one atomic KA, no root entities.
+      roots: [] as string[],
+      contentScopeVersion: 2,
+      kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
         authorAddress: authorAddress as `0x${string}`,
@@ -279,14 +286,19 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(jobId).toBe('job-1');
     expect(job?.status).toBe('accepted');
-    expect(job?.jobSlug).toBe('music-social/knowledge-assets/albums/vm-publish/share-op-1/one-two');
+    expect(job?.jobSlug).toBe('music-social/knowledge-assets/albums/vm-publish/share-op-1/no-roots');
     expect(job?.request.jobType).toBe('knowledge-asset-vm-publish');
     expect(job?.request.knowledgeAssetVmPublish).toEqual({
       contextGraphId: 'music-social',
       name: 'albums',
       subGraphName: 'research',
       shareOperationId: 'share-op-1',
-      roots: ['urn:album:one', 'urn:album:two'],
+      roots: [],
+      contentScopeVersion: 2,
+      kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: `0x${'12'.repeat(32)}`,
         authorAddress: '0x1111111111111111111111111111111111111111',
@@ -496,21 +508,24 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
       },
     });
-    const publisherContract: Publisher = makeTestPublisher({
+    // Graph-scoped v2: the queued job resolves its content from the immutable
+    // digest-validated operation snapshot, not the legacy root-scoped bucket.
+    await storeKnowledgeAssetOperationPublicQuads({
       store,
-      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-      eventBus: new TypedEventBus(),
-      keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
-      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      graphManager: new GraphManager(store),
+      contextGraphId: 'music-social',
+      shareOperationId: 'share-op-1',
+      kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+      assertionVersion: '1',
+      quads: [
+        { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+        { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+      ],
+      privateTripleCount: 0,
+      publisherPeerId: 'peer-1',
     });
-    const share = await publisherContract.share('music-social', [
-      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-    ], { publisherPeerId: 'peer-1' });
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
-      shareOperationId: share.shareOperationId,
       clearSharedMemoryAfter: true,
     }));
     const processed = await publisher.processNext('wallet-1');
@@ -524,8 +539,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         request: {
           contextGraphId: 'music-social',
           name: 'albums',
-          shareOperationId: share.shareOperationId,
-          roots: ['urn:album:one', 'urn:album:two'],
+          shareOperationId: 'share-op-1',
+          roots: [],
           seal: {
             merkleRoot: `0x${'12'.repeat(32)}`,
             authorAddress: '0x1111111111111111111111111111111111111111',
@@ -547,7 +562,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
           clearSharedMemoryAfter: true,
         },
         validation: {
-          canonicalRoots: ['urn:album:one', 'urn:album:two'],
+          canonicalRoots: [],
           swmQuadCount: 2,
           transitionType: 'CREATE',
         },
@@ -556,10 +571,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
         publishOptions: {
           publisherPeerId: 'peer-1',
-          quads: [
+          // Snapshot reads are RDF sets — order-insensitive.
+          quads: expect.arrayContaining([
             { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
             { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-          ],
+          ]),
         },
       });
   });
