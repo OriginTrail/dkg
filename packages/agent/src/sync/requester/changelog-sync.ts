@@ -196,10 +196,9 @@ export interface ChangelogSyncDeps {
   logWarn?(message: string): void;
 }
 
-export interface ChangelogSyncOutcome {
-  kind: 'delta' | 'resync' | 'denied';
-  applied: number;
-}
+export type ChangelogSyncOutcome =
+  | { kind: 'delta' | 'denied'; applied: number }
+  | { kind: 'resync'; applied: number; complete: boolean };
 
 /** After this many consecutive no-forward-progress rounds, fall back to a full resync. */
 const RESYNC_AFTER_STALLED_ROUNDS = 3;
@@ -238,7 +237,7 @@ export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<Changel
       // Only jump the cursor to headSeq if the resync verifiably fetched everything < headSeq;
       // otherwise leave it (still first-contact / behind) so the next cycle retries — no gap.
       if (rr.complete) deps.setCursor(resp.era, resp.headSeq);
-      return { kind: 'resync', applied };
+      return { kind: 'resync', applied, complete: rr.complete };
     }
 
     // delta — verified apply of the page (store writes commit inside applyPage).
@@ -258,7 +257,7 @@ export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<Changel
         const rr = await deps.runResync();
         applied += rr.insertedTriples;
         if (rr.complete) deps.setCursor(resp.era, resp.headSeq);
-        return { kind: 'resync', applied };
+        return { kind: 'resync', applied, complete: rr.complete };
       }
     }
 

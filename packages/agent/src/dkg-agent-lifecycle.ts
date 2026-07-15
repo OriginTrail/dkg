@@ -4232,8 +4232,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     result.insertedDataTriples += insertedDataTriples;
     result.insertedMetaTriples += insertedMetaTriples;
     result.insertedTriples += insertedDataTriples + insertedMetaTriples;
+    const changelogComplete = outcome.kind === 'delta'
+      || (outcome.kind === 'resync' && outcome.complete);
+    if (!changelogComplete) {
+      // A legacy fallback may have completed its own fetch phases while the
+      // changelog drop remains unauthoritative. Preserve inserted progress,
+      // but do not surface those phase completions as CG readiness evidence.
+      result.completedPhases = 0;
+    }
     if (
-      outcome.kind !== 'denied'
+      changelogComplete
       && result.timedOutPhases === 0
       && result.failedPhases === 0
       && result.failedPeers === 0
