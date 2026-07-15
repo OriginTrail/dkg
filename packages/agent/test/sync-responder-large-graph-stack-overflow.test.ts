@@ -34,7 +34,19 @@ describe('sync responder tolerates a shared-memory graph larger than the spread 
 
     const store = {
       async query(sparql: string) {
-        if (sparql.includes('SELECT DISTINCT ?g ?s ?p ?o')) {
+        if (sparql.includes('SELECT DISTINCT ?g ?root')) {
+          return {
+            type: 'bindings' as const,
+            bindings: [{ g: dataGraph, root }],
+          };
+        }
+        if (sparql.includes('SELECT ?g ?count')) {
+          return {
+            type: 'bindings' as const,
+            bindings: [{ g: dataGraph, count: String(rowCount) }],
+          };
+        }
+        if (sparql.includes('SELECT DISTINCT ?s ?p ?o')) {
           const offset = Number(/OFFSET (\d+)/.exec(sparql)?.[1] ?? 0);
           const limit = Number(/LIMIT (\d+)/.exec(sparql)?.[1] ?? rowCount);
           return {

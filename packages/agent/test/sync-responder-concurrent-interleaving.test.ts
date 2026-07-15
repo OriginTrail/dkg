@@ -470,7 +470,7 @@ describe('sync responder pagination interleaving', () => {
     expect(lineGraphsFromNquads(out)).toEqual(new Set([cgPrefix, fallbackGraph]));
   });
 
-  it('builds a reusable durable-data snapshot only from ordered bounded store pages', async () => {
+  it('builds a reusable durable-data snapshot from exact-graph bounded pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'single-query-durable-fallback';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -481,18 +481,28 @@ describe('sync responder pagination interleaving', () => {
     ]);
 
     const originalQuery = store.query.bind(store);
-    let globalRowLoads = 0;
+    let exactGraphRowLoads = 0;
+    let exactGraphCounts = 0;
+    const originalCountQuads = store.countQuads.bind(store);
+    store.countQuads = async (graph, options) => {
+      if (graph === cgPrefix || graph === fallbackGraph) exactGraphCounts++;
+      return originalCountQuads(graph, options);
+    };
     store.query = (async (sparql: string) => {
       const normalized = sparql.replace(/\s+/g, ' ').trim();
-      if (normalized.includes('COUNT(*)')) {
-        throw new Error(`durable fallback should not count per graph: ${normalized}`);
-      }
       if (
         /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-        normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`)
+        normalized.includes('VALUES ?g') &&
+        normalized.includes('ORDER BY ?g ?s ?p ?o')
       ) {
-        globalRowLoads++;
-        expect(normalized).toContain('ORDER BY ?g ?s ?p ?o');
+        throw new Error(`durable fallback must not globally sort graph rows: ${normalized}`);
+      }
+      if (
+        /^SELECT \?s \?p \?o WHERE \{/.test(normalized) &&
+        (normalized.includes(`GRAPH <${cgPrefix}>`) || normalized.includes(`GRAPH <${fallbackGraph}>`))
+      ) {
+        exactGraphRowLoads++;
+        expect(normalized).toContain('ORDER BY ?s ?p ?o');
         expect(normalized).toContain('OFFSET 0');
         expect(normalized).toMatch(/LIMIT \d+$/);
       }
@@ -517,7 +527,8 @@ describe('sync responder pagination interleaving', () => {
       syncSessionId: 'cache-session',
     });
 
-    expect(globalRowLoads).toBe(1);
+    expect(exactGraphCounts).toBe(2);
+    expect(exactGraphRowLoads).toBe(2);
     expect(first).toContain('"row-000"');
     expect(first).not.toContain('"row-001"');
     expect(second).toContain('"row-001"');
