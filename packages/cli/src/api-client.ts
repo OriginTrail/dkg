@@ -108,14 +108,12 @@ export interface KnowledgeAssetShareResponse {
 
 export interface KnowledgeAssetShareTargetOptions {
   subGraphName?: string;
-  /** @deprecated New Knowledge Assets are atomic. Only `"all"` is accepted. */
-  entities?: string[] | 'all';
+  entities?: 'all';
 }
 
 export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOptions {
   awaitCuratorAck?: boolean;
-  /** @deprecated `true` is rejected; graph-scoped KAs are always seal-before-share. */
-  skipSeal?: boolean;
+  skipSeal?: false;
 }
 
 export type KnowledgeAssetShareAsyncOptions = KnowledgeAssetShareTargetOptions;
@@ -138,18 +136,22 @@ export interface KnowledgeAssetLifecycleError {
   [key: string]: unknown;
 }
 
-export interface KnowledgeAssetPublishAsyncResponse {
+export interface KnowledgeAssetContentEnvelope {
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: string;
+  privateTripleCount?: number;
+}
+
+export interface KnowledgeAssetPublishAsyncResponse extends KnowledgeAssetContentEnvelope {
   jobId: string;
   status: string;
   contextGraphId: string;
   name: string;
   subGraphName?: string;
   shareOperationId?: string;
-  contentScopeVersion?: number;
-  kaUal?: string;
-  assertionVersion?: string;
-  publicTripleCount?: number;
-  privateTripleCount?: number;
   sealMerkleRoot?: string;
   intentKey?: string;
 }
@@ -228,8 +230,8 @@ function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptio
   }
 }
 
-function assertAtomicKnowledgeAssetShare(options: KnowledgeAssetShareTargetOptions | undefined): void {
-  if (Array.isArray(options?.entities)) {
+function assertAtomicKnowledgeAssetShare(options: unknown): void {
+  if (hasOwnKey(options, 'entities') && Array.isArray(options.entities)) {
     throw new Error(
       'entities selection is not supported; graph-scoped Knowledge Assets are shared atomically',
     );
@@ -742,7 +744,7 @@ export class ApiClient {
     options?: KnowledgeAssetShareOptions,
   ): Promise<KnowledgeAssetShareResponse> {
     assertAtomicKnowledgeAssetShare(options);
-    if (options?.skipSeal === true) {
+    if ((options as { skipSeal?: unknown } | undefined)?.skipSeal === true) {
       throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
     }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
@@ -1911,7 +1913,7 @@ export class ApiClient {
 
   async promoteAssertion(name: string, request: {
     contextGraphId: string;
-    entities?: 'all' | string[];
+    entities?: 'all';
     subGraphName?: string;
   }): Promise<{
     promoted?: boolean;
@@ -1922,7 +1924,8 @@ export class ApiClient {
     sharedMemoryGraph?: string;
     rootEntities?: string[];
   }> {
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, request);
+    const { contextGraphId, ...options } = request;
+    return this.knowledgeAssetShare(contextGraphId, name, options);
   }
 
   async queryAssertion(name: string, request: {

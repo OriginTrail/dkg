@@ -1,5 +1,12 @@
 import type { AssetPartitionQuad } from '@origintrail-official/dkg-core';
 import type { SourceWorkerJobFailureDetails, SourceWorkerJobStatusResult } from '@origintrail-official/dkg-agent';
+import type { KnowledgeAssetContentEnvelope } from './api-client.js';
+
+export interface KnowledgeAssetLifecyclePublishAsyncResponse extends KnowledgeAssetContentEnvelope {
+  jobId: string;
+  shareOperationId?: string;
+  intentKey?: string;
+}
 
 export interface KnowledgeAssetLifecycleClient {
   createAndShare(
@@ -8,16 +15,11 @@ export interface KnowledgeAssetLifecycleClient {
     quads: AssetPartitionQuad[],
     options?: { subGraphName?: string },
   ): Promise<{ promotedCount: number; publishReady?: boolean; shareOperationId?: string }>;
-  publishAsync(contextGraphId: string, name: string, options?: { subGraphName?: string }): Promise<{
-    jobId: string;
-    shareOperationId?: string;
-    contentScopeVersion?: number;
-    kaUal?: string;
-    assertionVersion?: string;
-    publicTripleCount?: number;
-    privateTripleCount?: number;
-    intentKey?: string;
-  }>;
+  publishAsync(
+    contextGraphId: string,
+    name: string,
+    options?: { subGraphName?: string },
+  ): Promise<KnowledgeAssetLifecyclePublishAsyncResponse>;
   getJobStatus(jobId: string): Promise<SourceWorkerJobStatusResult>;
 }
 
@@ -76,16 +78,7 @@ export function createDaemonKnowledgeAssetLifecycleClient(
       contextGraphId: string,
       name: string,
       options: { subGraphName?: string } = {},
-    ): Promise<{
-      jobId: string;
-      shareOperationId?: string;
-      contentScopeVersion?: number;
-      kaUal?: string;
-      assertionVersion?: string;
-      publicTripleCount?: number;
-      privateTripleCount?: number;
-      intentKey?: string;
-    }> {
+    ): Promise<KnowledgeAssetLifecyclePublishAsyncResponse> {
       const response = await fetch(`${daemonUrl}/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
         method: 'POST',
         headers: jsonHeaders(token),
@@ -107,6 +100,7 @@ export function createDaemonKnowledgeAssetLifecycleClient(
         kaUal: stringField((payload as { kaUal?: unknown }).kaUal),
         assertionVersion: stringField((payload as { assertionVersion?: unknown }).assertionVersion),
         publicTripleCount: numberField((payload as { publicTripleCount?: unknown }).publicTripleCount),
+        privateMerkleRoot: stringField((payload as { privateMerkleRoot?: unknown }).privateMerkleRoot),
         privateTripleCount: numberField((payload as { privateTripleCount?: unknown }).privateTripleCount),
         intentKey: stringField((payload as { intentKey?: unknown }).intentKey),
       };

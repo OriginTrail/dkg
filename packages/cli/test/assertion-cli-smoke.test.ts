@@ -315,6 +315,21 @@ describe.sequential('assertion CLI smoke', () => {
     daemonCalls = [];
     await expectUnknownCommand(['publisher', 'enqueue', 'research'], env, 'enqueue');
     expect(daemonCalls).toEqual([]);
+
+    daemonCalls = [];
+    await expect(execFileAsync('node', [
+      CLI_ENTRY,
+      'assertion',
+      'promote',
+      'paper',
+      '--context-graph',
+      'research',
+      '--entity',
+      'urn:company:acme',
+    ], { env })).rejects.toMatchObject({
+      stderr: expect.stringContaining("unknown option '--entity'"),
+    });
+    expect(daemonCalls).toEqual([]);
   }, 15000);
 
   it('enqueues a named KA async VM publish through the shared CLI publish options', async () => {

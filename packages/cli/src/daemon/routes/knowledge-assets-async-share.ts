@@ -1,14 +1,12 @@
 // daemon/routes/knowledge-assets-async-share.ts
 //
-// Async SWM-share queue routes for the GitHub-shaped Knowledge Asset HTTP
-// surface. These are FAITHFUL ports of the five legacy `/api/assertion/
-// promote-async*` routes in `daemon/routes/assertion.ts` (RFC:
+// Async SWM-share job-management routes for the GitHub-shaped Knowledge Asset
+// HTTP surface. These are FAITHFUL ports of the four legacy `/api/assertion/
+// promote-async*` job routes in `daemon/routes/assertion.ts` (RFC:
 // docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md). The SWM "share" is the WM→SWM
-// promote, so the async variant is exposed as `share-async` (enqueue) and the
-// jobs collection as `share-jobs`:
+// promote; enqueue is handled alongside the synchronous share policy in
+// `knowledge-assets.ts`, while this module owns the `share-jobs` collection:
 //
-//   POST   /api/knowledge-assets/:name/swm/share-async
-//        ↔ POST   /api/assertion/:name/promote-async
 //   GET    /api/knowledge-assets/swm/share-jobs
 //        ↔ GET    /api/assertion/promote-async
 //   GET    /api/knowledge-assets/swm/share-jobs/:jobId
@@ -23,120 +21,15 @@
 // Shared logic lives in `./shared-assertion-helpers.js`.
 
 import type { RequestContext } from "./context.js";
-import {
-  jsonResponse,
-  readBody,
-  safeParseJson,
-  validateEntities,
-  validateOptionalSubGraphName,
-  resolveRequiredWriteContextGraphId,
-  SMALL_BODY_BYTES,
-} from "../http-utils.js";
+import { jsonResponse } from "../http-utils.js";
 import {
   PROMOTE_JOB_STATES,
-  PromoteJobConflictError,
   type PromoteJobState,
 } from "@origintrail-official/dkg-publisher";
-import { validateAssertionName } from "@origintrail-official/dkg-core";
 import {
   promoteJobToView,
   asyncPromoteUnavailable,
-  scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-
-// ── POST /api/knowledge-assets/:name/swm/share-async ──────────────────────────
-//   { contextGraphId, entities?, subGraphName? }
-//
-// Faithful port of POST /api/assertion/:name/promote-async. The caller passes
-// the already-decoded `:name` segment (the KA dispatch decodes/validates names
-// up front, exactly as the legacy route did via `safeDecodeURIComponent` +
-// `validateAssertionName`); we re-validate the name here so this standalone
-// handler matches the legacy contract byte-for-byte regardless of entry point.
-// Async share uses the named Knowledge Asset lifecycle: finalization allocates
-// the UAL-bound KA id, canonicalizes the exact graph, and persists the seal
-// before the graph-scoped queue job can be accepted. (The live dispatch in
-// `knowledge-assets.ts` already
-// serves swm/share-async inline; this standalone faithful-port handler is kept in
-// lockstep so either entry point behaves identically.)
-export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: string): Promise<void> {
-  const { req, res, agent, requestToken } = ctx;
-  const writePreflightCallerAgentAddress = requestToken
-    ? agent.resolveAgentByToken(requestToken)
-    : undefined;
-  const writePreflightContextGraphOpts = {
-    callerAgentAddress: writePreflightCallerAgentAddress,
-    allowLocalExactFallback: !writePreflightCallerAgentAddress,
-  };
-
-  const nameVal = validateAssertionName(name);
-  if (!nameVal.valid)
-    return jsonResponse(res, 400, {
-      error: `Invalid assertion name: ${nameVal.reason}`,
-    });
-  if (asyncPromoteUnavailable(res)) return;
-  const body = await readBody(req, SMALL_BODY_BYTES);
-  const parsed = safeParseJson(body, res);
-  if (!parsed) return;
-  const { contextGraphId, entities, subGraphName } = parsed;
-  const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
-    agent,
-    contextGraphId,
-    res,
-    writePreflightContextGraphOpts,
-  );
-  if (!resolvedContextGraphId) return;
-  if (!validateEntities(entities, res)) return;
-  if (!validateOptionalSubGraphName(subGraphName, res)) return;
-  // #1116 (round 5) — the sync swm/share validates `skipSeal` as a strict
-  // boolean; the async queue ALWAYS seals (the safe default) and cannot carry
-  // skipSeal through the job, so it was silently dropped — a confusing footgun
-  // (a caller asking to skip sealing got a sealed share). Match the sync route's
-  // strict-boolean validation, and reject a truthy boolean outright rather than
-  // honoring it differently than requested.
-  if (parsed?.skipSeal !== undefined) {
-    if (typeof parsed.skipSeal !== "boolean") {
-      return jsonResponse(res, 400, {
-        error: '"skipSeal" must be a boolean when supplied',
-      });
-    }
-    if (parsed.skipSeal === true) {
-      return jsonResponse(res, 400, {
-        error:
-          "skipSeal is not supported for async share; use swm/share (the synchronous route) to share without sealing",
-      });
-    }
-  }
-  try {
-    const result = await agent.assertion.promoteAsync(
-      resolvedContextGraphId,
-      name,
-      {
-        entities: entities ?? "all",
-        subGraphName,
-        ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
-      },
-    );
-    return jsonResponse(res, 200, {
-      jobId: result.jobId,
-      state: "queued",
-    });
-  } catch (err: any) {
-    if (err instanceof PromoteJobConflictError) {
-      return jsonResponse(res, 409, {
-        error: err.message,
-        existingJobId: err.existingJobId,
-      });
-    }
-    if (
-      err.message?.includes("required") ||
-      err.message?.includes("Invalid") ||
-      err.message?.includes("must be")
-    ) {
-      return jsonResponse(res, 400, { error: err.message });
-    }
-    throw err;
-  }
-}
 
 // ── GET /api/knowledge-assets/swm/share-jobs ──────────────────────────────────
 //   ?contextGraphId=<cg>&state=queued,running,...&limit=<n>
