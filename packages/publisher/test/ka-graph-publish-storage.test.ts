@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -370,6 +370,18 @@ describe('graph-scoped KA publish storage', () => {
       MemoryLayer.VerifiableMemory,
       scope,
     );
+    const plannerPrepare = vi.spyOn(
+      (publisher as unknown as {
+        publisherPlanner: { prepare: (...args: unknown[]) => Promise<unknown> };
+      }).publisherPlanner,
+      'prepare',
+    );
+    const ensureContextGraph = vi.spyOn(
+      (publisher as unknown as {
+        graphManager: { ensureContextGraph: (...args: unknown[]) => Promise<unknown> };
+      }).graphManager,
+      'ensureContextGraph',
+    );
 
     await expect(
       publisher.publish({
@@ -382,6 +394,8 @@ describe('graph-scoped KA publish storage', () => {
         reservedKaId: expectedPackedKaId + 1n,
       }),
     ).rejects.toThrow(/derives packed kaId/);
+    expect(plannerPrepare).not.toHaveBeenCalled();
+    expect(ensureContextGraph).not.toHaveBeenCalled();
     expect(await store.hasGraph(vmGraph)).toBe(false);
 
     await expect(
@@ -401,6 +415,8 @@ describe('graph-scoped KA publish storage', () => {
         },
       }),
     ).rejects.toThrow(/does not match/);
+    expect(plannerPrepare).not.toHaveBeenCalled();
+    expect(ensureContextGraph).not.toHaveBeenCalled();
     expect(await store.hasGraph(vmGraph)).toBe(false);
 
     const accepted = await publisher.publish({
@@ -413,6 +429,8 @@ describe('graph-scoped KA publish storage', () => {
       reservedKaId: expectedPackedKaId,
     });
     expect(accepted.ual).toBe(UAL);
+    expect(plannerPrepare).toHaveBeenCalledTimes(1);
+    expect(ensureContextGraph).toHaveBeenCalledTimes(1);
   });
 
   it('rejects legacy and incomplete mutation envelopes before writing', async () => {
