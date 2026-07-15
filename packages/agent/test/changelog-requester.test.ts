@@ -309,7 +309,7 @@ describe('planPageApply — verified-apply planner', () => {
 function loopHarness(
   responses: ChangelogSyncResponse[],
   applyPage: ChangelogSyncDeps['applyPage'],
-  resync: () => Promise<ResyncOutcome> = async () => ({ complete: true, insertedTriples: 0 }),
+  resync: (dropCandidates: readonly string[]) => Promise<ResyncOutcome> = async () => ({ complete: true, insertedTriples: 0 }),
 ) {
   let cursor: { era: string; seq: number } | undefined;
   const requests: ChangelogSyncRequest[] = [];
@@ -325,7 +325,7 @@ function loopHarness(
       return encodeChangelogResponse(r);
     },
     applyPage,
-    runResync: async () => { resyncs += 1; return resync(); },
+    runResync: async (dropCandidates) => { resyncs += 1; return resync(dropCandidates); },
     logWarn: () => {},
   };
   return { deps, requests, resyncs: () => resyncs, cursor: () => cursor };
