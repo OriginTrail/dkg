@@ -33,6 +33,15 @@ function change(filePath, status = 'M') {
   return { status, paths: [filePath] };
 }
 
+function workflowJobBlock(workflow, jobName) {
+  const marker = `  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `workflow must define ${jobName}`);
+  const remainder = workflow.slice(start + marker.length);
+  const nextJob = remainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
+  return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
+}
+
 function pullRequestPlan(changeEntries, overrides = {}) {
   return planCi({
     eventName: 'pull_request',
@@ -476,10 +485,11 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     /ref: aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d/,
     'the trusted controller must not point into candidate-only history',
   );
+  const abiFreshnessJob = workflowJobBlock(primaryWorkflow, 'abi-freshness');
   assert.doesNotMatch(
-    primaryWorkflow,
-    /if: needs\.changes\.outputs\.abi_freshness == 'true'/,
-    'ABI freshness must run conservatively until the new controller is protected',
+    abiFreshnessJob,
+    /^    if:/m,
+    'ABI freshness must have no job-level condition until the new controller is protected',
   );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
@@ -575,11 +585,7 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     );
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
-  assert.doesNotMatch(
-    workflow,
-    /if: needs\.changes\.outputs\.abi_freshness == 'true'/,
-    'the first rollout phase must not depend on output from an untrusted controller update',
-  );
+  assert.doesNotMatch(workflowJobBlock(workflow, 'abi-freshness'), /^    if:/m);
   assert.ok(
     workflow.includes(
       "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
