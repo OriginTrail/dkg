@@ -18,7 +18,7 @@ const META_GRAPH = `${CONTEXT_GRAPH_URI}/_meta`;
 const UAL_A = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/19';
 const UAL_B = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000cd/23';
 
-function graphScopedAsset(ual: string, name: string) {
+function graphScopedAsset(ual: string, name: string, batchId?: bigint) {
   const assertionVersion = '1';
   const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
   const assertionGraph = knowledgeAssetLayerGraphUri(
@@ -47,6 +47,14 @@ function graphScopedAsset(ual: string, name: string) {
     },
     'tentative',
   );
+  if (batchId !== undefined) {
+    meta.push({
+      subject: ual,
+      predicate: 'http://dkg.io/ontology/batchId',
+      object: `"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      graph: META_GRAPH,
+    });
+  }
   return { assertionGraph, payload, meta };
 }
 
@@ -94,6 +102,31 @@ describe('durable sync worker result transport', () => {
       expect(result.rejectedKcs).toBe(1);
       expect(result.verifiedData).toEqual([]);
       expect(result.verifiedMeta).toEqual([]);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('carries sinceBatchId scope across the real worker boundary', async () => {
+    const unchanged = graphScopedAsset(UAL_A, 'unchanged', 5n);
+    const changed = graphScopedAsset(UAL_B, 'changed', 6n);
+    const fullMetadataSnapshot = [...unchanged.meta, ...changed.meta];
+    const worker = new SyncVerifyWorker();
+
+    try {
+      const result = await worker.processDurableBatch(
+        changed.payload,
+        fullMetadataSnapshot,
+        false,
+        { kind: 'sinceBatchId', sinceBatchId: '5' },
+      );
+
+      expect(result.rejectedKcs).toBe(0);
+      expect(result.verifiedData).toEqual(changed.payload);
+      expect(result.verifiedData[0]).toBe(changed.payload[0]);
+      expect(result.verifiedMeta).toEqual(changed.meta);
+      expect(result.verifiedMeta[0]).toBe(changed.meta[0]);
+      expect(result.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
     } finally {
       await worker.close();
     }

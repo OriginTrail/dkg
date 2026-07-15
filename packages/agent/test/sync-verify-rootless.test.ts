@@ -57,6 +57,7 @@ function fixture(options: {
   assertionVersion?: string;
   subGraphName?: string;
   ual?: string;
+  batchId?: bigint;
 } = {}) {
   const ual = options.ual ?? UAL;
   const assertionVersion = options.assertionVersion ?? '1';
@@ -91,6 +92,14 @@ function fixture(options: {
     },
     'tentative',
   );
+  if (options.batchId !== undefined) {
+    meta.push(quad(
+      ual,
+      `${DKG}batchId`,
+      `"${options.batchId}"^^<${XSD_INTEGER}>`,
+      META,
+    ));
+  }
   return { payload, meta, assertionGraph, ual };
 }
 
@@ -431,6 +440,69 @@ describe('verifySyncedData — rootless graph scope', () => {
     const processed = processDurableBatchForWire(present.payload, meta, false);
 
     expect(processed.rejectedKcs).toBe(1);
+    expect(processed.verifiedDataIndexes).toEqual([]);
+    expect(processed.verifiedMetaIndexes).toEqual([]);
+  });
+
+  it('verifies only newer graph-scoped KAs in a sinceBatchId delta', () => {
+    const unchanged = fixture({ batchId: 5n });
+    const changed = fixture({ ual: UAL_B, batchId: 6n });
+    const meta = [...unchanged.meta, ...changed.meta];
+
+    const processed = processDurableBatchForWire(
+      changed.payload,
+      meta,
+      false,
+      { kind: 'sinceBatchId', sinceBatchId: '5' },
+    );
+
+    expect(processed.rejectedKcs).toBe(0);
+    expect(processed.verifiedDataIndexes).toEqual(changed.payload.map((_, index) => index));
+    expect(processed.verifiedMetaIndexes).toEqual(
+      changed.meta.map((_, index) => unchanged.meta.length + index),
+    );
+    expect(processed.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
+  });
+
+  it('recognizes a newer fully-private KA in a sinceBatchId delta', () => {
+    const unchanged = fixture({ batchId: 5n });
+    const changed = fixture({
+      ual: UAL_B,
+      batchId: 6n,
+      payload: [],
+      publicTripleCount: 0,
+      privateTripleCount: 2,
+      privateMerkleRoot: new Uint8Array(32).fill(6),
+    });
+    const meta = [...unchanged.meta, ...changed.meta];
+
+    const processed = processDurableBatchForWire(
+      [],
+      meta,
+      false,
+      { kind: 'sinceBatchId', sinceBatchId: '5' },
+    );
+
+    expect(processed.rejectedKcs).toBe(0);
+    expect(processed.metaOnlyResponses).toBe(0);
+    expect(processed.verifiedPrivateOnlyResponses).toBe(1);
+    expect(processed.verifiedMetaIndexes).toEqual(
+      changed.meta.map((_, index) => unchanged.meta.length + index),
+    );
+  });
+
+  it('treats a sinceBatchId delta with no newer KA as clean completion', () => {
+    const unchanged = fixture({ batchId: 5n });
+
+    const processed = processDurableBatchForWire(
+      [],
+      unchanged.meta,
+      false,
+      { kind: 'sinceBatchId', sinceBatchId: '5' },
+    );
+
+    expect(processed.rejectedKcs).toBe(0);
+    expect(processed.metaOnlyResponses).toBe(0);
     expect(processed.verifiedDataIndexes).toEqual([]);
     expect(processed.verifiedMetaIndexes).toEqual([]);
   });

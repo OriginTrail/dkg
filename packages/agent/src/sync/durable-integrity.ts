@@ -20,6 +20,7 @@ const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
+const BATCH_ID = `${DKG_NS}batchId`;
 const PUBLIC_TRIPLE_COUNT = `${DKG_NS}publicTripleCount`;
 const PRIVATE_TRIPLE_COUNT = `${DKG_NS}privateTripleCount`;
 const PRIVATE_MERKLE_ROOT = `${DKG_NS}privateMerkleRoot`;
@@ -80,6 +81,7 @@ export interface DurableIntegrityLogEntry {
 
 export type DurableIntegrityVerificationMode =
   | { kind: 'fullSnapshot' }
+  | { kind: 'sinceBatchId'; sinceBatchId: bigint }
   | { kind: 'changelogPage'; changedDataGraphs: ReadonlySet<string> };
 
 export interface DurableIntegritySelection {
@@ -428,14 +430,22 @@ function verifyGraphScopedCandidates(
 
   for (const candidate of graphScopedCandidates) {
     const { ual, descriptor } = candidate;
-    // Changelog records serialize the complete shared metadata graph but only
-    // the assertion graphs changed in this page. Unchanged descriptors remain
-    // structurally parseable, but their peer-supplied rows are not selected
-    // without the corresponding payload. Full snapshots verify every graph.
-    if (
-      mode.kind === 'changelogPage'
-      && !mode.changedDataGraphs.has(descriptor.assertionGraph)
-    ) {
+    let inScope: boolean;
+    try {
+      inScope = graphScopedCandidateIsInScope(ual, descriptor.assertionGraph, metadata, mode);
+    } catch (error) {
+      rejectedKcUals.add(ual);
+      fatalUnscopedFailure = true;
+      logs.push({
+        level: acceptUnverified ? 'debug' : 'warn',
+        message: `Invalid graph-scoped KA delta metadata for ${ual}: ${errorMessage(error)}`,
+      });
+      continue;
+    }
+    // Changelog and since-batch responses carry complete shared metadata but
+    // only a scoped data payload. Out-of-scope descriptors are structurally
+    // valid, yet their peer-supplied rows are not authenticated by this page.
+    if (!inScope) {
       // The shared metadata record includes descriptors for unchanged assets.
       // They are structurally valid but not authenticated by this page's
       // payload, so never select their peer-supplied rows for replacement.
@@ -559,6 +569,22 @@ function verifyLegacyCandidates(
   const partitioned = skolemizeByEntity(dataQuads as Quad[]);
   for (const kcUal of legacyKcUals) {
     if (!metadata.merkleSubjects.has(kcUal)) continue;
+    if (mode.kind === 'sinceBatchId') {
+      try {
+        if (!candidateIsNewerThan(metadata.metaBySubject.get(kcUal) ?? [], mode.sinceBatchId)) {
+          if (acceptUnverified) verifiedKcUals.add(kcUal);
+          continue;
+        }
+      } catch (error) {
+        rejectedKcUals.add(kcUal);
+        fatalUnscopedFailure = true;
+        logs.push({
+          level: acceptUnverified ? 'debug' : 'warn',
+          message: `Invalid legacy KA delta metadata for ${kcUal}: ${errorMessage(error)}`,
+        });
+        continue;
+      }
+    }
     const roots = kcRootEntities.get(kcUal) ?? [];
     let claimedRoots: string[];
     try {
@@ -642,6 +668,27 @@ function verifyLegacyCandidates(
     fatalUnscopedFailure,
     logs,
   };
+}
+
+function graphScopedCandidateIsInScope(
+  ual: string,
+  assertionGraph: string,
+  metadata: IntegrityMetadataIndex,
+  mode: DurableIntegrityVerificationMode,
+): boolean {
+  if (mode.kind === 'fullSnapshot') return true;
+  if (mode.kind === 'changelogPage') return mode.changedDataGraphs.has(assertionGraph);
+  return candidateIsNewerThan(metadata.metaBySubject.get(ual) ?? [], mode.sinceBatchId);
+}
+
+function candidateIsNewerThan(rows: readonly Quad[], sinceBatchId: bigint): boolean {
+  const values = distinctObjects(rows, BATCH_ID);
+  if (values.length !== 1) {
+    throw new Error(`${values.length === 0 ? 'missing' : 'ambiguous'} batchId metadata`);
+  }
+  const batchId = parseInteger(values[0]!, 'batchId');
+  if (batchId < 0n) throw new Error(`invalid batchId: ${batchId}`);
+  return batchId > sinceBatchId;
 }
 
 function legacyDataGraphFromMetadata(
