@@ -12,8 +12,6 @@ import {
   publicQuadsDigestFromPayload,
   validateIntegrityDataResponse,
   validateIntegrityHeadResponse,
-  workloadPlanRowsTsv,
-  workloadPlanSummaryTsv,
 } from './private-cg-recovery.mjs';
 
 function parseJson(value, label) {
@@ -46,12 +44,30 @@ async function main() {
         loadTriplesPerKa: args[4],
       }));
       return;
-    case 'workload-summary-tsv':
-      process.stdout.write(workloadPlanSummaryTsv(parseJson(args[0], 'workload plan')));
+    case 'workload-field': {
+      const plan = parseJson(args[0], 'workload plan');
+      const fields = {
+        'planned.kaCount': plan.planned?.kaCount,
+        'planned.rootKaCount': plan.planned?.rootKaCount,
+        'planned.subgraphKaCount': plan.planned?.subgraphKaCount,
+        'planned.rootTriples': plan.planned?.rootTriples,
+        'planned.subgraphTriples': plan.planned?.subgraphTriples,
+        'planned.totalTriples': plan.planned?.totalTriples,
+        'timeoutDefaults.recoverySeconds': plan.timeoutDefaults?.recoverySeconds,
+        'timeoutDefaults.postRestartSeconds': plan.timeoutDefaults?.postRestartSeconds,
+        'timeoutDefaults.apiSeconds': plan.timeoutDefaults?.apiSeconds,
+      };
+      if (!Object.hasOwn(fields, args[1]) || fields[args[1]] === undefined) {
+        throw new Error(`unknown workload plan field: ${args[1] ?? '(missing)'}`);
+      }
+      process.stdout.write(String(fields[args[1]]));
       return;
-    case 'workload-rows-tsv':
-      process.stdout.write(`${workloadPlanRowsTsv(parseJson(args[0], 'workload plan'))}\n`);
+    }
+    case 'workload-rows-jsonl': {
+      const plan = parseJson(args[0], 'workload plan');
+      for (const entry of plan.entries ?? []) process.stdout.write(`${JSON.stringify(entry)}\n`);
       return;
+    }
     case 'payload-public-digest':
       process.stdout.write(publicQuadsDigestFromPayload(await readStdinJson()));
       return;

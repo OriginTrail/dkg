@@ -104,27 +104,6 @@ export function createWorkloadPlan({
   };
 }
 
-export function workloadPlanSummaryTsv(plan) {
-  const { planned } = plan;
-  return [
-    planned.kaCount,
-    planned.rootKaCount,
-    planned.subgraphKaCount,
-    planned.rootTriples,
-    planned.subgraphTriples,
-    planned.totalTriples,
-    plan.timeoutDefaults.recoverySeconds,
-    plan.timeoutDefaults.postRestartSeconds,
-    plan.timeoutDefaults.apiSeconds,
-  ].join('\t');
-}
-
-export function workloadPlanRowsTsv(plan) {
-  return plan.entries
-    .map(({ ordinal, lane, label, triples }) => [ordinal, lane, label, triples].join('\t'))
-    .join('\n');
-}
-
 export function publicQuadsDigestFromPayload(payload) {
   const quads = Array.isArray(payload?.quads) ? payload.quads : [];
   return workspacePublicQuadsDigest(quads);

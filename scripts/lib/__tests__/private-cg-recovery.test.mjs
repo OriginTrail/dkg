@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import {
@@ -13,6 +16,9 @@ import {
   validateIntegrityDataResponse,
   validateIntegrityHeadResponse,
 } from '../private-cg-recovery.mjs';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const HARNESS = path.join(REPO_ROOT, 'scripts/devnet-test-private-cg-membership-recovery.sh');
 
 const publicQuads = [
   {
@@ -99,6 +105,40 @@ test('sync-load workload derives lanes, labels, and totals from the plan rows', 
     postRestartSeconds: 600,
     apiSeconds: 180,
   });
+});
+
+test('testnet release-gate constraints fail at the shell boundary before SSH', () => {
+  const run = (overrides) => spawnSync('bash', [HARNESS], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HARNESS_TARGET: 'testnet',
+      HARNESS_EXPECT: 'fixed',
+      ADMISSION_MODE: 'manual',
+      TESTNET_EXPECT_COMMIT: 'abcdef0',
+      TESTNET_PREFLIGHT_ONLY: '1',
+      HARNESS_LOAD_PROFILE: 'sync-load',
+      LOAD_KA_COUNT: '50',
+      LOAD_TRIPLES_PER_KA: '1000',
+      TESTNET_NODE_1_SSH: 'unused-1',
+      TESTNET_NODE_2_SSH: 'unused-2',
+      TESTNET_NODE_3_SSH: 'unused-3',
+      TESTNET_NODE_4_SSH: 'unused-4',
+      ...overrides,
+    },
+  });
+
+  for (const [overrides, expected] of [
+    [{ HARNESS_LOAD_PROFILE: 'smoke' }, /HARNESS_LOAD_PROFILE=sync-load/],
+    [{ LOAD_KA_COUNT: '49' }, /LOAD_KA_COUNT >= 50/],
+    [{ LOAD_TRIPLES_PER_KA: '999' }, /LOAD_TRIPLES_PER_KA >= 1000/],
+  ]) {
+    const result = run(overrides);
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, expected);
+    assert.doesNotMatch(result.stderr, /SSH is required/);
+  }
 });
 
 test('payload and integrity validation reuse the publisher digest implementation', () => {
@@ -259,4 +299,69 @@ test('health audit reports sustained saturation and allows one planned restart',
   });
   assert.equal(saturated.passed, false);
   assert.match(saturated.failures.join('\n'), /sustained saturation for 2 samples/);
+});
+
+test('health audit rejects OOM counters, systemd restarts, and unplanned PID changes', () => {
+  const baseline = {
+    node: 5,
+    mainPid: 10,
+    nRestarts: 0,
+    oxigraphPid: 20,
+    oomEvents: 0,
+    oomKillEvents: 0,
+    oxigraphOomEvents: 0,
+    oxigraphOomKillEvents: 0,
+  };
+  const sample = (overrides = {}) => ({
+    node: 5,
+    phase: 'audit',
+    mainPid: 10,
+    nRestarts: 0,
+    oxigraphPid: 20,
+    oxigraphWatchdogPid: 21,
+    acceptQueue: 0,
+    cpuCount: 4,
+    loadOne: 1,
+    hostMemoryUsedPercent: 50,
+    oomEvents: 0,
+    oomKillEvents: 0,
+    oxigraphOomEvents: 0,
+    oxigraphOomKillEvents: 0,
+    ...overrides,
+  });
+  const thresholds = {
+    maxAcceptQueue: 128,
+    maxHostMemoryUsedPercent: 90,
+    maxLoadPerCpuPercent: 200,
+    consecutiveSamples: 2,
+  };
+  const audit = (overrides, restartNodes = []) => auditTestnetHealth({
+    baselines: [baseline],
+    samples: [sample(overrides)],
+    thresholds,
+    restartNodes,
+  });
+
+  for (const [field, expected] of [
+    ['oomEvents', /daemon cgroup OOM counter increased/],
+    ['oomKillEvents', /daemon cgroup OOM-kill counter increased/],
+    ['oxigraphOomEvents', /Oxigraph cgroup OOM counter increased/],
+    ['oxigraphOomKillEvents', /Oxigraph cgroup OOM-kill counter increased/],
+  ]) {
+    const report = audit({ [field]: 1 });
+    assert.equal(report.passed, false, field);
+    assert.match(report.failures.join('\n'), expected, field);
+  }
+
+  const restarted = audit({ nRestarts: 1 });
+  assert.equal(restarted.passed, false);
+  assert.match(restarted.failures.join('\n'), /systemd NRestarts changed/);
+
+  const daemonPid = audit({ mainPid: 11 });
+  assert.equal(daemonPid.passed, false);
+  assert.match(daemonPid.failures.join('\n'), /daemon PID changed 1 times; allowed 0/);
+
+  const oxigraphPid = audit({ oxigraphPid: 22 });
+  assert.equal(oxigraphPid.passed, false);
+  assert.match(oxigraphPid.failures.join('\n'), /Oxigraph PID changed 1 times; allowed 0/);
 });

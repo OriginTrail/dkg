@@ -123,10 +123,18 @@ esac
 WORKLOAD_PLAN_JSON="$(node "$HARNESS_TOOL" workload-plan \
   "$HARNESS_LOAD_PROFILE" "$ROOT_TRIPLES" "$SUB_GRAPH_TRIPLES" \
   "$LOAD_KA_COUNT" "$LOAD_TRIPLES_PER_KA")"
-IFS=$'\t' read -r PLANNED_KA_COUNT ROOT_KA_COUNT SUB_GRAPH_KA_COUNT \
-  ROOT_TRIPLES SUB_GRAPH_TRIPLES TOTAL_TRIPLES PLAN_RECOVERY_TIMEOUT_S \
-  PLAN_POST_RESTART_TIMEOUT_S PLAN_API_TIMEOUT_S \
-  <<< "$(node "$HARNESS_TOOL" workload-summary-tsv "$WORKLOAD_PLAN_JSON")"
+workload_plan_field() {
+  node "$HARNESS_TOOL" workload-field "$WORKLOAD_PLAN_JSON" "$1"
+}
+PLANNED_KA_COUNT="$(workload_plan_field planned.kaCount)"
+ROOT_KA_COUNT="$(workload_plan_field planned.rootKaCount)"
+SUB_GRAPH_KA_COUNT="$(workload_plan_field planned.subgraphKaCount)"
+ROOT_TRIPLES="$(workload_plan_field planned.rootTriples)"
+SUB_GRAPH_TRIPLES="$(workload_plan_field planned.subgraphTriples)"
+TOTAL_TRIPLES="$(workload_plan_field planned.totalTriples)"
+PLAN_RECOVERY_TIMEOUT_S="$(workload_plan_field timeoutDefaults.recoverySeconds)"
+PLAN_POST_RESTART_TIMEOUT_S="$(workload_plan_field timeoutDefaults.postRestartSeconds)"
+PLAN_API_TIMEOUT_S="$(workload_plan_field timeoutDefaults.apiSeconds)"
 HARNESS_EXPECT="${HARNESS_EXPECT:-}"
 ADMISSION_MODE="${ADMISSION_MODE:-manual}"
 AUTO_MAX_MEMBERS="${AUTO_MAX_MEMBERS:-10}"
@@ -1777,14 +1785,18 @@ SUBGRAPH_RESPONSE="$(api_call "$CURATOR_NODE" POST /api/sub-graph/create \
 save_artifact "subgraph-create-response.json" "$SUBGRAPH_RESPONSE"
 
 act "Seed $PLANNED_KA_COUNT named KAs / $TOTAL_TRIPLES unique SWM triples"
-while IFS=$'\t' read -r ordinal lane label triples; do
-  [ -n "$ordinal" ] || continue
+while IFS= read -r workload_row; do
+  [ -n "$workload_row" ] || continue
+  ordinal="$(json_get "$workload_row" ordinal)"
+  lane="$(json_get "$workload_row" lane)"
+  label="$(json_get "$workload_row" label)"
+  triples="$(json_get "$workload_row" triples)"
   seed_named_ka "$ordinal" "$lane" "$triples" "$label"
   if [ "$HARNESS_LOAD_PROFILE" = "smoke" ]; then
     [ "$lane" != "root" ] || ROOT_WRITE="$LAST_SEED_WRITE"
     [ "$lane" != "subgraph" ] || SUB_WRITE="$LAST_SEED_WRITE"
   fi
-done < <(node "$HARNESS_TOOL" workload-rows-tsv "$WORKLOAD_PLAN_JSON")
+done < <(node "$HARNESS_TOOL" workload-rows-jsonl "$WORKLOAD_PLAN_JSON")
 if [ "$HARNESS_LOAD_PROFILE" = "smoke" ]; then
   # Preserve the original smoke-profile artifact names for existing consumers.
   save_artifact "root-write-summary.json" "$ROOT_WRITE"
