@@ -74,6 +74,10 @@ export interface DurableIntegrityLogEntry {
   message: string;
 }
 
+export type DurableIntegrityVerificationMode =
+  | { kind: 'fullSnapshot' }
+  | { kind: 'changelogPage'; changedDataGraphs: ReadonlySet<string> };
+
 export interface DurableIntegritySelection {
   dataIndexes: number[];
   metaIndexes: number[];
@@ -82,8 +86,6 @@ export interface DurableIntegritySelection {
   verifiedZeroPublicAssets: number;
   /** Exact assertion graphs whose V2 descriptors and fetched payload verified. */
   verifiedGraphScopedDataGraphs: string[];
-  /** Metadata graphs containing a Merkle root or graph-scope marker in this batch. */
-  integrityMetadataGraphs: string[];
   logs: DurableIntegrityLogEntry[];
 }
 
@@ -100,7 +102,6 @@ interface IntegrityMetadataIndex {
   dataIndexesByGraph: Map<string, number[]>;
   merkleSubjects: Set<string>;
   markerSubjects: Set<string>;
-  integrityMetadataGraphs: Set<string>;
 }
 
 interface GraphScopedCandidate {
@@ -165,7 +166,7 @@ export function selectVerifiedDurableSyncQuads(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
   acceptUnverified = false,
-  graphScopedDataGraphsToVerify?: ReadonlySet<string>,
+  mode: DurableIntegrityVerificationMode = { kind: 'fullSnapshot' },
 ): DurableIntegritySelection {
   const logs: DurableIntegrityLogEntry[] = [];
   if (metaQuads.length === 0) {
@@ -180,7 +181,6 @@ export function selectVerifiedDurableSyncQuads(
         rejected: 1,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
-        integrityMetadataGraphs: [],
         logs,
       };
     }
@@ -190,13 +190,11 @@ export function selectVerifiedDurableSyncQuads(
       rejected: 0,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
-      integrityMetadataGraphs: [],
       logs,
     };
   }
 
   const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
-  const integrityMetadataGraphs = [...metadata.integrityMetadataGraphs].sort();
   if (metadata.merkleSubjects.size === 0 && metadata.markerSubjects.size === 0) {
     if (!acceptUnverified && dataQuads.length > 0) {
       logs.push({
@@ -209,7 +207,6 @@ export function selectVerifiedDurableSyncQuads(
         rejected: 1,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
-        integrityMetadataGraphs,
         logs,
       };
     }
@@ -219,7 +216,6 @@ export function selectVerifiedDurableSyncQuads(
       rejected: 0,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
-      integrityMetadataGraphs,
       logs,
     };
   }
@@ -230,7 +226,7 @@ export function selectVerifiedDurableSyncQuads(
     metadata,
     parsed,
     acceptUnverified,
-    graphScopedDataGraphsToVerify,
+    mode,
   );
   const legacy = verifyLegacyCandidates(
     dataQuads,
@@ -238,7 +234,7 @@ export function selectVerifiedDurableSyncQuads(
     metadata,
     parsed.candidates,
     acceptUnverified,
-    graphScopedDataGraphsToVerify,
+    mode,
   );
   const outcome: IntegrityVerificationOutcome = {
     hasGraphScopedCandidates: graphScoped.hasGraphScopedCandidates,
@@ -286,15 +282,12 @@ function indexIntegrityMetadata(
 
   const merkleSubjects = new Set<string>();
   const markerSubjects = new Set<string>();
-  const integrityMetadataGraphs = new Set<string>();
   for (const quad of metaQuads) {
     if (quad.predicate === MERKLE_ROOT) {
       merkleSubjects.add(quad.subject);
-      integrityMetadataGraphs.add(quad.graph);
     }
     if (quad.predicate === CONTENT_SCOPE_VERSION) {
       markerSubjects.add(quad.subject);
-      integrityMetadataGraphs.add(quad.graph);
     }
   }
 
@@ -303,7 +296,6 @@ function indexIntegrityMetadata(
     dataIndexesByGraph,
     merkleSubjects,
     markerSubjects,
-    integrityMetadataGraphs,
   };
 }
 
@@ -333,15 +325,15 @@ function readIntegrityMetadata(
         throw new Error('ambiguous contentScopeVersion metadata');
       }
       const version = BigInt(versions[0]!);
+      if (!metadata.merkleSubjects.has(subject)) {
+        throw new Error('missing merkleRoot metadata');
+      }
       if (version === 1n) {
         candidates.push({ kind: 'legacy', ual: subject });
         continue;
       }
       if (version !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
         throw new Error(`unsupported contentScopeVersion ${version}`);
-      }
-      if (!metadata.merkleSubjects.has(subject)) {
-        throw new Error('missing merkleRoot metadata');
       }
       candidates.push({
         kind: 'graph-scoped',
@@ -417,7 +409,7 @@ function verifyGraphScopedCandidates(
   metadata: IntegrityMetadataIndex,
   parsed: IntegrityMetadataRead,
   acceptUnverified: boolean,
-  graphScopedDataGraphsToVerify?: ReadonlySet<string>,
+  mode: DurableIntegrityVerificationMode,
 ): GraphScopedVerificationOutcome {
   const graphScopedCandidates = parsed.candidates.filter(
     (candidate): candidate is GraphScopedCandidate => candidate.kind === 'graph-scoped',
@@ -433,16 +425,18 @@ function verifyGraphScopedCandidates(
   for (const candidate of graphScopedCandidates) {
     const { ual, descriptor } = candidate;
     // Changelog records serialize the complete shared metadata graph but only
-    // the assertion graphs changed in this page. Preserve fully validated
-    // descriptors for unchanged graphs without pretending their absent payload
-    // was re-verified. Full durable sync leaves this scope undefined and still
-    // requires every advertised public assertion graph.
+    // the assertion graphs changed in this page. Unchanged descriptors remain
+    // structurally parseable, but their peer-supplied rows are not selected
+    // without the corresponding payload. Full snapshots verify every graph.
     if (
-      graphScopedDataGraphsToVerify !== undefined
-      && descriptor.publicTripleCount > 0
-      && !graphScopedDataGraphsToVerify.has(descriptor.assertionGraph)
+      mode.kind === 'changelogPage'
+      && !mode.changedDataGraphs.has(descriptor.assertionGraph)
     ) {
-      admittedMetadataUals.add(ual);
+      // The shared metadata record includes descriptors for unchanged assets.
+      // They are structurally valid but not authenticated by this page's
+      // payload, so never select their peer-supplied rows for replacement.
+      // System graphs retain their explicit unverified-data override.
+      if (acceptUnverified) admittedMetadataUals.add(ual);
       continue;
     }
 
@@ -498,7 +492,7 @@ function verifyLegacyCandidates(
   metadata: IntegrityMetadataIndex,
   candidates: readonly IntegrityCandidate[],
   acceptUnverified: boolean,
-  dataGraphsToVerify?: ReadonlySet<string>,
+  mode: DurableIntegrityVerificationMode,
 ): LegacyVerificationOutcome {
   const legacyKcUals = new Set(
     candidates
@@ -594,15 +588,16 @@ function verifyLegacyCandidates(
       }
       const legacyDataGraph = legacyDataGraphFromMetadata(kcUal, metadata);
       if (
-        dataGraphsToVerify !== undefined
-        && legacyDataGraph !== undefined
-        && !dataGraphsToVerify.has(legacyDataGraph)
+        mode.kind === 'changelogPage'
+        && (
+          legacyDataGraph === undefined
+          || !mode.changedDataGraphs.has(legacyDataGraph)
+        )
       ) {
         // Changelog pages carry the complete shared metadata graph but only
-        // changed data graphs. The descriptor remains structurally admitted;
-        // its absent payload is not claimed as re-verified. Full snapshots
-        // leave the scope undefined and retain strict verification.
-        verifiedKcUals.add(kcUal);
+        // changed data graphs. Do not select unchanged peer-supplied legacy
+        // rows for whole-graph replacement when their payload was not checked.
+        if (acceptUnverified) verifiedKcUals.add(kcUal);
         continue;
       }
       if (overlappingLegacyKcs.has(kcUal)) {
@@ -670,7 +665,6 @@ function selectVerifiedQuads(
 ): DurableIntegritySelection {
   const logs = [...outcome.logs];
   const verifiedGraphScopedDataGraphs = [...outcome.verifiedGraphScopedDataGraphs].sort();
-  const integrityMetadataGraphs = [...metadata.integrityMetadataGraphs].sort();
 
   const verifiedLegacyRoots = new Set<string>();
   const allLegacyRoots = new Set<string>();
@@ -718,7 +712,6 @@ function selectVerifiedQuads(
       rejected: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
-      integrityMetadataGraphs,
       logs,
     };
   }
@@ -729,7 +722,6 @@ function selectVerifiedQuads(
       rejected,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
-      integrityMetadataGraphs,
       logs,
     };
   }
@@ -754,7 +746,6 @@ function selectVerifiedQuads(
     rejected,
     verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
     verifiedGraphScopedDataGraphs,
-    integrityMetadataGraphs,
     logs,
   };
 }

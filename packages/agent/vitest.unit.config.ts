@@ -34,6 +34,7 @@ export default defineConfig({
       "test/sync-durable-worker-wire.test.ts",
       "test/changelog-requester.test.ts",
       "test/durable-sync-since-threading.test.ts",
+      "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",
       "test/discovery-subscription-boundary.test.ts",
       "test/core-fills-gap.test.ts",

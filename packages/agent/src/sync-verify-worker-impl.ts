@@ -1,9 +1,12 @@
 import { parentPort } from 'node:worker_threads';
 import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
+import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, DurableBatchVerificationMode, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
-import { selectVerifiedDurableSyncQuads } from './sync/durable-integrity.js';
+import {
+  selectVerifiedDurableSyncQuads,
+  type DurableIntegrityVerificationMode,
+} from './sync/durable-integrity.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -30,17 +33,17 @@ parentPort?.on('message', async (message: { id: number; method: string; args: un
       return;
     }
     if (message.method === 'processDurableBatch') {
-      const [dataQuads, metaQuads, acceptUnverified, graphScopedDataGraphsToVerify] = message.args as [
+      const [dataQuads, metaQuads, acceptUnverified, mode] = message.args as [
         Quad[],
         Quad[],
         boolean,
-        string[] | undefined,
+        DurableBatchVerificationMode | undefined,
       ];
       const result = processDurableBatchForWire(
         dataQuads,
         metaQuads,
         acceptUnverified,
-        graphScopedDataGraphsToVerify,
+        mode,
       );
       parentPort!.postMessage({ id: message.id, result });
       return;
@@ -77,7 +80,6 @@ type VerifiedSelectionDetails = {
   meta: number[];
   verifiedZeroPublicAssets: number;
   verifiedGraphScopedDataGraphs: string[];
-  integrityMetadataGraphs: string[];
 };
 
 function verifySyncedDataImpl(
@@ -85,20 +87,19 @@ function verifySyncedDataImpl(
   metaQuads: Quad[],
   acceptUnverified = false,
   recordSelection?: (selection: VerifiedSelectionDetails) => void,
-  graphScopedDataGraphsToVerify?: ReadonlySet<string>,
+  mode: DurableIntegrityVerificationMode = { kind: 'fullSnapshot' },
 ): SyncVerifyResult {
   const selection = selectVerifiedDurableSyncQuads(
     dataQuads,
     metaQuads,
     acceptUnverified,
-    graphScopedDataGraphsToVerify,
+    mode,
   );
   recordSelection?.({
     data: selection.dataIndexes,
     meta: selection.metaIndexes,
     verifiedZeroPublicAssets: selection.verifiedZeroPublicAssets,
     verifiedGraphScopedDataGraphs: selection.verifiedGraphScopedDataGraphs,
-    integrityMetadataGraphs: selection.integrityMetadataGraphs,
   });
   return {
     data: selection.dataIndexes.map((index) => dataQuads[index]!),
@@ -308,7 +309,7 @@ function processDurableBatch(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
-  graphScopedDataGraphsToVerify?: readonly string[],
+  mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
 ): DurableBatchSelectionResult {
   const logs: SyncVerifyLogEntry[] = [];
   const totalFetchedDataQuads = dataQuads.length;
@@ -321,7 +322,6 @@ function processDurableBatch(
       verifiedDataIndexes: [],
       verifiedMetaIndexes: [],
       verifiedGraphScopedDataGraphs: [],
-      integrityMetadataGraphs: [],
       verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
@@ -344,7 +344,6 @@ function processDurableBatch(
       verifiedDataIndexes: [],
       verifiedMetaIndexes: [],
       verifiedGraphScopedDataGraphs: [],
-      integrityMetadataGraphs: [],
       verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
@@ -361,16 +360,15 @@ function processDurableBatch(
     meta: [],
     verifiedZeroPublicAssets: 0,
     verifiedGraphScopedDataGraphs: [],
-    integrityMetadataGraphs: [],
   };
   const verified = verifySyncedDataImpl(
     dataQuads,
     metaQuads,
     acceptUnverified,
     (selection) => { verifiedSelection = selection; },
-    graphScopedDataGraphsToVerify === undefined
-      ? undefined
-      : new Set(graphScopedDataGraphsToVerify),
+    mode.kind === 'fullSnapshot'
+      ? mode
+      : { kind: 'changelogPage', changedDataGraphs: new Set(mode.changedDataGraphs) },
   );
   // A fully-private V2 KA legitimately has an empty public assertion graph.
   // Its metadata commits the private root and declares publicTripleCount=0,
@@ -397,7 +395,6 @@ function processDurableBatch(
     verifiedDataIndexes: verifiedSelection.data,
     verifiedMetaIndexes: verifiedSelection.meta,
     verifiedGraphScopedDataGraphs: verifiedSelection.verifiedGraphScopedDataGraphs,
-    integrityMetadataGraphs: verifiedSelection.integrityMetadataGraphs,
     verifiedPrivateOnlyResponses: verifiedFullyPrivateResponse ? 1 : 0,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
@@ -413,19 +410,18 @@ export function processDurableBatchForWire(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
-  graphScopedDataGraphsToVerify?: readonly string[],
+  mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
 ): DurableBatchProcessWireResult {
   const result = processDurableBatch(
     dataQuads,
     metaQuads,
     acceptUnverified,
-    graphScopedDataGraphsToVerify,
+    mode,
   );
   const {
     verifiedDataIndexes,
     verifiedMetaIndexes,
     verifiedGraphScopedDataGraphs,
-    integrityMetadataGraphs,
     verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
@@ -441,7 +437,6 @@ export function processDurableBatchForWire(
     verifiedDataIndexes,
     verifiedMetaIndexes,
     verifiedGraphScopedDataGraphs,
-    integrityMetadataGraphs,
     verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,

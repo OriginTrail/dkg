@@ -62,15 +62,17 @@ describe('durable sync worker result transport', () => {
         changed.payload,
         fullMetadataSnapshot,
         false,
-        [changed.assertionGraph],
+        {
+          kind: 'changelogPage',
+          changedDataGraphs: [changed.assertionGraph],
+        },
       );
 
       expect(result.rejectedKcs).toBe(0);
       expect(result.verifiedData).toEqual(changed.payload);
       expect(result.verifiedData[0]).toBe(changed.payload[0]);
-      expect(result.verifiedMeta).toEqual(fullMetadataSnapshot);
+      expect(result.verifiedMeta).toEqual(changed.meta);
       expect(result.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
-      expect(result.integrityMetadataGraphs).toEqual([META_GRAPH]);
     } finally {
       await worker.close();
     }
@@ -92,7 +94,6 @@ describe('durable sync worker result transport', () => {
       expect(result.rejectedKcs).toBe(1);
       expect(result.verifiedData).toEqual([]);
       expect(result.verifiedMeta).toEqual([]);
-      expect(result.integrityMetadataGraphs).toEqual([META_GRAPH]);
     } finally {
       await worker.close();
     }

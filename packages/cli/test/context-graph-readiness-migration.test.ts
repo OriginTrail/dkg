@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   migrateLegacyContextGraphReadiness,
+  parseProjectSyncedReadinessPayload,
   persistProjectSyncedReadiness,
   type ContextGraphReadinessStore,
 } from '../src/context-graph-readiness.js';
@@ -69,6 +70,19 @@ function fixture(options: {
 }
 
 describe('legacy context-graph readiness provenance migration', () => {
+  it('normalizes a legacy PROJECT_SYNCED payload without private-only evidence', () => {
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'legacy-project-synced',
+      dataSynced: 2,
+      sharedMemorySynced: 0,
+    })).toEqual({
+      contextGraphId: 'legacy-project-synced',
+      dataSynced: 2,
+      sharedMemorySynced: 0,
+      verifiedPrivateOnlyResponses: 0,
+    });
+  });
+
   it('resets an unproven private row once and preserves newly verified provenance on restart', async () => {
     const f = fixture({
       confirmedMeta: true,

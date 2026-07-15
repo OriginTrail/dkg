@@ -210,7 +210,7 @@ export interface ContextGraphCatchupReadinessClassification {
   eventPayload?: {
     dataSynced: number;
     sharedMemorySynced: number;
-    verifiedPrivateOnlyResponses?: number;
+    verifiedPrivateOnlyResponses: number;
   };
 }
 
@@ -458,9 +458,10 @@ export async function persistProjectSyncedReadiness(input: {
   verifiedPrivateOnlyResponses?: number;
 }): Promise<boolean> {
   const contextGraphId = input.contextGraphId.trim();
+  const verifiedPrivateOnlyResponses = input.verifiedPrivateOnlyResponses ?? 0;
   const durableCompleted = (Number.isFinite(input.dataSynced) && input.dataSynced > 0) || (
-    Number.isFinite(input.verifiedPrivateOnlyResponses)
-    && (input.verifiedPrivateOnlyResponses ?? 0) > 0
+    Number.isFinite(verifiedPrivateOnlyResponses)
+    && verifiedPrivateOnlyResponses > 0
   );
   const sharedMemoryCompleted = Number.isFinite(input.sharedMemorySynced) &&
     input.sharedMemorySynced > 0;
@@ -493,7 +494,7 @@ export interface ProjectSyncedReadinessPayload {
   contextGraphId: string;
   dataSynced: number;
   sharedMemorySynced: number;
-  verifiedPrivateOnlyResponses?: number;
+  verifiedPrivateOnlyResponses: number;
 }
 
 export function parseProjectSyncedReadinessPayload(
@@ -521,9 +522,7 @@ export function parseProjectSyncedReadinessPayload(
     contextGraphId: candidate.contextGraphId,
     dataSynced: candidate.dataSynced,
     sharedMemorySynced: candidate.sharedMemorySynced,
-    ...(candidate.verifiedPrivateOnlyResponses === undefined
-      ? {}
-      : { verifiedPrivateOnlyResponses: candidate.verifiedPrivateOnlyResponses }),
+    verifiedPrivateOnlyResponses: candidate.verifiedPrivateOnlyResponses ?? 0,
   };
 }
 
