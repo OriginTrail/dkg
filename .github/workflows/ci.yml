@@ -42,8 +42,10 @@ jobs:
   # ------------------------------------------------------------------
   # Produce one fail-closed test plan for every workflow in this repository.
   # PRs run the affected package lane plus declared downstream consumers.
-  # Protected pushes, merge queue candidates, manual runs, global/unknown
-  # changes, package manifests, large changes, and `ci:full` run everything.
+  # Protected pushes, manual runs, and merge queue candidates select every
+  # lane. Global/unknown changes, package manifests, large changes, and
+  # `ci:full` run every Node/EVM lane; Solidity retains its independent PR
+  # path gate.
   # ------------------------------------------------------------------
   changes:
     name: Plan CI delta
@@ -939,16 +941,18 @@ jobs:
   #
   # This job catches the only way that contract can break: a contributor
   # changes a `.sol` file and forgets to commit the regenerated ABIs.
-  # Runs only when `changes.outputs.contracts == 'true'` so PRs that
-  # don't touch contracts pay zero cost. On failure prints an explicit
-  # remediation command so the fix is one copy-paste away.
+  # The controller changes in this PR are not trusted until they land on the
+  # protected default branch. During that first rollout phase, run this cheap
+  # gate unconditionally instead of pinning workflows to candidate history.
+  # A follow-up may rotate the immutable controller and restore path selection.
+  # On failure prints an explicit remediation command so the fix is one
+  # copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: needs.changes.outputs.contracts == 'true'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -1016,8 +1020,8 @@ jobs:
   #   - PR + contract changes    : 4-way sharded hardhat test, no
   #                                coverage (~5-6 min per shard in
   #                                parallel; previously ~20 min single).
-  #   - merge queue candidate    : same sharded full test suite as a PR,
-  #                                keeping the pre-merge critical path short.
+  #   - merge queue candidate    : same sharded suite against the exact
+  #                                combined commit that is about to land.
   #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
   #                                single job (coverage reports don't
   #                                compose across shards, so we keep
@@ -1028,8 +1032,8 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Candidate lane only — sharded 4 ways. Protected pushes and manual runs
-    # use the separate coverage+ratchet job below.
+    # Candidate lane — sharded 4 ways. Protected pushes and manual runs use the
+    # separate coverage+ratchet job below.
     if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'
     strategy:
       fail-fast: false

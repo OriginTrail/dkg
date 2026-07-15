@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CI_LANES,
   EVM_SCOPES,
+  NODE_EVM_LANES,
   WORKSPACE_OWNING_EVM_SCOPES,
   WORKSPACE_OWNING_LANES,
   WORKSPACE_RULES,
@@ -22,10 +23,23 @@ import {
 } from '../ci-results.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+// This SHA predates the candidate branch and is already reachable from the
+// protected default branch. Controller updates in this PR need a second,
+// post-merge pin-rotation PR before workflows may execute them.
 const TRUSTED_CI_CONTROLLER_SHA = 'c441bd6766ace67e331c0dfc6e22cb1325a6e1f6';
+const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 
 function change(filePath, status = 'M') {
   return { status, paths: [filePath] };
+}
+
+function workflowJobBlock(workflow, jobName) {
+  const marker = `  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `workflow must define ${jobName}`);
+  const remainder = workflow.slice(start + marker.length);
+  const nextJob = remainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
+  return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
 }
 
 function pullRequestPlan(changeEntries, overrides = {}) {
@@ -49,7 +63,7 @@ test('parses NUL-delimited git name-status output without shell-splitting file n
   ]);
 });
 
-test('push, merge queue, manual, and explicit label plans are always full', () => {
+test('non-PR events run every lane while full-PR overrides preserve the Solidity gate', () => {
   for (const eventName of ['push', 'merge_group', 'workflow_dispatch']) {
     const plan = planCi({ eventName });
     assert.equal(plan.fullCi, true, eventName);
@@ -59,6 +73,56 @@ test('push, merge queue, manual, and explicit label plans are always full', () =
 
   const labeled = pullRequestPlan([change('CHANGELOG.md')], { labels: ['ci:full'] });
   assert.equal(labeled.fullCi, true);
+  assert.deepEqual(selectedLanes(labeled), NON_SOLIDITY_LANES);
+  assert.deepEqual(labeled.evmScopes, EVM_SCOPES);
+  assert.equal(labeled.lanes.contracts, false);
+  assert.equal(labeled.abiFreshnessRelevant, false);
+  assert.deepEqual(NODE_EVM_LANES, NON_SOLIDITY_LANES);
+});
+
+test('unknown PR diffs fail closed with Solidity selected and enforced', () => {
+  const plan = pullRequestPlan([]);
+  assert.equal(plan.mode, 'full');
+  assert.equal(plan.fullCi, true);
+  assert.equal(plan.lanes.contracts, true);
+  assert.equal(plan.abiFreshnessRelevant, true);
+  assert.deepEqual(selectedLanes(plan), CI_LANES);
+  assert.match(plan.reasons.join('\n'), /failing closed/);
+
+  for (const [name, overridePlan] of [
+    ['ci:full', pullRequestPlan([], { labels: ['ci:full'] })],
+    ['audit sample', pullRequestPlan([], { sampleKey: '00000000ffffffff' })],
+    ['delta disabled', planCi({
+      eventName: 'pull_request_delta_disabled',
+      changeEntries: [],
+    })],
+  ]) {
+    assert.equal(overridePlan.mode, 'full', name);
+    assert.equal(overridePlan.lanes.contracts, true, name);
+    assert.equal(overridePlan.abiFreshnessRelevant, true, name);
+    assert.deepEqual(selectedLanes(overridePlan), CI_LANES, name);
+    assert.match(overridePlan.reasons.join('\n'), /failing closed/, name);
+  }
+
+  const needs = {
+    changes: { result: 'success' },
+    build: { result: 'success' },
+    'abi-freshness': { result: 'success' },
+    solidity: { result: 'skipped' },
+    'solidity-coverage': { result: 'skipped' },
+    'tornado-static-analysis': { result: 'success' },
+    'evm-node-test-artifacts': { result: 'success' },
+    'evm-devnet-test-artifacts': { result: 'success' },
+    ...Object.fromEntries(
+      Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'success' }]),
+    ),
+  };
+  assert.match(
+    validatePrimaryResults({ eventName: 'pull_request', plan, needs }).join('\n'),
+    /solidity was selected but ended with skipped/,
+  );
+  needs.solidity.result = 'success';
+  assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan, needs }), []);
 });
 
 test('five percent of PR SHAs are deterministic full-CI audit samples', () => {
@@ -66,8 +130,87 @@ test('five percent of PR SHAs are deterministic full-CI audit samples', () => {
   const normal = pullRequestPlan([change('CHANGELOG.md')], { sampleKey: 'ffffffffffffffff' });
   assert.equal(sampled.auditSampled, true);
   assert.equal(sampled.fullCi, true);
+  assert.deepEqual(selectedLanes(sampled), NON_SOLIDITY_LANES);
   assert.equal(normal.auditSampled, false);
   assert.equal(normal.fullCi, false);
+});
+
+test('full PR plans preserve legacy Solidity paths and cover Hardhat support code', () => {
+  const solidityRelevantPaths = [
+    'packages/evm-module/contracts/KnowledgeAssets.sol',
+    'packages/evm-module/test/KnowledgeAssets.test.ts',
+    'packages/evm-module/deploy/001_deploy.ts',
+    'packages/evm-module/scripts/export-abi.ts',
+    'packages/evm-module/hardhat.config.ts',
+    'packages/evm-module/hardhat.node.config.ts',
+    'packages/evm-module/package.json',
+    'packages/evm-module/slither.config.json',
+    'packages/evm-module/.solhint.json',
+    'packages/evm-module/.solhintignore',
+    'packages/evm-module/aderyn.toml',
+    'package.json',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    '.github/workflows/ci.yml',
+    'packages/evm-module/utils/helpers.ts',
+    'packages/evm-module/utils/network.ts',
+    'packages/evm-module/tasks/send_neuro.ts',
+    'packages/evm-module/tsconfig.json',
+    'packages/evm-module/deployments/parameters.json',
+  ];
+
+  const hardhatSupport = pullRequestPlan([
+    change('packages/evm-module/utils/helpers.ts'),
+  ]);
+  assert.equal(hardhatSupport.mode, 'full');
+  assert.equal(hardhatSupport.lanes.contracts, true);
+  assert.equal(hardhatSupport.abiFreshnessRelevant, true);
+
+  for (const filePath of solidityRelevantPaths) {
+    const plan = pullRequestPlan([change(filePath)], { labels: ['ci:full'] });
+    assert.equal(plan.mode, 'full', filePath);
+    assert.equal(plan.lanes.contracts, true, filePath);
+    assert.equal(plan.abiFreshnessRelevant, true, filePath);
+  }
+
+  const abiOnly = pullRequestPlan([
+    change('packages/evm-module/abi/KnowledgeAssets.json'),
+  ]);
+  assert.equal(abiOnly.mode, 'full');
+  assert.equal(abiOnly.lanes.contracts, false);
+  assert.equal(abiOnly.abiFreshnessRelevant, true);
+  assert.deepEqual(selectedLanes(abiOnly), NON_SOLIDITY_LANES);
+
+  const nonSolidityPaths = [
+    'packages/evm-module/README.md',
+    'packages/evm-module/docs/greenfield-ka-ual.md',
+    'packages/agent/package.json',
+    '.github/workflows/evm-integration.yml',
+    'scripts/ci/plan-ci.mjs',
+  ];
+  for (const filePath of nonSolidityPaths) {
+    const plan = pullRequestPlan([change(filePath)], { labels: ['ci:full'] });
+    assert.equal(plan.mode, 'full', filePath);
+    assert.equal(plan.lanes.contracts, false, filePath);
+    assert.equal(plan.abiFreshnessRelevant, false, filePath);
+    assert.deepEqual(selectedLanes(plan), NON_SOLIDITY_LANES, filePath);
+  }
+});
+
+test('the delta rollback switch still path-gates Solidity on pull requests', () => {
+  const nonContract = planCi({
+    eventName: 'pull_request_delta_disabled',
+    changeEntries: [change('packages/agent/src/index.ts')],
+  });
+  assert.equal(nonContract.mode, 'full');
+  assert.deepEqual(selectedLanes(nonContract), NON_SOLIDITY_LANES);
+  assert.deepEqual(nonContract.evmScopes, EVM_SCOPES);
+
+  const contract = planCi({
+    eventName: 'pull_request_delta_disabled',
+    changeEntries: [change('packages/evm-module/contracts/KnowledgeAssets.sol')],
+  });
+  assert.deepEqual(selectedLanes(contract), CI_LANES);
 });
 
 test('documentation-only PRs select no test lane or shared build', () => {
@@ -159,7 +302,7 @@ test('highest-risk, global, unknown, manifest, large, and ambiguous changes fail
   assert.equal(hugePlan.changedFiles.length, 200, 'GitHub output must stay bounded');
 });
 
-test('workflow, planner, and aggregate-gate changes always force every CI lane', () => {
+test('control-plane changes force full Node/EVM CI without overriding the Solidity gate', () => {
   const controlPlanePaths = [
     '.github/workflows/ci.yml',
     '.github/workflows/evm-integration.yml',
@@ -176,7 +319,11 @@ test('workflow, planner, and aggregate-gate changes always force every CI lane',
     assert.equal(plan.mode, 'full', filePath);
     assert.equal(plan.fullCi, true, filePath);
     assert.equal(plan.runNode, true, filePath);
-    assert.deepEqual(selectedLanes(plan), CI_LANES, filePath);
+    assert.deepEqual(
+      selectedLanes(plan),
+      filePath === '.github/workflows/ci.yml' ? CI_LANES : NON_SOLIDITY_LANES,
+      filePath,
+    );
     assert.deepEqual(plan.evmScopes, EVM_SCOPES, filePath);
   }
 });
@@ -333,6 +480,17 @@ test('workflows execute the planner and aggregate gates from one immutable trust
   }
 
   const primaryWorkflow = workflows.get('primary');
+  assert.doesNotMatch(
+    primaryWorkflow,
+    /ref: aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d/,
+    'the trusted controller must not point into candidate-only history',
+  );
+  const abiFreshnessJob = workflowJobBlock(primaryWorkflow, 'abi-freshness');
+  assert.doesNotMatch(
+    abiFreshnessJob,
+    /^    if:/m,
+    'ABI freshness must have no job-level condition until the new controller is protected',
+  );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
       > primaryWorkflow.indexOf('node trusted-ci/scripts/ci/plan-ci.mjs'),
@@ -365,7 +523,7 @@ test('trusted planner and gates reject the all-skipped candidate-control attack'
   assert.equal(planner.status, 0, planner.stderr);
   const plan = JSON.parse(planner.stdout);
   assert.equal(plan.mode, 'full');
-  assert.deepEqual(selectedLanes(plan), CI_LANES);
+  assert.deepEqual(selectedLanes(plan), NON_SOLIDITY_LANES);
   assert.deepEqual(plan.evmScopes, EVM_SCOPES);
 
   const primaryNeeds = {
@@ -427,6 +585,13 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     );
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
+  assert.doesNotMatch(workflowJobBlock(workflow, 'abi-freshness'), /^    if:/m);
+  assert.ok(
+    workflow.includes(
+      "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
+    ),
+    'the sharded Solidity suite must protect contract PRs and exact merge candidates',
+  );
   assert.ok(
     workflow.includes('run: node candidate/scripts/check-npm-metadata.mjs'),
     'docs-only package README changes must retain the npm metadata gate',
@@ -495,8 +660,17 @@ test('GitHub outputs are booleans plus compact JSON matrices', () => {
   const gatePlan = JSON.parse(outputs.plan_json);
   assert.equal(gatePlan.mode, 'delta');
   assert.equal(gatePlan.lanes.kosava_supporting, true);
+  assert.equal(gatePlan.lanes.contracts, false);
+  assert.equal(gatePlan.abiFreshnessRelevant, false);
+  assert.equal('solidityRelevant' in gatePlan, false);
   assert.equal('changedFiles' in gatePlan, false);
   assert.equal('reasons' in gatePlan, false);
+
+  const abiOnlyOutputs = githubOutputsForPlan(pullRequestPlan([
+    change('packages/evm-module/abi/KnowledgeAssets.json'),
+  ]));
+  assert.equal(abiOnlyOutputs.abi_freshness, 'true');
+  assert.equal(abiOnlyOutputs.contracts, 'false');
 });
 
 test('aggregate gates reject failed or accidentally skipped selected jobs', () => {
@@ -517,6 +691,49 @@ test('aggregate gates reject failed or accidentally skipped selected jobs', () =
 
   needs['kosava-supporting'].result = 'skipped';
   assert.match(validatePrimaryResults({ eventName: 'pull_request', plan, needs }).join('\n'), /selected/);
+
+  const fullNonContract = pullRequestPlan(
+    [change('scripts/unrelated-maintenance.mjs')],
+    { labels: ['ci:full'] },
+  );
+  const fullNonContractNeeds = {
+    changes: { result: 'success' },
+    build: { result: 'success' },
+    'abi-freshness': { result: 'skipped' },
+    solidity: { result: 'skipped' },
+    'solidity-coverage': { result: 'skipped' },
+    'tornado-static-analysis': { result: 'skipped' },
+    'evm-node-test-artifacts': { result: 'success' },
+    'evm-devnet-test-artifacts': { result: 'success' },
+    ...Object.fromEntries(
+      Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'success' }]),
+    ),
+  };
+  assert.deepEqual(validatePrimaryResults({
+    eventName: 'pull_request',
+    plan: fullNonContract,
+    needs: fullNonContractNeeds,
+  }), []);
+
+  const abiOnly = pullRequestPlan([
+    change('packages/evm-module/abi/KnowledgeAssets.json'),
+  ]);
+  const abiOnlyNeeds = structuredClone(fullNonContractNeeds);
+  abiOnlyNeeds['abi-freshness'].result = 'success';
+  assert.deepEqual(validatePrimaryResults({
+    eventName: 'pull_request',
+    plan: abiOnly,
+    needs: abiOnlyNeeds,
+  }), []);
+  abiOnlyNeeds['abi-freshness'].result = 'skipped';
+  assert.match(
+    validatePrimaryResults({
+      eventName: 'pull_request',
+      plan: abiOnly,
+      needs: abiOnlyNeeds,
+    }).join('\n'),
+    /abi-freshness was selected but ended with skipped/,
+  );
 
   const evmPlan = pullRequestPlan([change('packages/agent/src/index.ts')]);
   assert.deepEqual(validateEvmResults({
@@ -562,8 +779,14 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
   );
 
   const mergeNeeds = structuredClone(fullNeeds);
-  mergeNeeds.solidity.result = 'success';
   mergeNeeds['solidity-coverage'].result = 'skipped';
+  assert.match(validatePrimaryResults({
+    eventName: 'merge_group',
+    plan: full,
+    needs: mergeNeeds,
+  }).join('\n'), /solidity was selected but ended with skipped/);
+
+  mergeNeeds.solidity.result = 'success';
   assert.deepEqual(validatePrimaryResults({
     eventName: 'merge_group',
     plan: full,
