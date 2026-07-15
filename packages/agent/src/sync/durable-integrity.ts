@@ -108,6 +108,163 @@ export interface DurableIntegritySelection {
   logs: DurableIntegrityLogEntry[];
 }
 
+/**
+ * A safe, graph-aligned prefix from an incomplete rootless durable snapshot.
+ *
+ * Durable V2 responders order exact assertion graphs by Unicode code point and
+ * concatenate each complete graph into one stable row stream. A requester may
+ * therefore persist and checkpoint the leading *complete* graphs after a
+ * deadline, while discarding the final partial graph. Legacy/root-scoped or
+ * structurally-invalid metadata deliberately returns `null`: those layouts do
+ * not provide a safe graph boundary and retain the existing all-or-nothing
+ * verification behaviour.
+ */
+export interface BoundedGraphScopedDurableBatch {
+  /** Only rows belonging to complete assertion graphs in this fetch round. */
+  dataQuads: Quad[];
+  /** Exact graphs whose descriptors are in scope for this verification round. */
+  changedDataGraphs: string[];
+  /** Absolute responder row offset at the last complete graph boundary. */
+  safeNextOffset: number;
+  /** Number of positive-size assertion graphs completed in this round. */
+  completedGraphCount: number;
+}
+
+function compareUnicodeCodePoints(leftValue: string, rightValue: string): number {
+  const left = Array.from(leftValue);
+  const right = Array.from(rightValue);
+  const length = Math.min(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    const delta = left[index]!.codePointAt(0)! - right[index]!.codePointAt(0)!;
+    if (delta !== 0) return delta;
+  }
+  return left.length - right.length;
+}
+
+/**
+ * Project an incomplete/resumed full snapshot onto a safe V2 graph prefix.
+ *
+ * This mirrors the responder's `buildExactGraphPagePlan` ordering. The raw
+ * offset must start on a manifest boundary and the received rows must be a
+ * contiguous prefix of the remaining exact graphs. Any ambiguity fails closed
+ * by returning `null`, so callers cannot advance a cursor on attacker-shaped
+ * metadata or a mixed legacy/V2 snapshot.
+ */
+export function planBoundedGraphScopedDurableBatch(
+  dataQuads: readonly Quad[],
+  metaQuads: readonly Quad[],
+  resumedFromOffset: number,
+  rawNextOffset: number,
+  phaseCompleted: boolean,
+): BoundedGraphScopedDurableBatch | null {
+  if (
+    !Number.isSafeInteger(resumedFromOffset)
+    || resumedFromOffset < 0
+    || !Number.isSafeInteger(rawNextOffset)
+    || rawNextOffset < resumedFromOffset
+    || rawNextOffset - resumedFromOffset !== dataQuads.length
+    || metaQuads.length === 0
+  ) return null;
+
+  const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
+  const parsed = readIntegrityMetadata(metadata, false);
+  if (
+    parsed.fatalUnscopedFailure
+    || parsed.invalidKcUals.size > 0
+    || parsed.candidates.length === 0
+    || parsed.candidates.some((candidate) => candidate.kind !== 'graph-scoped')
+  ) return null;
+
+  const descriptors = (parsed.candidates as GraphScopedCandidate[])
+    .map((candidate) => candidate.descriptor)
+    .sort((left, right) => compareUnicodeCodePoints(left.assertionGraph, right.assertionGraph));
+  const descriptorByGraph = new Map(
+    descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
+  );
+  if (descriptorByGraph.size !== descriptors.length) return null;
+
+  const observedCounts = new Map<string, number>();
+  for (const quad of dataQuads) {
+    if (!descriptorByGraph.has(quad.graph)) return null;
+    observedCounts.set(quad.graph, (observedCounts.get(quad.graph) ?? 0) + 1);
+  }
+
+  let manifestOffset = 0;
+  let reachedResumeBoundary = resumedFromOffset === 0;
+  let stoppedAtIncompleteGraph = false;
+  let safeNextOffset = resumedFromOffset;
+  let completedGraphCount = 0;
+  const completeGraphs = new Set<string>();
+  const completedPositiveGraphs: Array<{ graph: string; rowCount: number }> = [];
+
+  // Zero-public V2 assets have no responder rows, but their metadata envelope
+  // is independently verifiable. Keep them in scope on every bounded round;
+  // this is idempotent and avoids an offset ambiguity for zero-width entries.
+  for (const descriptor of descriptors) {
+    if (descriptor.publicTripleCount === 0) completeGraphs.add(descriptor.assertionGraph);
+  }
+
+  for (const descriptor of descriptors) {
+    const expected = descriptor.publicTripleCount;
+    if (expected === 0) continue;
+    const graphStart = manifestOffset;
+    const graphEnd = graphStart + expected;
+    if (!Number.isSafeInteger(graphEnd)) return null;
+    manifestOffset = graphEnd;
+
+    if (!reachedResumeBoundary) {
+      if (graphEnd <= resumedFromOffset) {
+        if ((observedCounts.get(descriptor.assertionGraph) ?? 0) !== 0) return null;
+        continue;
+      }
+      if (graphStart !== resumedFromOffset) return null;
+      reachedResumeBoundary = true;
+    }
+
+    const observed = observedCounts.get(descriptor.assertionGraph) ?? 0;
+    if (stoppedAtIncompleteGraph) {
+      if (observed !== 0) return null;
+      continue;
+    }
+    if (observed === expected) {
+      completeGraphs.add(descriptor.assertionGraph);
+      completedPositiveGraphs.push({
+        graph: descriptor.assertionGraph,
+        rowCount: expected,
+      });
+      safeNextOffset += expected;
+      completedGraphCount += 1;
+      continue;
+    }
+    if (observed < 0 || observed > expected) return null;
+    stoppedAtIncompleteGraph = true;
+  }
+
+  if (!reachedResumeBoundary || safeNextOffset > rawNextOffset) return null;
+
+  // A timed-out fetch can stop exactly on a graph boundary without receiving
+  // the terminal empty page. Do not checkpoint the final complete graph in
+  // that case: the next round must receive at least one verified data graph so
+  // its clean completion can serve as readiness evidence rather than an empty
+  // terminal probe after all useful rows were persisted by timed-out rounds.
+  if (!phaseCompleted && safeNextOffset === rawNextOffset && completedPositiveGraphs.length > 0) {
+    const replay = completedPositiveGraphs.pop()!;
+    completeGraphs.delete(replay.graph);
+    safeNextOffset -= replay.rowCount;
+    completedGraphCount -= 1;
+  }
+
+  const boundedData = dataQuads.filter((quad) => completeGraphs.has(quad.graph));
+  if (boundedData.length !== safeNextOffset - resumedFromOffset) return null;
+
+  return {
+    dataQuads: boundedData,
+    changedDataGraphs: [...completeGraphs],
+    safeNextOffset,
+    completedGraphCount,
+  };
+}
+
 interface GraphScopedDescriptor {
   ual: string;
   assertionGraph: string;
