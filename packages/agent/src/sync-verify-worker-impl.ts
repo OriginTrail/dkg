@@ -75,32 +75,16 @@ export function verifySyncedData(
   return verifySyncedDataImpl(dataQuads, metaQuads, acceptUnverified);
 }
 
-type VerifiedSelectionDetails = {
-  data: number[];
-  meta: number[];
-  verifiedZeroPublicAssets: number;
-  verifiedGraphScopedDataGraphs: string[];
-};
-
 function verifySyncedDataImpl(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified = false,
-  recordSelection?: (selection: VerifiedSelectionDetails) => void,
-  mode: DurableIntegrityVerificationMode = { kind: 'fullSnapshot' },
 ): SyncVerifyResult {
   const selection = selectVerifiedDurableSyncQuads(
     dataQuads,
     metaQuads,
     acceptUnverified,
-    mode,
   );
-  recordSelection?.({
-    data: selection.dataIndexes,
-    meta: selection.metaIndexes,
-    verifiedZeroPublicAssets: selection.verifiedZeroPublicAssets,
-    verifiedGraphScopedDataGraphs: selection.verifiedGraphScopedDataGraphs,
-  });
   return {
     data: selection.dataIndexes.map((index) => dataQuads[index]!),
     meta: selection.metaIndexes.map((index) => metaQuads[index]!),
@@ -355,32 +339,34 @@ function processDurableBatch(
     };
   }
 
-  let verifiedSelection: VerifiedSelectionDetails = {
-    data: [],
-    meta: [],
-    verifiedZeroPublicAssets: 0,
-    verifiedGraphScopedDataGraphs: [],
-  };
-  const verified = verifySyncedDataImpl(
+  const integrityMode = durableIntegrityMode(mode);
+  const verifiedSelection = selectVerifiedDurableSyncQuads(
     dataQuads,
     metaQuads,
     acceptUnverified,
-    (selection) => { verifiedSelection = selection; },
-    mode.kind === 'fullSnapshot'
-      ? mode
-      : { kind: 'changelogPage', changedDataGraphs: new Set(mode.changedDataGraphs) },
+    integrityMode,
   );
   // A fully-private V2 KA legitimately has an empty public assertion graph.
   // Its metadata commits the private root and declares publicTripleCount=0,
   // so exact verification is enough to advance both durable cursors. Keep
   // treating every other meta-without-data response as potentially pruned.
   const verifiedFullyPrivateResponse = totalFetchedDataQuads === 0
-    && verified.rejected === 0
+    && verifiedSelection.rejected === 0
     && verifiedSelection.verifiedZeroPublicAssets > 0;
+  // A since-batch response legitimately carries the full metadata phase even
+  // when no asset is newer than the watermark. Once every descriptor was
+  // cleanly classified out of scope, an empty DATA phase is clean delta
+  // completion—not evidence of a pruned graph that should pin the cursor.
+  const cleanEmptySinceBatchDelta = mode.kind === 'sinceBatchId'
+    && totalFetchedDataQuads === 0
+    && verifiedSelection.rejected === 0
+    && verifiedSelection.dataIndexes.length === 0
+    && verifiedSelection.verifiedZeroPublicAssets === 0;
   const metaOnlyResponses = !acceptUnverified
     && totalFetchedMetaQuads > 0
     && totalFetchedDataQuads === 0
     && !verifiedFullyPrivateResponse
+    && !cleanEmptySinceBatchDelta
     ? 1
     : 0;
   if (metaOnlyResponses > 0) {
@@ -390,20 +376,31 @@ function processDurableBatch(
     });
   }
   return {
-    verifiedData: verified.data,
-    verifiedMeta: verified.meta,
-    verifiedDataIndexes: verifiedSelection.data,
-    verifiedMetaIndexes: verifiedSelection.meta,
+    verifiedData: verifiedSelection.dataIndexes.map((index) => dataQuads[index]!),
+    verifiedMeta: verifiedSelection.metaIndexes.map((index) => metaQuads[index]!),
+    verifiedDataIndexes: verifiedSelection.dataIndexes,
+    verifiedMetaIndexes: verifiedSelection.metaIndexes,
     verifiedGraphScopedDataGraphs: verifiedSelection.verifiedGraphScopedDataGraphs,
     verifiedPrivateOnlyResponses: verifiedFullyPrivateResponse ? 1 : 0,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
-    rejectedKcs: verified.rejected,
+    rejectedKcs: verifiedSelection.rejected,
     emptyResponses: 0,
     metaOnlyResponses,
     dataRejectedMissingMeta: 0,
-    logs: [...logs, ...verified.logs],
+    logs: [...logs, ...verifiedSelection.logs],
   };
+}
+
+function durableIntegrityMode(mode: DurableBatchVerificationMode): DurableIntegrityVerificationMode {
+  if (mode.kind === 'fullSnapshot') return mode;
+  if (mode.kind === 'changelogPage') {
+    return { kind: 'changelogPage', changedDataGraphs: new Set(mode.changedDataGraphs) };
+  }
+  if (!/^\d+$/.test(mode.sinceBatchId)) {
+    throw new Error(`Invalid sinceBatchId verification scope: ${mode.sinceBatchId}`);
+  }
+  return { kind: 'sinceBatchId', sinceBatchId: BigInt(mode.sinceBatchId) };
 }
 
 export function processDurableBatchForWire(

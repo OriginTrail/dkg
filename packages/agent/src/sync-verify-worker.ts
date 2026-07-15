@@ -39,6 +39,7 @@ export interface SharedMemoryBatchProcessResult {
 
 export type DurableBatchVerificationMode =
   | { kind: 'fullSnapshot' }
+  | { kind: 'sinceBatchId'; sinceBatchId: string }
   | { kind: 'changelogPage'; changedDataGraphs: readonly string[] };
 
 export interface DurableBatchProcessResult {
