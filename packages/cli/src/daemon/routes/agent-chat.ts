@@ -1087,6 +1087,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       if (errorCode === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
         return jsonResponse(res, 400, { error: message });
       }
+      if (errorCode === "KA_UPDATE_AUTHOR_NOT_OWNER") {
+        return jsonResponse(res, 403, { error: message, code: "KA_UPDATE_AUTHOR_NOT_OWNER" });
+      }
       if (errorCode === "LEGACY_KA_READ_ONLY") {
         return jsonResponse(res, 409, { error: message, code: "LEGACY_KA_READ_ONLY" });
       }

@@ -134,6 +134,8 @@ import {
   skolemizeKnowledgeAssetParts,
   assertNoKnowledgeAssetPayloadNamedGraphs,
   assertValidPrecomputedUpdateAttestation,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
   isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
@@ -1971,6 +1973,40 @@ export class PublishMethods extends DKGAgentBase {
     for (const graph of priorSwmGraphs) {
       if (graph !== canonicalSwmGraph) await this.store.dropGraph(graph);
     }
+
+    // Persist the exact update snapshot and monotonic SWM head before the
+    // publisher can cross the chain write-ahead boundary. If the process dies
+    // after the transaction lands but before local VM materialization, chain
+    // reconciliation can now resolve the staged version, counts, private
+    // commitment, publisher, and immutable public payload without guessing.
+    const updateOperationId = ctx.operationId;
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: this.store,
+      graphManager,
+      contextGraphId,
+      shareOperationId: updateOperationId,
+      kaUal: updateScope.ual,
+      assertionVersion: updateScope.assertionVersion,
+      quads: canonicalParts.publicQuads,
+      ...(canonicalPrivateMerkleRoot
+        ? { privateMerkleRoot: canonicalPrivateMerkleRoot }
+        : {}),
+      privateTripleCount: canonicalParts.privateQuads.length,
+      publisherPeerId: this.node.peerId.toString(),
+      agentAddress: updateScope.agentAddress,
+      subGraphName: opts?.subGraphName,
+      timestamp: new Date(),
+      publicSnapshotStore: this.publicSnapshotStore,
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager,
+      contextGraphId,
+      kaUal: updateScope.ual,
+      assertionVersion: updateScope.assertionVersion,
+      shareOperationId: updateOperationId,
+      subGraphName: opts?.subGraphName,
+    });
     // GH #842: thread the on-chain cgId so the publisher can promote the update
     // payload into the per-cgId partition the RS prover reads. Without it,
     // updated KAs stay unprovable (data-corrupted / leaf-count-mismatch).

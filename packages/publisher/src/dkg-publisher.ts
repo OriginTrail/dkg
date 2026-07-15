@@ -230,13 +230,51 @@ export async function assertValidPrecomputedUpdateAttestation(
   const isContractAuthor = typeof chain.hasContractCode === 'function'
     ? await chain.hasContractCode(updateSeal.authorAddress)
     : false;
-  if (isContractAuthor) return;
+  if (isContractAuthor) {
+    if (typeof chain.verifyContractSignature !== 'function') {
+      throw new Error(
+        'V10 contract-author update authorization requires verifyContractSignature() on the chain adapter.',
+      );
+    }
+    const valid = await chain.verifyContractSignature(
+      updateSeal.authorAddress,
+      digest,
+      signature.serialized,
+    );
+    if (!valid) {
+      throw new Error(
+        `precomputedUpdateAttestation contract signature is invalid for ${updateSeal.authorAddress}.`,
+      );
+    }
+  } else {
+    const recovered = ethers.recoverAddress(digest, signature);
+    if (recovered.toLowerCase() !== updateSeal.authorAddress.toLowerCase()) {
+      throw new Error(
+        `precomputedUpdateAttestation signer mismatch: recovers ${recovered} `
+        + `but claims ${updateSeal.authorAddress}.`,
+      );
+    }
+  }
 
-  const recovered = ethers.recoverAddress(digest, signature);
-  if (recovered.toLowerCase() !== updateSeal.authorAddress.toLowerCase()) {
+  if (typeof chain.getKnowledgeAssetOwner !== 'function') {
     throw new Error(
-      `precomputedUpdateAttestation signer mismatch: recovers ${recovered} `
-      + `but claims ${updateSeal.authorAddress}.`,
+      'V10 update authorization requires getKnowledgeAssetOwner() on the chain adapter.',
+    );
+  }
+  const currentOwner = ethers.getAddress(await chain.getKnowledgeAssetOwner(kaId));
+  const claimedAuthor = ethers.getAddress(updateSeal.authorAddress);
+  if (currentOwner !== claimedAuthor) {
+    throw Object.assign(
+      new Error(
+        `precomputedUpdateAttestation author ${claimedAuthor} is not the current owner `
+        + `${currentOwner} of Knowledge Asset ${kaId.toString()}.`,
+      ),
+      {
+        code: 'KA_UPDATE_AUTHOR_NOT_OWNER',
+        kaId: kaId.toString(),
+        currentOwner,
+        authorAddress: claimedAuthor,
+      },
     );
   }
 }
