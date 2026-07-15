@@ -227,6 +227,27 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(String(res.body.recovery)).toContain('retry');
   });
 
+  it('swm/share preserves sealed publish-ready status for a durable replay', async () => {
+    await startWith({
+      promote: async () => ({
+        promotedCount: 0,
+        sealed: true,
+        publishReady: true,
+        shareOperationId: 'existing-share-operation',
+      }),
+    });
+
+    const res = await post('swm/share', { contextGraphId: CG_ID });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      swmShared: true,
+      promotedCount: 0,
+      sealed: true,
+      publishReady: true,
+      shareOperationId: 'existing-share-operation',
+    });
+  });
+
   it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {
     await startWith({
       promote: async () => {

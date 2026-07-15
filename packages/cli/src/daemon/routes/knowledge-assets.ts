@@ -1259,10 +1259,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
           recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
         }
-        // #1116: ownership conflicts are advisory skips. A zero-row outcome is
-        // still HTTP 200, but it did not create an SWM share and must not report
-        // the pre-share WM seal as a sealed share.
-        const swmShared = share.promotedCount > 0;
+        // A durable idempotent replay returns zero newly-promoted rows together
+        // with the original shareOperationId. That is an already-completed share,
+        // not an ownership skip, so preserve its sealed/publish-ready status.
+        const durableReplay = share.promotedCount === 0 && Boolean(share.shareOperationId);
+        const swmShared = share.promotedCount > 0 || durableReplay;
         return jsonResponse(res, 200, {
           swmShared,
           promotedCount: share.promotedCount,

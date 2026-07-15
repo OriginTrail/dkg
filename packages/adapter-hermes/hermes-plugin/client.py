@@ -576,8 +576,6 @@ class DKGClient:
             payload["authorAgentAddress"] = author_agent_address
         if scheme_version is not None:
             payload["schemeVersion"] = scheme_version
-        if layer == "wm":
-            payload["layer"] = layer
         return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/wm/finalize", payload)
 
     def publish_finalized_assertion(self, assertion_name: str, context_graph_id: str,
