@@ -230,7 +230,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
   it('swm/share preserves sealed publish-ready status for a durable replay', async () => {
     await startWith({
-      promote: async () => ({
+      shareWholeKnowledgeAsset: async () => ({
         promotedCount: 0,
         sealed: true,
         publishReady: true,
