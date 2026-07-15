@@ -3,6 +3,7 @@ import {
   ExactGraphReadError,
   GraphManager,
   readExactGraphPaged,
+  resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
 import type {
   QueryResult,
@@ -25,9 +26,8 @@ import {
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  buildGraphKnowledgeAssetMetadataQuery,
-  buildTrustedRootContextGraphRegistrationFilter,
-  parseGraphKnowledgeAssetMetadataBindings,
+  buildLegacyKnowledgeAssetMetadataQuery,
+  type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
 import {
   validateReadOnlySparql,
@@ -958,23 +958,23 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   async resolveKnowledgeAsset(ual: string): Promise<ResolvedKnowledgeAsset> {
     const safeUal = assertSafeIri(ual);
-    const graphScoped = await this.resolveGraphScopedKA(safeUal);
-    if (graphScoped) return graphScoped;
-    return this.resolveLegacyRootScopedKA(safeUal);
+    const resolved = await resolveGraphScopedOrLegacyMetadata(
+      this.store,
+      safeUal,
+      () => this.resolveLegacyRootScopedKA(safeUal),
+      { source: 'query.resolveKnowledgeAsset.metadata' },
+    );
+    if (resolved.kind === 'graph') {
+      return this.resolveGraphScopedKA(safeUal, resolved.metadata);
+    }
+    if (resolved.kind === 'legacy') return resolved.metadata;
+    throw new Error(`KA not found for UAL: ${safeUal}`);
   }
 
   private async resolveGraphScopedKA(
     ual: string,
-  ): Promise<ResolvedGraphKnowledgeAsset | null> {
-    const metaResult = await this.store.query(
-      buildGraphKnowledgeAssetMetadataQuery(ual),
-    );
-    const parsed = parseGraphKnowledgeAssetMetadataBindings(
-      ual,
-      metaResult.type === 'bindings' ? metaResult.bindings : [],
-    );
-    if (parsed.kind !== 'graph') return null;
-    const metadata = parsed.metadata;
+    metadata: ParsedGraphKnowledgeAssetMetadata,
+  ): Promise<ResolvedGraphKnowledgeAsset> {
     const expectedGraph = metadata.assertionGraph;
 
     let quads: Quad[];
@@ -1015,24 +1015,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Existing V10 metadata can use either token-row + partOf membership or
     // the collapsed UAL-subject rootEntity form. This path is read-only.
     const metaResult = await this.store.query(
-      `SELECT ?ka ?rootEntity ?ctxGraph ?sgName WHERE {
-        GRAPH ?g {
-          {
-            ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
-            ?ka <http://dkg.io/ontology/partOf> <${ual}> .
-          }
-          UNION
-          {
-            <${ual}> <http://dkg.io/ontology/rootEntity> ?rootEntity .
-            BIND(<${ual}> AS ?ka)
-          }
-          <${ual}> <http://dkg.io/ontology/contextGraph> ?ctxGraph .
-          OPTIONAL { <${ual}> <http://dkg.io/ontology/subGraphName> ?sgName }
-          BIND(CONCAT(STR(?ctxGraph), "/_meta") AS ?expectedMetaGraph)
-          FILTER(STR(?g) = ?expectedMetaGraph)
-        }
-        ${buildTrustedRootContextGraphRegistrationFilter('?ctxGraph', '?g')}
-      } ORDER BY ?ka`,
+      buildLegacyKnowledgeAssetMetadataQuery(ual),
     );
 
     if (metaResult.type !== 'bindings' || metaResult.bindings.length === 0) {

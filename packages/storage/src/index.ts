@@ -86,6 +86,10 @@ export {
   type ReadExactGraphPagedOptions,
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  resolveGraphScopedOrLegacyMetadata,
+  type GraphScopedOrLegacyMetadata,
+} from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
