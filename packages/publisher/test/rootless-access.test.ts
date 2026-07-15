@@ -264,6 +264,48 @@ describe('rootless graph-scoped private access', () => {
     expect(response.rejectionReason).toContain('assertionGraph mismatch');
   });
 
+  it('treats persisted content-scope version zero as a legacy private read', async () => {
+    const store = new OxigraphStore();
+    const legacyRoot = 'urn:legacy:version-zero';
+    await store.insert([
+      {
+        subject: UAL,
+        predicate: `${DKG}contentScopeVersion`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: META_GRAPH,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}rootEntity`,
+        object: legacyRoot,
+        graph: META_GRAPH,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}contextGraph`,
+        object: CONTEXT_GRAPH_URI,
+        graph: META_GRAPH,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}accessPolicy`,
+        object: '"public"',
+        graph: META_GRAPH,
+      },
+      {
+        subject: legacyRoot,
+        predicate: 'urn:p',
+        object: '"legacy-zero"',
+        graph: `${CONTEXT_GRAPH_URI}/_private`,
+      },
+    ]);
+
+    const response = await request(new AccessHandler(store, new TypedEventBus()));
+
+    expect(response.granted).toBe(true);
+    expect(new TextDecoder().decode(response.nquads)).toContain('legacy-zero');
+  });
+
   it('never falls back to a legacy root bag after seeing an incomplete V2 marker', async () => {
     const store = new OxigraphStore();
     const legacyRoot = 'urn:legacy:poison';
