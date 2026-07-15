@@ -73,7 +73,12 @@ import {
   utimesSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { isExternalBackend, getSparqlEndpoint, CHANGELOG_GRAPH } from '@origintrail-official/dkg-storage';
+import {
+  isExternalBackend,
+  getSparqlEndpoint,
+  CHANGELOG_GRAPH,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+} from '@origintrail-official/dkg-storage';
 
 const STATE_FILE = '.network-state.json';
 
@@ -142,7 +147,9 @@ const SPARQL_DROP_ALL = 'DROP ALL';
 const SPARQL_SCOPED_DELETE =
   'DELETE { GRAPH ?g { ?s ?p ?o } } ' +
   'WHERE { GRAPH ?g { ?s ?p ?o } ' +
-  `FILTER(strstarts(str(?g), "${V10_GRAPH_PREFIX}") || str(?g) = "${CHANGELOG_GRAPH}") }`;
+  `FILTER(strstarts(str(?g), "${V10_GRAPH_PREFIX}") ` +
+  `|| str(?g) = "${CHANGELOG_GRAPH}" ` +
+  `|| str(?g) = "${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}") }`;
 
 export interface ChainResetWipeResult {
   /** True when a wipe was performed. */

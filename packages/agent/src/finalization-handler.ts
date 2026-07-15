@@ -1069,6 +1069,7 @@ export class FinalizationHandler {
         metaGraph,
         scope.ual,
         materializedVersion,
+        BigInt(scope.assertionVersion),
       ))) {
         return 'stale' as const;
       }

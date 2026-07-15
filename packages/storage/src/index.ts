@@ -17,14 +17,17 @@ export {
   createTripleStore,
   tryUpdateWithTouchedGraphs,
   tryReplaceGraphAtomically,
+  tryReplaceGraphAndSubjectAtomically,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
 } from './triple-store.js';
 export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
+  type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
 export {
@@ -116,6 +119,7 @@ export {
   type LoadSharedMemorySliceWithKaBoundFallbackOptions,
 } from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
+export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';

@@ -10,6 +10,7 @@ import {
   OxigraphStore,
   SharedMemoryLiteralBlobStore,
   buildAtomicGraphReplaceUpdate,
+  tryReplaceGraphAndSubjectAtomically,
   tryReplaceGraphAtomically,
   type Quad,
   type TripleStore,
@@ -68,6 +69,49 @@ describe('atomic named-graph replacement', () => {
     expect(await store.countQuads(OTHER)).toBe(1);
   });
 
+  it('replaces one data graph and metadata subject in a single update', async () => {
+    const store = new OxigraphStore();
+    const metaGraph = 'did:dkg:context-graph:atomic/_meta';
+    const ual = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1';
+    const oldMeta: Quad = {
+      subject: ual,
+      predicate: 'http://dkg.io/ontology/merkleRoot',
+      object: '"old"',
+      graph: metaGraph,
+    };
+    const keepMeta: Quad = {
+      subject: 'urn:keep',
+      predicate: 'urn:test:value',
+      object: '"keep"',
+      graph: metaGraph,
+    };
+    const newMeta: Quad = {
+      ...oldMeta,
+      object: '"new"',
+    };
+    await store.insert([quad('urn:old', '"old"'), oldMeta, keepMeta]);
+
+    await expect(tryReplaceGraphAndSubjectAtomically(
+      store,
+      TARGET,
+      [quad('urn:new', '"new"')],
+      metaGraph,
+      ual,
+      [newMeta],
+    )).resolves.toBe(true);
+
+    const data = await store.query(`SELECT ?s WHERE { GRAPH <${TARGET}> { ?s ?p ?o } }`);
+    expect(data.type === 'bindings' ? data.bindings : []).toEqual([{ s: 'urn:new' }]);
+    const metadata = await store.query(`SELECT ?s ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } ORDER BY ?s`);
+    expect(metadata.type === 'bindings' ? metadata.bindings : []).toEqual([
+      { s: ual, o: '"new"' },
+      { s: 'urn:keep', o: '"keep"' },
+    ]);
+    expect((await store.listGraphs()).some(
+      (graph) => graph.startsWith(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX),
+    )).toBe(false);
+  });
+
   it('externalizes per-KA SWM literals and emits only the canonical changelog graph', async () => {
     const blobDir = await mkdtemp(join(tmpdir(), 'dkg-atomic-graph-blobs-'));
     tempDirs.push(blobDir);
@@ -119,6 +163,16 @@ describe('atomic named-graph replacement', () => {
     const unsupported = {} as TripleStore;
     await expect(
       tryReplaceGraphAtomically(unsupported, TARGET, [quad('urn:s', '"v"')]),
+    ).resolves.toBe(false);
+    await expect(
+      tryReplaceGraphAndSubjectAtomically(
+        unsupported,
+        TARGET,
+        [quad('urn:s', '"v"')],
+        OTHER,
+        'urn:meta:subject',
+        [],
+      ),
     ).resolves.toBe(false);
 
     expect(() => buildAtomicGraphReplaceUpdate(TARGET, [

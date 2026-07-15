@@ -54,6 +54,7 @@ export default defineConfig({
       "test/sync-backpressure.test.ts",
       "test/sync-requester-priority.test.ts",
       "test/sync-requester-progress.test.ts",
+      "test/durable-sync-graph-scoped-materialization.test.ts",
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
       "test/sync-on-connect-churn.test.ts",

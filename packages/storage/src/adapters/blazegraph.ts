@@ -22,6 +22,7 @@ import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import {
+  buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
@@ -350,6 +351,41 @@ export class BlazegraphStore implements TripleStore {
           'replaceGraphCleanup',
         ).catch(() => undefined);
       }
+      throw error;
+    }
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: DKGQuad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'BlazegraphStore.replaceGraphAndSubject',
+    });
+    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
+    try {
+      await this.sparqlUpdate(
+        plan.update,
+        { ...options, source: options?.source ?? 'blazegraph.replaceGraphAndSubject' },
+        'replaceGraphAndSubject',
+      );
+    } catch (error) {
+      await this.sparqlUpdate(
+        plan.cleanup,
+        { ...options, source: 'blazegraph.replaceGraphAndSubject.cleanup' },
+        'replaceGraphAndSubjectCleanup',
+      ).catch(() => undefined);
       throw error;
     }
   }

@@ -20,6 +20,7 @@ import {
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import {
+  buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
@@ -350,6 +351,39 @@ export class OxigraphStore implements TripleStore {
     }
     this.scheduleFlush();
     this.writeGen.recordGraphWrites([graphUri]);
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: DKGQuad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: DKGQuad[],
+  ): Promise<void> {
+    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'OxigraphStore.replaceGraphAndSubject',
+    });
+    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
+    try {
+      this.store.update(plan.update);
+    } catch (error) {
+      try {
+        this.store.update(plan.cleanup);
+      } catch {
+        // Preserve the compound replacement failure.
+      }
+      this.scheduleFlush();
+      throw error;
+    }
+    this.scheduleFlush();
+    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {

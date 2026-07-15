@@ -341,6 +341,45 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     });
   }
 
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraphAndSubject !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraphAndSubject',
+        'ChangelogStore',
+      );
+    }
+    if (!this.enabled) {
+      return this.inner.replaceGraphAndSubject(
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+        options,
+      );
+    }
+    this.assertNotReserved(graphUri, 'replaceGraphAndSubject');
+    this.assertNotReserved(metaGraphUri, 'replaceGraphAndSubject');
+    await this.runExclusive(async () => {
+      await this.inner.replaceGraphAndSubject!(
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+        options,
+      );
+      await this.markPostMutation([graphUri, metaGraphUri], options);
+    });
+  }
+
   async createGraph(graphUri: string): Promise<void> {
     // Empty graphs are not listed by this repo's `listGraphs` semantics and
     // carry no data to converge, so no marker until the first insert. Matches

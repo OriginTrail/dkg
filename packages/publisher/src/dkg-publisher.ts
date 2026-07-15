@@ -3,7 +3,7 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -50,8 +50,10 @@ import {
   buildScopedMinimalMeta,
   resolveUalByBatchId,
   promoteUpdatedKaToPerCgId,
+  replaceLocallyTrustedKnowledgeAssetControls,
   restateLabelGraphForUpdate,
   shouldApplyMaterialization,
+  materializedVersionQuad,
   withMaterializationLock,
   writeMaterializedVersion,
   type MaterializedVersion,
@@ -3116,6 +3118,16 @@ export class DKGPublisher implements Publisher {
           q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
         );
       }
+      if (graphPublish && !isAgentRegistryContextGraph(contextGraphId)) {
+        // Precommit version-bound local controls. If a later visible write
+        // fails, the future sidecar is ignored until that assertion version
+        // and root actually materialize.
+        await replaceLocallyTrustedKnowledgeAssetControls(
+          this.store,
+          graphPublish.scope.ual,
+          tentativeMeta,
+        );
+      }
       this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store (${reasonLog})`);
       if (graphPublish) {
         await this.replaceExactKnowledgeAssetGraph(
@@ -3605,6 +3617,13 @@ export class DKGPublisher implements Publisher {
             )
           : contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, options.subGraphName);
         const vmQuads = normalizedQuads.map((q) => ({ ...q, graph: vmGraph }));
+        if (graphPublish) {
+          await replaceLocallyTrustedKnowledgeAssetControls(
+            this.store,
+            graphPublish.scope.ual,
+            confirmedQuads,
+          );
+        }
         this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
         if (graphPublish) {
           await this.replaceExactKnowledgeAssetGraph(
@@ -4143,60 +4162,91 @@ export class DKGPublisher implements Publisher {
     const storeUpdatedQuads = async (
       version?: MaterializedVersion,
       provenance?: OnChainProvenance,
-    ): Promise<void> => {
+    ): Promise<'applied' | 'stale'> => {
       onPhase?.('store', 'start');
 
       if (graphUpdate) {
-        await this.replaceExactKnowledgeAssetGraph(
-          dataGraph,
-          allSkolemizedQuads,
-          'Graph-scoped KA update',
-        );
-        await this.privateStore.replaceKnowledgeAssetPrivateTriples(
-          contextGraphId,
-          graphUpdate.scope,
-          canonicalPrivateQuads,
-          options.subGraphName,
-        );
         const labelMeta = options.targetMetaGraphUri
           ?? this.graphManager.metaGraphUri(contextGraphId);
-        const metadata = generateGraphKnowledgeAssetMetadata(
-          {
-            ual: graphUpdate.scope.ual,
-            contextGraphId,
-            merkleRoot: kcMerkleRoot,
-            publisherPeerId: options.publisherPeerId?.trim() || 'unknown',
-            accessPolicy: options.accessPolicy,
-            allowedPeers: options.allowedPeers,
-            timestamp: new Date(),
-            subGraphName: options.subGraphName,
-            authorAddress: options.precomputedUpdateAttestation?.authorAddress,
-            assertionVersion: graphUpdate.scope.assertionVersion,
-            publicTripleCount: graphUpdate.publicTripleCount,
-            privateTripleCount: graphUpdate.privateTripleCount,
-            ...(updatePrivateRoots[0]
-              ? { privateMerkleRoot: updatePrivateRoots[0] }
-              : {}),
-            assertionGraph: dataGraph,
-          },
-          provenance ? 'confirmed' : 'tentative',
-          provenance,
-        );
-        await this.convergeKnowledgeAssetMetadataRows(
-          labelMeta,
-          graphUpdate.scope.ual,
-          metadata,
-        );
-        if (version) {
-          await writeMaterializedVersion(
+        const incomingVersion = version ?? { blockNumber: 0, txIndex: 0 };
+        const outcome = await withMaterializationLock(labelMeta, graphUpdate.scope.ual, async () => {
+          if (!(await shouldApplyMaterialization(
             this.store,
             labelMeta,
             graphUpdate.scope.ual,
-            version,
+            incomingVersion,
+            BigInt(graphUpdate.scope.assertionVersion),
+          ))) {
+            this.log.info(
+              ctx,
+              `Graph-scoped KA update skipped for ${graphUpdate.scope.ual}: a newer assertion is already materialized`,
+            );
+            return 'stale' as const;
+          }
+          const metadata = generateGraphKnowledgeAssetMetadata(
+            {
+              ual: graphUpdate.scope.ual,
+              contextGraphId,
+              merkleRoot: kcMerkleRoot,
+              publisherPeerId: options.publisherPeerId?.trim() || 'unknown',
+              accessPolicy: options.accessPolicy,
+              allowedPeers: options.allowedPeers,
+              timestamp: new Date(),
+              subGraphName: options.subGraphName,
+              authorAddress: options.precomputedUpdateAttestation?.authorAddress,
+              assertionVersion: graphUpdate.scope.assertionVersion,
+              publicTripleCount: graphUpdate.publicTripleCount,
+              privateTripleCount: graphUpdate.privateTripleCount,
+              ...(updatePrivateRoots[0]
+                ? { privateMerkleRoot: updatePrivateRoots[0] }
+                : {}),
+              assertionGraph: dataGraph,
+            },
+            provenance ? 'confirmed' : 'tentative',
+            provenance,
+          ).map((quad) => ({ ...quad, graph: labelMeta }));
+          if (version) {
+            metadata.push(materializedVersionQuad(
+              labelMeta,
+              graphUpdate.scope.ual,
+              version,
+            ));
+          }
+          await replaceLocallyTrustedKnowledgeAssetControls(
+            this.store,
+            graphUpdate.scope.ual,
+            metadata,
           );
-        }
+          // The versioned private graph is written first. If it fails, the
+          // visible public+metadata projection is untouched; if the compound
+          // commit fails, the new private graph is an unreachable retry-safe
+          // orphan while the prior assertion remains coherent.
+          await this.privateStore.replaceKnowledgeAssetPrivateTriples(
+            contextGraphId,
+            graphUpdate.scope,
+            canonicalPrivateQuads,
+            options.subGraphName,
+          );
+          const replaced = await tryReplaceGraphAndSubjectAtomically(
+            this.store,
+            dataGraph,
+            allSkolemizedQuads.map((quad) => ({ ...quad, graph: dataGraph })),
+            labelMeta,
+            graphUpdate.scope.ual,
+            metadata,
+          );
+          if (!replaced) {
+            throw Object.assign(
+              new Error(
+                'Graph-scoped KA update requires atomic data/metadata replacement, but the configured triple store does not support it',
+              ),
+              { code: 'ATOMIC_GRAPH_AND_METADATA_REPLACE_UNSUPPORTED', graphUri: dataGraph },
+            );
+          }
+          return 'applied' as const;
+        });
         onPhase?.('store', 'end');
-        return;
+        return outcome;
       }
 
       // Discover the PRIOR root entities from `_meta` BEFORE the label
@@ -4305,11 +4355,17 @@ export class DKGPublisher implements Publisher {
         version,
       });
       onPhase?.('store', 'end');
+      return 'applied';
     };
 
     if (localOnlyUpdate) {
       this.log.warn(ctx, 'No chain configured — applying update locally and returning tentative result');
-      await storeUpdatedQuads();
+      if ((await storeUpdatedQuads()) === 'stale') {
+        throw Object.assign(
+          new Error(`Graph-scoped KA update ${graphUpdate!.scope.ual} is stale and was not materialized`),
+          { code: 'STALE_KA_ASSERTION_VERSION' },
+        );
+      }
       const result: PublishResult = {
         kaId,
         ual: graphUpdate?.scope.ual
@@ -4775,7 +4831,12 @@ export class DKGPublisher implements Publisher {
         'Chain adapter returned a successful update without publisherAddress. ' +
         'Applying local data update as tentative instead of confirming unproven attribution.',
       );
-      await storeUpdatedQuads();
+      if ((await storeUpdatedQuads()) === 'stale') {
+        throw Object.assign(
+          new Error(`Graph-scoped KA update ${graphUpdate!.scope.ual} is stale and was not materialized`),
+          { code: 'STALE_KA_ASSERTION_VERSION' },
+        );
+      }
       const result: PublishResult = {
         kaId,
         ual: graphUpdate?.scope.ual ?? await this.resolveKaUal(kaId),
@@ -4804,7 +4865,12 @@ export class DKGPublisher implements Publisher {
       batchId: kaId,
       chainId: this.chain.chainId,
     };
-    await storeUpdatedQuads(updateVersion, updateProvenance);
+    if ((await storeUpdatedQuads(updateVersion, updateProvenance)) === 'stale') {
+      throw Object.assign(
+        new Error(`Graph-scoped KA update ${graphUpdate!.scope.ual} is stale and was not materialized`),
+        { code: 'STALE_KA_ASSERTION_VERSION' },
+      );
+    }
 
     // B6 — the on-chain update has confirmed and the verifiable-memory quads are
     // committed: REPLACE-persist the rotated PUBLIC `_catalog` here, inside the

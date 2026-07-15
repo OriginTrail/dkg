@@ -42,9 +42,11 @@ import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import {
+  buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -146,6 +148,8 @@ export interface SparqlHttpStoreOptions {
    * index/revalidation owner.
    */
   managedByDkg?: boolean;
+  /** Internal capability flag retained when GraphSetIndexStore owns caching. */
+  atomicCompoundUpdate?: boolean;
   /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
   slowQueryThresholdMs?: number;
   /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
@@ -167,6 +171,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
   private readonly managedByDkg: boolean;
+  private readonly atomicCompoundUpdate: boolean;
 
   private readonly now: () => number;
   private readonly slowQueryThresholdMs: number;
@@ -189,6 +194,7 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
     this.managedByDkg = options.managedByDkg === true;
+    this.atomicCompoundUpdate = this.managedByDkg || options.atomicCompoundUpdate === true;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
       options.slowQueryThresholdMs,
@@ -443,6 +449,55 @@ export class SparqlHttpStore implements TripleStore {
     }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: DKGQuad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    // A generic SPARQL endpoint is not required by the protocol to commit a
+    // multi-operation Update request transactionally. DKG-managed endpoints
+    // are Oxigraph servers and do provide that boundary; all others fail
+    // closed unless a future adapter can make an equally explicit guarantee.
+    if (!this.atomicCompoundUpdate) {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraphAndSubject',
+        'SparqlHttpStore',
+      );
+    }
+    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceGraphAndSubject',
+    });
+    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
+    const execute = async (update: string, source: string): Promise<void> => {
+      const res = await this.postUpdate(update, { ...options, source }, 'replaceGraphAndSubject');
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(
+          `SPARQL HTTP replaceGraphAndSubject failed (${res.status}): ${body.slice(0, 300)}`,
+        );
+      }
+    };
+    try {
+      await execute(plan.update, options?.source ?? 'sparql-http.replaceGraphAndSubject');
+    } catch (error) {
+      await execute(plan.cleanup, 'sparql-http.replaceGraphAndSubject.cleanup').catch(() => undefined);
+      this.invalidateListGraphsCache();
+      throw error;
+    }
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {

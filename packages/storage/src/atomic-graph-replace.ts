@@ -15,6 +15,12 @@ export interface AtomicGraphReplaceUpdate {
   stagingGraph?: string;
 }
 
+export interface AtomicGraphAndSubjectReplaceUpdate {
+  update: string;
+  cleanup: string;
+  stagingGraphs: readonly string[];
+}
+
 /**
  * Build one SPARQL Update request that replaces a complete named graph.
  *
@@ -54,6 +60,62 @@ export function buildAtomicGraphReplaceUpdate(
   };
 }
 
+/**
+ * Build one transactional SPARQL Update that replaces both a complete named
+ * graph and one metadata subject. Payloads are staged inside the same request,
+ * so parse/staging failures cannot expose a mixed data/metadata projection.
+ */
+export function buildAtomicGraphAndSubjectReplaceUpdate(
+  graphUri: string,
+  graphQuads: readonly Quad[],
+  metaGraphUri: string,
+  metadataSubject: string,
+  metadataQuads: readonly Quad[],
+): AtomicGraphAndSubjectReplaceUpdate {
+  const target = assertSafeIri(graphUri);
+  const metaGraph = assertSafeIri(metaGraphUri);
+  const subject = assertSafeIri(metadataSubject);
+  assertReplacementPayload(target, graphQuads);
+  assertSubjectReplacementPayload(metaGraph, subject, metadataQuads);
+
+  const dataStagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
+  const metaStagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
+  const stagingGraphs = [dataStagingGraph, metaStagingGraph];
+  const cleanup = stagingGraphs
+    .map((graph) => `DROP SILENT GRAPH <${graph}>`)
+    .join(';\n');
+  const stagingBlocks = [
+    graphQuads.length > 0
+      ? formatGraphBlock(dataStagingGraph, graphQuads)
+      : undefined,
+    metadataQuads.length > 0
+      ? formatGraphBlock(metaStagingGraph, metadataQuads)
+      : undefined,
+  ].filter((block): block is string => block !== undefined);
+  const stagePayload = stagingBlocks.length > 0
+    ? `INSERT DATA {\n${stagingBlocks.join('\n')}\n};\n`
+    : '';
+  const insertMetadata = metadataQuads.length > 0
+    ? `INSERT { GRAPH <${metaGraph}> { <${subject}> ?p ?o } }\n` +
+      `WHERE { GRAPH <${metaStagingGraph}> { <${subject}> ?p ?o } };\n`
+    : '';
+  const replaceData = graphQuads.length > 0
+    ? `MOVE SILENT GRAPH <${dataStagingGraph}> TO GRAPH <${target}>`
+    : `DROP SILENT GRAPH <${target}>`;
+
+  return {
+    stagingGraphs,
+    cleanup,
+    update:
+      `${cleanup};\n` +
+      stagePayload +
+      `DELETE WHERE { GRAPH <${metaGraph}> { <${subject}> ?p ?o } };\n` +
+      insertMetadata +
+      `${replaceData};\n` +
+      `DROP SILENT GRAPH <${metaStagingGraph}>`,
+  };
+}
+
 export function isAtomicGraphReplaceStagingGraph(graphUri: string): boolean {
   return graphUri.startsWith(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX);
 }
@@ -71,6 +133,32 @@ function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): voi
       );
     }
   }
+}
+
+function assertSubjectReplacementPayload(
+  graphUri: string,
+  subject: string,
+  quads: readonly Quad[],
+): void {
+  for (const [index, quad] of quads.entries()) {
+    if (quad.graph !== graphUri || quad.subject !== subject) {
+      throw new Error(
+        `Atomic subject replacement quad ${index} must target subject "${subject}" in graph "${graphUri}"`,
+      );
+    }
+    if (quad.object.startsWith('_:')) {
+      throw new Error(
+        `Atomic subject replacement requires canonical skolem IRIs; quad ${index} still contains a blank node`,
+      );
+    }
+  }
+}
+
+function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
+  const triples = quads
+    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
+    .join('\n');
+  return `  GRAPH <${graphUri}> {\n${triples}\n  }`;
 }
 
 function formatResource(term: string, role: string): string {

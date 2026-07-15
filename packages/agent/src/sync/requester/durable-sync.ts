@@ -7,6 +7,35 @@ import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
+import type {
+  GraphScopedMaterializationOutcome,
+  VerifiedGraphScopedAsset,
+} from './graph-scoped-materialization.js';
+
+const DKG_NS = 'http://dkg.io/ontology/';
+const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
+const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
+const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
+const MATERIALIZED_VERSION = `${DKG_NS}materializedVersion`;
+const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
+  MATERIALIZED_VERSION,
+  `${DKG_NS}accessPolicy`,
+  `${DKG_NS}allowedPeer`,
+  `${DKG_NS}publisherPeerId`,
+  `${DKG_NS}status`,
+]);
+const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
+  `${DKG_NS}merkleRoot`,
+  `${DKG_NS}contentScopeVersion`,
+  `${DKG_NS}kaUal`,
+  ASSERTION_VERSION,
+  `${DKG_NS}publicTripleCount`,
+  `${DKG_NS}privateTripleCount`,
+  `${DKG_NS}privateMerkleRoot`,
+  ASSERTION_GRAPH,
+  `${DKG_NS}contextGraph`,
+  `${DKG_NS}subGraphName`,
+]);
 
 export interface DurableSyncSummary {
   insertedTriples: number;
@@ -95,6 +124,10 @@ interface DurableSyncContext {
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (quads: Quad[]) => Promise<void>;
+  /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
+  storeGraphScopedAsset?: (
+    asset: VerifiedGraphScopedAsset,
+  ) => Promise<GraphScopedMaterializationOutcome>;
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
@@ -118,6 +151,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
+    storeGraphScopedAsset,
     onVerifiedFullSnapshot,
     deleteCheckpoint,
     setCheckpoint,
@@ -338,15 +372,50 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       startPhase('store');
       const storeStartedAt = Date.now();
-      if (processed.verifiedData.length > 0) {
-        await storeInsert(processed.verifiedData);
-        summary.insertedTriples += processed.verifiedData.length;
-        summary.insertedDataTriples += processed.verifiedData.length;
+      const partitioned = partitionVerifiedGraphScopedAssets(
+        pid,
+        processed.verifiedData,
+        processed.verifiedMeta,
+        processed.verifiedGraphScopedDataGraphs ?? [],
+      );
+      if (partitioned.assets.length > 0 && !storeGraphScopedAsset) {
+        throw Object.assign(
+          new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
+          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+        );
       }
-      if (processed.verifiedMeta.length > 0) {
-        await storeInsert(processed.verifiedMeta);
-        summary.insertedTriples += processed.verifiedMeta.length;
-        summary.insertedMetaTriples += processed.verifiedMeta.length;
+      const appliedGraphScopedAssets: VerifiedGraphScopedAsset[] = [];
+      for (const asset of partitioned.assets) {
+        const outcome = await storeGraphScopedAsset!(asset);
+        if (outcome === 'applied') appliedGraphScopedAssets.push(asset);
+        else if (outcome === 'stale') {
+          logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+        } else {
+          logWarn(ctx, `Quarantined oversized graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+        }
+      }
+      if (partitioned.remainingData.length > 0) {
+        await storeInsert(partitioned.remainingData);
+        summary.insertedTriples += partitioned.remainingData.length;
+        summary.insertedDataTriples += partitioned.remainingData.length;
+      }
+      if (partitioned.remainingMeta.length > 0) {
+        await storeInsert(partitioned.remainingMeta);
+        summary.insertedTriples += partitioned.remainingMeta.length;
+        summary.insertedMetaTriples += partitioned.remainingMeta.length;
+      }
+      if (appliedGraphScopedAssets.length > 0) {
+        const graphScopedDataCount = appliedGraphScopedAssets.reduce(
+          (total, asset) => total + asset.dataQuads.length,
+          0,
+        );
+        const graphScopedMetaCount = appliedGraphScopedAssets.reduce(
+          (total, asset) => total + asset.metadataQuads.length,
+          0,
+        );
+        summary.insertedTriples += graphScopedDataCount + graphScopedMetaCount;
+        summary.insertedDataTriples += graphScopedDataCount;
+        summary.insertedMetaTriples += graphScopedMetaCount;
       }
       await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
@@ -403,4 +472,127 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   }
 
   return summary;
+}
+
+function partitionVerifiedGraphScopedAssets(
+  contextGraphId: string,
+  verifiedData: Quad[],
+  verifiedMeta: Quad[],
+  verifiedGraphs: readonly string[],
+): {
+  assets: VerifiedGraphScopedAsset[];
+  remainingData: Quad[];
+  remainingMeta: Quad[];
+} {
+  const graphSet = new Set(verifiedGraphs);
+  // These predicates participate in local stale-write control. A peer may
+  // supply assertionVersion only inside a fully verified graph-scoped asset;
+  // materializedVersion is never peer-owned.
+  const peerSafeMetadata = verifiedMeta.filter(
+    (quad) => !PEER_UNTRUSTED_METADATA_PREDICATES.has(quad.predicate),
+  );
+  if (graphSet.size === 0) {
+    return {
+      assets: [],
+      remainingData: verifiedData,
+      remainingMeta: peerSafeMetadata.filter((quad) => quad.predicate !== ASSERTION_VERSION),
+    };
+  }
+
+  const dataByGraph = new Map<string, Quad[]>();
+  const remainingData: Quad[] = [];
+  for (const quad of verifiedData) {
+    if (!graphSet.has(quad.graph)) {
+      remainingData.push(quad);
+      continue;
+    }
+    const graphQuads = dataByGraph.get(quad.graph) ?? [];
+    graphQuads.push(quad);
+    dataByGraph.set(quad.graph, graphQuads);
+  }
+
+  const ualByGraph = new Map<string, Set<string>>();
+  const metadataBySubject = new Map<string, Quad[]>();
+  for (const quad of peerSafeMetadata) {
+    const subjectQuads = metadataBySubject.get(quad.subject) ?? [];
+    subjectQuads.push(quad);
+    metadataBySubject.set(quad.subject, subjectQuads);
+    if (quad.predicate !== ASSERTION_GRAPH) continue;
+    const graph = stripLiteral(quad.object);
+    if (!graphSet.has(graph)) continue;
+    const owners = ualByGraph.get(graph) ?? new Set<string>();
+    owners.add(quad.subject);
+    ualByGraph.set(graph, owners);
+  }
+
+  const assets: VerifiedGraphScopedAsset[] = [];
+  const handledUals = new Set<string>();
+  for (const assertionGraph of [...graphSet].sort()) {
+    const owners = ualByGraph.get(assertionGraph);
+    if (!owners || owners.size !== 1) {
+      throw new Error(`Verified graph-scoped assertion ${assertionGraph} has ${owners?.size ?? 0} metadata owners`);
+    }
+    const [ual] = owners;
+    // Only persist structural fields used to verify and locate the exact
+    // assertion. ACLs, status, timestamps and provenance are not Merkle-bound
+    // by V2 data and must never become trusted local controls from a peer.
+    const metadataQuads = (metadataBySubject.get(ual) ?? []).filter(
+      (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
+    );
+    const versions = new Set(
+      metadataQuads
+        .filter((quad) => quad.predicate === ASSERTION_VERSION)
+        .map((quad) => stripLiteral(quad.object)),
+    );
+    if (versions.size !== 1) {
+      throw new Error(`Verified graph-scoped KA ${ual} has ${versions.size} assertion versions`);
+    }
+    const [versionRaw] = versions;
+    if (!versionRaw || !/^\d+$/.test(versionRaw)) {
+      throw new Error(`Verified graph-scoped KA ${ual} has invalid assertionVersion ${versionRaw ?? '<missing>'}`);
+    }
+    const metaGraphs = new Set(metadataQuads.map((quad) => quad.graph));
+    if (metaGraphs.size !== 1) {
+      throw new Error(`Verified graph-scoped KA ${ual} spans ${metaGraphs.size} metadata graphs`);
+    }
+    const [metaGraph] = metaGraphs;
+    const expectedContextGraph = `did:dkg:context-graph:${contextGraphId}`;
+    const contextGraphs = new Set(
+      metadataQuads
+        .filter((quad) => quad.predicate === CONTEXT_GRAPH)
+        .map((quad) => stripLiteral(quad.object)),
+    );
+    if (
+      metaGraph !== `${expectedContextGraph}/_meta`
+      || contextGraphs.size !== 1
+      || !contextGraphs.has(expectedContextGraph)
+    ) {
+      throw new Error(
+        `Verified graph-scoped KA ${ual} is not bound to requested context graph ${contextGraphId}`,
+      );
+    }
+    assets.push({
+      contextGraphId,
+      ual,
+      assertionVersion: BigInt(versionRaw),
+      assertionGraph,
+      metaGraph,
+      dataQuads: dataByGraph.get(assertionGraph) ?? [],
+      metadataQuads,
+    });
+    handledUals.add(ual);
+  }
+
+  return {
+    assets,
+    remainingData,
+    remainingMeta: peerSafeMetadata.filter(
+      (quad) => !handledUals.has(quad.subject) && quad.predicate !== ASSERTION_VERSION,
+    ),
+  };
+}
+
+function stripLiteral(raw: string): string {
+  const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
+  return match ? match[1]! : raw;
 }

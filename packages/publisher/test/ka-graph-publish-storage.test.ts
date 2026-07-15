@@ -8,7 +8,11 @@ import {
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  OxigraphStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   DKGPublisher,
   computePrivateRootV10,
@@ -111,6 +115,76 @@ describe('graph-scoped KA publish storage', () => {
     expect(metadata.quads.filter((q) => q.predicate.endsWith('assertionGraph'))).toEqual([
       expect.objectContaining({ object: vmGraph }),
     ]);
+    const trustedControls = await store.query(
+      `SELECT ?predicate ?object WHERE {
+        GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+          ?entry <http://dkg.io/ontology/kaUal> <${UAL}> .
+          ?entry ?predicate ?object .
+        }
+      }`,
+    );
+    expect(trustedControls.type).toBe('bindings');
+    if (trustedControls.type !== 'bindings') throw new Error('expected trusted controls');
+    expect(trustedControls.bindings).toEqual(expect.arrayContaining([
+      { predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"' },
+      { predicate: 'http://dkg.io/ontology/publisherPeerId', object: '"rootless-publisher"' },
+    ]));
+  });
+
+  it('does not expose a new assertion when trusted-control precommit fails', async () => {
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const initialResult = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:version:one', 'urn:predicate:value', '"one"')],
+      publisherPeerId: 'owner-peer',
+      accessPolicy: 'ownerOnly',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+    });
+    const realInsert = store.insert.bind(store);
+    store.insert = async (quads, options) => {
+      if (quads.some((candidate) => (
+        candidate.graph === LOCAL_TRUSTED_KA_CONTROLS_GRAPH
+        && candidate.predicate === 'http://dkg.io/ontology/assertionVersion'
+        && /^"2"/.test(candidate.object)
+      ))) {
+        throw new Error('injected trusted-control precommit failure');
+      }
+      return realInsert(quads, options);
+    };
+
+    await expect(publisher.update(initialResult.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:version:two', 'urn:predicate:value', '"two"')],
+      publisherPeerId: 'owner-peer',
+      accessPolicy: 'ownerOnly',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 2,
+      publicTripleCount: 1,
+    })).rejects.toThrow('injected trusted-control precommit failure');
+
+    const visible = await store.query(
+      `SELECT ?subject WHERE { GRAPH <${vmGraph}> { ?subject <urn:predicate:value> ?value } }`,
+    );
+    expect(visible.type).toBe('bindings');
+    expect(visible.type === 'bindings' ? visible.bindings : []).toEqual([
+      { subject: 'urn:version:one' },
+    ]);
+    const oldSidecar = await store.query(`ASK {
+      GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+        ?entry <http://dkg.io/ontology/kaUal> <${UAL}> ;
+          <http://dkg.io/ontology/assertionVersion> ?version .
+        FILTER(str(?version) = "1")
+      }
+    }`);
+    expect(oldSidecar).toEqual({ type: 'boolean', value: true });
   });
 
   it('replaces the complete VM graph and preserves the prior version on failed swap', async () => {
@@ -130,11 +204,24 @@ describe('graph-scoped KA publish storage', () => {
       publicTripleCount: 1,
     });
 
-    const realReplace = store.replaceGraph?.bind(store);
-    store.replaceGraph = async (graphUri, quads, options) => {
+    const realReplace = store.replaceGraphAndSubject.bind(store);
+    store.replaceGraphAndSubject = async (
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+      options,
+    ) => {
       if (graphUri === vmGraph) throw new Error('injected VM replacement failure');
-      if (!realReplace) throw new Error('replaceGraph unavailable');
-      return realReplace(graphUri, quads, options);
+      return realReplace(
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+        options,
+      );
     };
     await expect(
       publisher.update(initialResult.kaId, {
@@ -153,7 +240,7 @@ describe('graph-scoped KA publish storage', () => {
     if (preserved.type !== 'bindings') throw new Error('expected bindings');
     expect(preserved.bindings).toEqual([{ s: 'urn:version:one' }]);
 
-    store.replaceGraph = realReplace;
+    store.replaceGraphAndSubject = realReplace;
     const updateResult = await publisher.update(initialResult.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [quad('urn:version:two', 'urn:predicate:value', '"two"')],
@@ -170,6 +257,113 @@ describe('graph-scoped KA publish storage', () => {
     expect(replaced.type).toBe('bindings');
     if (replaced.type !== 'bindings') throw new Error('expected bindings');
     expect(replaced.bindings).toEqual([{ s: 'urn:version:two' }]);
+  });
+
+  it('does not let a delayed local v1 update overwrite a durable v2 materialization', async () => {
+    const initial = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:version:one', 'urn:predicate:value', '"one"')],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+    });
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(UAL, 2),
+    );
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    await store.replaceGraphAndSubject(
+      vmGraph,
+      [{
+        subject: 'urn:version:two',
+        predicate: 'urn:predicate:value',
+        object: '"two"',
+        graph: vmGraph,
+      }],
+      metaGraph,
+      UAL,
+      [{
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: metaGraph,
+      }],
+    );
+
+    await expect(publisher.update(initial.kaId, {
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [quad('urn:delayed:version:one', 'urn:predicate:value', '"stale"')],
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: 1,
+      })).rejects.toMatchObject({ code: 'STALE_KA_ASSERTION_VERSION' });
+
+    const materialized = await store.query(
+      `SELECT ?s WHERE { GRAPH <${vmGraph}> { ?s <urn:predicate:value> ?o } }`,
+    );
+    expect(materialized.type).toBe('bindings');
+    if (materialized.type !== 'bindings') throw new Error('expected bindings');
+    expect(materialized.bindings).toEqual([{ s: 'urn:version:two' }]);
+  });
+
+  it('keeps the prior public and metadata projection when private replacement fails', async () => {
+    const initialPrivate = [quad('urn:private:v1', 'urn:predicate:secret', '"one"')];
+    const canonicalInitialPrivate = await skolemizeKnowledgeAsset(initialPrivate);
+    const initial = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:public:v1', 'urn:predicate:value', '"one"')],
+      privateQuads: initialPrivate,
+      publisherPeerId: 'private-owner',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+      privateTripleCount: canonicalInitialPrivate.length,
+      privateMerkleRoot: computePrivateRootV10(canonicalInitialPrivate),
+    });
+    const privateStore = (publisher as unknown as {
+      privateStore: {
+        replaceKnowledgeAssetPrivateTriples: () => Promise<string>;
+      };
+    }).privateStore;
+    privateStore.replaceKnowledgeAssetPrivateTriples = async () => {
+      throw new Error('injected private replacement failure');
+    };
+
+    const replacementPrivate = [quad('urn:private:v2', 'urn:predicate:secret', '"two"')];
+    const canonicalReplacementPrivate = await skolemizeKnowledgeAsset(replacementPrivate);
+    await expect(publisher.update(initial.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:public:v2', 'urn:predicate:value', '"two"')],
+      privateQuads: replacementPrivate,
+      publisherPeerId: 'private-owner',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 2,
+      publicTripleCount: 1,
+      privateTripleCount: canonicalReplacementPrivate.length,
+      privateMerkleRoot: computePrivateRootV10(canonicalReplacementPrivate),
+    })).rejects.toThrow('injected private replacement failure');
+
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const data = await store.query(
+      `SELECT ?s WHERE { GRAPH <${vmGraph}> { ?s <urn:predicate:value> ?o } }`,
+    );
+    expect(data.type === 'bindings' ? data.bindings : []).toEqual([{ s: 'urn:public:v1' }]);
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const version = await store.query(
+      `SELECT ?v WHERE { GRAPH <${metaGraph}> {
+        <${UAL}> <http://dkg.io/ontology/assertionVersion> ?v
+      } }`,
+    );
+    expect(version.type === 'bindings' ? version.bindings : []).toEqual([{ v: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' }]);
   });
 
   it('updates a fully private KA from SWM without requiring a public placeholder', async () => {

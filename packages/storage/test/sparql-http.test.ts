@@ -131,6 +131,29 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads.some(q => q.includes('INSERT'))).toBe(true);
   });
 
+  it('retains compound atomic replacement through the managed factory wrapper', async () => {
+    const managed = await createTripleStore({
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: queryUrl,
+        updateEndpoint: updateUrl,
+        managedByDkg: true,
+      },
+    });
+    const graph = 'http://ex.org/managed-data';
+    const metaGraph = 'http://ex.org/managed-meta';
+    const subject = 'http://ex.org/managed-ual';
+
+    await expect(managed.replaceGraphAndSubject!(
+      graph,
+      [{ subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph }],
+      metaGraph,
+      subject,
+      [{ subject, predicate: 'http://ex.org/root', object: '"r"', graph: metaGraph }],
+    )).resolves.toBeUndefined();
+    expect(insertedQuads.at(-1)).toContain(`GRAPH <${metaGraph}>`);
+  });
+
   it('sends charset=utf-8 on the query and update Content-Type (non-ASCII wire safety)', async () => {
     // Regression guard: without an explicit charset, Jetty-backed stores
     // (Blazegraph) decode the raw body as ISO-8859-1 and mojibake non-ASCII

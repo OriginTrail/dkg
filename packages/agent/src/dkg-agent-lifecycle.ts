@@ -100,6 +100,10 @@ import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
+import {
+  authenticateVerifiedGraphScopedAsset,
+  materializeVerifiedGraphScopedAsset,
+} from './sync/requester/graph-scoped-materialization.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -4024,6 +4028,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         priority: 'background',
         source: 'agent.durableSync.storeInsert',
       }),
+      storeGraphScopedAsset: async (asset) => {
+        const authenticatedAsset = await authenticateVerifiedGraphScopedAsset(
+          this.chain,
+          asset,
+          (contextGraphId) => this.getContextGraphOnChainId(contextGraphId),
+        );
+        const outcome = await materializeVerifiedGraphScopedAsset({
+          store: this.store,
+          asset: authenticatedAsset,
+          options: {
+            priority: 'background',
+            source: 'agent.durableSync.graphScopedMaterialization',
+          },
+          oversizeHooks: {
+            recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+          },
+        });
+        if (outcome === 'applied') {
+          this.invalidateListContextGraphsCache();
+          this.contextGraphMetaProjection.markDirtyFromQuads(authenticatedAsset.metadataQuads);
+        }
+        return outcome;
+      },
       onVerifiedFullSnapshot,
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),

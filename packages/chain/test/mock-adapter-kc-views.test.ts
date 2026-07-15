@@ -37,6 +37,7 @@ describe('MockChainAdapter KC views — __registerKC populated state', () => {
     });
 
     expect(ethers.hexlify(await adapter.getLatestMerkleRoot(42n))).toBe(ROOT_HEX);
+    expect(await adapter.getMerkleRootCount(42n)).toBe(1n);
     expect(await adapter.getMerkleLeafCount(42n)).toBe(2);
     expect(await adapter.getLatestMerkleRootPublisher(42n)).toBe(MOCK_DEFAULT_SIGNER);
     // `__registerKC` is a Random-Sampling test bridge that bypasses the
@@ -91,6 +92,7 @@ describe('MockChainAdapter KC views — createKnowledgeAssets path', () => {
     });
 
     expect(ethers.hexlify(await adapter.getLatestMerkleRoot(result.batchId))).toBe(ROOT_HEX);
+    expect(await adapter.getMerkleRootCount(result.batchId)).toBe(1n);
     expect(await adapter.getMerkleLeafCount(result.batchId)).toBe(4);
     expect(await adapter.getLatestMerkleRootPublisher(result.batchId)).toBe(MOCK_DEFAULT_SIGNER);
     // V10.1 publish path: mock persists the supplied author address, so
@@ -144,6 +146,7 @@ describe('MockChainAdapter KC views — error / default behaviour', () => {
   it('throws on unknown kaId for the four required-data views', async () => {
     const adapter = new MockChainAdapter();
     await expect(adapter.getLatestMerkleRoot(404n)).rejects.toThrow(/unknown kaId/);
+    await expect(adapter.getMerkleRootCount(404n)).rejects.toThrow(/unknown kaId/);
     await expect(adapter.getMerkleLeafCount(404n)).rejects.toThrow(/unknown kaId/);
     await expect(adapter.getLatestMerkleRootPublisher(404n)).rejects.toThrow(/unknown kaId/);
     await expect(adapter.getLatestMerkleRootAuthor(404n)).rejects.toThrow(/unknown kaId/);

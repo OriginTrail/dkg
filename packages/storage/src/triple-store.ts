@@ -127,6 +127,19 @@ export interface TripleStore {
    * and fail closed when it is unavailable.
    */
   replaceGraph?(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void>;
+  /**
+   * Atomically replace one complete named graph and every row for one subject
+   * in a second named graph. Implementations MUST guarantee one commit boundary
+   * for both replacements; generic `update()` support is not sufficient.
+   */
+  replaceGraphAndSubject?(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -213,6 +226,46 @@ export async function tryReplaceGraphAtomically(
     if (
       error instanceof UnsupportedTripleStoreCapabilityError &&
       error.capability === 'replaceGraph'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt one atomic complete-graph + metadata-subject replacement.
+ *
+ * `false` means the configured store does not explicitly guarantee this
+ * compound transaction and no mutation was started. Execution failures
+ * propagate; callers must never fall back to a two-step replacement.
+ */
+export async function tryReplaceGraphAndSubjectAtomically(
+  store: TripleStore,
+  graphUri: string,
+  graphQuads: Quad[],
+  metaGraphUri: string,
+  metadataSubject: string,
+  metadataQuads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replace = store.replaceGraphAndSubject;
+  if (typeof replace !== 'function') return false;
+  try {
+    await replace.call(
+      store,
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+      options,
+    );
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceGraphAndSubject'
     ) {
       return false;
     }
@@ -362,7 +415,14 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   ) {
     return config.options;
   }
-  return { ...config.options, managedByDkg: false };
+  return {
+    ...config.options,
+    // GraphSetIndexStore owns graph-list caching, but the adapter must retain
+    // the independent fact that this DKG-managed Oxigraph endpoint provides a
+    // transactional SPARQL Update boundary.
+    managedByDkg: false,
+    atomicCompoundUpdate: true,
+  };
 }
 
 function wrapGraphSetIndex(

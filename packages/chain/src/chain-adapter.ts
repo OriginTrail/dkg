@@ -1534,6 +1534,9 @@ export interface ChainAdapter {
    */
   getLatestMerkleRoot?(kaId: bigint): Promise<Uint8Array>;
 
+  /** Number of committed roots for the KA (initial publish is version one). */
+  getMerkleRootCount?(kaId: bigint): Promise<bigint>;
+
   /**
    * V10 flat-KC merkle leaf count (sorted + deduped) recorded on-chain
    * for `kaId`. Used by the prover to (a) validate the local extraction
