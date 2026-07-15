@@ -498,8 +498,7 @@ function legacyTokenAliasBase(kaUal: string): string | undefined {
   const candidate = match?.[1];
   if (!candidate) return undefined;
   try {
-    parseDeterministicKnowledgeAssetUal(candidate);
-    return candidate;
+    return parseDeterministicKnowledgeAssetUal(candidate).ual;
   } catch {
     // A canonical bare UAL also ends in digits. Its prefix is not itself a
     // deterministic KA UAL, so it must never be stripped as a token alias.

@@ -119,6 +119,15 @@ async function readExactGraphPagedInternal(
     options.maxNQuadsBytes ?? DEFAULT_EXACT_GRAPH_MAX_NQUADS_BYTES,
     'maxNQuadsBytes',
   );
+  const maxPageResponseBytes = Math.min(
+    options.queryOptions?.maxResponseBytes ?? DEFAULT_MAX_READ_BYTES,
+    DEFAULT_MAX_READ_BYTES,
+    Math.max(64 * 1024, maxNQuadsBytes + 64 * 1024),
+  );
+  const boundedQueryOptions: QueryOptions = {
+    ...options.queryOptions,
+    maxResponseBytes: maxPageResponseBytes,
+  };
   const configuredExpectedQuadCount = 'expectedQuadCount' in options
     ? nonNegativeSafeInteger(options.expectedQuadCount, 'expectedQuadCount')
     : undefined;
@@ -140,7 +149,7 @@ async function readExactGraphPagedInternal(
     store,
     graph,
     maxQuadCount,
-    options.queryOptions,
+    boundedQueryOptions,
   );
   const expectedQuadCount = configuredExpectedQuadCount ?? preflightQuadCount;
   if (
@@ -164,7 +173,7 @@ async function readExactGraphPagedInternal(
       ORDER BY ?s ?p ?o
       LIMIT ${pageLimit}
       OFFSET ${offset}`,
-      options.queryOptions,
+      boundedQueryOptions,
     );
     if (result.type !== 'bindings') {
       throw invalidQueryResult(graph, 'Exact graph read expected SELECT bindings');
@@ -236,7 +245,7 @@ async function readExactGraphPagedInternal(
     store,
     graph,
     maxQuadCount,
-    options.queryOptions,
+    boundedQueryOptions,
   );
   if (postflightQuadCount !== expectedQuadCount) {
     throw quadCountMismatch(graph, expectedQuadCount, postflightQuadCount);

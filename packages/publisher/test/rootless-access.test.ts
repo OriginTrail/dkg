@@ -349,9 +349,13 @@ describe('rootless graph-scoped private access', () => {
     expect(new TextDecoder().decode(response.nquads)).not.toContain('must-not-leak');
   });
 
-  it('rechecks the canonical UAL before a legacy token alias can expose stale private data', async () => {
+  it('canonicalizes and rechecks a legacy token alias before serving stale private data', async () => {
     const store = new OxigraphStore();
     const legacyRoot = 'urn:legacy:alias-poison';
+    const aliasedUal = UAL.replace(
+      '0x70997970c51812dc3a010c7d01b50e0d17dc79c8',
+      '0x70997970C51812DC3A010C7D01B50E0D17DC79C8',
+    );
     await store.insert([
       {
         subject: UAL,
@@ -366,19 +370,25 @@ describe('rootless graph-scoped private access', () => {
         graph: META_GRAPH,
       },
       {
-        subject: `${UAL}/1`,
+        subject: `${aliasedUal}/1`,
         predicate: `${DKG}rootEntity`,
         object: legacyRoot,
         graph: META_GRAPH,
       },
       {
-        subject: `${UAL}/1`,
+        subject: `${aliasedUal}/1`,
         predicate: `${DKG}partOf`,
-        object: UAL,
+        object: aliasedUal,
         graph: META_GRAPH,
       },
       {
-        subject: UAL,
+        subject: aliasedUal,
+        predicate: `${DKG}contextGraph`,
+        object: CONTEXT_GRAPH_URI,
+        graph: META_GRAPH,
+      },
+      {
+        subject: aliasedUal,
         predicate: `${DKG}accessPolicy`,
         object: '"public"',
         graph: META_GRAPH,
@@ -391,7 +401,10 @@ describe('rootless graph-scoped private access', () => {
       },
     ]);
 
-    const response = await request(new AccessHandler(store, new TypedEventBus()), `${UAL}/1`);
+    const response = await request(
+      new AccessHandler(store, new TypedEventBus()),
+      `${aliasedUal}/1`,
+    );
 
     expect(response.granted).toBe(false);
     expect(response.rejectionReason).toContain('missing kaUal metadata');

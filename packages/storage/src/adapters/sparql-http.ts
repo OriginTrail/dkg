@@ -46,6 +46,7 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
+import { readResponseTextBounded } from '../http-response-limit.js';
 import {
   assertQuadLiteralsMutf8Safe,
   getMetrics,
@@ -504,11 +505,18 @@ export class SparqlHttpStore implements TripleStore {
 
         const res = await this.postQuery(trimmed, 'application/sparql-results+json', options);
         if (!res.ok) {
-          const text = await res.text().catch(() => '');
+          const text = await (options?.maxResponseBytes === undefined
+            ? res.text()
+            : readResponseTextBounded(res, options.maxResponseBytes)
+          ).catch(() => '');
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = (await res.json()) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
+        const json = options?.maxResponseBytes === undefined
+          ? await res.json() as AdapterSparqlJsonSelectResponse | W3CAskResponse
+          : JSON.parse(
+              await readResponseTextBounded(res, options.maxResponseBytes),
+            ) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
         if (isAsk || 'boolean' in json) {
           return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
@@ -530,10 +538,15 @@ export class SparqlHttpStore implements TripleStore {
   private async queryConstruct(sparql: string, options?: SparqlHttpQueryOptions): Promise<ConstructResult> {
     const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', options);
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
+      const text = await (options?.maxResponseBytes === undefined
+        ? res.text()
+        : readResponseTextBounded(res, options.maxResponseBytes)
+      ).catch(() => '');
       throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    const text = await res.text();
+    const text = options?.maxResponseBytes === undefined
+      ? await res.text()
+      : await readResponseTextBounded(res, options.maxResponseBytes);
     const quads = parseNQuadsText(text);
     return { type: 'quads', quads };
   }

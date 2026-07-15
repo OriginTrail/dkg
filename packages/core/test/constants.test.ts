@@ -159,6 +159,17 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('user@domain').valid).toBe(true);
   });
 
+  it('rejects path segments reserved for storage partitions', () => {
+    for (const id of [
+      'victim/_meta',
+      'victim/_private',
+      'victim/_shared_memory',
+      'victim/_future-partition',
+    ]) {
+      expect(validateContextGraphId(id)).toMatchObject({ valid: false });
+    }
+  });
+
   it('rejects IDs exceeding 256 chars', () => {
     expect(validateContextGraphId('a'.repeat(257)).valid).toBe(false);
     expect(validateContextGraphId('a'.repeat(256)).valid).toBe(true);
