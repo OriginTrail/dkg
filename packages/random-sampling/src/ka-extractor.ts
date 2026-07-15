@@ -4,6 +4,9 @@ import {
   contextGraphMetaUri,
   contextGraphLayerUri,
   contextGraphSubGraphUri,
+  createGraphKnowledgeAssetScope,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  knowledgeAssetLayerGraphUri,
   validateSubGraphName,
   MemoryLayer,
   hashTripleV10,
@@ -209,6 +212,21 @@ export async function extractV10KCFromStore(
   if (cgName === null) {
     throw new KCNotFoundError(cgId, kaId);
   }
+
+  // V2/rootless KAs are atomic graphs. Resolve their constant-size label
+  // metadata first and read the exact per-KA VM graph directly; no subject
+  // discovery or shared per-cgId data copy is involved. A missing V2 row falls
+  // through to the legacy root-based extractor below so historical KAs remain
+  // readable during the transition.
+  const graphScoped = await extractGraphScopedV10KC(
+    store,
+    cgName,
+    cgId,
+    kaId,
+    subGraphNameHint,
+  );
+  if (graphScoped) return graphScoped;
+
   const metaGraph = contextGraphMetaUri(cgName, cgIdStr);
   const dataGraph = contextGraphDataUri(cgName, cgIdStr);
   // No assertSafeIri on derived URIs — `cgIdStr` is a bigint stringification
@@ -398,6 +416,117 @@ export async function extractV10KCFromStore(
   for (const root of privateRoots) leaves.push(root);
 
   return { contextGraphName: cgName, dataGraph, subGraphName, ual, rootEntities, triples, privateRoots, leaves };
+}
+
+async function extractGraphScopedV10KC(
+  store: TripleStore,
+  cgName: string,
+  cgId: bigint,
+  kaId: bigint,
+  _subGraphNameHint?: string,
+): Promise<KCExtractionResult | null> {
+  const labelMetaGraph = contextGraphMetaUri(cgName);
+  const result = await store.query(
+    `SELECT ?ual ?scope ?version ?publicCount ?privateCount ?privateRoot ?assertionGraph ?subGraph WHERE {
+       GRAPH <${labelMetaGraph}> {
+         ?ual <${DKG}batchId> "${kaId}"^^<${XSD}integer> ;
+           <${DKG}contentScopeVersion> ?scope ;
+           <${DKG}assertionVersion> ?version ;
+           <${DKG}publicTripleCount> ?publicCount ;
+           <${DKG}privateTripleCount> ?privateCount ;
+           <${DKG}assertionGraph> ?assertionGraph .
+         OPTIONAL { ?ual <${DKG}privateMerkleRoot> ?privateRoot }
+         OPTIONAL { ?ual <${DKG}subGraphName> ?subGraph }
+       }
+     } LIMIT 1`,
+  );
+  if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+
+  const row = result.bindings[0];
+  const contentScopeVersion = Number(stripQuotes(row['scope'] ?? ''));
+  if (contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(
+      `Unsupported content scope version ${contentScopeVersion} for KC ${kaId} in cg ${cgId}`,
+    );
+  }
+  const ual = stripQuotes(row['ual'] ?? '');
+  const assertionVersion = stripQuotes(row['version'] ?? '');
+  const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+  const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+  if (scope.ual !== ual || packedKaId !== kaId) {
+    throw new Error(`Graph-scoped KC identity does not match kaId ${kaId} in cg ${cgId}`);
+  }
+
+  const publicTripleCount = Number(stripQuotes(row['publicCount'] ?? ''));
+  const privateTripleCount = Number(stripQuotes(row['privateCount'] ?? ''));
+  if (
+    !Number.isSafeInteger(publicTripleCount)
+    || publicTripleCount < 0
+    || !Number.isSafeInteger(privateTripleCount)
+    || privateTripleCount < 0
+    || (publicTripleCount === 0 && privateTripleCount === 0)
+  ) {
+    throw new Error(`Invalid graph-scoped content counts for KC ${kaId} in cg ${cgId}`);
+  }
+
+  const metaSubGraph = stripQuotes(row['subGraph'] ?? '') || undefined;
+  if (metaSubGraph && !validateSubGraphName(metaSubGraph).valid) {
+    throw new Error(`Invalid graph-scoped sub-graph metadata for KC ${kaId} in cg ${cgId}`);
+  }
+  // V2 metadata is authoritative: an absent subGraphName means the CG root.
+  // Caller hints are only a legacy discovery optimization and must never move
+  // an atomic KA to a different physical graph.
+  const subGraphName = metaSubGraph;
+  const assertionGraph = row['assertionGraph'] ?? '';
+  const expectedGraph = knowledgeAssetLayerGraphUri(
+    cgName,
+    MemoryLayer.VerifiableMemory,
+    scope,
+    subGraphName,
+  );
+  if (assertionGraph !== expectedGraph) {
+    throw new Error(`Graph-scoped assertion graph mismatch for KC ${kaId} in cg ${cgId}`);
+  }
+
+  const privateRootLiteral = stripQuotes(row['privateRoot'] ?? '');
+  const privateRoots = privateRootLiteral ? [parseHexBytes(privateRootLiteral)] : [];
+  if (
+    (privateTripleCount > 0 && (privateRoots.length !== 1 || privateRoots[0].length !== 32))
+    || (privateTripleCount === 0 && privateRoots.length !== 0)
+  ) {
+    throw new Error(`Invalid graph-scoped private commitment for KC ${kaId} in cg ${cgId}`);
+  }
+
+  const graphResult = await store.query(
+    `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertionGraph}> { ?s ?p ?o } }`,
+  );
+  const triples: KCTriple[] = graphResult.type === 'quads'
+    ? graphResult.quads
+      .filter((quad) => !POST_PUBLISH_PREDICATES_TO_SKIP.has(quad.predicate))
+      .map((quad) => ({
+        subject: quad.subject,
+        predicate: quad.predicate,
+        object: quad.object,
+        graph: assertionGraph,
+      }))
+    : [];
+  if (triples.length !== publicTripleCount) {
+    throw new KCDataMissingError(cgId, kaId, ual, []);
+  }
+
+  const leaves = triples.map((triple) =>
+    hashTripleV10(triple.subject, triple.predicate, triple.object));
+  leaves.push(...privateRoots);
+  return {
+    contextGraphName: cgName,
+    dataGraph: assertionGraph,
+    subGraphName,
+    ual,
+    rootEntities: [],
+    triples,
+    privateRoots,
+    leaves,
+  };
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────
