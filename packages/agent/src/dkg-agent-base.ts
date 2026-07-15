@@ -474,6 +474,13 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => markProjectionDirty?.(),
       );
     },
+    replaceGraph: innerStore.replaceGraph
+      ? (graphUri, quads, options) => invalidateAfterMutation(
+          () => innerStore.replaceGraph!(graphUri, quads, options),
+          () => true,
+          () => markProjectionDirty?.(),
+        )
+      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },

@@ -66,6 +66,10 @@ export const ASSERTION_SEAL_PREDICATES = {
   ASSERTION_VERSION: `${ONT}assertionVersion`,
   /** Complete public RDF triple count for the graph-scoped assertion. */
   PUBLIC_TRIPLE_COUNT: `${ONT}publicTripleCount`,
+  /** Single KA-level private Merkle commitment (xsd:hexBinary). */
+  PRIVATE_MERKLE_ROOT: `${ONT}privateMerkleRoot`,
+  /** Number of private RDF triples committed by PRIVATE_MERKLE_ROOT. */
+  PRIVATE_TRIPLE_COUNT: `${ONT}privateTripleCount`,
   /**
    * Root entity bound to the seal (multi-valued). Recorded at finalize
    * time so that `publishFromFinalizedAssertion` can scope the SWM
@@ -157,6 +161,8 @@ export type AssertionSealBuildArgs = AssertionSealBuildBaseArgs & (
       kaUal: string;
       assertionVersion: string | number | bigint;
       publicTripleCount: number;
+      privateMerkleRoot?: Uint8Array;
+      privateTripleCount: number;
       rootEntities?: never;
     }
 );
@@ -174,12 +180,34 @@ export function buildAssertionSealQuads(args: AssertionSealBuildArgs): Array<{ s
   let graphScope: ReturnType<typeof createGraphKnowledgeAssetScope> | undefined;
   let legacyRootEntities: ReadonlyArray<string> = [];
   let graphPublicTripleCount: number | undefined;
+  let graphPrivateTripleCount: number | undefined;
+  let graphPrivateMerkleRoot: Uint8Array | undefined;
   if (args.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
     graphScope = createGraphKnowledgeAssetScope(args.kaUal, args.assertionVersion);
     graphPublicTripleCount = args.publicTripleCount;
-    if (!Number.isSafeInteger(graphPublicTripleCount) || graphPublicTripleCount < 1) {
+    graphPrivateTripleCount = args.privateTripleCount;
+    graphPrivateMerkleRoot = args.privateMerkleRoot;
+    if (!Number.isSafeInteger(graphPublicTripleCount) || graphPublicTripleCount < 0) {
       throw new Error(
-        `Graph-scoped assertion publicTripleCount must be a positive safe integer, got ${graphPublicTripleCount}`,
+        `Graph-scoped assertion publicTripleCount must be a non-negative safe integer, got ${graphPublicTripleCount}`,
+      );
+    }
+    if (!Number.isSafeInteger(graphPrivateTripleCount) || graphPrivateTripleCount < 0) {
+      throw new Error(
+        `Graph-scoped assertion privateTripleCount must be a non-negative safe integer, got ${graphPrivateTripleCount}`,
+      );
+    }
+    if (graphPublicTripleCount === 0 && graphPrivateTripleCount === 0) {
+      throw new Error('Graph-scoped assertion must contain at least one public or private triple');
+    }
+    if (graphPrivateTripleCount > 0 && graphPrivateMerkleRoot?.length !== 32) {
+      throw new Error(
+        'Graph-scoped assertion with private triples requires one 32-byte privateMerkleRoot',
+      );
+    }
+    if (graphPrivateTripleCount === 0 && graphPrivateMerkleRoot !== undefined) {
+      throw new Error(
+        'Graph-scoped assertion privateMerkleRoot requires a positive privateTripleCount',
       );
     }
   } else {
@@ -240,6 +268,14 @@ export function buildAssertionSealQuads(args: AssertionSealBuildArgs): Array<{ s
       ASSERTION_SEAL_PREDICATES.PUBLIC_TRIPLE_COUNT,
       `"${graphPublicTripleCount}"^^${xsdInteger}`,
     ),
+    quad(
+      ASSERTION_SEAL_PREDICATES.PRIVATE_TRIPLE_COUNT,
+      `\"${graphPrivateTripleCount}\"^^${xsdInteger}`,
+    ),
+    ...(graphPrivateMerkleRoot ? [quad(
+      ASSERTION_SEAL_PREDICATES.PRIVATE_MERKLE_ROOT,
+      `\"${bytesToHexLower(graphPrivateMerkleRoot)}\"^^${xsdHexBinary}`,
+    )] : []),
   ] : [];
 
   return [
@@ -342,6 +378,10 @@ export interface AssertionSeal {
   assertionVersion?: string;
   /** Present only for graph-scoped v2 seals. */
   publicTripleCount?: number;
+  /** Present only for graph-scoped v2 seals with private content. */
+  privateMerkleRoot?: Uint8Array;
+  /** Present only for graph-scoped v2 seals. */
+  privateTripleCount?: number;
   /**
    * Root entities the seal commits to. Set at finalize time, used at
    * publish time to scope the SWM SPARQL CONSTRUCT (so a named publish
@@ -411,11 +451,14 @@ export function parseAssertionSealQuads(
   let kaUal: string | undefined;
   let assertionVersion: string | undefined;
   let publicTripleCount: number | undefined;
+  let privateMerkleRoot: Uint8Array | undefined;
+  let privateTripleCount: number | undefined;
   if (contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
     const graphRequired = [
       ASSERTION_SEAL_PREDICATES.KA_UAL,
       ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
       ASSERTION_SEAL_PREDICATES.PUBLIC_TRIPLE_COUNT,
+      ASSERTION_SEAL_PREDICATES.PRIVATE_TRIPLE_COUNT,
     ];
     for (const predicate of graphRequired) {
       if (!seen.has(predicate)) {
@@ -436,14 +479,47 @@ export function parseAssertionSealQuads(
     const count = integerLiteralToValue(
       seen.get(ASSERTION_SEAL_PREDICATES.PUBLIC_TRIPLE_COUNT)!,
     );
-    if (count < 1n || count > BigInt(Number.MAX_SAFE_INTEGER)) {
+    const privateCount = integerLiteralToValue(
+      seen.get(ASSERTION_SEAL_PREDICATES.PRIVATE_TRIPLE_COUNT)!,
+    );
+    if (count < 0n || count > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw new Error(
         `Invalid graph-scoped publicTripleCount for <${assertionUri}>: ${count}`,
+      );
+    }
+    if (privateCount < 0n || privateCount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `Invalid graph-scoped privateTripleCount for <${assertionUri}>: ${privateCount}`,
+      );
+    }
+    if (count === 0n && privateCount === 0n) {
+      throw new Error(
+        `Graph-scoped assertion seal for <${assertionUri}> contains no public or private triples`,
+      );
+    }
+    const privateRootObject = seen.get(ASSERTION_SEAL_PREDICATES.PRIVATE_MERKLE_ROOT);
+    if (privateCount > 0n) {
+      if (privateRootObject === undefined) {
+        throw new Error(
+          `Partial graph-scoped assertion seal for <${assertionUri}>: missing ` +
+            `<${ASSERTION_SEAL_PREDICATES.PRIVATE_MERKLE_ROOT}>.`,
+        );
+      }
+      privateMerkleRoot = hexBinaryLiteralToBytes(privateRootObject);
+      if (privateMerkleRoot.length !== 32) {
+        throw new Error(
+          `Invalid graph-scoped privateMerkleRoot for <${assertionUri}>: expected 32 bytes, got ${privateMerkleRoot.length}`,
+        );
+      }
+    } else if (privateRootObject !== undefined) {
+      throw new Error(
+        `Graph-scoped assertion seal for <${assertionUri}> has privateMerkleRoot with zero privateTripleCount`,
       );
     }
     kaUal = scope.ual;
     assertionVersion = scope.assertionVersion;
     publicTripleCount = Number(count);
+    privateTripleCount = Number(privateCount);
   } else if (contentScopeVersion === LEGACY_ROOT_CONTENT_SCOPE_VERSION) {
     if (rootEntities.length === 0) {
       throw new Error(
@@ -491,6 +567,8 @@ export function parseAssertionSealQuads(
     ...(kaUal ? { kaUal } : {}),
     ...(assertionVersion ? { assertionVersion } : {}),
     ...(publicTripleCount !== undefined ? { publicTripleCount } : {}),
+    ...(privateMerkleRoot !== undefined ? { privateMerkleRoot } : {}),
+    ...(privateTripleCount !== undefined ? { privateTripleCount } : {}),
     rootEntities,
   };
 }

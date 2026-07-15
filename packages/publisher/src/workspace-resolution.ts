@@ -17,6 +17,7 @@ import {
   generateShareMetadata,
   toHex,
 } from './metadata.js';
+import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -573,6 +574,80 @@ export async function resolveLiftWorkspaceSlice(params: {
   const request = params.request;
   const shareOperationId = request.shareOperationId;
   const subGraphName = normalizeOptionalSubGraphName(request.subGraphName);
+  if (request.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    if (request.roots.length !== 0) {
+      throw new Error('Graph-scoped Lift snapshot must not contain root entities');
+    }
+    if (
+      request.kaUal === undefined
+      || request.assertionVersion === undefined
+      || request.publicTripleCount === undefined
+      || request.privateTripleCount === undefined
+    ) {
+      throw new Error('Graph-scoped Lift snapshot is missing its KA content envelope');
+    }
+    if (
+      !Number.isSafeInteger(request.publicTripleCount)
+      || request.publicTripleCount < 0
+      || !Number.isSafeInteger(request.privateTripleCount)
+      || request.privateTripleCount < 0
+      || (request.publicTripleCount === 0 && request.privateTripleCount === 0)
+    ) {
+      throw new Error('Graph-scoped Lift snapshot has invalid public/private triple counts');
+    }
+    const scope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+    const publicSnapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: params.store,
+      graphManager: params.graphManager,
+      contextGraphId: request.contextGraphId,
+      shareOperationId,
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      subGraphName,
+      publicSnapshotStore: params.publicSnapshotStore,
+    });
+    if (publicSnapshot.quads.length !== request.publicTripleCount) {
+      throw new Error(
+        `Graph-scoped Lift public triple count mismatch for ${scope.ual}: ` +
+          `snapshot=${publicSnapshot.quads.length}, request=${request.publicTripleCount}`,
+      );
+    }
+    const privateStore = new PrivateContentStore(params.store, params.graphManager);
+    const privateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
+      request.contextGraphId,
+      scope,
+      subGraphName,
+    );
+    if (privateQuads.length !== request.privateTripleCount) {
+      throw new Error(
+        `Graph-scoped Lift private triple count mismatch for ${scope.ual}: ` +
+          `store=${privateQuads.length}, request=${request.privateTripleCount}`,
+      );
+    }
+    const privateRoot = computePrivateRoot(privateQuads);
+    const actualPrivateRoot = privateRoot ? `0x${toHex(privateRoot)}`.toLowerCase() : undefined;
+    const expectedPrivateRoot = request.privateMerkleRoot?.toLowerCase();
+    if (actualPrivateRoot !== expectedPrivateRoot) {
+      throw new Error(
+        `Graph-scoped Lift private Merkle commitment mismatch for ${scope.ual}`,
+      );
+    }
+    const publishContextGraphId = await resolveOnChainContextGraphId({
+      store: params.store,
+      contextGraphId: request.contextGraphId,
+    });
+    return {
+      quads: publicSnapshot.quads,
+      privateQuads: privateQuads.length > 0 ? privateQuads : undefined,
+      publisherPeerId: publicSnapshot.publisherPeerId,
+      accessPolicy: request.accessPolicy,
+      allowedPeers: request.allowedPeers ? [...request.allowedPeers] : undefined,
+      publishContextGraphId,
+    };
+  }
+  // Raw Lift jobs retain their existing root-scoped staging contract until
+  // the dedicated mutation-cutover PR. Named KA jobs are guarded at enqueue
+  // and therefore never reach this compatibility branch.
   const requestedRoots = normalizeRoots(request.roots);
   if (requestedRoots.length === 0) {
     throw new Error(`No valid Lift shared-memory roots provided for context graph ${request.contextGraphId}`);
@@ -616,16 +691,19 @@ export async function resolveLiftWorkspaceSlice(params: {
   const privateQuads = (
     await Promise.all(
       requestedRoots.map((root) =>
-        privateStore.getPrivateTriplesForOperation(request.contextGraphId, shareOperationId, root, subGraphName),
+        privateStore.getPrivateTriplesForOperation(
+          request.contextGraphId,
+          shareOperationId,
+          root,
+          subGraphName,
+        ),
       ),
     )
   ).flat();
-
   const publishContextGraphId = await resolveOnChainContextGraphId({
     store: params.store,
     contextGraphId: request.contextGraphId,
   });
-
   return {
     quads: publicSnapshot.quads,
     privateQuads: privateQuads.length > 0 ? privateQuads : undefined,

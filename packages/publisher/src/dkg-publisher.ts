@@ -1731,9 +1731,18 @@ export class DKGPublisher implements Publisher {
       sharedMemoryScope,
       loadOptions,
     );
+    const privateQuads = graphPublish
+      ? await this.privateStore.getKnowledgeAssetPrivateTriples(
+          contextGraphId,
+          graphPublish.scope,
+          options?.subGraphName,
+        )
+      : [];
 
-    if (quads.length === 0) {
-      throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
+    if (quads.length === 0 && privateQuads.length === 0) {
+      throw new Error(
+        `No public or private quads for context graph ${contextGraphId} matching the selected Knowledge Asset`,
+      );
     }
     // OT-RFC-44 / Design B: once the caller has selected one lifecycle/file,
     // that payload may contain N root entities and still publish as ONE KA in a
@@ -1777,10 +1786,11 @@ export class DKGPublisher implements Publisher {
       onChainContextGraphId: chainCgId,
     });
 
-    this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${chainCgId && !ctxGraphId ? ` (on-chain CG ${chainCgId})` : ''}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
+    this.log.info(ctx, `Publishing ${quads.length} public and ${privateQuads.length} private quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${chainCgId && !ctxGraphId ? ` (on-chain CG ${chainCgId})` : ''}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
     const internalPublishOptions: InternalPublishOptions = {
       contextGraphId,
       quads: quads.map((q) => ({ ...q, graph: '' })),
+      ...(graphPublish ? { privateQuads } : {}),
       operationCtx: ctx,
       onPhase: options?.onPhase,
       publisherPeerId: options?.publisherPeerId,
@@ -6214,6 +6224,8 @@ export class DKGPublisher implements Publisher {
       `${A2_DKG}wmCurrentAssertion`,
       `${A2_DKG}swmCurrentAssertion`,
       `${A2_DKG}vmCurrentAssertion`,
+      `${A2_DKG}contentScopeVersion`,
+      `${A2_DKG}assertionVersion`,
       'http://www.w3.org/ns/prov#wasRevisionOf',
       // #1116: the promote-stamped member rows (dkg:rootEntity / dkg:entity) are
       // the SEAL-INDEPENDENT recovery source readPromotedRootEntities uses. Pull-from
@@ -6239,6 +6251,16 @@ export class DKGPublisher implements Publisher {
       `SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${lifecycleSubject}> ?p ?o } }`,
     );
     if (preserveRes.type === 'bindings') {
+      const scopeObject = preserveRes.bindings.find(
+        (row) => row['p'] === `${A2_DKG}contentScopeVersion`,
+      )?.['o'];
+      const scopeVersion = scopeObject?.match(/(\d+)/)?.[1];
+      if (
+        (scopeVersion !== undefined && scopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) ||
+        (scopeVersion === undefined && preserveRes.bindings.length > 0)
+      ) {
+        throw new LegacyKnowledgeAssetReadOnlyError();
+      }
       for (const row of preserveRes.bindings) {
         const p = row['p'];
         const o = row['o'];
@@ -6300,6 +6322,14 @@ export class DKGPublisher implements Publisher {
       kaNumber,
       reservedUal,
     }, { provenanceEvents: this.provenanceEvents });
+    if (!preserved.some((quad) => quad.predicate === `${A2_DKG}contentScopeVersion`)) {
+      lifecycleQuads.push({
+        subject: lifecycleSubject,
+        predicate: `${A2_DKG}contentScopeVersion`,
+        object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+        graph: metaGraph,
+      });
+    }
     await this.store.insert(lifecycleQuads);
 
     await this.store.insert([{
@@ -6319,7 +6349,22 @@ export class DKGPublisher implements Publisher {
     input: Quad[] | Array<{ subject: string; predicate: string; object: string }>,
     subGraphName?: string,
   ): Promise<void> {
+    // Reject protocol-reserved user data before any lifecycle/store read. This
+    // keeps the security boundary deterministic even when the addressed KA is
+    // legacy/read-only or does not exist.
+    rejectUserAuthoredProtocolMetadata(input.map((quad) => ({
+      subject: quad.subject,
+      predicate: quad.predicate,
+      object: quad.object,
+      graph: 'graph' in quad ? String(quad.graph ?? '') : '',
+    })));
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+    await this.assertGraphScopedLifecycleWritable(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
     const scopedGraphs = new Set<string>([graphUri]);
     const quads = input.map((t) => {
@@ -6349,6 +6394,36 @@ export class DKGPublisher implements Publisher {
     await this.store.insert(quads);
   }
 
+  /**
+   * Append private content to the mutable draft of one graph-scoped KA.
+   * Private draft triples never enter the public WM graph; finalize
+   * canonicalizes both partitions together and commits one private root.
+   */
+  async assertionWritePrivate(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    input: Quad[],
+    subGraphName?: string,
+  ): Promise<void> {
+    rejectUserAuthoredProtocolMetadata(input.map((quad) => ({ ...quad, graph: '' })));
+    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+    await this.assertGraphScopedLifecycleWritable(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
+    rejectOversizedRdfLiterals(input, 'assertionWritePrivate.quads');
+    await this.privateStore.storeKnowledgeAssetPrivateDraftTriples(
+      contextGraphId,
+      agentAddress,
+      name,
+      input,
+      subGraphName,
+    );
+  }
+
   async assertionQuery(
     contextGraphId: string,
     name: string,
@@ -6358,6 +6433,21 @@ export class DKGPublisher implements Publisher {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
     return this.assertionScopedQuads(graphUri);
+  }
+
+  async assertionQueryPrivate(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): Promise<Quad[]> {
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    return this.privateStore.getKnowledgeAssetPrivateDraftTriples(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
   }
 
   /**
@@ -6581,8 +6671,75 @@ export class DKGPublisher implements Publisher {
     // swallow, or change control flow, and the `store.insert` write itself is
     // deliberately left untagged.
     await tagPromoteStep('ensureSubGraphRegistered', () => this.ensureSubGraphRegistered(contextGraphId, opts?.subGraphName));
-    const graphUri = await tagPromoteStep('wmGraphUri', () => this.wmGraphUri(contextGraphId, agentAddress, name, opts?.subGraphName));
-    const swmGraphUri = await tagPromoteStep('swmGraphUri', () => this.swmGraphUri(contextGraphId, agentAddress, name, opts?.subGraphName));
+    await tagPromoteStep('assertGraphScopedLifecycleWritable', () =>
+      this.assertGraphScopedLifecycleWritable(
+        contextGraphId,
+        agentAddress,
+        name,
+        opts?.subGraphName,
+      ));
+    if (opts?.entities && opts.entities !== 'all') {
+      throw Object.assign(
+        new Error(
+          'A graph-scoped Knowledge Asset is atomic. Create a new KA instead of sharing a subject subset.',
+        ),
+        { code: 'KA_ATOMIC_SHARE_REQUIRED' },
+      );
+    }
+    const sealSubject = contextGraphAssertionUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      opts?.subGraphName,
+    );
+    const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
+    const sealResult = await this.store.query(
+      `CONSTRUCT { <${assertSafeIri(sealSubject)}> ?p ?o } WHERE {
+        GRAPH <${assertSafeIri(promoteMetaGraph)}> { <${assertSafeIri(sealSubject)}> ?p ?o }
+      }`,
+    );
+    const seal = parseAssertionSealQuads(
+      sealResult.type === 'quads' ? sealResult.quads : [],
+      sealSubject,
+    );
+    if (!seal) {
+      throw Object.assign(
+        new Error('Graph-scoped KA sharing requires a finalized v2 assertion seal'),
+        { code: 'UNSEALED_SHARE_BLOCKED' },
+      );
+    }
+    if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    if (
+      !seal.kaUal
+      || !seal.assertionVersion
+      || seal.publicTripleCount === undefined
+      || seal.privateTripleCount === undefined
+    ) {
+      throw new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
+    }
+    const contentScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+    const immutablePrivateQuads = await tagPromoteStep(
+      'knowledgeAssetPrivateQuads',
+      () => this.privateStore.getKnowledgeAssetPrivateTriples(
+        contextGraphId,
+        contentScope,
+        opts?.subGraphName,
+      ),
+    );
+    const graphUri = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.WorkingMemory,
+      contentScope,
+      opts?.subGraphName,
+    );
+    const swmGraphUri = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      contentScope,
+      opts?.subGraphName,
+    );
 
     // #1116 (round 10) — the swmShareComplete marker MUST be maintained on EVERY
     // return path of assertionPromote, not just the success tail. A non-full share
@@ -6594,9 +6751,8 @@ export class DKGPublisher implements Publisher {
     // return with `isFull = promotingAllEntities && promotedAllRoots` for that path.
     // (Member-row REPLACE stays at the success path — it only matters when quads
     // are actually promoted; the MARKER is the cross-cutting invariant.)
-    const promotingAllEntities = !opts?.entities || opts.entities === 'all';
+    const promotingAllEntities = true;
     const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
-    const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
     const clearCurrentShareOperationId = async (): Promise<void> => {
       await this.store.deleteByPattern({
         graph: promoteMetaGraph,
@@ -6614,34 +6770,14 @@ export class DKGPublisher implements Publisher {
     };
 
     const assertionQuads = await tagPromoteStep('assertionScopedQuads', () => this.assertionScopedQuads(graphUri));
-    if (assertionQuads.length === 0) {
-      // Issue #864 — when the assertion data graph is empty, distinguish two
-      // failure modes so the caller (and ultimately the UI) gets an
-      // actionable signal instead of a silent "Promoted 0 triples":
-      //
-      //   a) genuine empty assertion (never imported, never written, or
-      //      already discarded) → keep the legacy `{ promotedCount: 0 }`
-      //      success-shape return so polling/retry paths keep working.
-      //   b) `_meta` says structural extraction *completed* with a non-zero
-      //      triple count → the data graph SHOULD hold content. Returning
-      //      0 here silently leaves the user staring at "Promoted 0" with
-      //      no recovery path; raise a typed error so the daemon route
-      //      can map it to a 409 the UI knows to surface.
-      //
-      // Rows 18 (`dkg:extractionStatus`) and 19 (`dkg:structuralTripleCount`)
-      // are stamped by the daemon's import-file flow on the data-graph URI
-      // subject (NOT the lifecycle URN) — see
-      // `packages/cli/src/daemon/routes/assertion.ts:metaQuads`. That makes
-      // them a clean witness of "extraction landed", scoped to the same
-      // graphUri we just CONSTRUCTed against. Lifecycle-URN rows from
-      // `assertionCreate` are not consulted: they fire for empty-write
-      // flows where promoting nothing is legitimate.
-      await this.assertAssertionDataPersisted(contextGraphId, graphUri);
-      // No roots to promote is a no-op, not a fresh full share. Clear any prior
-      // marker and current share intent so an empty WM retry cannot re-arm async
-      // VM publish with an old shareOperationId.
+    if (assertionQuads.length === 0 && immutablePrivateQuads.length === 0) {
       await maintainMarker(false);
-      return { promotedCount: 0, promotedAllRoots: false };
+      throw Object.assign(
+        new Error(
+          `Finalized graph-scoped assertion <${sealSubject}> has no materialized public or private content`,
+        ),
+        { code: 'KA_GRAPH_CONTENT_MISSING' },
+      );
     }
 
     let quadsToPromote = assertionQuads;
@@ -6714,34 +6850,17 @@ export class DKGPublisher implements Publisher {
       onChainContextGraphId: opts?.onChainContextGraphId,
       allowLocalPrivateContextGraph: true,
     }));
-    const trustedGeneratedCatalogTriples = trustedCatalogTripleKeySet(
-      opts?.trustedNonManifestCatalogTriples,
+    const privateQuadsToPromote = immutablePrivateQuads.filter(
+      (q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q),
     );
-    const trustedGeneratedCatalogQuads = trustedGeneratedCatalogTriples.size > 0
-      ? quadsToPromote.filter((q) => trustedGeneratedCatalogTriples.has(catalogTripleKey(q)))
-      : [];
-    if (trustedGeneratedCatalogQuads.length > 0) {
-      quadsToPromote = quadsToPromote.filter(
-        (q) => !trustedGeneratedCatalogTriples.has(catalogTripleKey(q)),
-      );
-    }
-
-    if (opts?.entities && opts.entities !== 'all') {
-      const entitySet = new Set(opts.entities);
-      const genidPrefixes = opts.entities.map((e) => `${e}/.well-known/genid/`);
-      quadsToPromote = quadsToPromote.filter(
-        (q) =>
-          entitySet.has(q.subject) ||
-          genidPrefixes.some((prefix) => q.subject.startsWith(prefix)),
-      );
-    }
-
-    // Nothing left after reserved-subject or selective-entity filtering is also
-    // a no-op. It must clear stale full-share state rather than act like a fresh
-    // complete share.
-    if (quadsToPromote.length === 0) {
+    if (quadsToPromote.length === 0 && privateQuadsToPromote.length === 0) {
       await maintainMarker(false);
-      return { promotedCount: 0, promotedAllRoots: false };
+      throw Object.assign(
+        new Error(
+          `Finalized graph-scoped assertion <${sealSubject}> contains only filtered protocol metadata`,
+        ),
+        { code: 'KA_GRAPH_CONTENT_MISSING' },
+      );
     }
 
     const namedGraphs = [...new Set(quadsToPromote
@@ -6760,26 +6879,57 @@ export class DKGPublisher implements Publisher {
 
     const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // Skolemize blank nodes so local SWM and gossip peers store identical data.
-    const kaMap = skolemizeByEntity(quadsToPromote);
-    if (kaMap.size === 0) {
+    // Canonicalize both partitions together so blank-node labels stay stable
+    // across the public/private boundary and validate the complete sealed KA.
+    const normalizedParts = await skolemizeKnowledgeAssetParts(
+      quadsToPromote,
+      privateQuadsToPromote,
+      {
+      allowCanonicalSkolemTerms: true,
+      },
+    );
+    const normalizedQuads = normalizedParts.publicQuads;
+    const normalizedPrivateQuads = normalizedParts.privateQuads;
+    if (normalizedQuads.length !== seal.publicTripleCount) {
       throw new Error(
-        'Cannot promote assertion: no root entities found. ' +
-        'Assertions must contain at least one named (non-blank-node) subject.',
+        `Graph-scoped assertion triple-count mismatch: seal=${seal.publicTripleCount}, ` +
+        `working-memory=${normalizedQuads.length}`,
       );
     }
-    const normalizedQuads = [...kaMap.values()].flat();
-    const rootEntities = [...kaMap.keys()];
-
-    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, opts?.subGraphName);
-    const ownershipKey = opts?.subGraphName ? `${contextGraphId}\0${opts.subGraphName}` : contextGraphId;
-    const swmOwners = await tagPromoteStep('sharedMemoryOwnersForPromotion', () => this.sharedMemoryOwnersForPromotion(
-      contextGraphId,
-      opts?.subGraphName,
-      ownershipKey,
-      rootEntities,
-    ));
-    const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
+    if (normalizedPrivateQuads.length !== seal.privateTripleCount) {
+      throw new Error(
+        `Graph-scoped assertion private triple-count mismatch: seal=${seal.privateTripleCount}, ` +
+        `private-store=${normalizedPrivateQuads.length}`,
+      );
+    }
+    const promotedPrivateRoot = computePrivateRoot(normalizedPrivateQuads);
+    const privateRootMatches = seal.privateMerkleRoot === undefined
+      ? promotedPrivateRoot === undefined
+      : promotedPrivateRoot !== undefined
+        && seal.privateMerkleRoot.length === promotedPrivateRoot.length
+        && seal.privateMerkleRoot.every((byte, index) => byte === promotedPrivateRoot[index]);
+    if (!privateRootMatches) {
+      throw new Error(
+        `Graph-scoped assertion private Merkle mismatch: seal=${seal.privateMerkleRoot
+          ? ethers.hexlify(seal.privateMerkleRoot)
+          : '(none)'}, private-store=${promotedPrivateRoot
+          ? ethers.hexlify(promotedPrivateRoot)
+          : '(none)'}`,
+      );
+    }
+    const promotedMerkleRoot = computeFlatKCRoot(
+      normalizedQuads,
+      promotedPrivateRoot ? [promotedPrivateRoot] : [],
+    );
+    if (
+      promotedMerkleRoot.length !== seal.merkleRoot.length ||
+      !promotedMerkleRoot.every((byte, index) => byte === seal.merkleRoot[index])
+    ) {
+      throw new Error(
+        `Graph-scoped assertion Merkle mismatch: seal=${ethers.hexlify(seal.merkleRoot)}, ` +
+        `working-memory=${ethers.hexlify(promotedMerkleRoot)}`,
+      );
+    }
 
     // Pre-encode gossip message and enforce size limit BEFORE any destructive
     // mutations, so oversized promotions are rejected cleanly while the
@@ -6793,24 +6943,24 @@ export class DKGPublisher implements Publisher {
             `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`,
         )
         .join('\n');
-      const manifestEntries = rootEntities.map((rootEntity) => ({
-        rootEntity,
-        privateMerkleRoot: undefined,
-        privateTripleCount: 0,
-      }));
       const timestampMs = Date.now();
-      const promoteKaNumber = await tagPromoteStep('resolveKaNumber', () => this.resolveKaNumber(contextGraphId, agentAddress, name, opts?.subGraphName));
       const encoded = encodeWorkspacePublishRequest({
         contextGraphId: contextGraphId,
         nquads: new TextEncoder().encode(nquadsStr),
-        manifest: manifestEntries,
+        manifest: [],
         publisherPeerId: opts.publisherPeerId,
         shareOperationId: operationId,
         timestampMs,
         operationId,
         subGraphName: opts.subGraphName,
-        agentAddress,
-        kaNumber: promoteKaNumber !== null ? String(promoteKaNumber) : undefined,
+        agentAddress: contentScope.agentAddress,
+        kaNumber: contentScope.kaNumber,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: contentScope.ual,
+        assertionVersion: contentScope.assertionVersion,
+        publicTripleCount: normalizedQuads.length,
+        ...(promotedPrivateRoot ? { privateMerkleRoot: promotedPrivateRoot } : {}),
+        privateTripleCount: normalizedPrivateQuads.length,
       });
 
       // Wrap the plaintext publish-request in the encrypted envelope
@@ -6838,7 +6988,7 @@ export class DKGPublisher implements Publisher {
       ));
 
       if (wrapped.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
-        const hint = `Promote fewer entities per call.`;
+        const hint = 'Reduce the complete assertion payload size.';
         throw new SwmGossipPayloadTooLargeError({
           actualBytes: wrapped.length,
           maxBytes: DKG_GOSSIP_MAX_MESSAGE_BYTES,
@@ -6870,91 +7020,15 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    // OT-RFC-46 §17.4 / rc.17 D6 — workspaceOwner is now an ADVISORY hint, not a
-    // hard exclusivity gate: a foreign co-claim is no longer REJECTED (the Rule-4
-    // throw is removed). While SWM is still a shared bucket (pre rc.17b per-KA
-    // conversion) we SKIP foreign-owned roots so a co-claim cannot clobber the
-    // owner's quads in the shared graph; once SWM is per-KA (each peer owns its own
-    // graph) this skip is dropped entirely and overlap is fully allowed.
-    const skippedRoots = new Set<string>();
-    for (const root of rootEntities) {
-      const owner = swmOwners.get(root);
-      if (!owner) continue;
-      if (opts?.publisherPeerId && owner === opts.publisherPeerId) continue; // self-owned — proceed
-      this.log.warn(
-        createOperationContext('share'),
-        `Skipping entity <${root}>: owned by peer ${owner} in SWM (advisory ownership; co-claim not rejected). caller=${opts?.publisherPeerId ?? '(none)'}`,
-      );
-      skippedRoots.add(root);
-    }
-
-    // Filter out skipped roots so subsequent mutations don't touch foreign-owned data.
-    const effectiveRoots = skippedRoots.size > 0
-      ? rootEntities.filter(r => !skippedRoots.has(r))
-      : rootEntities;
-    const effectiveQuads = skippedRoots.size > 0
-      ? normalizedQuads.filter(q => !skippedRoots.has(q.subject) && !skippedRoots.has(q.subject.split('/.well-known/genid/')[0]))
-      : normalizedQuads;
-
-    // #1116 FIX 1 — did this promote cover the FULL requested/sealed root set?
-    // A FULL share seals ALL of `rootEntities`, but the advisory ownership skip
-    // above can promote only `effectiveRoots`. When any root is foreign-skipped
-    // the SWM copy is missing part of the sealed set, so the seal exists but the
-    // asset is NOT publish-ready (publishFromFinalizedAssertion would recompute a
-    // different merkleRoot over the partial SWM slice and fail the seal guard).
-    // The agent's promote() threads this into `publishReady`. A no-op with roots
-    // but no effective quads is not a complete share and must not stamp a fresh
-    // shareOperationId for async VM publish.
-    const promotedAllRoots = skippedRoots.size === 0 && effectiveQuads.length > 0;
-
-    if (effectiveRoots.length === 0 || effectiveQuads.length === 0) {
-      // Nothing is actually promoted, either because every root was skipped or
-      // because the remaining root set has no publishable quads. This is never a
-      // complete full share.
-      await maintainMarker(false);
-      return { promotedCount: 0, promotedAllRoots: false };
-    }
-
-    // Delete-then-insert for existing SWM entities (upsert), matching
-    // _shareImpl and SharedMemoryHandler so re-promotes replace stale triples.
-    // Safe after the ownership check above — only self-owned or unowned roots remain.
-    for (const root of effectiveRoots) {
-      if (swmOwned.has(root)) {
-        await this.store.deleteByPattern({ graph: swmGraphUri, subject: root });
-        await this.store.deleteBySubjectPrefix(swmGraphUri, root + '/.well-known/genid/');
-        await this.deleteMetaForRoot(swmMetaGraph, root);
-      }
-    }
-
-    const swmQuads = effectiveQuads.map((q) => ({ ...q, graph: swmGraphUri }));
-    await this.store.insert(swmQuads);
-
-    // Delete promoted triples from assertion graph (only the effective, non-skipped roots)
-    const effectivePromoteQuads = skippedRoots.size > 0
-      ? quadsToPromote.filter(q => !skippedRoots.has(q.subject) && !skippedRoots.has(q.subject.split('/.well-known/genid/')[0]))
-      : quadsToPromote;
-    const wmQuadsToDelete = [...effectivePromoteQuads, ...trustedGeneratedCatalogQuads];
-    // A full promote that consumes every WM quad can drop its assertion-scoped
-    // graphs directly. Besides being cheaper, this avoids serializing a large
-    // connected blank-node component as one DELETE ... WHERE pattern. Such a
-    // pattern is legal SPARQL but its self-join can grow combinatorially (a
-    // 100-triple Wikidata assertion took minutes of one-core Oxigraph CPU).
-    //
-    // Keep the precise delete path whenever anything must remain in WM:
-    // subset shares, foreign-owned-root skips, or reserved provenance/trust
-    // rows filtered out of the SWM payload. `wmQuadsToDelete` is derived only
-    // from `assertionQuads`, and the trusted catalog subset is disjoint from
-    // `effectivePromoteQuads`, so equal lengths prove the full graph is
-    // consumed without a second store scan.
-    const consumesEntireAssertion =
-      promotingAllEntities
-      && skippedRoots.size === 0
-      && wmQuadsToDelete.length === assertionQuads.length;
-    if (consumesEntireAssertion) {
-      await this.dropAssertionScopedGraphs(graphUri);
-    } else {
-      await this.deleteAssertionScopedQuads(graphUri, wmQuadsToDelete);
-    }
+    // The UAL-derived graph is the ownership boundary. Replace the complete
+    // graph; never inspect, claim, skip, or delete individual RDF subjects.
+    const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
+    await this.replaceExactKnowledgeAssetGraph(
+      swmGraphUri,
+      swmQuads,
+      'Knowledge Asset WM-to-SWM promotion',
+    );
+    await this.dropAssertionScopedGraphs(graphUri);
 
     // Update the assertion's memory layer from WM → SWM in _meta
     const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
@@ -6965,55 +7039,26 @@ export class DKGPublisher implements Publisher {
       predicate: DKG_MEMORY_LAYER,
     });
     await this.store.insert([{
-      subject: graphUri,
+      subject: swmGraphUri,
       predicate: DKG_MEMORY_LAYER,
       object: '"SWM"',
       graph: assertionMetaGraph,
     }]);
-
-    // RFC ka-metadata-trim Phase 3 (P3.4): the `ShareTransition` record
-    // (spec §8) is no longer written. Its only consumer — the node-ui
-    // on-chain-receipt hook — now reads the seal-subject receipt rows in
-    // `_meta` directly (read-both: it still falls back to ShareTransition
-    // rows for old stores). The entity→assertion bridge it provided is
-    // carried by the seal's `dkg:assertionRootEntity`/`dkg:assertionEntity`
-    // rows and the lifecycle record's member-entity stamps.
-
-    // #1116 (round 7) — REPLACE (not append) the lifecycle-URN member rows on a
-    // FULL-COMPLETE share. `generateAssertionPromotedMetadata` only INSERTs the
-    // member rows (its delete set never removes prior ones — metadata.ts), so a
-    // full {A,C} → discard → recreate → full {A,B} cycle (or a no-discard full
-    // re-share) accumulates the stale UNION {A,B,C}. The seal-less SWM
-    // reconstruction (readPromotedRootEntities) then seals a stale SUPERSET. When
-    // this promote is the AUTHORITATIVE current full set (entities:"all" AND no
-    // foreign root skipped — exactly the markSwmShareComplete condition), the rows
-    // must end up as EXACTLY the just-promoted roots. Clear the prior member rows
-    // for the lifecycle URN here, then stamp the current ones below.
-    //
-    // A SUBSET / partial promote is intentionally NOT replaced: it shares only some
-    // roots, the marker is cleared (round 6) so readPromotedRootEntities output is
-    // gated-out, and over-deleting could drop a still-valid member. The audit
-    // confirmed no reader needs the cumulative historical union; all read the
-    // CURRENT set, so REPLACE-on-full is strictly more correct.
-    // `promotingAllEntities` is hoisted to the top of the method (round 10) so the
-    // early-return marker maintenance can use it; reuse it here.
-    const isFullCompletePromote = promotingAllEntities && promotedAllRoots;
+    const promotedAllRoots = true; // compatibility return name; v2 has no roots.
+    const isFullCompletePromote = true;
     await clearCurrentShareOperationId();
-    if (isFullCompletePromote) {
-      await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
-      await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
-    }
+    await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
+    await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
 
     // Update assertion lifecycle record in _meta: created → promoted
-    const promotedKaNumber = await this.resolveKaNumber(contextGraphId, agentAddress, name, opts?.subGraphName);
     const promoted = generateAssertionPromotedMetadata({
       contextGraphId,
       agentAddress,
       assertionName: name,
       subGraphName: opts?.subGraphName,
-      kaNumber: promotedKaNumber ?? undefined,
+      kaNumber: BigInt(contentScope.kaNumber),
       shareOperationId: operationId,
-      rootEntities: effectiveRoots,
+      rootEntities: [],
       timestamp: new Date(),
     }, { provenanceEvents: this.provenanceEvents });
     await this.store.delete(promoted.delete);
@@ -7029,53 +7074,39 @@ export class DKGPublisher implements Publisher {
     // EVERY caller of the public assertionPromote — no desync on a direct caller.
     await maintainMarker(isFullCompletePromote);
 
-    // Write WorkspaceOperation metadata + ownership quads, mirroring what
-    // _shareImpl and the remote SharedMemoryHandler both produce, so the
-    // promoting node and replicas converge on identical ownership state.
-    if (opts?.publisherPeerId) {
-      const operationTimestamp = new Date();
-      await storeWorkspaceOperationPublicQuads({
-        store: this.store,
-        graphManager: this.graphManager,
-        contextGraphId,
-        shareOperationId: operationId,
-        rootEntities: effectiveRoots,
-        quads: swmQuads,
-        publisherPeerId: opts.publisherPeerId,
-        agentAddress,
-        subGraphName: opts.subGraphName,
-        timestamp: operationTimestamp,
-        publicSnapshotStore: this.publicSnapshotStore,
-      });
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId,
+      shareOperationId: operationId,
+      kaUal: contentScope.ual,
+      assertionVersion: contentScope.assertionVersion,
+      quads: swmQuads,
+      ...(promotedPrivateRoot ? { privateMerkleRoot: promotedPrivateRoot } : {}),
+      privateTripleCount: normalizedPrivateQuads.length,
+      publisherPeerId: opts?.publisherPeerId,
+      agentAddress: contentScope.agentAddress,
+      subGraphName: opts?.subGraphName,
+      timestamp: new Date(),
+      publicSnapshotStore: this.publicSnapshotStore,
+    });
 
-      if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
-        this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
-      }
-      const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
-      const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
-      for (const r of effectiveRoots) {
-        if (!liveOwned.has(r)) {
-          newOwnershipEntries.push({ rootEntity: r, creatorPeerId: opts.publisherPeerId });
-        }
-      }
-      if (newOwnershipEntries.length > 0) {
-        for (const entry of newOwnershipEntries) {
-          await this.store.deleteByPattern({
-            graph: swmMetaGraph, subject: entry.rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
-          });
-        }
-        await this.store.insert(generateOwnershipQuads(newOwnershipEntries, swmMetaGraph));
-        for (const entry of newOwnershipEntries) {
-          liveOwned.set(entry.rootEntity, entry.creatorPeerId);
-        }
-      }
-    }
-
-    return { promotedCount: swmQuads.length, gossipMessage, promotedAllRoots, shareOperationId: operationId };
+    return {
+      promotedCount: swmQuads.length + normalizedPrivateQuads.length,
+      gossipMessage,
+      promotedAllRoots,
+      shareOperationId: operationId,
+    };
   }
 
   async assertionDiscard(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<void> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
+    await this.assertGraphScopedLifecycleWritable(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
     // Drop the assertion data graph AND clean up any `_meta` rows keyed
     // by this assertion's UAL in the CG root `_meta` graph. Without this
@@ -7183,6 +7214,12 @@ export class DKGPublisher implements Publisher {
       await this.clearAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
     }
     await this.dropAssertionScopedGraphs(graphUri);
+    await this.privateStore.deleteKnowledgeAssetPrivateDraft(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
   }
 
   /**

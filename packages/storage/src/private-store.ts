@@ -166,6 +166,82 @@ export class PrivateContentStore {
   }
 
   /**
+   * Mutable private draft paired with one named WM lifecycle.
+   *
+   * The final assertion version is not known until finalize, so drafts cannot
+   * use the immutable `(UAL, assertionVersion)` graph yet. Keep them in a
+   * lifecycle-keyed graph under the private bucket, then atomically materialize
+   * the canonical assertion-versioned graph before exposing the seal.
+   */
+  knowledgeAssetPrivateDraftGraphUri(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+    subGraphName?: string,
+  ): string {
+    const bucket = this.privateGraph(contextGraphId, subGraphName);
+    const identity = [agentAddress.toLowerCase(), assertionName]
+      .map((part) => encodeURIComponent(part))
+      .join(':');
+    return assertSafeIri(`${bucket}/_working_memory/${identity}`);
+  }
+
+  /** Append private triples to a mutable named-KA draft. */
+  async storeKnowledgeAssetPrivateDraftTriples(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+    quads: readonly Quad[],
+    subGraphName?: string,
+  ): Promise<void> {
+    if (quads.length === 0) return;
+    for (const quad of quads) assertSafePrivateQuad(quad);
+    const graphUri = this.knowledgeAssetPrivateDraftGraphUri(
+      contextGraphId,
+      agentAddress,
+      assertionName,
+      subGraphName,
+    );
+    await this.withGraphWriteLock(graphUri, async () => {
+      await this.store.insert(quads.map((quad) => ({ ...quad, graph: graphUri })));
+    });
+  }
+
+  /** Read the complete mutable private draft without exposing its storage graph. */
+  async getKnowledgeAssetPrivateDraftTriples(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+    subGraphName?: string,
+  ): Promise<Quad[]> {
+    const graphUri = this.knowledgeAssetPrivateDraftGraphUri(
+      contextGraphId,
+      agentAddress,
+      assertionName,
+      subGraphName,
+    );
+    const result = await this.store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
+    );
+    if (result.type !== 'quads') return [];
+    return result.quads.map((quad) => ({ ...quad, graph: '' }));
+  }
+
+  async deleteKnowledgeAssetPrivateDraft(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+    subGraphName?: string,
+  ): Promise<void> {
+    await this.store.dropGraph(this.knowledgeAssetPrivateDraftGraphUri(
+      contextGraphId,
+      agentAddress,
+      assertionName,
+      subGraphName,
+    ));
+  }
+
+  /**
    * Exact private content graph for one rootless KA assertion.
    *
    * Public VM currently materializes the latest assertion in a stable UAL-derived

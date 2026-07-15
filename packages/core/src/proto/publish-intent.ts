@@ -93,7 +93,15 @@ export const PublishIntentSchema = new Type('PublishIntent')
   // the exact KC root as hash(public subtree, collapse(private roots)). Sent
   // only over `PROTOCOL_STORAGE_ACK_V2` so V1 cores never silently ignore the
   // commitments during rolling upgrades.
-  .add(new Field('privateMerkleRoots', 20, 'bytes', 'repeated'));
+  .add(new Field('privateMerkleRoots', 20, 'bytes', 'repeated'))
+  // Rootless KA scope. The legacy rootEntities/privateMerkleRoots fields MUST
+  // be empty when contentScopeVersion is 2.
+  .add(new Field('contentScopeVersion', 21, 'uint32'))
+  .add(new Field('kaUal', 22, 'string'))
+  .add(new Field('assertionVersion', 23, 'string'))
+  .add(new Field('publicTripleCount', 24, 'uint32'))
+  .add(new Field('privateMerkleRoot', 25, 'bytes'))
+  .add(new Field('privateTripleCount', 26, 'uint32'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -203,6 +211,18 @@ export interface PublishIntentMsg {
    * V1 peers are not compatible because they ignore field 20.
    */
   privateMerkleRoots?: Uint8Array[];
+  /** Rootless KA graph-scope discriminator. New writers emit exactly 2. */
+  contentScopeVersion?: number;
+  /** Canonical deterministic UAL for the single atomic KA assertion. */
+  kaUal?: string;
+  /** One-based assertion/Merkle-root index encoded as a decimal string. */
+  assertionVersion?: string;
+  /** Number of public RDF triples in the assertion. */
+  publicTripleCount?: number;
+  /** Optional single KA-level private commitment. */
+  privateMerkleRoot?: Uint8Array;
+  /** Number of private RDF triples committed by privateMerkleRoot. */
+  privateTripleCount?: number;
 }
 
 /** Sent in `ackProtocolVersion` for LU-11 chunked ACKs. */

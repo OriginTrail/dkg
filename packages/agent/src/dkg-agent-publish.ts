@@ -44,6 +44,10 @@ import {
   buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
   buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads, type AssertionSeal,
+  ASSERTION_SEAL_PREDICATES,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  LegacyKnowledgeAssetReadOnlyError,
+  createGraphKnowledgeAssetScope,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
   computeWorkspaceAgentEncryptionKeyProofPayload,
@@ -108,7 +112,13 @@ import {
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
-  computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject,
+  computeTripleHashV10 as computeTripleHash,
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computePrivateRootV10 as computePrivateRoot,
+  skolemizeByEntity,
+  skolemizeKnowledgeAsset,
+  skolemizeKnowledgeAssetParts,
+  isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
   appendMissingGeneratedPrivateCatalogFloor,
@@ -148,10 +158,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import {
-  prepareFinalizedLifecycleSwmForPublish,
-  sharedMemoryScopeForFinalizedLifecycle,
-} from './finalized-lifecycle-swm.js';
+import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-swm.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -1628,6 +1635,12 @@ export class PublishMethods extends DKGAgentBase {
       precomputedUpdateAttestation?: PublishOptions['precomputedUpdateAttestation'];
       publisherOverride?: DKGPublisher;
       subGraphName?: string;
+      contentScopeVersion?: PublishOptions['contentScopeVersion'];
+      kaUal?: PublishOptions['kaUal'];
+      assertionVersion?: PublishOptions['assertionVersion'];
+      publicTripleCount?: PublishOptions['publicTripleCount'];
+      privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
+      privateTripleCount?: PublishOptions['privateTripleCount'];
     },
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('update');
@@ -1738,9 +1751,8 @@ export class PublishMethods extends DKGAgentBase {
     const updateQuads = preparedUpdateCatalog?.quads ?? quads;
 
     const publisher = opts?.publisherOverride ?? this.publisher;
-    const result = await publisher.update(kaId, {
+    const publisherUpdateOptions = {
       contextGraphId,
-      quads: updateQuads,
       privateQuads,
       publisherPeerId: this.node.peerId.toString(),
       publishContextGraphId: updateOnChainId ?? undefined,
@@ -1748,6 +1760,12 @@ export class PublishMethods extends DKGAgentBase {
       onPhase,
       subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts?.precomputedUpdateAttestation,
+      contentScopeVersion: opts?.contentScopeVersion,
+      kaUal: opts?.kaUal,
+      assertionVersion: opts?.assertionVersion,
+      publicTripleCount: opts?.publicTripleCount,
+      privateMerkleRoot: opts?.privateMerkleRoot,
+      privateTripleCount: opts?.privateTripleCount,
       trustedNonManifestCatalogTriples:
         preparedUpdateCatalog?.trustedNonManifestCatalogTriples,
       v10UpdateACKProvider,
@@ -1758,7 +1776,10 @@ export class PublishMethods extends DKGAgentBase {
       // Curated → the chunked emitter the producer prefers to fan the updated
       // private payload out to CG members (member distribution). Public → undefined.
       encryptInlineChunked: updateEncryptInlineChunked,
-    });
+    };
+    const result = opts?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+      ? await publisher.updateKnowledgeAssetFromSharedMemory(kaId, publisherUpdateOptions)
+      : await publisher.update(kaId, { ...publisherUpdateOptions, quads: updateQuads });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
     onPhase?.('broadcast', 'start');
@@ -2097,6 +2118,12 @@ export class PublishMethods extends DKGAgentBase {
     reservedKaId: bigint;
     /** Internal exact payload boundary used by seal-in-SWM migration. */
     rootEntities: string[];
+    contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
+    kaUal: string;
+    assertionVersion: string;
+    publicTripleCount: number;
+    privateMerkleRoot?: Uint8Array;
+    privateTripleCount: number;
     schemeVersion: number;
     chainId: bigint;
     kav10Address: string;
@@ -2119,6 +2146,73 @@ export class PublishMethods extends DKGAgentBase {
       opts?.subGraphName,
     );
     const metaGraph = contextGraphMetaUri(contextGraphId);
+    const lifecycleUri = assertionLifecycleUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      opts?.subGraphName,
+    );
+    const sourceWmGraphUri = await this.publisher.wmGraphUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      opts?.subGraphName,
+    );
+    const xsdInteger = '<http://www.w3.org/2001/XMLSchema#integer>';
+    const stampFinalizedLifecycle = async (
+      assertionVersion: string | bigint,
+      finalizedMerkleRoot: Uint8Array,
+    ): Promise<void> => {
+      // Keep the v2 mutation gate present throughout recovery. The assertion
+      // version may need replacement, but a failure after its delete is safe:
+      // the durable seal is written first and an idempotent finalize retry
+      // repairs this row before returning.
+      await this.store.deleteByPattern({
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+      });
+      await this.store.insert([
+        {
+          subject: lifecycleUri,
+          predicate: ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION,
+          object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^${xsdInteger}`,
+          graph: metaGraph,
+        },
+        {
+          subject: lifecycleUri,
+          predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+          object: `"${assertionVersion}"^^${xsdInteger}`,
+          graph: metaGraph,
+        },
+      ]);
+      const merkleHexBare = ethers.hexlify(finalizedMerkleRoot).slice(2);
+      await this._stampPointerIfDivergedFromVm(
+        lifecycleUri,
+        WM_CURRENT_ASSERTION_PRED,
+        merkleHexBare,
+        metaGraph,
+      );
+    };
+
+    // Read any durable seal before loading the private partition. A completed
+    // finalize removes the mutable private draft, so an idempotent retry must
+    // recover that partition from the immutable `(UAL, assertionVersion)` graph.
+    const existingMetaResult = await this.store.query(
+      `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+    );
+    const existingMetaQuads =
+      existingMetaResult.type === 'quads' ? existingMetaResult.quads : [];
+    let existingSeal: AssertionSeal | undefined;
+    try {
+      existingSeal = parseAssertionSealQuads(existingMetaQuads, assertionUri);
+    } catch (err) {
+      throw new Error(
+        `assertionFinalize: existing _meta seal for <${assertionUri}> is corrupt: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+    const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
 
     // 2. Pull the assertion's quads. Refuse to finalize an empty
     //    assertion — there's nothing to commit. The public DCAT catalog entry
@@ -2131,7 +2225,26 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress,
       opts?.subGraphName,
     );
-    if (rawQuads.length === 0) {
+    let rawPrivateQuads = await this.publisher.assertionQueryPrivate(
+      contextGraphId,
+      name,
+      agentAddress,
+      opts?.subGraphName,
+    );
+    if (
+      rawPrivateQuads.length === 0
+      && existingSeal?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+      && existingSeal.kaUal !== undefined
+      && existingSeal.assertionVersion !== undefined
+      && (existingSeal.privateTripleCount ?? 0) > 0
+    ) {
+      rawPrivateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
+        contextGraphId,
+        createGraphKnowledgeAssetScope(existingSeal.kaUal, existingSeal.assertionVersion),
+        opts?.subGraphName,
+      );
+    }
+    if (rawQuads.length === 0 && rawPrivateQuads.length === 0) {
       throw new Error(
         `Cannot finalize assertion <${assertionUri}>: it has no quads. ` +
           `Write at least one quad with /api/knowledge-assets/${name}/wm/write before finalizing.`,
@@ -2148,12 +2261,15 @@ export class PublishMethods extends DKGAgentBase {
     //     can never recompute. (Round 4 review §8 — "assertionFinalize
     //     hashes WM-only urn:dkg:file: rows".)
     const userQuads = rawQuads.filter((q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
-    if (userQuads.length === 0) {
+    const userPrivateQuads = rawPrivateQuads.filter(
+      (q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q),
+    );
+    if (userQuads.length === 0 && userPrivateQuads.length === 0) {
       throw new Error(
         `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
           `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
           `which is filtered out before SWM. Add at least one user-authored ` +
-          `quad on a non-reserved subject before finalizing.`,
+          `public or private quad on a non-reserved subject before finalizing.`,
       );
     }
 
@@ -2182,93 +2298,59 @@ export class PublishMethods extends DKGAgentBase {
       quads.push(...catalogQuads);
     }
 
-    // 3. Compute merkleRoot using the SAME algorithm the publisher
-    //    uses at publish-time (V10: keccak256-based merkle, sort+dedupe
-    //    leaves). Drift between these two compute paths is the silent
-    //    failure mode this whole architecture is trying to eliminate —
-    //    so we reuse the publisher's exported helpers verbatim.
-    //
-    //    Round 5 review §1 — `kaMap` may contain unsafe-IRI roots
-    //    (e.g. RFC-3987-valid IRIs with `|` `^` etc that fail
-    //    `isSafeIri`'s SPARQL-interpolation rules). Those cannot be
-    //    referenced from the SPARQL CONSTRUCT that
-    //    `publishFromFinalizedAssertion` uses to reload the
-    //    promoted-SWM payload, so they MUST NOT contribute to the
-    //    sealed merkleRoot — otherwise the seal commits to a root
-    //    the publish path can never recompute. Reject finalize
-    //    instead of silently dropping content: silent-drop hides a
-    //    real input error and would let a partial assertion ship
-    //    with a seal that doesn't cover all of its quads.
-    //    Defense-in-depth: the current oxigraph storage adapter
-    //    rejects most unsafe characters at write time, so this guard
-    //    is rarely triggered through `assertion.write`. It still
-    //    matters for non-oxigraph adapters and for code paths that
-    //    seed the WM graph directly (bulk-import / `_meta` fixtures
-    //    / future storage backends). The canonical wire pin lives
-    //    at `core/test/assertion-seal-root-entities.test.ts` —
-    //    `buildAssertionSealQuads` rejects unsafe roots at the seal
-    //    boundary. This guard surfaces the same failure earlier
-    //    with a more actionable message.
-    const kaMap = skolemizeByEntity(quads);
-    const allRootEntities = [...kaMap.keys()];
-    const unsafeRootEntities = allRootEntities.filter((r) => !isSafeIri(r));
-    if (unsafeRootEntities.length > 0) {
-      const sample = unsafeRootEntities
-        .slice(0, 3)
-        .map((r) => `<${r}>`)
-        .join(', ');
-      const more = unsafeRootEntities.length > 3 ? ` (+${unsafeRootEntities.length - 3} more)` : '';
-      throw new Error(
-        `Cannot finalize assertion <${assertionUri}>: ${unsafeRootEntities.length} root ` +
-          `entit${unsafeRootEntities.length === 1 ? 'y has' : 'ies have'} an unsafe IRI: ${sample}${more}. ` +
-          `The publish path reloads SWM via SPARQL CONSTRUCT scoped to these roots — unsafe IRIs ` +
-          `would be filtered, recomputing a different merkleRoot from the truncated payload, so the ` +
-          `sealed assertion could never be republished. Rename these subjects to safe IRIs ` +
-          `(no blank nodes, control chars, or unbalanced delimiters) before finalizing.`,
-      );
-    }
-    const allSkolemizedQuads = [...kaMap.values()].flat();
-    const merkleRoot = computeFlatKCRoot(allSkolemizedQuads, []);
-    // 3b. Capture rootEntities from the SAME `skolemizeByEntity` call that
-    //     drives the merkle leaves. The seal binds these so
-    //     `publishFromFinalizedAssertion` can scope its SWM CONSTRUCT
-    //     instead of bundling everything currently sitting in shared
-    //     memory (Round 4 review §9). Now safe by construction — the
-    //     guard above guarantees every key passes `isSafeIri`.
-    const canonicalForManifest = canonicalPublishPayload(quads, [], {
-      trustedNonManifestCatalogTriples: trustedGeneratedCatalogTriples,
+    // 3. Canonicalize the COMPLETE RDF set once at KA scope. Subjects are data,
+    // not partitions: 1,000 distinct subjects still produce one asset, one
+    // Merkle tree, and (downstream) one graph operation. The linear skolemizer
+    // also permits a valid all-blank-node component, which the root-based model
+    // could not represent.
+    const normalizedParts = await skolemizeKnowledgeAssetParts(quads, userPrivateQuads, {
+      // The first finalize sees user data already checked at assertionWrite;
+      // an interrupted retry can see our own canonical WM target. Accept only
+      // exact c14nN terms here, never arbitrary names in the reserved prefix.
+      allowCanonicalSkolemTerms: true,
     });
-    const rootEntities = canonicalForManifest.manifestEntries.map((m) => m.rootEntity);
-    if (rootEntities.length === 0) {
-      throw new Error(
-        `Cannot finalize assertion <${assertionUri}>: skolemizeByEntity produced ` +
-          `no root entities. The assertion has no quads; add at least one ` +
-          `user-authored quad on a non-reserved subject before finalizing.`,
-      );
-    }
+    const normalizedKnowledgeAssetQuads = normalizedParts.publicQuads;
+    const normalizedPrivateKnowledgeAssetQuads = normalizedParts.privateQuads;
+    const privateMerkleRoot = computePrivateRoot(normalizedPrivateKnowledgeAssetQuads);
+    const privateTripleCount = normalizedPrivateKnowledgeAssetQuads.length;
+    const merkleRoot = computeFlatKCRoot(
+      normalizedKnowledgeAssetQuads,
+      privateMerkleRoot ? [privateMerkleRoot] : [],
+    );
+    const publicTripleCount = normalizedKnowledgeAssetQuads.length;
 
     // 4. Idempotency: if a seal already exists for this assertion,
     //    return it as-is when the merkleRoot matches. Mismatch means
     //    the assertion was mutated since the previous finalize —
     //    refuse to overwrite silently.
-    const existingMetaResult = await this.store.query(
-      `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
-    );
-    const existingMetaQuads =
-      existingMetaResult.type === 'quads' ? existingMetaResult.quads : [];
-    let existingSeal: AssertionSeal | undefined;
-    try {
-      existingSeal = parseAssertionSealQuads(existingMetaQuads, assertionUri);
-    } catch (err) {
-      // Corrupt seal — surface to the caller. Do NOT silently overwrite
-      // because the original author's signature is still on record and
-      // overwriting would lose the audit trail.
-      throw new Error(
-        `assertionFinalize: existing _meta seal for <${assertionUri}> is corrupt: ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-    }
     if (existingSeal) {
+      if (existingSeal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+        throw new LegacyKnowledgeAssetReadOnlyError();
+      }
+      if (
+        !existingSeal.kaUal ||
+        !existingSeal.assertionVersion ||
+        existingSeal.publicTripleCount === undefined ||
+        existingSeal.privateTripleCount === undefined
+      ) {
+        throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
+      }
+      const existingPrivateRoot = existingSeal.privateMerkleRoot;
+      const privateRootMatches =
+        existingPrivateRoot === undefined
+          ? privateMerkleRoot === undefined
+          : privateMerkleRoot !== undefined
+            && existingPrivateRoot.length === privateMerkleRoot.length
+            && existingPrivateRoot.every((byte, index) => byte === privateMerkleRoot[index]);
+      if (
+        existingSeal.publicTripleCount !== publicTripleCount
+        || existingSeal.privateTripleCount !== privateTripleCount
+        || !privateRootMatches
+      ) {
+        throw new Error(
+          `assertionFinalize: assertion <${assertionUri}> private/public partition differs from its existing seal`,
+        );
+      }
       if (
         existingSeal.merkleRoot.length !== merkleRoot.length ||
         !existingSeal.merkleRoot.every((b, i) => b === merkleRoot[i])
@@ -2305,12 +2387,58 @@ export class PublishMethods extends DKGAgentBase {
         reservedKaId: reReservedKaId,
         schemeVersion: existingSeal.authorSchemeVersion,
       });
+      // A prior attempt may have stopped after the target swap, after the seal,
+      // or before source cleanup. Re-materialize and repair in that order so an
+      // idempotent finalize always converges to one exact canonical WM graph.
+      const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
+        contextGraphId,
+        existingSeal.kaUal,
+        existingSeal.assertionVersion,
+        normalizedKnowledgeAssetQuads,
+        opts?.subGraphName,
+      );
+      const existingScope = createGraphKnowledgeAssetScope(
+        existingSeal.kaUal,
+        existingSeal.assertionVersion,
+      );
+      await privateStore.replaceKnowledgeAssetPrivateTriples(
+        contextGraphId,
+        existingScope,
+        normalizedPrivateKnowledgeAssetQuads,
+        opts?.subGraphName,
+      );
+      await stampFinalizedLifecycle(
+        existingSeal.assertionVersion,
+        existingSeal.merkleRoot,
+      );
+      await this.publisher.cleanupCanonicalWorkingMemorySources(
+        contextGraphId,
+        name,
+        agentAddress,
+        canonicalWmGraphUri,
+        [sourceWmGraphUri],
+        opts?.subGraphName,
+      );
+      await privateStore.deleteKnowledgeAssetPrivateDraft(
+        contextGraphId,
+        agentAddress,
+        name,
+        opts?.subGraphName,
+      );
       return {
         assertionUri,
         merkleRoot: existingSeal.merkleRoot,
         authorAddress: existingSeal.authorAddress,
         reservedKaId: reReservedKaId,
-        rootEntities: [...existingSeal.rootEntities],
+        rootEntities: [],
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: existingSeal.kaUal,
+        assertionVersion: existingSeal.assertionVersion,
+        publicTripleCount: existingSeal.publicTripleCount,
+        ...(existingSeal.privateMerkleRoot !== undefined
+          ? { privateMerkleRoot: existingSeal.privateMerkleRoot }
+          : {}),
+        privateTripleCount: existingSeal.privateTripleCount,
         schemeVersion: existingSeal.authorSchemeVersion,
         chainId: existingSeal.chainId,
         kav10Address: existingSeal.kav10Address,
@@ -2407,8 +2535,37 @@ export class PublishMethods extends DKGAgentBase {
     //   • update of a previously-stamped name → reuse the stable existing number;
     //   • fresh create with an allocator → reconcile-once then allocate ONE number;
     //   • no allocator → 0n (non-Option-1; the on-chain namespace check rejects).
-    const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
-    const xsdInteger = '<http://www.w3.org/2001/XMLSchema#integer>';
+    const lifecycleScopeResult = await this.store.query(
+      `SELECT ?scope ?version ?vm WHERE { GRAPH <${metaGraph}> {
+        OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION}> ?scope }
+        OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?version }
+        OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
+      } } LIMIT 1`,
+    );
+    const lifecycleScopeRow = lifecycleScopeResult.type === 'bindings'
+      ? lifecycleScopeResult.bindings[0]
+      : undefined;
+    const stripLifecycleLiteral = (value: unknown): string | undefined => {
+      if (value === undefined) return undefined;
+      return String(value).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim();
+    };
+    const persistedScopeVersion = stripLifecycleLiteral(lifecycleScopeRow?.['scope']);
+    const persistedAssertionVersion = stripLifecycleLiteral(lifecycleScopeRow?.['version']);
+    const hasConfirmedVm = lifecycleScopeRow?.['vm'] !== undefined;
+    if (persistedScopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    let assertionVersion = 1n;
+    if (hasConfirmedVm) {
+      if (persistedAssertionVersion === undefined) {
+        throw new Error(
+          `Graph-scoped lifecycle <${lifecycleUri}> is missing its assertion version`,
+        );
+      }
+      assertionVersion = BigInt(persistedAssertionVersion) + 1n;
+    } else if (persistedAssertionVersion !== undefined) {
+      assertionVersion = BigInt(persistedAssertionVersion);
+    }
     const existingKaIdRes = await this.store.query(
       `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
     );
@@ -2627,6 +2784,8 @@ export class PublishMethods extends DKGAgentBase {
 
     // 10. Persist the seal as `_meta` triples.
     const finalizedAtIso = new Date().toISOString();
+    const kaNumber = reservedKaId & ((1n << 96n) - 1n);
+    const kaUal = `did:dkg:${this.chain.chainId}/${authorAddress.toLowerCase()}/${kaNumber}`;
     const sealQuads = buildAssertionSealQuads({
       assertionUri,
       metaGraph,
@@ -2639,7 +2798,12 @@ export class PublishMethods extends DKGAgentBase {
       kav10Address,
       reservedKaId,
       finalizedAtIso,
-      rootEntities,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal,
+      assertionVersion,
+      publicTripleCount,
+      privateMerkleRoot,
+      privateTripleCount,
     });
 
     // ── OT-RFC-43 A2 — stamp the per-author kaId + reservedUal + WM pointer ──
@@ -2652,18 +2816,7 @@ export class PublishMethods extends DKGAgentBase {
     // down so the publisher REUSES it. freshNumber is set only for a fresh create
     // (or a not-yet-stamped preSigned slot); an update of a previously-stamped
     // name keeps its STABLE kaId — no re-stamp.
-    const merkleHexBare = ethers.hexlify(merkleRoot).slice(2);
-    // Re-stamp the WM pointer (idempotent: drop any prior value first so a
-    // re-finalize / update advances WM without accumulating stale pointers).
-    // RFC ka-metadata-trim Phase 2: only materialised when it diverges from
-    // VM — readers COALESCE a missing wm pointer to vm.
-    await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
-
     if (freshNumber !== undefined) {
-      // chainId here is the EVM uint256 from getEvmChainId(); the reservedUal
-      // uses the adapter's canonical chainId string to match resolveKaUal's
-      // UAL shape (did:dkg:<chainId>/<addr>/<number>).
-      const reservedUal = `did:dkg:${this.chain.chainId}/${authorAddress.toLowerCase()}/${freshNumber}`;
       sealQuads.push({
         subject: lifecycleUri,
         predicate: KA_ID_PRED,
@@ -2673,19 +2826,62 @@ export class PublishMethods extends DKGAgentBase {
       sealQuads.push({
         subject: lifecycleUri,
         predicate: RESERVED_UAL_PRED,
-        object: `"${reservedUal}"`,
+        object: `"${kaUal}"`,
         graph: metaGraph,
       });
     }
 
+    // Crash-safe commit order:
+    //   1. atomically materialize the complete canonical target;
+    //   2. persist the seal (and a fresh identity, when needed);
+    //   3. repair lifecycle pointers/version;
+    //   4. remove obsolete source graphs.
+    // Any interruption leaves either the original source or the canonical
+    // target plus enough durable seal data for the idempotent branch above to
+    // finish the transition on retry.
+    const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
+      contextGraphId,
+      kaUal,
+      assertionVersion,
+      normalizedKnowledgeAssetQuads,
+      opts?.subGraphName,
+    );
+    const canonicalScope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
+    await privateStore.replaceKnowledgeAssetPrivateTriples(
+      contextGraphId,
+      canonicalScope,
+      normalizedPrivateKnowledgeAssetQuads,
+      opts?.subGraphName,
+    );
     await this.store.insert(sealQuads);
+    await stampFinalizedLifecycle(assertionVersion, merkleRoot);
+    await this.publisher.cleanupCanonicalWorkingMemorySources(
+      contextGraphId,
+      name,
+      agentAddress,
+      canonicalWmGraphUri,
+      [sourceWmGraphUri],
+      opts?.subGraphName,
+    );
+    await privateStore.deleteKnowledgeAssetPrivateDraft(
+      contextGraphId,
+      agentAddress,
+      name,
+      opts?.subGraphName,
+    );
 
     return {
       assertionUri,
       merkleRoot,
       authorAddress,
       reservedKaId,
-      rootEntities: [...rootEntities],
+      rootEntities: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal,
+      assertionVersion: assertionVersion.toString(),
+      publicTripleCount,
+      ...(privateMerkleRoot !== undefined ? { privateMerkleRoot } : {}),
+      privateTripleCount,
       schemeVersion,
       chainId,
       kav10Address,
@@ -3506,7 +3702,17 @@ export class PublishMethods extends DKGAgentBase {
         { code: 'PUBLISH_INTENT_STALE' },
       );
     }
-
+    if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    if (
+      seal.kaUal === undefined
+      || seal.assertionVersion === undefined
+      || seal.publicTripleCount === undefined
+      || seal.privateTripleCount === undefined
+    ) {
+      throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
+    }
     const latestPromote = [...history.events]
       .reverse()
       .find((event) => event.type === 'promoted' && event.shareOperationId);
@@ -3516,20 +3722,6 @@ export class PublishMethods extends DKGAgentBase {
         new Error(
           `Cannot publish "${name}" asynchronously: the current SWM share is missing a shareOperationId. ` +
             `Re-share the asset through /api/knowledge-assets/${encodeURIComponent(name)}/swm/share before publishing.`,
-        ),
-        { code: 'PUBLISH_INTENT_STALE' },
-      );
-    }
-
-    const roots = [...new Set([
-      ...(latestPromote?.rootEntities ?? []),
-      ...(latestPromote?.rootEntities?.length ? [] : seal.rootEntities),
-    ])].sort();
-    if (roots.length === 0) {
-      throw Object.assign(
-        new Error(
-          `Cannot publish "${name}" asynchronously: the current SWM share has no recorded root entities. ` +
-            `Re-share the full asset before publishing.`,
         ),
         { code: 'PUBLISH_INTENT_STALE' },
       );
@@ -3565,7 +3757,15 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress,
       subGraphName: opts?.subGraphName ?? null,
       shareOperationId,
-      roots,
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+      publicTripleCount: seal.publicTripleCount,
+      privateMerkleRoot: seal.privateMerkleRoot
+        ? ethers.hexlify(seal.privateMerkleRoot).toLowerCase()
+        : null,
+      privateTripleCount: seal.privateTripleCount,
       sealMerkleRoot: sealMerkleRoot.toLowerCase(),
       seal: queuedSeal,
       sealChainId: seal.chainId.toString(),
@@ -3588,7 +3788,15 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress,
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       shareOperationId,
-      roots,
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+      publicTripleCount: seal.publicTripleCount,
+      ...(seal.privateMerkleRoot
+        ? { privateMerkleRoot: ethers.hexlify(seal.privateMerkleRoot) as `0x${string}` }
+        : {}),
+      privateTripleCount: seal.privateTripleCount,
       seal: queuedSeal,
       sealChainId: seal.chainId.toString() as `${bigint}`,
       sealKav10Address: ethers.getAddress(seal.kav10Address) as `0x${string}`,
@@ -3631,6 +3839,7 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     } catch (err) {
+      if (err instanceof LegacyKnowledgeAssetReadOnlyError) throw err;
       const wrapped = new Error(
         `Cannot enqueue VM publish for "${request.name}" because share snapshot ` +
           `${request.shareOperationId} is unavailable or stale. Re-share the knowledge asset before enqueueing: ` +
@@ -3646,6 +3855,17 @@ export class PublishMethods extends DKGAgentBase {
     request: KnowledgeAssetVmPublishRequest,
     opts?: { publisherOverride?: DKGPublisher },
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult> {
+    if (
+      request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+      || request.kaUal === undefined
+      || request.assertionVersion === undefined
+      || request.publicTripleCount === undefined
+      || request.privateTripleCount === undefined
+      || request.roots.length !== 0
+    ) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
     const bareRoot = (value?: string | null): string | undefined => {
       const trimmed = value?.trim().toLowerCase();
       if (!trimmed) return undefined;
@@ -3817,6 +4037,18 @@ export class PublishMethods extends DKGAgentBase {
     ctx: OperationContext,
   ): Promise<void> {
     const { request, job, recovery } = input;
+    if (
+      request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+      || request.kaUal === undefined
+      || request.assertionVersion === undefined
+      || request.roots.length !== 0
+    ) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    const queuedScope = createGraphKnowledgeAssetScope(
+      request.kaUal,
+      request.assertionVersion,
+    );
     const recovered = await normalizeRecoveredNamedKaPublish({
       request,
       job,
@@ -3883,17 +4115,19 @@ export class PublishMethods extends DKGAgentBase {
 
     if (!recovered.materialization.superseded) {
       const publisher = input.publisher ?? this.publisher;
-      const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
-        request.seal.authorAddress,
-        recovered.reservedKaId,
-      );
+      const sharedMemoryScope: SharedMemoryGraphScope = {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: queuedScope.agentAddress,
+          kaNumber: BigInt(queuedScope.kaNumber),
+        },
+      };
       try {
-        await publisher.clearPublishedSwmRoots(
+        await publisher.clearPublishedKnowledgeAssetSwm(
           request.contextGraphId,
-          [...request.roots],
+          sharedMemoryScope,
           request.subGraphName,
           ctx,
-          sharedMemoryScope,
         );
         if (request.clearSharedMemoryAfter === true) {
           await publisher.clearRemainingSharedMemory(request.contextGraphId, request.subGraphName, ctx);
@@ -3931,6 +4165,25 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
+    if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    if (
+      request.roots.length !== 0
+      || request.kaUal === undefined
+      || request.assertionVersion === undefined
+      || request.publicTripleCount === undefined
+      || request.privateTripleCount === undefined
+    ) {
+      throw new Error('Queued graph-scoped VM publish has an incomplete KA content envelope');
+    }
+    const graphScope = createGraphKnowledgeAssetScope(
+      request.kaUal,
+      request.assertionVersion,
+    );
+    const queuedPrivateMerkleRoot = request.privateMerkleRoot
+      ? ethers.getBytes(request.privateMerkleRoot)
+      : undefined;
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const assertionUri = contextGraphAssertionUri(
       request.contextGraphId,
@@ -3955,7 +4208,13 @@ export class PublishMethods extends DKGAgentBase {
       chainId: BigInt(request.sealChainId),
       kav10Address: ethers.getAddress(request.sealKav10Address),
       finalizedAtIso: request.sealFinalizedAtIso,
-      rootEntities: [...request.roots],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: graphScope.ual,
+      assertionVersion: graphScope.assertionVersion,
+      publicTripleCount: request.publicTripleCount,
+      ...(queuedPrivateMerkleRoot ? { privateMerkleRoot: queuedPrivateMerkleRoot } : {}),
+      privateTripleCount: request.privateTripleCount,
+      rootEntities: [],
       ...(request.seal.reservedKaId !== undefined ? { reservedKaId: BigInt(request.seal.reservedKaId) } : {}),
     };
     const queuedMerkleRoot = ethers.hexlify(seal.merkleRoot).toLowerCase();
@@ -3989,13 +4248,47 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    const snapshotQuads = publishOptions.quads.map((q) => ({ ...q, graph: '' }));
-    const snapshotPrivateQuads = (publishOptions.privateQuads ?? []).map((q) => ({ ...q, graph: '' }));
+    const snapshotParts = await skolemizeKnowledgeAssetParts(
+      publishOptions.quads.map((q) => ({ ...q, graph: '' })),
+      (publishOptions.privateQuads ?? []).map((q) => ({ ...q, graph: '' })),
+      { allowCanonicalSkolemTerms: true },
+    );
+    const snapshotQuads = snapshotParts.publicQuads;
+    const snapshotPrivateQuads = snapshotParts.privateQuads;
     if (snapshotQuads.length === 0 && snapshotPrivateQuads.length === 0) {
       throw new Error(
         `No queued shared-memory snapshot quads for context graph ${request.contextGraphId} ` +
           `share operation ${request.shareOperationId}`,
       );
+    }
+    if (
+      snapshotQuads.length !== seal.publicTripleCount
+      || snapshotPrivateQuads.length !== seal.privateTripleCount
+    ) {
+      throw new Error(
+        `Queued graph-scoped VM publish triple-count mismatch for ${graphScope.ual}: ` +
+          `seal=${seal.publicTripleCount}/${seal.privateTripleCount}, ` +
+          `snapshot=${snapshotQuads.length}/${snapshotPrivateQuads.length}`,
+      );
+    }
+    const snapshotPrivateRoot = computePrivateRoot(snapshotPrivateQuads);
+    const privateRootMatches = seal.privateMerkleRoot === undefined
+      ? snapshotPrivateRoot === undefined
+      : snapshotPrivateRoot !== undefined
+        && seal.privateMerkleRoot.length === snapshotPrivateRoot.length
+        && seal.privateMerkleRoot.every((byte, index) => byte === snapshotPrivateRoot[index]);
+    if (!privateRootMatches) {
+      throw new Error(`Queued graph-scoped VM publish private Merkle mismatch for ${graphScope.ual}`);
+    }
+    const snapshotMerkleRoot = computeFlatKCRoot(
+      snapshotQuads,
+      snapshotPrivateRoot ? [snapshotPrivateRoot] : [],
+    );
+    if (
+      snapshotMerkleRoot.length !== seal.merkleRoot.length
+      || !snapshotMerkleRoot.every((byte, index) => byte === seal.merkleRoot[index])
+    ) {
+      throw new Error(`Queued graph-scoped VM publish Merkle mismatch for ${graphScope.ual}`);
     }
 
     const pointerRes = await this.store.query(
@@ -4009,39 +4302,50 @@ export class PublishMethods extends DKGAgentBase {
     const vmCurrent = request.vmCurrentAssertion ?? stripLit(pointerRow?.['vm']);
     const stampedNumberStr = request.kaNumber ?? stripLit(pointerRow?.['kaNum']);
 
-    let packedKaId: bigint | undefined;
-    if (stampedNumberStr != null && stampedNumberStr !== '') {
-      try {
-        const authorBits = BigInt(ethers.getAddress(seal.authorAddress));
-        packedKaId = (authorBits << 96n) | BigInt(stampedNumberStr);
-      } catch (err) {
-        this.log.warn(
-          ctx,
-          `Failed to re-pack queued kaId number "${stampedNumberStr}" for <${lifecycleUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
+    if (graphScope.agentAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
+      throw new Error(
+        `Queued graph-scoped seal author ${seal.authorAddress} does not match UAL author ${graphScope.agentAddress}`,
+      );
     }
-    const sharedMemoryScope = sharedMemoryScopeForFinalizedLifecycle(
-      seal.authorAddress,
-      seal.reservedKaId ?? packedKaId,
-    );
+    if (
+      stampedNumberStr !== undefined
+      && stampedNumberStr !== ''
+      && BigInt(stampedNumberStr) !== BigInt(graphScope.kaNumber)
+    ) {
+      throw new Error(
+        `Queued lifecycle kaId number ${stampedNumberStr} does not match UAL number ${graphScope.kaNumber}`,
+      );
+    }
+    const packedKaId =
+      (BigInt(graphScope.agentAddress) << 96n)
+      | BigInt(graphScope.kaNumber);
+    if (seal.reservedKaId !== undefined && seal.reservedKaId !== packedKaId) {
+      throw new Error(
+        `Queued seal reservedKaId ${seal.reservedKaId} does not match UAL-derived kaId ${packedKaId}`,
+      );
+    }
+    const sharedMemoryScope: SharedMemoryGraphScope = {
+      kind: 'named-lifecycle',
+      identity: {
+        agentAddress: graphScope.agentAddress,
+        kaNumber: BigInt(graphScope.kaNumber),
+      },
+    };
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
-    const clearPublishedRoots = async (label: string): Promise<void> => {
+    const clearPublishedGraph = async (label: string): Promise<void> => {
       try {
-        await publisher.clearPublishedSwmRoots(
+        await publisher.clearPublishedKnowledgeAssetSwm(
           request.contextGraphId,
-          [...request.roots],
+          sharedMemoryScope,
           request.subGraphName,
           ctx,
-          sharedMemoryScope,
         );
       } catch (err) {
         this.log.warn(
           ctx,
-          `Failed to clear published SWM roots after confirmed queued ${label} of <${lifecycleUri}>: ` +
+          `Failed to clear published SWM graph after confirmed queued ${label} of <${lifecycleUri}>: ` +
             (err instanceof Error ? err.message : String(err)),
         );
       }
@@ -4079,11 +4383,17 @@ export class PublishMethods extends DKGAgentBase {
           precomputedUpdateAttestation: updateAttestation,
           publisherOverride: publisher,
           subGraphName: request.subGraphName,
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: graphScope.ual,
+          assertionVersion: graphScope.assertionVersion,
+          publicTripleCount: seal.publicTripleCount,
+          ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
+          privateTripleCount: seal.privateTripleCount,
         },
       );
 
       if (result.status === 'confirmed') {
-        await clearPublishedRoots('update');
+        await clearPublishedGraph('update');
         if (request.clearSharedMemoryAfter === true) {
           await clearRemainingSharedMemory();
         }
@@ -4188,6 +4498,12 @@ export class PublishMethods extends DKGAgentBase {
         privateQuads: snapshotPrivateQuads.length > 0 ? snapshotPrivateQuads : undefined,
         publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
         subGraphName: request.subGraphName,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: graphScope.ual,
+        assertionVersion: graphScope.assertionVersion,
+        publicTripleCount: seal.publicTripleCount,
+        ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
+        privateTripleCount: seal.privateTripleCount,
         operationCtx: ctx,
         onPhase: opts?.onPhase ?? publishOptions.onPhase,
         skipContextGraphEnsure: true,
@@ -4232,7 +4548,7 @@ export class PublishMethods extends DKGAgentBase {
       }
 
       if (result.status === 'confirmed') {
-        await clearPublishedRoots('publish');
+        await clearPublishedGraph('publish');
         if (request.clearSharedMemoryAfter === true) {
           await clearRemainingSharedMemory();
         }
@@ -4256,9 +4572,7 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     if (result.status === 'confirmed' && result.onChainResult) {
-      const rootEntities = result.kaManifest.length > 0
-        ? result.kaManifest.map((ka) => ka.rootEntity)
-        : [...request.roots];
+      const rootEntities: string[] = [];
       const broadcastCgId = queuedOnChainContextGraphId ?? (onChainCapable
         ? normalizeOptionalContextGraphId(await this.getContextGraphOnChainId(request.contextGraphId))
         : undefined);
@@ -4364,6 +4678,20 @@ export class PublishMethods extends DKGAgentBase {
           `Call /api/knowledge-assets/${name}/wm/finalize before publishing.`,
       );
     }
+    if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    if (
+      seal.kaUal === undefined
+      || seal.assertionVersion === undefined
+      || seal.publicTripleCount === undefined
+    ) {
+      throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
+    }
+    const graphScope = createGraphKnowledgeAssetScope(
+      seal.kaUal,
+      seal.assertionVersion,
+    );
 
     // 2. Cross-check chain target — refuse to publish a sig signed
     //    against a different deployment than this daemon currently
@@ -4450,72 +4778,110 @@ export class PublishMethods extends DKGAgentBase {
     const vmCurrent = stripLit(pointerRow?.['vm']);
     const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
 
-    // Re-pack the stamped per-author NUMBER into the full packed kaId:
-    //   kaId = (uint160(author) << 96) | number   (matches KaNumberAllocator)
-    let packedKaId: bigint | undefined;
-    if (stampedNumberStr != null && stampedNumberStr !== '') {
-      try {
-        const authorBits = BigInt(ethers.getAddress(seal.authorAddress));
-        packedKaId = (authorBits << 96n) | BigInt(stampedNumberStr);
-      } catch (err) {
-        this.log.warn(
-          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          `Failed to re-pack stamped kaId number "${stampedNumberStr}" for <${lifecycleUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
+    if (graphScope.agentAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
+      throw new Error(
+        `Graph-scoped seal author ${seal.authorAddress} does not match UAL author ${graphScope.agentAddress}`,
+      );
     }
-    const finalizedLifecycleSelection = { rootEntities: seal.rootEntities };
-
+    const packedKaId =
+      (BigInt(graphScope.agentAddress) << 96n)
+      | BigInt(graphScope.kaNumber);
+    if (
+      stampedNumberStr !== undefined
+      && stampedNumberStr !== ''
+      && BigInt(stampedNumberStr) !== BigInt(graphScope.kaNumber)
+    ) {
+      throw new Error(
+        `Lifecycle kaId number ${stampedNumberStr} does not match graph-scoped UAL number ${graphScope.kaNumber}`,
+      );
+    }
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
-    const isExistingVmLifecycle = Boolean(vmCurrent && packedKaId !== undefined);
-    // FAIL FAST when this is an on-chain-capable daemon: a new mint below will
-    // submit the precomputed attestation, and a missing packed id would revert.
-    // Keep this validation before the compatibility preflight so an invalid
-    // legacy mint cannot mutate SWM while it is already known to be unusable.
-    const onChainCapable =
-      typeof this.chain.getEvmChainId === 'function' &&
-      typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
-    if (!isExistingVmLifecycle && recoveredReservedKaId === undefined && onChainCapable) {
+    if (recoveredReservedKaId !== packedKaId) {
       throw new Error(
-        `publishFromFinalizedAssertion: cannot recover the §F2 reservedKaId for ` +
-          `<${assertionUri}> — the seal has neither a persisted reservedKaId nor a ` +
-          `stamped lifecycle kaId (legacy pre-OT-RFC-43-§F2 finalize). Minting with a ` +
-          `0n placeholder id would revert on-chain with KaIdNamespaceMismatch. ` +
-          `Re-finalize the assertion (POST /api/knowledge-assets/${name}/wm/finalize) ` +
-          `so the AuthorAttestation binds a valid packed kaId before publishing.`,
+        `Graph-scoped seal reservedKaId ${recoveredReservedKaId} does not match UAL-derived kaId ${packedKaId}`,
+      );
+    }
+    const sharedMemoryScope: SharedMemoryGraphScope = {
+      kind: 'named-lifecycle',
+      identity: {
+        agentAddress: graphScope.agentAddress,
+        kaNumber: BigInt(graphScope.kaNumber),
+      },
+    };
+    const scopedSwmQuads = await this._loadSelectedSWMQuads(
+      contextGraphId,
+      'all',
+      opts?.subGraphName,
+      sharedMemoryScope,
+    );
+    const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
+    const scopedPrivateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
+      contextGraphId,
+      graphScope,
+      opts?.subGraphName,
+    );
+    if (scopedSwmQuads.length === 0 && scopedPrivateQuads.length === 0) {
+      throw new Error(
+        `No public or private quads in shared memory for context graph ${contextGraphId} ` +
+          `matching graph-scoped KA ${graphScope.ual}`,
+      );
+    }
+    const canonicalParts = await skolemizeKnowledgeAssetParts(
+      scopedSwmQuads,
+      scopedPrivateQuads,
+      { allowCanonicalSkolemTerms: true },
+    );
+    const canonicalSwmQuads = canonicalParts.publicQuads;
+    const canonicalPrivateQuads = canonicalParts.privateQuads;
+    if (canonicalSwmQuads.length !== seal.publicTripleCount) {
+      throw new Error(
+        `Graph-scoped SWM triple count mismatch for ${graphScope.ual}: ` +
+          `seal=${seal.publicTripleCount}, store=${canonicalSwmQuads.length}`,
+      );
+    }
+    if (canonicalPrivateQuads.length !== seal.privateTripleCount) {
+      throw new Error(
+        `Graph-scoped private triple count mismatch for ${graphScope.ual}: ` +
+          `seal=${seal.privateTripleCount}, store=${canonicalPrivateQuads.length}`,
+      );
+    }
+    const privateMerkleRoot = computePrivateRoot(canonicalPrivateQuads);
+    const privateRootMatches = seal.privateMerkleRoot === undefined
+      ? privateMerkleRoot === undefined
+      : privateMerkleRoot !== undefined
+        && seal.privateMerkleRoot.length === privateMerkleRoot.length
+        && seal.privateMerkleRoot.every((byte, index) => byte === privateMerkleRoot[index]);
+    if (!privateRootMatches) {
+      throw new Error(
+        `Graph-scoped private Merkle root mismatch for ${graphScope.ual}: ` +
+          `seal=${seal.privateMerkleRoot ? ethers.hexlify(seal.privateMerkleRoot) : '(none)'}, ` +
+          `store=${privateMerkleRoot ? ethers.hexlify(privateMerkleRoot) : '(none)'}`,
+      );
+    }
+    const swmMerkleRoot = computeFlatKCRoot(
+      canonicalSwmQuads,
+      privateMerkleRoot ? [privateMerkleRoot] : [],
+    );
+    if (
+      swmMerkleRoot.length !== seal.merkleRoot.length
+      || !swmMerkleRoot.every((byte, index) => byte === seal.merkleRoot[index])
+    ) {
+      throw new Error(
+        `Graph-scoped SWM Merkle root mismatch for ${graphScope.ual}: ` +
+          `seal=${ethers.hexlify(seal.merkleRoot)}, store=${ethers.hexlify(swmMerkleRoot)}`,
       );
     }
 
-    const finalizedLifecycleSwm = await prepareFinalizedLifecycleSwmForPublish({
-      publisher,
-      operationContext: opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-      authorAddress: seal.authorAddress,
-      packedKaId: recoveredReservedKaId,
-      contextGraphId,
-      assertionName: name,
-      assertionLifecycleAgentAddress: agentAddress,
-      subGraphName: opts?.subGraphName,
-      rootEntities: seal.rootEntities,
-      load: (scope) => this._loadSelectedSWMQuads(
-        contextGraphId,
-        finalizedLifecycleSelection,
-        opts?.subGraphName,
-        scope,
-      ),
-    });
-    const sharedMemoryScope = finalizedLifecycleSwm.scope;
-
     let result: PublishResult;
-    if (vmCurrent && packedKaId !== undefined) {
+    if (vmCurrent) {
       // ── UPDATE PATH ──
       // The name already has a confirmed VM version. Reuse its kaId and call
       // the on-chain update primitive. The publisher's update path recomputes
       // the merkle from the SWM-selected quads and requires a
       // precomputedUpdateAttestation over (kaId, newMerkleRoot, author); we
       // mint it here from the seal's merkle using the seal's author signer.
-      const updateQuads = finalizedLifecycleSwm.quads;
+      const updateQuads = canonicalSwmQuads;
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
         seal,
@@ -4525,13 +4891,19 @@ export class PublishMethods extends DKGAgentBase {
         packedKaId,
         contextGraphId,
         updateQuads.map((q) => ({ ...q, graph: '' })),
-        [],
+        canonicalPrivateQuads.map((q) => ({ ...q, graph: '' })),
         {
           operationCtx: opts?.operationCtx,
           onPhase: opts?.onPhase,
           precomputedUpdateAttestation: updateAttestation,
           publisherOverride: publisher,
           subGraphName: opts?.subGraphName,
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: graphScope.ual,
+          assertionVersion: graphScope.assertionVersion,
+          publicTripleCount: seal.publicTripleCount,
+          ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+          privateTripleCount: seal.privateTripleCount,
         },
       );
 
@@ -4542,12 +4914,11 @@ export class PublishMethods extends DKGAgentBase {
       // that mirrored the share), so SWM and VM permanently disagreed.
       if (result.status === 'confirmed') {
         try {
-          await publisher.clearPublishedSwmRoots(
+          await publisher.clearPublishedKnowledgeAssetSwm(
             contextGraphId,
-            seal.rootEntities,
+            sharedMemoryScope,
             opts?.subGraphName,
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            sharedMemoryScope,
           );
         } catch (err) {
           this.log.warn(
@@ -4610,7 +4981,7 @@ export class PublishMethods extends DKGAgentBase {
       // mapping (/No quads in shared memory/) still applies.
       result = await this.publishFromSharedMemory(
         contextGraphId,
-        { rootEntities: seal.rootEntities },
+        'all',
         {
           operationCtx: opts?.operationCtx,
           onPhase: opts?.onPhase,
@@ -4619,6 +4990,12 @@ export class PublishMethods extends DKGAgentBase {
           publishEpochs: opts?.publishEpochs,
           reservedKaId: recoveredReservedKaId,
           sharedMemoryScope,
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: graphScope.ual,
+          assertionVersion: graphScope.assertionVersion,
+          publicTripleCount: seal.publicTripleCount,
+          ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+          privateTripleCount: seal.privateTripleCount,
           // Wired through to the inner publisher.publish() via
           // publishFromSharedMemory's `precomputedAttestation` option.
           // Skips the publisher's signing entirely.
@@ -5069,6 +5446,12 @@ export class PublishMethods extends DKGAgentBase {
        */
       reservedKaId?: bigint;
       sharedMemoryScope?: SharedMemoryGraphScope;
+      contentScopeVersion?: PublishOptions['contentScopeVersion'];
+      kaUal?: PublishOptions['kaUal'];
+      assertionVersion?: PublishOptions['assertionVersion'];
+      publicTripleCount?: PublishOptions['publicTripleCount'];
+      privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
+      privateTripleCount?: PublishOptions['privateTripleCount'];
       /**
        * RFC-001 §9.x — pre-computed attestation captured by
        * `agent.assertion.finalize()`. When the caller has already
@@ -5252,6 +5635,12 @@ export class PublishMethods extends DKGAgentBase {
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
       sharedMemoryScope: options?.sharedMemoryScope,
+      contentScopeVersion: options?.contentScopeVersion,
+      kaUal: options?.kaUal,
+      assertionVersion: options?.assertionVersion,
+      publicTripleCount: options?.publicTripleCount,
+      privateMerkleRoot: options?.privateMerkleRoot,
+      privateTripleCount: options?.privateTripleCount,
       encryptInlinePayload,
       encryptInlineChunked,
     });

@@ -36,6 +36,12 @@ export const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('blockNumber', 13, 'uint64'))
   .add(new Field('operationId', 14, 'string'))
   .add(new Field('subGraphName', 15, 'string'))
+  // Rootless KA scope. `ual` is already field 1; legacy `kas` MUST be empty.
+  .add(new Field('contentScopeVersion', 16, 'uint32'))
+  .add(new Field('assertionVersion', 17, 'string'))
+  .add(new Field('publicTripleCount', 18, 'uint32'))
+  .add(new Field('privateMerkleRoot', 19, 'bytes'))
+  .add(new Field('privateTripleCount', 20, 'uint32'))
   .add(KAManifestEntrySchema);
 
 export const PublishAckSchema = new Type('PublishAck')
@@ -74,6 +80,16 @@ export interface PublishRequestMsg {
   operationId?: string;
   /** Sub-graph within the context graph. Receivers store in sub-graph data graph if set. */
   subGraphName?: string;
+  /** Rootless KA graph-scope discriminator. New writers emit exactly 2. */
+  contentScopeVersion?: number;
+  /** One-based assertion/Merkle-root index encoded as a decimal string. */
+  assertionVersion?: string;
+  /** Number of public RDF triples in the complete assertion. */
+  publicTripleCount?: number;
+  /** Optional single KA-level private commitment. */
+  privateMerkleRoot?: Uint8Array;
+  /** Number of private RDF triples committed by privateMerkleRoot. */
+  privateTripleCount?: number;
 }
 
 export interface PublishAckMsg {

@@ -2287,22 +2287,46 @@ export class DKGAgent extends DKGAgentBase {
         opts?: { subGraphName?: string; agentAddress?: string },
       ): Promise<void> {
         const writeAgentAddress = opts?.agentAddress ?? agentAddress;
-        let quads: import('@origintrail-official/dkg-storage').Quad[];
+        let publicQuads: import('@origintrail-official/dkg-storage').Quad[] = [];
+        let privateQuads: import('@origintrail-official/dkg-storage').Quad[] = [];
         if (Array.isArray(input) && input.length > 0 && 'graph' in input[0]) {
-          quads = input as import('@origintrail-official/dkg-storage').Quad[];
+          publicQuads = input as import('@origintrail-official/dkg-storage').Quad[];
         } else if (!Array.isArray(input) || (input.length > 0 && !('subject' in input[0]))) {
-          const { publicQuads, privateQuads } = await jsonLdToQuads(input as JsonLdContent);
-          quads = [...publicQuads, ...privateQuads];
+          ({ publicQuads, privateQuads } = await jsonLdToQuads(
+            input as JsonLdContent,
+            { syntheticPrivateAnchor: false },
+          ));
         } else {
-          quads = (input as Array<{ subject: string; predicate: string; object: string }>)
+          publicQuads = (input as Array<{ subject: string; predicate: string; object: string }>)
             .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));
         }
-        return agent.publisher.assertionWrite(contextGraphId, name, writeAgentAddress, quads, opts?.subGraphName);
+        if (publicQuads.length > 0) {
+          await agent.publisher.assertionWrite(
+            contextGraphId,
+            name,
+            writeAgentAddress,
+            publicQuads,
+            opts?.subGraphName,
+          );
+        }
+        if (privateQuads.length > 0) {
+          await agent.publisher.assertionWritePrivate(
+            contextGraphId,
+            name,
+            writeAgentAddress,
+            privateQuads,
+            opts?.subGraphName,
+          );
+        }
       },
 
       async query(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
         const queryAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionQuery(contextGraphId, name, queryAgentAddress, opts?.subGraphName);
+      },
+      async queryPrivate(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
+        const queryAgentAddress = opts?.agentAddress ?? agentAddress;
+        return agent.publisher.assertionQueryPrivate(contextGraphId, name, queryAgentAddress, opts?.subGraphName);
       },
       /** OT-RFC-43 §10.5.3 — seed a fresh WM draft from this file's SWM/VM state. */
       async pullFrom(
