@@ -15,7 +15,7 @@ Every rule encodes a real incident class:
 | `R1 unscoped-all-var-scan` | `?s ?p ?o` with no bound term outside any `GRAPH <iri>` scope | whole-store scans on hot paths |
 | `R2 graph-var-scan` | an all-variable triple inside `GRAPH ?g` | the #1597 `listGraphs` sync storm (`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }` = every graph × every triple) |
 | `R3 offset-pagination` | `OFFSET n` (n > 0 or interpolated) | O(offset) re-scan per page → O(n²) full walks, plus torn reads on mutable data (sync responder) |
-| `R4 bucket-graph-scan` | all-variable scan over a graph family that grows with fleet usage (`…/_shared_memory`, `…/_meta`, data graph, `_catalog`) with no `LIMIT` | the #1609 unbounded SWM-slice `CONSTRUCT` |
+| `R4 bucket-graph-scan` | all-variable scan over a graph family that grows with fleet usage (`…/_shared_memory`, `…/_meta`, data graph, `_catalog`) without an unsorted top-level `LIMIT` | the #1609 unbounded SWM-slice `CONSTRUCT` |
 
 What deliberately does **not** trigger:
 
@@ -25,7 +25,9 @@ What deliberately does **not** trigger:
 - a **top-level** `LIMIT` without `ORDER BY` (bounded materialization) for
   R1/R2 — a `LIMIT` inside a subquery neither exempts outer scans nor (fail-
   closed) its own group's all-variable scan; pragma the latter if intentional;
-- `GRAPH ?g` bound by `VALUES ?g { … }`;
+- `GRAPH ?g` bound in the same group by finite concrete `VALUES` rows; `UNDEF`,
+  interpolated/unknown values, and bindings scoped inside another group do not
+  exempt the graph scan;
 - whole-graph reads of exact per-KA graphs (bounded by one assertion) —
   R4 keys on the *unbounded* graph families only;
 - `CONSTRUCT`/`INSERT`/`DELETE` **templates** (output, not scan patterns);
@@ -62,15 +64,16 @@ deliberately a diffable code change: allowing a scan is a reviewed decision.
   does not re-flag it, while editing the query re-evaluates it. The baseline
   is a **multiset**: duplicating a grandfathered query adds one more scan and
   blocks as a new finding, even though the copy's text is identical.
-- The scanner self-tests against 28 fixtures (including the exact #1597
+- The scanner self-tests against 37 fixtures (including the exact #1597
   bad/fixed pair) plus a diff-gate integration test on a throwaway git repo
-  (duplicate-copy blocking, reindent grandfathering, new-shape blocking, TSX
-  scanning, and a spawned-CLI proof that audit modes self-test first)
+  (duplicate-copy blocking, rename/reindent grandfathering, new-shape blocking,
+  TSX scanning, and spawned-CLI proofs that CI returns nonzero and audit modes
+  self-test first)
   before every CI scan; a broken scanner fails loudly instead of passing
   silently.
 - Source extraction uses the TypeScript compiler API (already a root
-  devDependency), so template-literal parsing is exact; only the SPARQL-shape
-  analysis is heuristic.
+  devDependency), so template and ordinary string literals are both covered;
+  only the SPARQL-shape analysis is heuristic.
 - Local usage:
   - `node scripts/sparql-scale-lint.mjs --diff origin/main HEAD` — what CI runs
   - `node scripts/sparql-scale-lint.mjs --all` — full-tree debt audit
@@ -108,8 +111,8 @@ everything.
 
 ## Current debt baseline
 
-At the time this gate landed, the full-tree audit reported ~53 grandfathered
-findings (18 R1, 10 R2, 12 R3, 13 R4 — the extra R2 is a `.tsx` UI query) — including the sync responder's
+At the time this gate landed, the hardened full-tree audit reported 68
+grandfathered findings (21 R1, 19 R2, 14 R3, 14 R4) — including the sync responder's
 documented OFFSET fallback and several adapter-level store primitives. They
 stay visible as notices on any PR that touches those files; burn them down
 opportunistically (each either restructures or earns a pragma).

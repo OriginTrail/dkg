@@ -19,15 +19,16 @@
  *                              mutable data. Use a keyset/seek cursor instead.
  *   R4 bucket-graph-scan       an all-variable triple over a KNOWN-UNBOUNDED
  *                              graph family (bucket `_shared_memory`, `_meta`,
- *                              data graph, catalog…) with no LIMIT → O(graph)
- *                              where the graph grows with fleet usage (#1609).
+ *                              data graph, catalog…) without an unsorted
+ *                              top-level LIMIT → O(graph) where the graph grows
+ *                              with fleet usage (#1609).
  *
  * What does NOT trigger:
  *   - plain ASK { ?s ?p ?o } with no FILTER (first-match short-circuit);
  *   - all-var triples inside FILTER [NOT] EXISTS / MINUS (per-binding
  *     existence probes — the FIXED #1597 listGraphs form lives here);
  *   - queries with LIMIT and no ORDER BY (bounded materialization) for R1/R2;
- *   - GRAPH ?g bound by VALUES ?g { … };
+ *   - GRAPH ?g bound in-scope by finite concrete VALUES (never UNDEF);
  *   - whole-graph reads of exact per-KA graphs (bounded by one assertion).
  *
  * Escape hatch: a query that is legitimately safe (small bounded graph,
@@ -50,12 +51,13 @@
  *   node scripts/sparql-scale-lint.mjs --files a.ts b.ts            (spot)
  *   node scripts/sparql-scale-lint.mjs --self-test                  (fixtures)
  *
- * Extraction uses the TypeScript compiler API (already a root devDependency);
- * the SPARQL-shape analysis itself is plain string analysis, because the
- * queries are template literals full of ${…} that no SPARQL parser accepts.
+ * Extraction uses the TypeScript compiler API (already a root devDependency)
+ * for both template and ordinary string literals; the SPARQL-shape analysis
+ * itself is plain string analysis because templates contain ${…} expressions
+ * that no SPARQL parser accepts.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -103,17 +105,13 @@ const UNBOUNDED_GRAPH_EXPR = /bucket|sharedMemoryUri|sharedMemoryMetaUri|dataGra
 const UNBOUNDED_GRAPH_LITERAL = /(\/_shared_memory|\/_shared_memory_meta|\/_meta|\/_catalog)\s*$|^did:dkg:context-graph:[^/]+$/;
 
 // ---------------------------------------------------------------------------
-// Template-literal extraction (handles nesting, escapes, ${ … } expressions)
+// JavaScript/TypeScript string extraction
 // ---------------------------------------------------------------------------
 
 /**
- * Extract every template literal from JS/TS source.
- * Returns { raw, parts, exprs, startLine } where `parts` is the literal text
- * with each interpolation replaced by `⟪i⟫` (index into exprs).
- */
-/**
- * Extract every template literal from JS/TS source using the TypeScript
- * compiler API (a root devDependency — no new install weight). Each literal
+ * Extract every template or ordinary string literal from JS/TS source using
+ * the TypeScript compiler API (a root devDependency — no new install weight).
+ * Each literal
  * is returned as { text, exprs, startLine } with interpolations replaced by
  * `⟪i⟫` placeholders (index into exprs, which hold the expression source
  * text for the R4 graph-family heuristic).
@@ -155,6 +153,11 @@ export function extractTemplateLiterals(source, fileName = 'source.ts') {
         text += span.literal.text;
       }
       literals.push({ text, exprs, startLine: startLineOf(node) });
+    } else if (ts.isStringLiteral(node)) {
+      // Ordinary quote-delimited SPARQL is common in adapters and UI code.
+      // Restricting extraction to backticks would make changing one quote
+      // character a complete bypass of the required CI gate.
+      literals.push({ text: node.text, exprs: [], startLine: startLineOf(node) });
     }
     ts.forEachChild(node, visit);
   };
@@ -172,20 +175,50 @@ function looksLikeSparql(text) {
   return SPARQL_HINT.test(text);
 }
 
-/** Strip SPARQL string literals + comments so tokens inside them are inert. */
-function stripLiteralsAndComments(text) {
+/**
+ * Return the closing offset for an IRIREF beginning at `start`, or -1 when
+ * `<` is an operator rather than a legal SPARQL `<...>` token.
+ */
+function iriRefEnd(text, start) {
+  if (text[start] !== '<') return -1;
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '>') return i;
+    if (/\s|[<"{}|^`\\]/.test(ch)) return -1;
+  }
+  return -1;
+}
+
+/** Strip SPARQL comments and optionally blank string-literal contents. */
+function stripSparqlLexical(text, dropLiteralContents) {
   let out = '';
   let i = 0;
   while (i < text.length) {
     const ch = text[i];
+    if (ch === '<') {
+      const end = iriRefEnd(text, i);
+      if (end !== -1) {
+        // `#` and `.` are ordinary IRI characters, not a comment or statement
+        // boundary. Preserve the token and let the query walker consume it
+        // atomically.
+        out += text.slice(i, end + 1);
+        i = end + 1;
+        continue;
+      }
+    }
     if (ch === '"' || ch === "'") {
-      // Keep the quotes (term-shape matters) but DROP the contents, so a
-      // literal like "has FILTER inside" cannot confuse keyword detection.
       const quote = ch;
       out += quote;
       i++;
       while (i < text.length && text[i] !== quote) {
-        if (text[i] === '\\') i++;
+        if (text[i] === '\\') {
+          if (!dropLiteralContents) out += text[i];
+          i++;
+          if (i < text.length && !dropLiteralContents) out += text[i];
+          i++;
+          continue;
+        }
+        if (!dropLiteralContents) out += text[i];
         i++;
       }
       out += quote;
@@ -202,6 +235,97 @@ function stripLiteralsAndComments(text) {
   return out;
 }
 
+/** Strip SPARQL string literals + comments so tokens inside them are inert. */
+function stripLiteralsAndComments(text) {
+  return stripSparqlLexical(text, true);
+}
+
+function stripComments(text) {
+  return stripSparqlLexical(text, false);
+}
+
+function matchingBrace(text, openOffset) {
+  let depth = 0;
+  for (let i = openOffset; i < text.length; i++) {
+    if (text[i] === '<') {
+      const end = iriRefEnd(text, i);
+      if (end !== -1) {
+        i = end;
+        continue;
+      }
+    }
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+function concreteGraphTerm(term) {
+  return /^<[^<>]+>$/.test(term) || /^[A-Za-z_][\w.-]*:[^\s{}()]+$/.test(term);
+}
+
+function valuesTerms(text) {
+  return text.match(/<[^<>]*>|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s]+/g) ?? [];
+}
+
+/** Return graph variables definitely bound to finite, concrete terms. */
+function concreteValuesVariables(header, body) {
+  if (/\bUNDEF\b/i.test(body) || /⟪\d+⟫/.test(body)) return new Set();
+  const bare = header.match(/\bVALUES\s+\?(\w+)\s*$/i);
+  if (bare) {
+    const terms = valuesTerms(body);
+    return terms.length > 0 && terms.every(concreteGraphTerm)
+      ? new Set([bare[1]])
+      : new Set();
+  }
+  const tuple = header.match(/\bVALUES\s*\(([^()]*)\)\s*$/i);
+  if (!tuple) return new Set();
+  const variables = [...tuple[1].matchAll(/\?(\w+)/g)].map((match) => match[1]);
+  if (variables.length === 0) return new Set();
+  const rows = [...body.matchAll(/\(([^()]*)\)/g)].map((match) => valuesTerms(match[1]));
+  if (rows.length === 0 || rows.some((row) => row.length !== variables.length)) return new Set();
+  return new Set(variables.filter((_, index) => rows.every((row) => concreteGraphTerm(row[index]))));
+}
+
+/**
+ * Index safe VALUES bindings by their immediate containing group. This keeps
+ * `VALUES` in a subquery/OPTIONAL from exempting a `GRAPH ?g` elsewhere while
+ * still supporting VALUES that appears before or after its sibling pattern.
+ */
+function collectScopedValuesBindings(stripped) {
+  const byParent = new Map();
+  const stack = [];
+  for (let i = 0; i < stripped.length; i++) {
+    if (stripped[i] === '<') {
+      const end = iriRefEnd(stripped, i);
+      if (end !== -1) {
+        i = end;
+        continue;
+      }
+    }
+    if (stripped[i] === '{') {
+      const prefix = stripped.slice(Math.max(0, i - 300), i);
+      const match = prefix.match(/\bVALUES\s+(\?\w+|\((?:\s*\?\w+)+\s*\))\s*$/i);
+      if (match) {
+        const end = matchingBrace(stripped, i);
+        if (end !== -1) {
+          const parent = stack.at(-1) ?? -1;
+          const concrete = concreteValuesVariables(match[0], stripped.slice(i + 1, end));
+          if (concrete.size > 0) {
+            const bound = byParent.get(parent) ?? new Set();
+            for (const variable of concrete) bound.add(variable);
+            byParent.set(parent, bound);
+          }
+        }
+      }
+      stack.push(i);
+    } else if (stripped[i] === '}') {
+      stack.pop();
+    }
+  }
+  return byParent;
+}
+
 /**
  * Walk the query text and classify each all-variable triple pattern by its
  * enclosing context: default graph, GRAPH <bound>, or GRAPH ?var — while
@@ -210,6 +334,7 @@ function stripLiteralsAndComments(text) {
 function analyzeQuery(queryText, exprs) {
   const stripped = stripLiteralsAndComments(queryText);
   const findings = [];
+  const scopedValuesBindings = collectScopedValuesBindings(stripped);
 
   // Solution modifiers count only at the TOP level of the query: a LIMIT
   // inside a subquery bounds that subquery, not an outer store-wide scan.
@@ -228,14 +353,9 @@ function analyzeQuery(queryText, exprs) {
       else if (depth === 0) topLevelOrderBy = true;
     }
   }
-  const hasLimit = topLevelLimit;
   const boundedNoSort = topLevelLimit && !topLevelOrderBy;
   const isPlainAsk = /^\s*ASK\b/i.test(stripped.replace(/^\s*(PREFIX[^\n]*\n|BASE[^\n]*\n)*/i, ''))
     && !/\bFILTER\b/i.test(stripped);
-
-  // VALUES-bound graph variables are effectively constants.
-  const valuesBound = new Set();
-  for (const m of stripped.matchAll(/\bVALUES\s+\?(\w+)/gi)) valuesBound.add(m[1]);
 
   // Context walk.
   const stack = [];
@@ -273,11 +393,21 @@ function analyzeQuery(queryText, exprs) {
     const literalRef = ref.replace(/⟪\d+⟫/g, '');
     const unbounded = (exprText !== '' && UNBOUNDED_GRAPH_EXPR.test(exprText))
       || UNBOUNDED_GRAPH_LITERAL.test(literalRef);
-    if (unbounded && !hasLimit) findings.push({ rule: 'R4', offset });
+    if (unbounded && !boundedNoSort) findings.push({ rule: 'R4', offset });
   };
 
   while (i < stripped.length) {
     const ch = stripped[i];
+    if (ch === '<') {
+      const end = iriRefEnd(stripped, i);
+      if (end !== -1) {
+        // Preserve exact graph/header text, but never interpret punctuation
+        // inside an IRI as SPARQL structure.
+        pending += stripped.slice(i, end + 1);
+        i = end + 1;
+        continue;
+      }
+    }
     if (ch === '{') {
       const head = pending.trimEnd();
       const graphMatch = head.match(graphHeader);
@@ -300,7 +430,8 @@ function analyzeQuery(queryText, exprs) {
         frame = { kind: 'template' };
       } else if (graphMatch) {
         if (graphMatch[2] !== undefined) {
-          frame = valuesBound.has(graphMatch[2])
+          const parent = stack.at(-1)?.open ?? -1;
+          frame = scopedValuesBindings.get(parent)?.has(graphMatch[2])
             ? { kind: 'graph-bound', ref: `?${graphMatch[2]}` }
             : { kind: 'graph-var', ref: `?${graphMatch[2]}` };
         } else if (graphMatch[3] !== undefined) {
@@ -309,6 +440,7 @@ function analyzeQuery(queryText, exprs) {
           frame = { kind: 'graph-bound', ref: `⟪${graphMatch[4]}⟫` };
         }
       }
+      frame.open = i;
       stack.push(frame);
       pending = '';
       i++;
@@ -358,9 +490,8 @@ function collectPragmas(literalText, source, literalStartLine) {
 }
 
 function normalizeForFingerprint(text) {
-  return text
+  return stripComments(text)
     .replace(/⟪\d+⟫/g, '@')
-    .replace(/#[^\n]*/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
@@ -412,10 +543,31 @@ function listTrackedSourceFiles() {
     .filter((f) => f && SCANNED_EXTENSIONS.test(f) && !EXCLUDED_PATH.test(f));
 }
 
-function changedSourceFiles(baseSha, headSha, cwd = process.cwd()) {
-  return git(['diff', '--name-only', '--diff-filter=ACMR', baseSha, headSha], cwd)
-    .split('\n')
-    .filter((f) => f && SCANNED_EXTENSIONS.test(f) && !EXCLUDED_PATH.test(f));
+function scannableSourceFile(file) {
+  return Boolean(file && SCANNED_EXTENSIONS.test(file) && !EXCLUDED_PATH.test(file));
+}
+
+function changedSourceEntries(baseSha, headSha, cwd = process.cwd()) {
+  const entries = [];
+  for (const line of git(
+    ['diff', '--name-status', '--find-renames', '--diff-filter=ACMR', baseSha, headSha],
+    cwd,
+  ).split('\n')) {
+    if (!line) continue;
+    const [status, first, second] = line.split('\t');
+    if (status.startsWith('R')) {
+      if (scannableSourceFile(second)) {
+        entries.push({ basePath: scannableSourceFile(first) ? first : null, headPath: second });
+      }
+    } else if (status.startsWith('C')) {
+      // A copy is a new occurrence. Do not consume the source file's baseline
+      // fingerprint; only a true rename/move is grandfathered.
+      if (scannableSourceFile(second)) entries.push({ basePath: null, headPath: second });
+    } else if (scannableSourceFile(first)) {
+      entries.push({ basePath: status === 'A' ? null : first, headPath: first });
+    }
+  }
+  return entries;
 }
 
 function fileAt(sha, path, cwd = process.cwd()) {
@@ -444,20 +596,22 @@ function report(finding, { status, level }) {
  * occurrence consumes one baseline occurrence; the surplus is new.
  */
 export function computeDiffFindings(baseSha, headSha, cwd = process.cwd()) {
-  const files = changedSourceFiles(baseSha, headSha, cwd);
+  const entries = changedSourceEntries(baseSha, headSha, cwd);
+  const files = entries.map((entry) => entry.headPath);
   const baseline = new Map();
-  for (const file of files) {
-    const baseSource = fileAt(baseSha, file, cwd);
+  for (const entry of entries) {
+    if (!entry.basePath) continue;
+    const baseSource = fileAt(baseSha, entry.basePath, cwd);
     if (!baseSource) continue;
-    for (const f of scanSource(file, baseSource)) {
+    for (const f of scanSource(entry.basePath, baseSource)) {
       baseline.set(f.fingerprint, (baseline.get(f.fingerprint) ?? 0) + 1);
     }
   }
   const results = [];
-  for (const file of files) {
-    const headSource = fileAt(headSha, file, cwd);
+  for (const entry of entries) {
+    const headSource = fileAt(headSha, entry.headPath, cwd);
     if (headSource === null) continue;
-    for (const f of scanSource(file, headSource)) {
+    for (const f of scanSource(entry.headPath, headSource)) {
       if (f.allowed) {
         results.push({ ...f, verdict: 'acknowledged' });
         continue;
@@ -572,6 +726,21 @@ const FIXTURES = [
     expect: [],
   },
   {
+    name: 'R2 fires: VALUES UNDEF does not bind the graph variable',
+    source: 'const q = `SELECT ?s WHERE { VALUES ?g { UNDEF } GRAPH ?g { ?s ?p ?o } }`;',
+    expect: ['R2'],
+  },
+  {
+    name: 'R2 exempt: parenthesized concrete VALUES binds the graph variable',
+    source: 'const q = `SELECT ?s WHERE { VALUES (?g) { (<urn:a>) } GRAPH ?g { ?s ?p ?o } }`;',
+    expect: [],
+  },
+  {
+    name: 'R2 fires: VALUES in a sibling subquery is out of scope',
+    source: 'const q = `SELECT ?s WHERE { { SELECT ?x WHERE { VALUES ?g { <urn:a> } <urn:s> <urn:p> ?x } } GRAPH ?g { ?s ?p ?o } }`;',
+    expect: ['R2'],
+  },
+  {
     name: 'bound-subject pattern inside GRAPH ?g is fine',
     source: 'const q = `SELECT ?v WHERE { GRAPH ?g { <urn:x> <urn:p> ?v } }`;',
     expect: [],
@@ -585,6 +754,16 @@ const FIXTURES = [
     name: 'R3 exempt: OFFSET 0 literal',
     source: 'const q = `SELECT ?s WHERE { GRAPH <urn:g> { ?s <urn:p> ?o } } LIMIT 100 OFFSET 0`;',
     expect: [],
+  },
+  {
+    name: 'R3 survives a fragment IRI before OFFSET',
+    source: 'const q = `SELECT ?s WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?o } LIMIT 100 OFFSET ${offset}`;',
+    expect: ['R3'],
+  },
+  {
+    name: 'R1 survives a fragment IRI before a later unsafe triple',
+    source: 'const q = `SELECT ?s WHERE { <http://example.test/id#one> ?p ?o . ?s ?p ?o }`;',
+    expect: ['R1'],
   },
   {
     name: 'R4 bucket scan (#1609 SWM-slice shape)',
@@ -602,9 +781,19 @@ const FIXTURES = [
     expect: [],
   },
   {
+    name: 'exact HTTP graph IRI with dots remains bounded',
+    source: 'const q = `SELECT ?s WHERE { GRAPH <https://example.com/assertion/1> { ?s ?p ?o } }`;',
+    expect: [],
+  },
+  {
     name: 'R4 exempt with LIMIT',
     source: 'const q = `SELECT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } LIMIT 500`;',
     expect: [],
+  },
+  {
+    name: 'R4 still fires: ORDER BY plus LIMIT materializes the bucket graph',
+    source: 'const q = `SELECT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } ORDER BY ?s LIMIT 500`;',
+    expect: ['R4'],
   },
   {
     name: 'pragma acknowledges (JS comment above)',
@@ -664,6 +853,16 @@ const FIXTURES = [
     expect: ['R1'],
   },
   {
+    name: 'ordinary single-quoted SPARQL is scanned',
+    source: "const q = 'SELECT ?s WHERE { ?s ?p ?o }';",
+    expect: ['R1'],
+  },
+  {
+    name: 'ordinary double-quoted SPARQL is scanned',
+    source: 'const q = "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }";',
+    expect: ['R2'],
+  },
+  {
     name: 'non-SPARQL template untouched',
     source: 'const msg = `hello ${name}, WHERE were you?`;',
     expect: [],
@@ -686,7 +885,9 @@ const FIXTURES = [
  *   1. duplicating a grandfathered query blocks with exactly ONE new finding
  *      (multiset semantics — membership alone would let copies through);
  *   2. reindenting/rewrapping the same query stays grandfathered;
- *   3. adding a genuinely new offending query blocks.
+ *   3. a true rename keeps the moved query grandfathered;
+ *   4. adding a genuinely new offending query blocks, including through the
+ *      real CLI exit code used by required CI.
  */
 function diffGateSelfTest() {
   const dir = mkdtempSync(join(tmpdir(), 'sparql-lint-selftest-'));
@@ -702,7 +903,19 @@ function diffGateSelfTest() {
     g('commit', '-qm', 'base');
     const base = g('rev-parse', 'HEAD').trim();
 
-    // 1. duplicate of the grandfathered query → exactly one NEW finding
+    // 1. A true move retains the old path's baseline occurrence.
+    g('mv', 'src/a.ts', 'src/moved.ts');
+    g('commit', '-qm', 'rename');
+    const renameHead = g('rev-parse', 'HEAD').trim();
+    const renamed = computeDiffFindings(base, renameHead, dir).results;
+    if (renamed.some((f) => f.verdict === 'new')
+      || renamed.filter((f) => f.verdict === 'grandfathered').length !== 1) {
+      console.error(`DIFF-GATE FAIL: rename → ${JSON.stringify(renamed.map((f) => f.verdict))} (want one grandfathered)`);
+      return false;
+    }
+    g('reset', '--hard', base);
+
+    // 2. duplicate of the grandfathered query → exactly one NEW finding
     writeFileSync(join(dir, 'src/a.ts'), BAD + 'const b = `SELECT ?s WHERE { ?s ?p ?o }`;\n');
     g('commit', '-aqm', 'dup');
     const dupHead = g('rev-parse', 'HEAD').trim();
@@ -714,7 +927,7 @@ function diffGateSelfTest() {
       return false;
     }
 
-    // 2. reindent/rewrap only → still grandfathered, nothing new
+    // 3. reindent/rewrap only → still grandfathered, nothing new
     writeFileSync(join(dir, 'src/a.ts'), 'const a = `SELECT ?s\n  WHERE {\n    ?s ?p ?o\n  }`;\n');
     g('commit', '-aqm', 'reindent');
     const reHead = g('rev-parse', 'HEAD').trim();
@@ -724,7 +937,7 @@ function diffGateSelfTest() {
       return false;
     }
 
-    // 3. a genuinely new shape blocks
+    // 4. a genuinely new shape blocks
     writeFileSync(join(dir, 'src/a.ts'), BAD + 'const c = `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }`;\n');
     g('commit', '-aqm', 'new-shape');
     const newHead = g('rev-parse', 'HEAD').trim();
@@ -734,7 +947,27 @@ function diffGateSelfTest() {
       return false;
     }
 
-    // 4. TSX is scanned too: a React component whose JSX parses only under
+    // The actual CLI must propagate that blocking result as exit code 1. A
+    // pure-helper test alone would not catch broken `main()` wiring.
+    if (!process.env.SPARQL_LINT_NO_SPAWN_CHECK) {
+      const cli = spawnSync(
+        process.execPath,
+        [process.argv[1], '--diff', base, newHead],
+        {
+          cwd: dir,
+          encoding: 'utf8',
+          env: { ...process.env, SPARQL_LINT_NO_SPAWN_CHECK: '1' },
+        },
+      );
+      if (cli.status !== 1 || !cli.stdout.includes('NEW — blocks merge')) {
+        console.error(
+          `DIFF-GATE FAIL: CLI exit=${cli.status}\nstdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+        );
+        return false;
+      }
+    }
+
+    // 5. TSX is scanned too: a React component whose JSX parses only under
     // ScriptKind.TSX, carrying an R2 shape, must block as a new finding.
     writeFileSync(
       join(dir, 'src/View.tsx'),
@@ -753,7 +986,7 @@ function diffGateSelfTest() {
       return false;
     }
 
-    // 5. Audit modes validate the scanner before scanning: spawn the real CLI
+    // 6. Audit modes validate the scanner before scanning: spawn the real CLI
     // in --files mode and require the self-test banner ahead of the finding.
     // (Env guard stops the child's own self-test from re-spawning forever.)
     if (!process.env.SPARQL_LINT_NO_SPAWN_CHECK) {
