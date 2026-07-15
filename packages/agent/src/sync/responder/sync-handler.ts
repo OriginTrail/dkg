@@ -588,11 +588,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           if (!snapshotRef || !publicSnapshotStore) {
             return new TextEncoder().encode('');
           }
-          const snapshot = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal);
-          if (!snapshot) {
-            return new TextEncoder().encode('');
-          }
-          const page = snapshot.slice(offset, offset + limit);
+          const page = publicSnapshotStore.getSnapshotPage
+            ? await raceAgainstAbort(
+              publicSnapshotStore.getSnapshotPage(snapshotRef, offset, limit, { signal }),
+              signal,
+            )
+            : (await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal))
+              ?.slice(offset, offset + limit);
+          if (!page) return new TextEncoder().encode('');
           if (page.length === 0) {
             return new TextEncoder().encode('');
           }
