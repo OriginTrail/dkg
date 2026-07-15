@@ -3866,7 +3866,11 @@ export class DKGPublisher implements Publisher {
       scope,
       { quadFilter: (quad) => !isSwmMerkleExcludedQuad(quad) },
     );
-    if (quads.length === 0) {
+    // Fully private KAs legitimately have ZERO public SWM quads — the update
+    // then carries only the private partition and its commitment (an empty
+    // envelope is already rejected by the descriptor). Reject only when the
+    // envelope promises public content that shared memory lacks.
+    if (quads.length === 0 && descriptor.publicTripleCount > 0) {
       throw new Error(
         `No quads in shared memory for graph-scoped KA ${descriptor.scope.ual}`,
       );
@@ -7028,7 +7032,11 @@ export class DKGPublisher implements Publisher {
       swmQuads,
       'Knowledge Asset WM-to-SWM promotion',
     );
-    await this.dropAssertionScopedGraphs(graphUri);
+    // NB: WM source cleanup and the pending-share-operation clear happen at the
+    // very END of this tail. Every write between here and there is fallible; if
+    // WM were dropped now (or the recovery pointer cleared), a failure below
+    // would strand the promotion: retry re-enters, reads empty WM, and aborts
+    // with KA_GRAPH_CONTENT_MISSING / a seal count mismatch.
 
     // Update the assertion's memory layer from WM → SWM in _meta
     const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
@@ -7046,7 +7054,6 @@ export class DKGPublisher implements Publisher {
     }]);
     const promotedAllRoots = true; // compatibility return name; v2 has no roots.
     const isFullCompletePromote = true;
-    await clearCurrentShareOperationId();
     await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
     await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
 
@@ -7090,6 +7097,13 @@ export class DKGPublisher implements Publisher {
       timestamp: new Date(),
       publicSnapshotStore: this.publicSnapshotStore,
     });
+
+    // Only after every durable write above: consume the pending share
+    // operation and drop the WM source. A failure anywhere above leaves WM and
+    // the recovery pointer intact, so a retry re-promotes the exact same
+    // content instead of aborting on empty working memory.
+    await clearCurrentShareOperationId();
+    await this.dropAssertionScopedGraphs(graphUri);
 
     return {
       promotedCount: swmQuads.length + normalizedPrivateQuads.length,
