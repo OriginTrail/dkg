@@ -38,7 +38,18 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
+import {
+  AUTHOR_SCHEME_VERSION_V1,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  buildUpdateAuthorAttestationTypedData,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  createGraphKnowledgeAssetScope,
+  decodeKAUpdateRequest,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 // Codex review feedback: the chain package exports the verifier
 // result type as `VerifyACKIdentityResult`; `ACKVerifyResult` is the
@@ -47,6 +58,10 @@ import type { VerifyACKIdentityResult } from '@origintrail-official/dkg-chain';
 import type {
   V10ACKProviderObject,
   V10UpdateACKProvider,
+} from '@origintrail-official/dkg-publisher';
+import {
+  computeFlatKCRootV10,
+  skolemizeKnowledgeAssetParts,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 
@@ -423,10 +438,59 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
   it('broadcasts the complete graph-scoped update envelope', async () => {
     const published: Uint8Array[] = [];
     const author = '0x1111111111111111111111111111111111111111';
+    const kaId = (BigInt(author) << 96n) | 7n;
     const kaUal = `did:dkg:otp:20430/${author}/7`;
+    const owner = new ethers.Wallet(
+      '0x59c6995e998f97a5a0044976f7d4b21ddc10b15f2b79366a0a69c3fcf4e7f5c2',
+    );
+    const kavAddress = '0x2222222222222222222222222222222222222222';
     const publicQuads = [{
       subject: 'urn:entity:a', predicate: 'urn:p:value', object: '"new"', graph: '',
     }];
+    const canonical = await skolemizeKnowledgeAssetParts(publicQuads, []);
+    const updateRoot = computeFlatKCRootV10(canonical.publicQuads, []);
+    const typedData = buildUpdateAuthorAttestationTypedData({
+      chainId: 20430n,
+      kav10Address: kavAddress,
+      kaId,
+      newMerkleRoot: updateRoot,
+      authorAddress: owner.address,
+      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+    });
+    const signature = ethers.Signature.from(await owner.signTypedData(
+      typedData.domain,
+      typedData.types,
+      typedData.message,
+    ));
+    const precomputedUpdateAttestation = {
+      expectedNewMerkleRoot: updateRoot,
+      authorAddress: owner.address,
+      signature: {
+        r: ethers.getBytes(signature.r),
+        vs: ethers.getBytes(signature.yParityAndS),
+      },
+      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+    };
+    const store = new OxigraphStore();
+    const metaGraph = contextGraphMetaUri('public-cg');
+    const scope = createGraphKnowledgeAssetScope(kaUal, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      'public-cg',
+      MemoryLayer.VerifiableMemory,
+      scope,
+      'nested',
+    );
+    const int = (value: bigint | number) =>
+      `"${value.toString()}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    await store.insert([
+      { subject: kaUal, predicate: 'http://dkg.io/ontology/contentScopeVersion', object: int(GRAPH_KA_CONTENT_SCOPE_VERSION), graph: metaGraph },
+      { subject: kaUal, predicate: 'http://dkg.io/ontology/kaUal', object: kaUal, graph: metaGraph },
+      { subject: kaUal, predicate: 'http://dkg.io/ontology/assertionVersion', object: int(1), graph: metaGraph },
+      { subject: kaUal, predicate: 'http://dkg.io/ontology/batchId', object: int(kaId), graph: metaGraph },
+      { subject: kaUal, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: metaGraph },
+      { subject: kaUal, predicate: 'http://dkg.io/ontology/contextGraph', object: contextGraphDataUri('public-cg'), graph: metaGraph },
+      { subject: kaUal, predicate: 'http://dkg.io/ontology/assertionGraph', object: vmGraph, graph: metaGraph },
+    ]);
     const publisherUpdate = vi.fn(async () => ({
       status: 'confirmed',
       onChainResult: {
@@ -439,6 +503,14 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       merkleRoot: new Uint8Array(32).fill(4),
     }));
     const agentLike = {
+      store,
+      chain: {
+        chainId: 'otp:20430',
+        getEvmChainId: async () => 20430n,
+        getKnowledgeAssetsLifecycleAddress: async () => kavAddress,
+        getKnowledgeAssetOwner: async () => owner.address,
+        hasContractCode: async () => false,
+      },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       getContextGraphOnChainId: vi.fn(async () => '42'),
       createV10UpdateACKProvider: vi.fn(() => undefined),
@@ -451,11 +523,12 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
 
     await (DKGAgent.prototype as any).update.call(
       agentLike,
-      7n,
+      kaId,
       'public-cg',
       publicQuads,
       undefined,
       {
+        precomputedUpdateAttestation,
         contentScopeVersion: 2,
         kaUal,
         assertionVersion: '2',

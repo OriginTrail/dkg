@@ -6541,14 +6541,15 @@ export class DKGPublisher implements Publisher {
       : undefined;
     const hasOperationId = operationIdBindings === undefined || operationIdBindings.length > 0;
     const hasIntent = intentResult.type !== 'boolean' || intentResult.value;
-    if (!hasOperationId && !hasIntent) return;
-
     const layer = layerResult.type === 'bindings' && layerResult.bindings.length === 1
       ? stripOptionalLiteral(layerResult.bindings[0]?.['layer'])
       : undefined;
     if (layer === MemoryLayer.VerifiableMemory) return;
-    if (layer === MemoryLayer.SharedWorkingMemory && operationIdBindings?.length === 1) {
-      const rawOperationId = operationIdBindings[0]?.['id'];
+    if (!hasOperationId && !hasIntent && layer !== MemoryLayer.SharedWorkingMemory) return;
+    if (layer === MemoryLayer.SharedWorkingMemory) {
+      const rawOperationId = operationIdBindings?.length === 1
+        ? operationIdBindings[0]?.['id']
+        : undefined;
       let operationId: string | undefined;
       try {
         const parsed: unknown = rawOperationId === undefined
@@ -6573,6 +6574,26 @@ export class DKGPublisher implements Publisher {
         sealResult.type === 'quads' ? sealResult.quads : [],
         sealSubject,
       );
+      // A completed promote consumes its provisional lifecycle pointer. The
+      // monotonic SWM head is then the authoritative recovery pointer. Resolve
+      // it only for the clean completed shape; an intent without its matching
+      // lifecycle ID remains corrupt and must fail closed below.
+      if (
+        !operationId
+        && !hasOperationId
+        && !hasIntent
+        && seal?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+        && seal.kaUal
+      ) {
+        const head = await resolveKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          kaUal: seal.kaUal,
+          subGraphName,
+        });
+        operationId = head?.shareOperationId;
+      }
       if (
         operationId
         && seal?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
@@ -8427,7 +8448,7 @@ export class DKGPublisher implements Publisher {
     // operation and drop the WM source. A failure anywhere above leaves WM and
     // the recovery pointer intact, so a retry re-promotes the exact same
     // content instead of aborting on empty working memory.
-    await clearCurrentShareOperationId();
+    await this.store.delete([operationIdQuad, operationIntentQuad]);
     await this.dropAssertionScopedGraphs(graphUri);
 
     return {

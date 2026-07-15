@@ -11,6 +11,7 @@ import {
   encodeAccessResponse,
   ed25519Verify,
   assertSafeIri,
+  createGraphKnowledgeAssetScope,
   parseDeterministicKnowledgeAssetUal,
   type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
@@ -23,6 +24,7 @@ import {
   resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
 import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
+import { resolveKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 
@@ -286,21 +288,80 @@ export class AccessHandler {
     const resolved = await resolveGraphScopedOrLegacyMetadata(
       this.store,
       canonicalUal,
-      async () => {
-        const direct = await this.queryLegacyKAMeta(kaUal);
-        if (direct) return direct;
-        // Read-both (RFC ka-metadata-trim P3.1): older requesters address
-        // private content by `<ual>/<n>`. Retry the canonical bare UAL once.
-        return legacyAliasBase
-          ? this.queryLegacyKAMeta(legacyAliasBase)
-          : null;
-      },
+      async () => null,
       { source: 'publisher.access.metadata' },
     );
     if (resolved.kind === 'graph') {
       return this.graphScopedKAMeta(resolved.metadata);
     }
-    return resolved.kind === 'legacy' ? resolved.metadata : null;
+    const workspaceMeta = await this.lookupWorkspaceHeadKAMeta(canonicalUal);
+    if (workspaceMeta) return workspaceMeta;
+
+    const direct = await this.queryLegacyKAMeta(kaUal);
+    if (direct) return direct;
+    // Read-both (RFC ka-metadata-trim P3.1): older requesters address
+    // private content by `<ual>/<n>`. Retry the canonical bare UAL once.
+    return legacyAliasBase
+      ? this.queryLegacyKAMeta(legacyAliasBase)
+      : null;
+  }
+
+  private async lookupWorkspaceHeadKAMeta(kaUal: string): Promise<GraphScopedKAMeta | null> {
+    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    try {
+      scope = createGraphKnowledgeAssetScope(
+        parseDeterministicKnowledgeAssetUal(kaUal).ual,
+        1,
+      );
+    } catch {
+      // Legacy token/entity aliases are not graph-scoped identities. Let the
+      // read-only legacy resolver below handle them unchanged.
+      return null;
+    }
+    const headSubject = `${scope.ual}#dkg-swm-head`;
+    const result = await this.store.query(
+      `SELECT DISTINCT ?g WHERE { GRAPH ?g {
+        <${assertSafeIri(headSubject)}> <${DKG_NS}contentScopeVersion> ?scopeVersion ;
+          <${DKG_NS}kaUal> <${assertSafeIri(scope.ual)}> .
+      } } LIMIT 2`,
+      { source: 'publisher.access.workspace-head' },
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+    if (result.bindings.length !== 1) {
+      throw new Error(`Graph-scoped KA ${scope.ual} has ambiguous durable workspace heads`);
+    }
+    const graph = result.bindings[0]?.['g'] ?? '';
+    const match = graph.match(
+      /^did:dkg:context-graph:([^/]+)(?:\/([^/]+))?\/_shared_memory_meta$/,
+    );
+    if (!match) {
+      throw new Error(`Graph-scoped KA ${scope.ual} has an invalid durable workspace-head graph`);
+    }
+    const contextGraphId = match[1]!;
+    const subGraphName = match[2];
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId,
+      kaUal: scope.ual,
+      subGraphName,
+    });
+    if (!head) return null;
+    return {
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      scope: createGraphKnowledgeAssetScope(head.kaUal, head.assertionVersion),
+      rootEntities: [],
+      contextGraphId,
+      subGraphName,
+      privateMerkleRoot: head.privateMerkleRoot
+        ? hexToBytes(head.privateMerkleRoot)
+        : undefined,
+      privateTripleCount: head.privateTripleCount,
+      accessPolicy: head.accessPolicy,
+      hasInvalidExplicitPolicy: false,
+      publisherPeerId: head.publisherPeerId,
+      allowedPeers: [...head.allowedPeers],
+    };
   }
 
   private graphScopedKAMeta(

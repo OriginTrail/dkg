@@ -71,6 +71,10 @@ describe('direct rootless agent publish entrypoint', () => {
       skills: [],
     });
     const internals = agent as unknown as Record<string, any>;
+    const buildAttestationSpy = vi.spyOn(
+      internals,
+      '_buildPrecomputedAttestationForSelection',
+    );
     Object.defineProperty(agent, 'peerId', {
       value: '12D3KooWRootlessPublisher',
       configurable: true,
@@ -127,6 +131,12 @@ describe('direct rootless agent publish entrypoint', () => {
       object: '"hidden"',
       graph: '',
     }];
+    const canonical = await skolemizeKnowledgeAssetParts(publicQuads, privateQuads);
+    const expectedPrivateRoot = computePrivateRootV10(canonical.privateQuads);
+    const expectedMerkleRoot = computeFlatKCRootV10(
+      canonical.publicQuads,
+      expectedPrivateRoot ? [expectedPrivateRoot] : [],
+    );
     const result = await internals._publish(
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       publicQuads,
@@ -154,7 +164,7 @@ describe('direct rootless agent publish entrypoint', () => {
       quad.subject === 'did:dkg:context-graph:ontology'
       && quad.predicate === 'http://purl.org/dc/terms/accessRights'
     )).toBe(false);
-    expect(internals._buildPrecomputedAttestationForSelection).toHaveBeenCalledWith(
+    expect(buildAttestationSpy).toHaveBeenCalledWith(
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       expect.arrayContaining(capturedOptions!.quads),
       expect.objectContaining({ graphScoped: true, privateQuads }),

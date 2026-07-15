@@ -14,7 +14,6 @@ import {
   STORAGE_ACK_DECLINE_CODES,
   boundedDeclineCodeLabel,
   isSubscriptionSource,
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   withSpan,
   getMetrics,

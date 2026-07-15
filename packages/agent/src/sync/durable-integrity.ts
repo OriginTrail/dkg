@@ -292,7 +292,10 @@ function indexIntegrityMetadata(
     if (quad.predicate === MERKLE_ROOT) {
       merkleSubjects.add(quad.subject);
     }
-    if (quad.predicate === CONTENT_SCOPE_VERSION) {
+    if (
+      quad.predicate === CONTENT_SCOPE_VERSION
+      && isDeterministicKaMetadataSubject(quad.subject)
+    ) {
       markerSubjects.add(quad.subject);
     }
   }

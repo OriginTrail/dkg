@@ -196,6 +196,6 @@ describe('fully private graph-scoped KA publish/update (real paths)', () => {
         privateTripleCount: 1,
         privateMerkleRoot,
       }),
-    ).rejects.toThrow(/No quads in shared memory/);
+    ).rejects.toThrow(/No public or private quads available/);
   });
 });
