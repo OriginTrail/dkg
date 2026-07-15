@@ -22,7 +22,9 @@ What deliberately does **not** trigger:
 - plain `ASK { ?s ?p ?o }` with no `FILTER` (first-match short-circuit);
 - all-variable triples inside `FILTER [NOT] EXISTS` / `MINUS` — per-binding
   existence probes (the **fixed** #1597 `listGraphs` form lives here);
-- `LIMIT` without `ORDER BY` (bounded materialization) for R1/R2;
+- a **top-level** `LIMIT` without `ORDER BY` (bounded materialization) for
+  R1/R2 — a `LIMIT` inside a subquery neither exempts outer scans nor (fail-
+  closed) its own group's all-variable scan; pragma the latter if intentional;
 - `GRAPH ?g` bound by `VALUES ?g { … }`;
 - whole-graph reads of exact per-KA graphs (bounded by one assertion) —
   R4 keys on the *unbounded* graph families only;
@@ -54,10 +56,14 @@ deliberately a diffable code change: allowing a scan is a reviewed decision.
 
 - Findings are fingerprinted by `(rule, normalized query text)` — whitespace-
   and interpolation-insensitive, so moving or reindenting an existing query
-  does not re-flag it, while editing the query re-evaluates it.
-- The scanner self-tests against ~20 fixtures (including the exact #1597
-  bad/fixed pair) before every CI scan; a broken scanner fails loudly instead
-  of passing silently.
+  does not re-flag it, while editing the query re-evaluates it. The baseline
+  is a **multiset**: duplicating a grandfathered query adds one more scan and
+  blocks as a new finding, even though the copy's text is identical.
+- The scanner self-tests against 27 fixtures (including the exact #1597
+  bad/fixed pair) plus a diff-gate integration test on a throwaway git repo
+  (duplicate-copy blocking, reindent grandfathering, new-shape blocking)
+  before every CI scan; a broken scanner fails loudly instead of passing
+  silently.
 - Local usage:
   - `node scripts/sparql-scale-lint.mjs --diff origin/main HEAD` — what CI runs
   - `node scripts/sparql-scale-lint.mjs --all` — full-tree debt audit
@@ -78,7 +84,7 @@ gh api repos/OriginTrail/dkg/branches/main/protection/required_status_checks/con
 ## Current debt baseline
 
 At the time this gate landed, the full-tree audit reported ~52 grandfathered
-findings (17 R1, 9 R2, 12 R3, 14 R4) — including the sync responder's
+findings (18 R1, 9 R2, 12 R3, 13 R4) — including the sync responder's
 documented OFFSET fallback and several adapter-level store primitives. They
 stay visible as notices on any PR that touches those files; burn them down
 opportunistically (each either restructures or earns a pragma).

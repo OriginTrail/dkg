@@ -56,7 +56,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import process from 'node:process';
 
 const SCANNED_EXTENSIONS = /\.(ts|mts|cts|js|mjs|cjs)$/;
@@ -247,6 +249,8 @@ function stripLiteralsAndComments(text) {
   while (i < text.length) {
     const ch = text[i];
     if (ch === '"' || ch === "'") {
+      // Keep the quotes (term-shape matters) but DROP the contents, so a
+      // literal like "has FILTER inside" cannot confuse keyword detection.
       const quote = ch;
       out += quote;
       i++;
@@ -277,9 +281,25 @@ function analyzeQuery(queryText, exprs) {
   const stripped = stripLiteralsAndComments(queryText);
   const findings = [];
 
-  const hasLimit = /\bLIMIT\s+(\d+|⟪\d+⟫)/i.test(stripped);
-  const hasOrderBy = /\bORDER\s+BY\b/i.test(stripped);
-  const boundedNoSort = hasLimit && !hasOrderBy;
+  // Solution modifiers count only at the TOP level of the query: a LIMIT
+  // inside a subquery bounds that subquery, not an outer store-wide scan.
+  // (Fail-closed corollary: an all-var triple inside a LIMITed subquery still
+  // flags — acknowledge with a pragma when the inner bound is intentional.)
+  let topLevelLimit = false;
+  let topLevelOrderBy = false;
+  {
+    let depth = 0;
+    const tokenRe = /[{}]|\bLIMIT\s+(?:\d+|⟪\d+⟫)|\bORDER\s+BY\b/gi;
+    let m;
+    while ((m = tokenRe.exec(stripped)) !== null) {
+      if (m[0] === '{') depth++;
+      else if (m[0] === '}') depth--;
+      else if (depth === 0 && /^LIMIT/i.test(m[0])) topLevelLimit = true;
+      else if (depth === 0) topLevelOrderBy = true;
+    }
+  }
+  const hasLimit = topLevelLimit;
+  const boundedNoSort = topLevelLimit && !topLevelOrderBy;
   const isPlainAsk = /^\s*ASK\b/i.test(stripped.replace(/^\s*(PREFIX[^\n]*\n|BASE[^\n]*\n)*/i, ''))
     && !/\bFILTER\b/i.test(stripped);
 
@@ -298,8 +318,13 @@ function analyzeQuery(queryText, exprs) {
   // (`?a ?b ?c` — the keyword predicate `a` and any prefixed/IRI term count
   // as bound and therefore never match).
   const checkPending = (offset) => {
-    const statement = pending.trim();
+    let statement = pending.trim();
     pending = '';
+    // SPARQL allows a triples block to run straight into FILTER/BIND/… with
+    // no dot; strip the trailing clause so the triple itself is still seen.
+    statement = statement
+      .replace(/\b(FILTER|OPTIONAL|BIND|VALUES|SERVICE|MINUS|UNION|GRAPH|EXISTS)\b[\s\S]*$/i, '')
+      .trim();
     if (!/(^|[\s{])\?\w+\s+\?\w+\s+\?\w+$/.test(statement)) return;
     // CONSTRUCT/INSERT/DELETE templates describe OUTPUT, not a scan.
     if (stack.some((f) => f.kind === 'probe' || f.kind === 'template')) return;
@@ -327,6 +352,13 @@ function analyzeQuery(queryText, exprs) {
       const head = pending.trimEnd();
       const graphMatch = head.match(graphHeader);
       const probeMatch = head.match(probeHeader);
+      // A triple can run straight into `OPTIONAL {`/`FILTER EXISTS {` with no
+      // dot — evaluate it before the new frame swallows the pending text.
+      // (checkPending strips the trailing keyword clause itself; save/restore
+      // pending because the header text is still needed below.)
+      const savedPending = pending;
+      checkPending(i);
+      pending = savedPending;
       // `CONSTRUCT { … }`, `INSERT [DATA] { … }`, `DELETE [DATA] { … }` blocks
       // are output templates, not scan patterns. `DELETE WHERE { … }` and any
       // WHERE-headed block remain patterns.
@@ -415,7 +447,7 @@ export function scanSource(filePath, source) {
     for (const f of raw) {
       const line = literal.startLine + literal.text.slice(0, f.offset).split('\n').length - 1;
       const fingerprint = createHash('sha1')
-        .update(`${f.rule} ${fingerprintBase}`)
+        .update(`${f.rule}:${fingerprintBase}`)
         .digest('hex');
       findings.push({
         file: filePath,
@@ -433,8 +465,8 @@ export function scanSource(filePath, source) {
 // Drivers
 // ---------------------------------------------------------------------------
 
-function git(args, opts = {}) {
-  return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
+function git(args, cwd = process.cwd()) {
+  return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, cwd });
 }
 
 function listTrackedSourceFiles() {
@@ -443,15 +475,15 @@ function listTrackedSourceFiles() {
     .filter((f) => f && SCANNED_EXTENSIONS.test(f) && !EXCLUDED_PATH.test(f));
 }
 
-function changedSourceFiles(baseSha, headSha) {
-  return git(['diff', '--name-only', '--diff-filter=ACMR', baseSha, headSha])
+function changedSourceFiles(baseSha, headSha, cwd = process.cwd()) {
+  return git(['diff', '--name-only', '--diff-filter=ACMR', baseSha, headSha], cwd)
     .split('\n')
     .filter((f) => f && SCANNED_EXTENSIONS.test(f) && !EXCLUDED_PATH.test(f));
 }
 
-function fileAt(sha, path) {
+function fileAt(sha, path, cwd = process.cwd()) {
   try {
-    return git(['show', `${sha}:${path}`]);
+    return git(['show', `${sha}:${path}`], cwd);
   } catch {
     return null; // added file — no baseline
   }
@@ -465,36 +497,65 @@ function report(finding, { status, level }) {
   );
 }
 
+/**
+ * Pure diff-gate core (exported for the self-test): compare head findings
+ * against the base version of each changed file.
+ *
+ * The baseline is a MULTISET (fingerprint → count), not a set: a PR that
+ * duplicates an existing grandfathered query adds one more O(store) scan and
+ * must block, even though the copy's normalized text is identical. Each head
+ * occurrence consumes one baseline occurrence; the surplus is new.
+ */
+export function computeDiffFindings(baseSha, headSha, cwd = process.cwd()) {
+  const files = changedSourceFiles(baseSha, headSha, cwd);
+  const baseline = new Map();
+  for (const file of files) {
+    const baseSource = fileAt(baseSha, file, cwd);
+    if (!baseSource) continue;
+    for (const f of scanSource(file, baseSource)) {
+      baseline.set(f.fingerprint, (baseline.get(f.fingerprint) ?? 0) + 1);
+    }
+  }
+  const results = [];
+  for (const file of files) {
+    const headSource = fileAt(headSha, file, cwd);
+    if (headSource === null) continue;
+    for (const f of scanSource(file, headSource)) {
+      if (f.allowed) {
+        results.push({ ...f, verdict: 'acknowledged' });
+        continue;
+      }
+      const remaining = baseline.get(f.fingerprint) ?? 0;
+      if (remaining > 0) {
+        baseline.set(f.fingerprint, remaining - 1);
+        results.push({ ...f, verdict: 'grandfathered' });
+      } else {
+        results.push({ ...f, verdict: 'new' });
+      }
+    }
+  }
+  return { files, results };
+}
+
 function runDiff(baseSha, headSha) {
-  const files = changedSourceFiles(baseSha, headSha);
+  const { files, results } = computeDiffFindings(baseSha, headSha);
   if (files.length === 0) {
     console.log('sparql-scale-lint: no scannable source changes.');
     return 0;
   }
-  const baseline = new Set();
-  for (const file of files) {
-    const baseSource = fileAt(baseSha, file);
-    if (!baseSource) continue;
-    for (const f of scanSource(file, baseSource)) baseline.add(f.fingerprint);
-  }
   let blocking = 0;
   let acknowledged = 0;
   let grandfathered = 0;
-  for (const file of files) {
-    const headSource = fileAt(headSha, file);
-    if (headSource === null) continue;
-    for (const f of scanSource(file, headSource)) {
-      const isNew = !baseline.has(f.fingerprint);
-      if (f.allowed) {
-        acknowledged++;
-        report(f, { status: 'acknowledged by pragma', level: 'notice' });
-      } else if (isNew) {
-        blocking++;
-        report(f, { status: 'NEW — blocks merge', level: 'error' });
-      } else {
-        grandfathered++;
-        report(f, { status: 'pre-existing (grandfathered; fix when touched)', level: 'notice' });
-      }
+  for (const f of results) {
+    if (f.verdict === 'acknowledged') {
+      acknowledged++;
+      report(f, { status: 'acknowledged by pragma', level: 'notice' });
+    } else if (f.verdict === 'new') {
+      blocking++;
+      report(f, { status: 'NEW — blocks merge', level: 'error' });
+    } else {
+      grandfathered++;
+      report(f, { status: 'pre-existing (grandfathered; fix when touched)', level: 'notice' });
     }
   }
   console.log(
@@ -624,6 +685,43 @@ const FIXTURES = [
     expect: ['R1'],
   },
   {
+    name: 'R1 fires when FILTER follows the triple with no dot',
+    source: 'const q = `SELECT ?s WHERE { ?s ?p ?o FILTER(?p = <urn:p>) }`;',
+    expect: ['R1'],
+  },
+  {
+    name: 'R2 fires when FILTER follows the triple with no dot inside GRAPH ?g',
+    source: 'const q = `SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?o > 1) } }`;',
+    expect: ['R2'],
+  },
+  {
+    name: 'R1 fires when OPTIONAL follows the triple with no dot',
+    source: 'const q = `SELECT ?s WHERE { ?s ?p ?o OPTIONAL { ?s <urn:p> ?x } }`;',
+    expect: ['R1'],
+  },
+  {
+    name: 'R1 fires despite an unrelated LIMITed subquery (outer scan unbounded)',
+    source: 'const q = `SELECT ?s WHERE { ?s ?p ?o . { SELECT ?x WHERE { <urn:a> <urn:b> ?x } LIMIT 1 } }`;',
+    expect: ['R1'],
+  },
+  {
+    name: 'fail-closed: a subquery-local LIMIT does not exempt its own all-var scan',
+    // Deliberate: per-group LIMIT binding is not modeled; a bounded inner scan
+    // that trips this should carry a pragma. Top-level LIMIT remains exempt.
+    source: 'const q = `SELECT ?s WHERE { { SELECT ?x WHERE { ?x ?p ?o } LIMIT 5 } }`;',
+    expect: ['R1'],
+  },
+  {
+    name: 'top-level LIMIT still exempts when a subquery also has one',
+    source: 'const q = `SELECT ?s WHERE { ?s ?p ?o . { SELECT ?x WHERE { <urn:a> <urn:b> ?x } LIMIT 1 } } LIMIT 10`;',
+    expect: [],
+  },
+  {
+    name: 'string literal containing keywords does not confuse the walker',
+    source: 'const q = `SELECT ?s WHERE { ?s <urn:p> "FILTER LIMIT GRAPH" }`;',
+    expect: [],
+  },
+  {
     name: 'non-SPARQL template untouched',
     source: 'const msg = `hello ${name}, WHERE were you?`;',
     expect: [],
@@ -640,6 +738,65 @@ const FIXTURES = [
   },
 ];
 
+/**
+ * Integration self-test for the RATCHET itself — the layer that decides
+ * whether a PR blocks. Builds a throwaway git repo and asserts:
+ *   1. duplicating a grandfathered query blocks with exactly ONE new finding
+ *      (multiset semantics — membership alone would let copies through);
+ *   2. reindenting/rewrapping the same query stays grandfathered;
+ *   3. adding a genuinely new offending query blocks.
+ */
+function diffGateSelfTest() {
+  const dir = mkdtempSync(join(tmpdir(), 'sparql-lint-selftest-'));
+  const g = (...args) => git(args, dir);
+  const BAD = 'const a = `SELECT ?s WHERE { ?s ?p ?o }`;\n';
+  try {
+    g('init', '-q');
+    g('config', 'user.email', 'selftest@example.invalid');
+    g('config', 'user.name', 'sparql-lint-selftest');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src/a.ts'), BAD);
+    g('add', '-A');
+    g('commit', '-qm', 'base');
+    const base = g('rev-parse', 'HEAD').trim();
+
+    // 1. duplicate of the grandfathered query → exactly one NEW finding
+    writeFileSync(join(dir, 'src/a.ts'), BAD + 'const b = `SELECT ?s WHERE { ?s ?p ?o }`;\n');
+    g('commit', '-aqm', 'dup');
+    const dupHead = g('rev-parse', 'HEAD').trim();
+    const dup = computeDiffFindings(base, dupHead, dir).results;
+    const dupNew = dup.filter((f) => f.verdict === 'new').length;
+    const dupOld = dup.filter((f) => f.verdict === 'grandfathered').length;
+    if (dupNew !== 1 || dupOld !== 1) {
+      console.error(`DIFF-GATE FAIL: duplicated query → new=${dupNew} grandfathered=${dupOld} (want 1/1)`);
+      return false;
+    }
+
+    // 2. reindent/rewrap only → still grandfathered, nothing new
+    writeFileSync(join(dir, 'src/a.ts'), 'const a = `SELECT ?s\n  WHERE {\n    ?s ?p ?o\n  }`;\n');
+    g('commit', '-aqm', 'reindent');
+    const reHead = g('rev-parse', 'HEAD').trim();
+    const re = computeDiffFindings(base, reHead, dir).results;
+    if (re.some((f) => f.verdict === 'new') || re.filter((f) => f.verdict === 'grandfathered').length !== 1) {
+      console.error(`DIFF-GATE FAIL: reindent → ${JSON.stringify(re.map((f) => f.verdict))} (want one grandfathered)`);
+      return false;
+    }
+
+    // 3. a genuinely new shape blocks
+    writeFileSync(join(dir, 'src/a.ts'), BAD + 'const c = `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }`;\n');
+    g('commit', '-aqm', 'new-shape');
+    const newHead = g('rev-parse', 'HEAD').trim();
+    const fresh = computeDiffFindings(base, newHead, dir).results;
+    if (fresh.filter((f) => f.verdict === 'new').length !== 1) {
+      console.error(`DIFF-GATE FAIL: new shape → ${JSON.stringify(fresh.map((f) => f.verdict))} (want one new)`);
+      return false;
+    }
+    return true;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function selfTest() {
   let failures = 0;
   for (const fixture of FIXTURES) {
@@ -653,8 +810,12 @@ function selfTest() {
       console.error(`SELF-TEST FAIL: ${fixture.name}\n  expected ${JSON.stringify(expected)}\n  got      ${JSON.stringify(found)}`);
     }
   }
-  console.log(`sparql-scale-lint self-test: ${FIXTURES.length - failures}/${FIXTURES.length} fixtures pass.`);
-  return failures === 0 ? 0 : 1;
+  const gateOk = diffGateSelfTest();
+  console.log(
+    `sparql-scale-lint self-test: ${FIXTURES.length - failures}/${FIXTURES.length} fixtures pass, ` +
+    `diff-gate ${gateOk ? 'pass' : 'FAIL'}.`,
+  );
+  return failures === 0 && gateOk ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
