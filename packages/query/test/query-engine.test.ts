@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { validateReadOnlySparql } from '../src/sparql-guard.js';
 
@@ -20,6 +26,8 @@ const DKG_CONTEXT_GRAPH = 'https://dkg.network/ontology#ContextGraph';
 const DKG_REGISTRATION_STATUS = 'https://dkg.network/ontology#registrationStatus';
 const SCHEMA_NAME = 'http://schema.org/name';
 const COUNT_NAME = 'http://example.com/countName';
+const DKG = 'http://dkg.io/ontology/';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -36,6 +44,32 @@ function subGraphRegistration(name: string): Quad[] {
 
 function assertionGraphRegistration(graph: string, name: string): Quad {
   return q(`urn:dkg:assertion:${name}`, DKG_ASSERTION_GRAPH, graph, META);
+}
+
+function graphScopedMetadata(
+  ual: string,
+  assertionVersion: string,
+  assertionGraph: string,
+  publicTripleCount: number,
+  subGraphName?: string,
+  metadataGraph = META,
+): Quad[] {
+  return [
+    q(
+      ual,
+      `${DKG}contentScopeVersion`,
+      `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
+      metadataGraph,
+    ),
+    q(ual, `${DKG}kaUal`, ual, metadataGraph),
+    q(ual, `${DKG}assertionVersion`, `"${assertionVersion}"^^<${XSD_INTEGER}>`, metadataGraph),
+    q(ual, `${DKG}publicTripleCount`, `"${publicTripleCount}"^^<${XSD_INTEGER}>`, metadataGraph),
+    q(ual, `${DKG}assertionGraph`, assertionGraph, metadataGraph),
+    q(ual, `${DKG}contextGraph`, GRAPH, metadataGraph),
+    ...(subGraphName
+      ? [q(ual, `${DKG}subGraphName`, JSON.stringify(subGraphName), metadataGraph)]
+      : []),
+  ];
 }
 
 describe('DKGQueryEngine', () => {
@@ -100,6 +134,8 @@ describe('DKGQueryEngine', () => {
     ]);
 
     const result = await engine.resolveKA(ual);
+    expect(result.contentScopeVersion).toBe(1);
+    expect(result.ual).toBe(ual);
     expect(result.rootEntity).toBe(ENTITY);
     expect(result.rootEntities).toEqual([ENTITY]);
     expect(result.contextGraphId).toBe(CONTEXT_GRAPH);
@@ -122,6 +158,7 @@ describe('DKGQueryEngine', () => {
     ]);
 
     const result = await engine.resolveKA(ual);
+    expect(result.contentScopeVersion).toBe(1);
     // Pre-#968 this returned only bindings[0]; now every member root is read.
     expect(result.rootEntities).toEqual([ENTITY, ENTITY_2]);
     expect(result.rootEntity).toBe(ENTITY); // backward-compat: first member root
@@ -129,6 +166,147 @@ describe('DKGQueryEngine', () => {
     expect(subjects).toContain(ENTITY);
     expect(subjects).toContain(ENTITY_2);
     expect(subjects).toContain(`${ENTITY_2}/.well-known/genid/o1`);
+  });
+
+  describe('graph-scoped resolveKA', () => {
+    const UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
+
+    it('loads the complete exact VM graph without root metadata or subject-prefix filtering', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const payload = [
+        q('urn:asset:alpha', 'urn:predicate:name', '"Alpha"', vmGraph),
+        q('urn:unconnected:beta', 'urn:predicate:name', '"Beta"', vmGraph),
+        q('urn:unconnected:gamma', 'urn:predicate:value', '"disconnected payload"', vmGraph),
+      ];
+      await store.insert([
+        ...payload,
+        ...graphScopedMetadata(UAL, '1', vmGraph, payload.length),
+        q('urn:asset:alpha', 'urn:predicate:decoy', '"outside exact graph"', GRAPH),
+      ]);
+
+      const result = await engine.resolveKA(UAL);
+
+      expect(result.contentScopeVersion).toBe(GRAPH_KA_CONTENT_SCOPE_VERSION);
+      if (result.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+        throw new Error('Expected graph-scoped KA');
+      }
+      expect(result.ual).toBe(UAL);
+      expect(result.assertionVersion).toBe('1');
+      expect(result.assertionGraph).toBe(vmGraph);
+      expect(result.rootEntities).toEqual([]);
+      expect(result.quads).toHaveLength(payload.length);
+      expect(new Set(result.quads.map((quad) => quad.subject))).toEqual(
+        new Set(payload.map((quad) => quad.subject)),
+      );
+      expect(result.quads.every((quad) => quad.graph === vmGraph)).toBe(true);
+      expect(result.quads.some((quad) => quad.predicate === 'urn:predicate:decoy')).toBe(false);
+    });
+
+    it('derives the versioned VM graph inside the registered subgraph', async () => {
+      const assertionVersion = '2';
+      const subGraphName = 'updates';
+      const scope = createGraphKnowledgeAssetScope(UAL, assertionVersion);
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+        subGraphName,
+      );
+      await store.insert([
+        q('urn:update:subject', 'urn:update:predicate', '"v2"', vmGraph),
+        ...graphScopedMetadata(UAL, assertionVersion, vmGraph, 1, subGraphName),
+      ]);
+
+      const result = await engine.resolveKA(UAL);
+
+      expect(result.contentScopeVersion).toBe(GRAPH_KA_CONTENT_SCOPE_VERSION);
+      if (result.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+        throw new Error('Expected graph-scoped KA');
+      }
+      expect(result.assertionVersion).toBe(assertionVersion);
+      expect(result.assertionGraph).toBe(vmGraph);
+      expect(result.quads).toEqual([
+        q('urn:update:subject', 'urn:update:predicate', '"v2"', vmGraph),
+      ]);
+    });
+
+    it('fails closed when metadata points away from the UAL-derived exact graph', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const attackerGraph = `${GRAPH}/_verifiable_memory/attacker/7`;
+      await store.insert([
+        q('urn:expected', 'urn:p', '"expected"', vmGraph),
+        q('urn:attacker', 'urn:p', '"attacker"', attackerGraph),
+        ...graphScopedMetadata(UAL, '1', attackerGraph, 1),
+      ]);
+
+      await expect(engine.resolveKA(UAL)).rejects.toThrow(/assertionGraph mismatch/);
+    });
+
+    it('fails closed when the exact graph count differs from committed metadata', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert([
+        q('urn:only', 'urn:p', '"one"', vmGraph),
+        ...graphScopedMetadata(UAL, '1', vmGraph, 2),
+      ]);
+
+      await expect(engine.resolveKA(UAL)).rejects.toThrow(/graph integrity mismatch/);
+    });
+
+    it('does not fall back to legacy resolution when a V2 marker has incomplete metadata', async () => {
+      await store.insert([
+        q(
+          UAL,
+          `${DKG}contentScopeVersion`,
+          `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
+          META,
+        ),
+        q(UAL, `${DKG}contextGraph`, GRAPH, META),
+        q(UAL, `${DKG}rootEntity`, ENTITY, META),
+      ]);
+
+      await expect(engine.resolveKA(UAL)).rejects.toThrow(/missing kaUal metadata/);
+    });
+
+    it('rejects graph-scoped metadata written outside the context graph meta partition', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const poisonedMetaGraph = 'urn:attacker:metadata';
+      await store.insert([
+        q('urn:asset', 'urn:p', '"value"', vmGraph),
+        ...graphScopedMetadata(UAL, '1', vmGraph, 1, undefined, poisonedMetaGraph),
+      ]);
+
+      await expect(engine.resolveKA(UAL)).rejects.toThrow(/metadata graph mismatch/);
+    });
+
+    it('does not hide a malformed scope marker behind the legacy fallback', async () => {
+      await store.insert([
+        q(UAL, `${DKG}contentScopeVersion`, '"not-an-integer"', META),
+        q(UAL, `${DKG}contextGraph`, GRAPH, META),
+        q(UAL, `${DKG}rootEntity`, ENTITY, META),
+      ]);
+
+      await expect(engine.resolveKA(UAL)).rejects.toThrow(/invalid contentScopeVersion/);
+    });
   });
 
   it('throws on unknown UAL', async () => {

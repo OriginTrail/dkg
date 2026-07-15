@@ -43,6 +43,10 @@ import { ethers } from 'ethers';
 // result type as `VerifyACKIdentityResult`; `ACKVerifyResult` is the
 // publisher-side mirror (same shape, different export site).
 import type { VerifyACKIdentityResult } from '@origintrail-official/dkg-chain';
+import type {
+  V10ACKProviderObject,
+  V10UpdateACKProvider,
+} from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 
 /**
@@ -51,6 +55,8 @@ import { DKGAgent } from '../src/index.js';
  */
 const capturedAckCollectorDeps: unknown[] = [];
 const capturedStorageACKHandlerConfigs: unknown[] = [];
+const capturedPublishCollectParams: unknown[] = [];
+const capturedUpdateCollectParams: unknown[] = [];
 
 vi.mock('@origintrail-official/dkg-publisher', async () => {
   const actual = await vi.importActual<typeof import('@origintrail-official/dkg-publisher')>(
@@ -66,11 +72,15 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
       constructor(deps: unknown) {
         capturedAckCollectorDeps.push(deps);
       }
-      // Required for the agent's outer closure shape — never called
-      // in this file, but TypeScript's structural matching expects
-      // the surface to exist.
-      async collect(): Promise<never> {
-        throw new Error('CapturingACKCollector.collect should not be invoked in wiring tests');
+      // Capture calls made through the returned provider closures so wiring
+      // tests can pin the agent-side validation boundary as well as deps.
+      async collect(params: unknown): Promise<{ acks: [] }> {
+        capturedPublishCollectParams.push(params);
+        return { acks: [] };
+      }
+      async collectUpdate(params: unknown): Promise<{ acks: [] }> {
+        capturedUpdateCollectParams.push(params);
+        return { acks: [] };
       }
     },
     StorageACKHandler: class CapturingStorageACKHandler {
@@ -172,6 +182,8 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
   beforeEach(() => {
     capturedAckCollectorDeps.length = 0;
     capturedStorageACKHandlerConfigs.length = 0;
+    capturedPublishCollectParams.length = 0;
+    capturedUpdateCollectParams.length = 0;
   });
 
   afterEach(async () => {
@@ -265,6 +277,109 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       42n,
     );
     expect(verdict).toBe(false);
+  });
+
+  it('allows zero public Merkle leaves only for curated publish and update ACK modes', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    const publishProvider = internals.createV10ACKProvider('test-cg') as V10ACKProviderObject;
+    const updateProvider = internals.createV10UpdateACKProvider('test-cg') as V10UpdateACKProvider;
+    const root = new Uint8Array(32);
+
+    await expect(publishProvider({
+      merkleRoot: root,
+      contextGraphId: '42',
+      kaCount: 1,
+      rootEntities: [],
+      publicByteSize: 1n,
+      merkleLeafCount: 0,
+      stagingQuads: new Uint8Array([1]),
+      ackMode: {
+        kind: 'curated-catalog',
+        catalogCommitment: { catalogRoot: root, catalogLeafCount: 1 },
+      },
+    })).resolves.toEqual([]);
+    await expect(updateProvider({
+      kaId: 1n,
+      contextGraphId: '42',
+      preUpdateMerkleRootCount: 1n,
+      newMerkleRoot: root,
+      newByteSize: 1n,
+      newTokenAmount: 1n,
+      mintAmount: 0n,
+      burnTokenIds: [],
+      newMerkleLeafCount: 0,
+      isEncryptedPayload: true,
+    })).resolves.toEqual([]);
+
+    expect(capturedPublishCollectParams).toHaveLength(1);
+    expect(capturedUpdateCollectParams).toHaveLength(1);
+    await expect(publishProvider({
+      merkleRoot: root,
+      contextGraphId: '42',
+      kaCount: 1,
+      rootEntities: [],
+      publicByteSize: 0n,
+      merkleLeafCount: 0,
+      ackMode: { kind: 'public' },
+    })).rejects.toThrow('zero is valid only for curated-catalog ACKs');
+    await expect(updateProvider({
+      kaId: 1n,
+      contextGraphId: '42',
+      preUpdateMerkleRootCount: 1n,
+      newMerkleRoot: root,
+      newByteSize: 0n,
+      newTokenAmount: 1n,
+      mintAmount: 0n,
+      burnTokenIds: [],
+      newMerkleLeafCount: 0,
+    })).rejects.toThrow('zero is valid only for curated encrypted updates');
+  });
+
+  it('forwards the complete graph-scoped publish envelope into ACK collection', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const publishProvider = boot.internals.createV10ACKProvider('test-cg') as V10ACKProviderObject;
+    const root = new Uint8Array(32).fill(0x44);
+    const privateRoot = new Uint8Array(32).fill(0x55);
+    const kaUal = 'did:dkg:mock:31337/0x1111111111111111111111111111111111111111/7';
+
+    await expect(publishProvider({
+      merkleRoot: root,
+      contextGraphId: '42',
+      kaCount: 1,
+      rootEntities: [],
+      publicByteSize: 100n,
+      merkleLeafCount: 4,
+      contentScopeVersion: 2,
+      kaUal,
+      assertionVersion: '1',
+      publicTripleCount: 4,
+      privateMerkleRoot: privateRoot,
+      privateTripleCount: 9,
+      accessPolicy: 'ownerOnly',
+      allowedPeers: [],
+      stagingQuads: new Uint8Array([1]),
+      ackMode: {
+        kind: 'curated-catalog',
+        catalogCommitment: { catalogRoot: root, catalogLeafCount: 4 },
+      },
+    })).resolves.toEqual([]);
+
+    expect(capturedPublishCollectParams).toHaveLength(1);
+    expect(capturedPublishCollectParams[0]).toMatchObject({
+      rootEntities: [],
+      contentScopeVersion: 2,
+      kaUal,
+      assertionVersion: '1',
+      publicTripleCount: 4,
+      privateTripleCount: 9,
+      accessPolicy: 'ownerOnly',
+      allowedPeers: [],
+    });
+    expect((capturedPublishCollectParams[0] as { privateMerkleRoot: Uint8Array }).privateMerkleRoot)
+      .toBe(privateRoot);
   });
 
   it('passes ackSendTimeoutMs through publish and update ACK provider sendP2P closures', async () => {

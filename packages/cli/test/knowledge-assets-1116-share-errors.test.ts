@@ -3,7 +3,7 @@
  * share contract, driven over real HTTP against `handleKnowledgeAssetsRoutes`
  * with a MINIMAL fake agent (same proven pattern as
  * `promote-route-not-persisted.test.ts`). The ENGINE outcomes (fail-closed +
- * WM-preserved + subset-not-sealable) are pinned at the agent e2e level
+ * WM-preserved + legacy-read-only) are pinned at the agent e2e level
  * (`packages/agent/test/e2e-memory-layers.test.ts`, #1116 block); this pins the
  * ROUTE's catch branches so the HTTP surface can't silently drift:
  *
@@ -12,8 +12,8 @@
  *     `{ code, error, recovery }`. The live-daemon suite explicitly can NOT
  *     reach this (it always has a signing key + V10 chain), so it's covered
  *     here with a fake agent.
- *   - wm/finalize (layer:swm): a subset-shared asset throws
- *     `code:'SWM_SUBSET_NOT_SEALABLE'` → route 409 `{ code, error }`.
+ *   - wm/finalize (layer:swm): the route rejects the retired write bridge with
+ *     `code:'LEGACY_KA_READ_ONLY'` before invoking the engine.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -22,18 +22,21 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { generateEd25519Keypair, MAX_UINT72_DECIMAL, TypedEventBus } from '@origintrail-official/dkg-core';
+import {
+  generateEd25519Keypair,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MAX_UINT72_DECIMAL,
+} from '@origintrail-official/dkg-core';
 import {
   AsyncLiftJobConflictError,
-  DKGPublisher,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
+  storeKnowledgeAssetOperationPublicQuads,
   validateLiftPublishPayload,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, createTripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
@@ -43,6 +46,38 @@ import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
 const UINT72_OVERFLOW_DECIMAL = '4722366482869645213696';
+const ROOTLESS_AUTHOR = '0x1111111111111111111111111111111111111111';
+
+async function seedRootlessPublicSnapshot(
+  store: TripleStore,
+  input: { shareOperationId: string; subject: string; object: string; kaNumber?: bigint },
+): Promise<{ shareOperationId: string; kaUal: string; kaNumber: string; publicTripleCount: number }> {
+  const kaNumber = input.kaNumber ?? 7n;
+  const kaUal = `did:dkg:31337/${ROOTLESS_AUTHOR}/${kaNumber}`;
+  const quads = [{
+    subject: input.subject,
+    predicate: 'http://schema.org/name',
+    object: input.object,
+    graph: '',
+  }];
+  await storeKnowledgeAssetOperationPublicQuads({
+    store,
+    graphManager: new GraphManager(store),
+    contextGraphId: CG_ID,
+    shareOperationId: input.shareOperationId,
+    kaUal,
+    assertionVersion: '1',
+    quads,
+    publisherPeerId: 'peer-1',
+    accessPolicy: 'public',
+  });
+  return {
+    shareOperationId: input.shareOperationId,
+    kaUal,
+    kaNumber: kaNumber.toString(),
+    publicTripleCount: quads.length,
+  };
+}
 
 describe('#1116 share/seal route error mapping (fake agent)', () => {
   let server: Server | undefined;
@@ -179,7 +214,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           new Error('Cannot seal "seal-asset" for sharing to Shared Memory — the asset would be left unpublishable and Working Memory was NOT emptied. no local signing key'),
           {
             code: 'UNSEALED_SHARE_BLOCKED',
-            recovery: 'Resolve the signing capability, then retry; or pass skipSeal:true.',
+            recovery: 'Resolve the signing capability, then retry.',
           },
         );
       },
@@ -189,7 +224,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('UNSEALED_SHARE_BLOCKED');
     expect(String(res.body.error)).toContain('Working Memory was NOT emptied');
-    expect(String(res.body.recovery)).toContain('skipSeal');
+    expect(String(res.body.recovery)).toContain('retry');
   });
 
   it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {
@@ -212,31 +247,20 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.namedGraphs).toEqual(['urn:test:graph:one']);
   });
 
-  it('wm/finalize (layer:swm): forwards layer:"swm" to the engine AND maps SWM_SUBSET_NOT_SEALABLE → 409', async () => {
-    // Round 10 (reviewer 🟡): CAPTURE the finalize call args so we prove the route
-    // threaded `layer:"swm"` through resolveFinalizeOptions into
-    // agent.assertion.finalize — a fake that ignored its args would let a route
-    // that dropped `layer` (always finalizing WM) pass this test silently.
+  it('wm/finalize (layer:swm): rejects read-only before invoking the engine', async () => {
     const finalizeCalls: Array<{ contextGraphId: unknown; name: unknown; opts: any }> = [];
     await startWith({
       finalize: async (contextGraphId: unknown, name: unknown, opts: any) => {
         finalizeCalls.push({ contextGraphId, name, opts });
-        throw Object.assign(
-          new Error('Cannot seal-in-SWM: this asset was not fully shared to SWM — subset shares are not publishable. Share the full asset (entities:"all") first, then finalize(layer:"swm").'),
-          { code: 'SWM_SUBSET_NOT_SEALABLE' },
-        );
+        throw new Error('must not be called');
       },
     });
 
     const res = await post('wm/finalize', { contextGraphId: CG_ID, layer: 'swm' });
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('SWM_SUBSET_NOT_SEALABLE');
-    expect(String(res.body.error)).toContain('subset shares are not publishable');
-
-    // The route actually forwarded layer:"swm" (not dropped, not defaulted to WM).
-    expect(finalizeCalls.length).toBe(1);
-    expect(finalizeCalls[0]?.opts?.layer).toBe('swm');
-    expect(finalizeCalls[0]?.contextGraphId).toBe(CG_ID);
+    expect(res.body.code).toBe('LEGACY_KA_READ_ONLY');
+    expect(String(res.body.error)).toContain('read-only');
+    expect(finalizeCalls).toHaveLength(0);
   });
 
   it('wm/finalize: uses the token-canonical storage lane and author when body author differs only by case', async () => {
@@ -825,30 +849,25 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const keypair = await generateEd25519Keypair();
     await addPublisherWallet(dataDir, wallet.privateKey);
 
-    const writer = new DKGPublisher({
-      store,
-      chain: new NoChainAdapter(),
-      eventBus: new TypedEventBus(),
-      keypair,
-      publisherPrivateKey: wallet.privateKey,
+    const rootless = await seedRootlessPublicSnapshot(store, {
+      shareOperationId: 'share-runtime-rootless',
+      subject: 'urn:test:runtime-subject',
+      object: '"Runtime Rootless"',
     });
-    const share = await writer.share(CG_ID, [
-      {
-        subject: 'urn:test:runtime-root',
-        predicate: 'http://schema.org/name',
-        object: '"Runtime Root"',
-        graph: '',
-      },
-    ], { publisherPeerId: 'peer-1' });
 
     const intent = {
       contextGraphId: CG_ID,
       name: ASSERTION_NAME,
-      shareOperationId: share.shareOperationId,
-      roots: ['urn:test:runtime-root'],
+      shareOperationId: rootless.shareOperationId,
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: rootless.kaUal,
+      assertionVersion: '1',
+      publicTripleCount: rootless.publicTripleCount,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
-        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        authorAddress: ROOTLESS_AUTHOR as `0x${string}`,
         signature: {
           r: `0x${'34'.repeat(32)}` as `0x${string}`,
           vs: `0x${'56'.repeat(32)}` as `0x${string}`,
@@ -860,6 +879,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
       sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
       intentKey: `sha256:${'cd'.repeat(32)}`,
+      kaNumber: rootless.kaNumber,
+      reservedUal: rootless.kaUal,
     };
     const executorCalls: any[] = [];
     const preflighted: any[] = [];
@@ -894,7 +915,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       const res = await post('vm/publish-async', { contextGraphId: CG_ID });
       expect(res.status).toBe(202);
       expect(res.body.status).toBe('accepted');
-      expect(res.body.shareOperationId).toBe(share.shareOperationId);
+      expect(res.body.shareOperationId).toBe(rootless.shareOperationId);
       expect(preflighted).toEqual([intent]);
 
       const processed = await runtime.publisher.processNext(wallet.address);
@@ -904,8 +925,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(executorCalls[0].request).toMatchObject({
         contextGraphId: CG_ID,
         name: ASSERTION_NAME,
-        shareOperationId: share.shareOperationId,
-        roots: ['urn:test:runtime-root'],
+        shareOperationId: rootless.shareOperationId,
+        roots: [],
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: rootless.kaUal,
       });
       expect(typeof executorCalls[0].publisher.publish).toBe('function');
     } finally {
@@ -921,31 +944,26 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const keypair = await generateEd25519Keypair();
     await addPublisherWallet(dataDir, wallet.privateKey);
 
-    const writer = new DKGPublisher({
-      store,
-      chain: new NoChainAdapter(),
-      eventBus: new TypedEventBus(),
-      keypair,
-      publisherPrivateKey: wallet.privateKey,
+    const rootless = await seedRootlessPublicSnapshot(store, {
+      shareOperationId: 'share-auto-register-rootless',
+      subject: 'urn:test:auto-register-subject',
+      object: '"Auto Register Rootless"',
     });
-    const share = await writer.share(CG_ID, [
-      {
-        subject: 'urn:test:auto-register-root',
-        predicate: 'http://schema.org/name',
-        object: '"Auto Register Root"',
-        graph: '',
-      },
-    ], { publisherPeerId: 'peer-1' });
 
     const intent = {
       contextGraphId: CG_ID,
       name: ASSERTION_NAME,
       agentAddress: '0x00000000000000000000000000000000000000b2',
-      shareOperationId: share.shareOperationId,
-      roots: ['urn:test:auto-register-root'],
+      shareOperationId: rootless.shareOperationId,
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: rootless.kaUal,
+      assertionVersion: '1',
+      publicTripleCount: rootless.publicTripleCount,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
-        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        authorAddress: ROOTLESS_AUTHOR as `0x${string}`,
         signature: {
           r: `0x${'34'.repeat(32)}` as `0x${string}`,
           vs: `0x${'56'.repeat(32)}` as `0x${string}`,
@@ -957,6 +975,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
       sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
       intentKey: `sha256:${'ef'.repeat(32)}`,
+      kaNumber: rootless.kaNumber,
+      reservedUal: rootless.kaUal,
     };
     const calls: string[] = [];
     const publisherOverrides: unknown[] = [];
@@ -1033,30 +1053,25 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     }
   });
 
-  // #1116 (round 5, FIX 1): the seal-less SWM reconstruction is reachable via the
-  // wm/pull-from route + a plain finalize, which bypasses the finalize(layer:"swm")
-  // wrapper guard. The publisher now rejects a subset-only asset at the source with
-  // SWM_SUBSET_NOT_SEALABLE; the wm/pull-from route must map it to 409 (parity with
-  // the wm/finalize verb) so a partial asset can't be reconstructed under the KA name.
-  it('wm/pull-from: SWM_SUBSET_NOT_SEALABLE → 409 { code, error }', async () => {
+  it('wm/pull-from: UNSEALED_PULL_FROM_BLOCKED → 409 { code, error }', async () => {
     await startWith({
       pullFrom: async () => {
         throw Object.assign(
-          new Error('"seal-asset" in context graph "issue-1116-cg" was only shared to SWM as a SUBSET — reconstructing or sealing it would publish a partial asset under the KA name. Share the full asset (entities:"all") before sealing in SWM.'),
-          { code: 'SWM_SUBSET_NOT_SEALABLE' },
+          new Error('Cannot pull an unsealed Knowledge Asset into WM'),
+          { code: 'UNSEALED_PULL_FROM_BLOCKED' },
         );
       },
     });
 
     const res = await post('wm/pull-from', { contextGraphId: CG_ID, layer: 'swm' });
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('SWM_SUBSET_NOT_SEALABLE');
-    expect(String(res.body.error)).toContain('only shared to SWM as a SUBSET');
+    expect(res.body.code).toBe('UNSEALED_PULL_FROM_BLOCKED');
+    expect(String(res.body.error)).toContain('unsealed Knowledge Asset');
   });
 
   it('wm/pull-from: an unrelated pull error still propagates (not silently 409ed)', async () => {
-    // Guard: the new 409 branch must only catch SWM_SUBSET_NOT_SEALABLE /
-    // WM_DRAFT_CONFLICT. Any other error rethrows to the outer handler (→ 500).
+    // Guard: only the explicit lifecycle conflict codes map to 409. Any other
+    // error rethrows to the outer handler (→ 500).
     await startWith({
       pullFrom: async () => {
         throw new Error('some unrelated pull failure');
@@ -1086,14 +1101,14 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(String(res.body.error)).toContain('skipSeal');
     });
 
-    it('rejects a truthy boolean skipSeal with 400 (not supported for async)', async () => {
+    it('rejects a truthy boolean skipSeal with 400', async () => {
       daemonState.promoteWorkerAvailable = true;
       await startWith({
         promoteAsync: async () => ({ jobId: 'should-not-reach' }),
       });
       const res = await post('swm/share-async', { contextGraphId: CG_ID, skipSeal: true });
       expect(res.status).toBe(400);
-      expect(String(res.body.error)).toContain('not supported for async');
+      expect(String(res.body.error)).toContain('not supported');
     });
 
     it('accepts skipSeal:false (the seal-always default) and enqueues', async () => {

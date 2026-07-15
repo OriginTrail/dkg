@@ -111,36 +111,27 @@ import { buildMemoryTools } from './tools/memory-tools.js';
 // canonical fixture at `tests/fixtures/share-seal-warnings.json`. Update the
 // fixture + all three adapters together; the parity tests flag any mismatch.
 
-// publishReady:false after a FULL share that opted out of sealing (skip_seal:true)
-// — a later finalize(layer:swm) DOES seal it.
+// Defensive mixed-version warning for a non-ready atomic share.
 export const SHARE_NOT_PUBLISH_READY_WARNING =
-  'Shared to SWM but NOT publish-ready (sealed:false). Seal it with ' +
-  'dkg_knowledge_asset_finalize (layer:swm works after sharing), then publish.';
+  'The atomic SWM share did not become publish-ready (sealed:false). Keep the ' +
+  'Working Memory draft and retry the complete Knowledge Asset share; do not publish it.';
 
-// A SUBSET share is publishReady:false too, but unlike a skip_seal full share it
-// is NOT sealable — finalize(layer:swm) now REJECTS it with SWM_SUBSET_NOT_SEALABLE.
-// Surface the real recovery (full share / new asset) instead of "seal it".
+// Defensive mixed-version classification for a legacy partial-share outcome.
 export const SHARE_SUBSET_NOT_PUBLISH_READY_WARNING =
-  'Shared a SUBSET to SWM for peer visibility. A subset is NOT sealable/' +
-  'publishable (finalize layer:swm will reject it). To publish on-chain, share ' +
-  'the full asset (entities:"all"), or model this subset as its own knowledge asset.';
+  'A legacy partial-share outcome was reported. Root-scoped subsets are read-only ' +
+  'and not publishable; model the intended data as its own Knowledge Asset and share it atomically.';
 
-// A FULL share can come back sealed:true but publishReady:false when NOT every
-// sealed root reached SWM (promotedAllRoots false — e.g. foreign-owned roots were
-// skipped). The engine did NOT set the swmShareComplete marker, so finalize(layer:
-// swm) would REJECT — do NOT recommend it here. Re-sharing the full asset recovers.
+// A sealed atomic share can still report incomplete delivery; retry from WM.
 export const SHARE_INCOMPLETE_PROMOTE_WARNING =
-  'Sealed, but not all roots reached SWM (some roots may be owned by other ' +
-  'agents) — not yet publishable; re-share the full asset so every sealed root ' +
-  'is in SWM.';
+  'The complete sealed Knowledge Asset did not reach SWM and is not publish-ready; ' +
+  'keep the Working Memory draft and retry the atomic share.';
 
 /**
  * #1116: pick the not-publish-ready share warning from the share outcome. Returns
  * `undefined` when the share IS publish-ready (no warning). Precedence:
- *  1. sealed:true + publishReady:false → incomplete full promote (marker NOT set;
- *     finalize layer:swm would reject) → re-share the full asset.
- *  2. sealed:false + SUBSET → not sealable.
- *  3. sealed:false + FULL (skip_seal) → sealable later (finalize layer:swm works).
+ *  1. sealed:true + publishReady:false → incomplete atomic delivery.
+ *  2. sealed:false + legacy subset response → legacy read-only warning.
+ *  3. sealed:false + atomic response → retry the complete share from WM.
  * Duplicated byte-identical on MCP (TS) + Hermes (Python).
  */
 export function classifyShareWarning(outcome: {
@@ -3593,6 +3584,12 @@ export class DkgNodePlugin {
       const name = String(args.name ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
+      if (args.layer === 'swm') {
+        return this.error('Legacy root-scoped Knowledge Assets are read-only.');
+      }
+      if (args.layer !== undefined && args.layer !== 'wm') {
+        return this.error('Only Working Memory finalization is supported.');
+      }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
       const authorAgentAddress = args.author_agent_address ? String(args.author_agent_address) : undefined;
       // CONTRACT §C: present-but-invalid is a tool error, never silent-default.
@@ -3605,20 +3602,6 @@ export class DkgNodePlugin {
         }
         schemeVersion = raw;
       }
-      // #1116: optional `layer` selects WHERE the content to seal lives. Default
-      // (omitted) seals the open WM draft; "swm" seals an asset already shared to
-      // SWM. Present-but-invalid is a tool error, never a silent default. Check
-      // `typeof === 'string'` BEFORE trimming/enum-checking — `String(args.layer)`
-      // would coerce a non-string like ['swm'] to "swm" and FORWARD it (parity
-      // with the Hermes direct-validation fix; not a String() coercion bypass).
-      let layer: 'wm' | 'swm' | undefined;
-      if (args.layer !== undefined) {
-        const raw = typeof args.layer === 'string' ? args.layer.trim() : args.layer;
-        if (raw !== 'wm' && raw !== 'swm') {
-          return this.error('"layer" must be "wm" or "swm".');
-        }
-        layer = raw;
-      }
       // Seal the WHOLE WM draft (CONTRACT §1 Stage3 — there is no subset scope on
       // finalize). The author defaults to the request token's agent when
       // `author_agent_address` is omitted; pre-signed attestations are not surfaced
@@ -3627,7 +3610,6 @@ export class DkgNodePlugin {
         subGraphName,
         authorAgentAddress,
         schemeVersion,
-        layer,
       });
       return this.json(result);
     } catch (err: any) {
@@ -3641,51 +3623,25 @@ export class DkgNodePlugin {
       const name = String(args.name ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
+      if (Array.isArray(args.entities)) {
+        return this.error('Knowledge Assets are shared atomically; root-entity selection is not supported.');
+      }
+      if (args.entities !== undefined && args.entities !== 'all') {
+        return this.error('"entities" is retired; omit it to share the complete Knowledge Asset.');
+      }
+      if (args.skip_seal === true) {
+        return this.error('Knowledge Assets are always sealed before sharing.');
+      }
+      if (args.skip_seal !== undefined && args.skip_seal !== false) {
+        return this.error('"skip_seal" must be a boolean when supplied.');
+      }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      // CONTRACT §B: `entities` accepts "all" | string[] | omitted. Omitted ⇒
-      // undefined (daemon defaults to a full share); the "all" string sentinel is
-      // passed through unchanged (the daemon reads parsed.entities and treats
-      // "all" as a full share). A non-empty string[] passes through as the subset.
-      // An empty array is rejected client-side (the daemon REST 400s "all"→[] /
-      // empty selections) — fail fast with a clear message, never coerce.
-      let entities: string[] | 'all' | undefined;
-      const raw = args.entities;
-      if (raw === undefined || raw === null) {
-        entities = undefined;
-      } else if (raw === 'all') {
-        entities = 'all';
-      } else if (Array.isArray(raw) && raw.length > 0 && raw.every((e) => typeof e === 'string')) {
-        // FIX K: trim each root-entity URI before forwarding — a whitespace-padded
-        // entity (" urn:a ") would otherwise reach the daemon with the spaces and
-        // resolve to the wrong (or no) root. Parity with Hermes.
-        entities = raw.map((e) => String(e).trim());
-      } else {
-        return this.error('"entities" must be omitted, the string "all", or a non-empty array of root entity URIs.');
-      }
-      // #1116: a full share SEALS BY DEFAULT; `skip_seal:true` shares unsealed.
-      // Present-but-invalid is a tool error, never a silent default.
-      let skipSeal: boolean | undefined;
-      if (args.skip_seal !== undefined) {
-        if (typeof args.skip_seal !== 'boolean') {
-          return this.error('"skip_seal" must be a boolean.');
-        }
-        skipSeal = args.skip_seal;
-      }
-      // WM → SWM. The KA `swm/share` route is the same engine call
-      // (`agent.assertion.promote`) the legacy promote used.
       const result = await this.client.knowledgeAssetShare(contextGraphId, name, {
-        entities,
         subGraphName,
-        skipSeal,
       });
-      // #1116: surface the seal outcome. `sealed`/`publishReady` flow through the
-      // JSON; ALSO add the explicit warning when the share is NOT publish-ready.
-      // classifyShareWarning picks the right of the three warnings from
-      // {sealed, publishReady, isSubset}. A subset is a non-empty specific array
-      // (an empty array was rejected above; "all"/undefined is a full share).
       const seal = result as { publishReady?: boolean; sealed?: boolean };
       const warning = result
-        ? classifyShareWarning({ sealed: seal.sealed, publishReady: seal.publishReady, isSubset: Array.isArray(entities) })
+        ? classifyShareWarning({ sealed: seal.sealed, publishReady: seal.publishReady, isSubset: false })
         : undefined;
       if (warning) {
         return this.json({ ...result, warning });

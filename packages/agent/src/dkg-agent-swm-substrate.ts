@@ -115,8 +115,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -221,7 +220,6 @@ import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-bu
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
-import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -355,9 +353,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -455,9 +450,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
     const finalizationTopic = contextGraphFinalizationTopic(contextGraphId);
     this.gossip.subscribe(finalizationTopic);
-    this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
+    this.gossip.onMessage(finalizationTopic, async (_topic, data, from) => {
       const fh = this.getOrCreateFinalizationHandler();
-      await fh.handleFinalizationMessage(data, contextGraphId);
+      await fh.handleFinalizationMessage(data, contextGraphId, from);
     });
   }
 
@@ -940,8 +935,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         workspaceRecipientPrivateKeys: () => this.getLocalWorkspaceRecipientPrivateKeys(),
         workspaceSenderKeyDecryptor: (message: SwmSenderKeyMessageMsg, contextGraphId: string, ctx: OperationContext) =>
           this.decryptWorkspacePayloadWithSenderKey(message, contextGraphId, ctx),
-        assetUalForKaIdentity: ({ agentAddress, kaNumber }) =>
-          resolveAssetUalFromKaIdentity(this.chain, { agentAddress, kaNumber }),
         lifecycleLogOptions: {
           localPeerId: () => this.peerId,
           localNodeIdentityId: () => this.identityId.toString(),

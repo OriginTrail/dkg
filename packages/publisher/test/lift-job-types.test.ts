@@ -30,6 +30,8 @@ import {
   normalizePersistedLiftJobRequest,
 } from '../src/async-lift-publisher-utils.js';
 
+const ROOTLESS_UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
+
 function rawJobRequest(request: RawLiftRequest): RawLiftJobRequest {
   return { jobType: 'lift', lift: request };
 }
@@ -68,7 +70,12 @@ function kaVmPublish(
     contextGraphId: 'music-social',
     name: 'albums',
     shareOperationId: 'op-1',
-    roots: ['urn:local:/rihana'],
+    roots: [],
+    contentScopeVersion: 2,
+    kaUal: ROOTLESS_UAL,
+    assertionVersion: '1',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
     seal: seal(),
     sealChainId: '31337',
     sealKav10Address: '0x2222222222222222222222222222222222222222',
@@ -168,7 +175,11 @@ describe('LiftJob request and record types', () => {
   });
 
   it('models KA VM publish snapshot validation without raw-lift placeholder fields', () => {
-    const request = kaVmPublish();
+    const request = kaVmPublish({
+      accessPolicy: 'allowList',
+      allowedPeers: ['peer-a', 'peer-b'],
+      entityProofs: true,
+    });
 
     const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request);
     const metadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
@@ -178,7 +189,15 @@ describe('LiftJob request and record types', () => {
     expect(snapshot).toMatchObject({
       contextGraphId: 'music-social',
       shareOperationId: 'op-1',
-      roots: ['urn:local:/rihana'],
+      roots: [],
+      contentScopeVersion: 2,
+      kaUal: ROOTLESS_UAL,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'allowList',
+      allowedPeers: ['peer-a', 'peer-b'],
+      entityProofs: true,
       seal: request.seal,
     });
     for (const rawOnlyField of ['jobType', 'swmId', 'namespace', 'scope', 'transitionType', 'authority']) {

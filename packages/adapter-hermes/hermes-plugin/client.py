@@ -533,20 +533,20 @@ class DKGClient:
                           entities: Optional[Any] = None,
                           sub_graph_name: Optional[str] = None,
                           skip_seal: Optional[bool] = None) -> Dict[str, Any]:
-        """POST /api/knowledge-assets/{name}/swm/share — promote assertion to SWM.
-
-        A full share SEALS BY DEFAULT (publish-ready). ``skip_seal=True`` opts
-        out into an unsealed SWM share (camelCase ``skipSeal`` on the wire).
-        """
+        """Atomically seal and share a complete Knowledge Asset to SWM."""
+        if isinstance(entities, list):
+            raise ValueError("Knowledge Assets are shared atomically; root-entity selection is not supported")
+        if entities is not None and entities != "all":
+            raise ValueError("Knowledge Assets are shared atomically; omit entities to share the complete asset")
+        if skip_seal is True:
+            raise ValueError("Knowledge Assets are always sealed before sharing")
+        if skip_seal is not None and skip_seal is not False:
+            raise TypeError("skip_seal must be false or omitted")
         payload: Dict[str, Any] = {
             "contextGraphId": _normalize_context_graph_id(context_graph_id),
         }
-        if entities is not None:
-            payload["entities"] = entities
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
-        if skip_seal is not None:
-            payload["skipSeal"] = skip_seal
         return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/swm/share", payload)
 
     def finalize_assertion(self, assertion_name: str, context_graph_id: str,
@@ -562,10 +562,13 @@ class DKGClient:
         omit it to let the daemon default the author to the request token's
         agent. The pre-signed attestation path is intentionally NOT exposed —
         Hermes relies on node-side signing, exactly like OpenClaw/MCP (no
-        client-side EIP-712, no raw preSignedAuthorAttestation). ``layer``
-        selects WHERE the content to seal lives: "wm" (default) seals the open
-        WM draft; "swm" seals an asset already shared to SWM.
+        client-side EIP-712, no raw preSignedAuthorAttestation). Existing
+        root-scoped SWM assets are read-only.
         """
+        if layer == "swm":
+            raise ValueError("Legacy root-scoped Knowledge Assets are read-only")
+        if layer is not None and layer != "wm":
+            raise ValueError("Only Working Memory finalization is supported")
         payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
@@ -573,7 +576,7 @@ class DKGClient:
             payload["authorAgentAddress"] = author_agent_address
         if scheme_version is not None:
             payload["schemeVersion"] = scheme_version
-        if layer is not None:
+        if layer == "wm":
             payload["layer"] = layer
         return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/wm/finalize", payload)
 

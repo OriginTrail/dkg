@@ -7,6 +7,7 @@ import {
   encodeChangelogResponse, decodeChangelogRequest, decodeChangelogResponse,
   type ChangelogDeltaRecord, type ChangelogSyncRequest, type ChangelogSyncResponse,
 } from '../src/sync/changelog/wire.js';
+import { classifyDurableMetaGraph } from '../src/sync/durable-integrity.js';
 
 const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: 'p', object: `o${n}`, graph });
 
@@ -15,27 +16,49 @@ const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: '
 /**
  * Build records + the verify maps planPageApply consumes. Each spec is a graph with `count`
  * parsed quads of which `verified` survived; a meta graph is added to metaGraphsWithRoot
- * unless `noRoot` (a rootless meta cannot bind data).
+ * unless `noRoot` (a rootless meta cannot bind data), and to integrityMetaGraphs unless
+ * explicitly marked as plain configuration.
  */
-function buildPage(specs: Array<{ seq: number; graph: string; op?: 'upsert' | 'drop'; count?: number; verified?: number; noRoot?: boolean }>) {
+function buildPage(specs: Array<{
+  seq: number;
+  graph: string;
+  op?: 'upsert' | 'drop';
+  count?: number;
+  verified?: number;
+  noRoot?: boolean;
+  noIntegrity?: boolean;
+  parsedQuads?: Quad[];
+}>) {
   const records: ChangelogDeltaRecord[] = [];
   const verifiedByGraph = new Map<string, Quad[]>();
   const recordQuadCountByGraph = new Map<string, number>();
   const metaGraphsWithRoot = new Set<string>();
+  const integrityMetaGraphs = new Set<string>();
   for (const s of specs) {
     const op = s.op ?? 'upsert';
     if (op === 'drop') { records.push({ seq: s.seq, graph: s.graph, op }); continue; }
-    const count = s.count ?? 1;
+    const parsedQuads = s.parsedQuads;
+    const count = s.count ?? parsedQuads?.length ?? 1;
     const verified = s.verified ?? count;
     records.push({ seq: s.seq, graph: s.graph, op, quads: `nq:${s.graph}` });
     recordQuadCountByGraph.set(s.graph, count);
-    verifiedByGraph.set(s.graph, Array.from({ length: verified }, (_, i) => qd(s.graph, i)));
-    if (s.graph.endsWith('/_meta') && !s.noRoot) metaGraphsWithRoot.add(s.graph);
+    const recordQuads = parsedQuads ?? Array.from({ length: count }, (_, i) => qd(s.graph, i));
+    verifiedByGraph.set(s.graph, recordQuads.slice(0, verified));
+    if (s.graph.endsWith('/_meta')) {
+      if (parsedQuads) {
+        const classification = classifyDurableMetaGraph(parsedQuads);
+        if (classification.hasMerkleRoot) metaGraphsWithRoot.add(s.graph);
+        if (classification.hasIntegrityEnvelope) integrityMetaGraphs.add(s.graph);
+      } else {
+        if (!s.noRoot) metaGraphsWithRoot.add(s.graph);
+        if (!s.noIntegrity) integrityMetaGraphs.add(s.graph);
+      }
+    }
   }
-  return { records, verifiedByGraph, recordQuadCountByGraph, metaGraphsWithRoot };
+  return { records, verifiedByGraph, recordQuadCountByGraph, metaGraphsWithRoot, integrityMetaGraphs };
 }
 
-const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; priorSeq?: number; isForeign?: (g: string) => boolean; batchClean?: boolean }) =>
+const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; priorSeq?: number; isForeign?: (g: string) => boolean; batchClean?: boolean; merkleBoundDataGraphs?: Set<string> }) =>
   planPageApply({
     records: page.records,
     nextSeq: extra.nextSeq,
@@ -44,6 +67,8 @@ const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; prio
     verifiedByGraph: page.verifiedByGraph,
     recordQuadCountByGraph: page.recordQuadCountByGraph,
     metaGraphsWithRoot: page.metaGraphsWithRoot,
+    integrityMetaGraphs: page.integrityMetaGraphs,
+    merkleBoundDataGraphs: extra.merkleBoundDataGraphs ?? new Set(),
     batchVerifiedCleanly: extra.batchClean ?? true,
   });
 
@@ -78,6 +103,94 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.deferred).toBe(true);
     expect(p.ops).toHaveLength(0);
     expect(p.advanceTo).toBe(1);
+  });
+
+  it('does not replace a merkle-bearing meta graph with a rejected partial subset', () => {
+    const page = buildPage([
+      { seq: 2, graph: META, count: 4, verified: 3 },
+      { seq: 3, graph: DATA, count: 3 },
+    ]);
+    const p = plan(page, { nextSeq: 3, priorSeq: 1, batchClean: false });
+    expect(p.deferred).toBe(true);
+    expect(p.ops).toEqual([]);
+    expect(p.advanceTo).toBe(1);
+  });
+
+  it('does not acknowledge rejected V2 metadata when its merkle root is missing', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const subject = 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7';
+    const page = buildPage([
+      {
+        seq: 7,
+        graph: topMeta,
+        verified: 0,
+        parsedQuads: [{
+          subject,
+          predicate: 'http://dkg.io/ontology/contentScopeVersion',
+          object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: topMeta,
+        }],
+      },
+    ]);
+    const p = plan(page, { nextSeq: 7, priorSeq: 6, batchClean: false });
+    expect(p.deferred).toBe(true);
+    expect(p.ops).toEqual([]);
+    expect(p.advanceTo).toBe(6);
+  });
+
+  it('classifies ordinary CG metadata as non-integrity configuration', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const page = buildPage([{
+      seq: 7,
+      graph: topMeta,
+      parsedQuads: [{
+        subject: 'did:dkg:context-graph:cg',
+        predicate: 'http://schema.org/name',
+        object: '"Context graph"',
+        graph: topMeta,
+      }],
+    }]);
+    const p = plan(page, { nextSeq: 7, priorSeq: 6 });
+    expect(p.deferred).toBe(false);
+    expect(p.ops.map((op) => op.graph)).toEqual([topMeta]);
+    expect(p.advanceTo).toBe(7);
+  });
+
+  it('classifies lifecycle scope fields as non-integrity metadata', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const lifecycle = 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7/assertion/1';
+    const classification = classifyDurableMetaGraph([
+      {
+        subject: lifecycle,
+        predicate: 'http://dkg.io/ontology/contentScopeVersion',
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: topMeta,
+      },
+      {
+        subject: lifecycle,
+        predicate: 'http://dkg.io/ontology/assertionGraph',
+        object: 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/7',
+        graph: topMeta,
+      },
+    ]);
+
+    expect(classification).toEqual({ hasMerkleRoot: false, hasIntegrityEnvelope: false });
+  });
+
+  it('accepts a rootless exact graph bound by verified top-level V2 metadata', () => {
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/7';
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const page = buildPage([
+      { seq: 2, graph, count: 3 },
+      { seq: 3, graph: topMeta, count: 9 },
+    ]);
+    const p = plan(page, {
+      nextSeq: 3,
+      merkleBoundDataGraphs: new Set([graph]),
+    });
+    expect(p.deferred).toBe(false);
+    expect(p.ops.map((op) => op.graph)).toEqual([graph, topMeta]);
+    expect(p.advanceTo).toBe(3);
   });
 
   it('DEFERS when the sibling meta carries no merkle root (rootless meta cannot bind data)', () => {

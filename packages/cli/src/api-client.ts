@@ -108,11 +108,13 @@ export interface KnowledgeAssetShareResponse {
 
 export interface KnowledgeAssetShareTargetOptions {
   subGraphName?: string;
+  /** @deprecated New Knowledge Assets are atomic. Only `"all"` is accepted. */
   entities?: string[] | 'all';
 }
 
 export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOptions {
   awaitCuratorAck?: boolean;
+  /** @deprecated `true` is rejected; graph-scoped KAs are always seal-before-share. */
   skipSeal?: boolean;
 }
 
@@ -143,7 +145,11 @@ export interface KnowledgeAssetPublishAsyncResponse {
   name: string;
   subGraphName?: string;
   shareOperationId?: string;
-  rootsCount?: number;
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateTripleCount?: number;
   sealMerkleRoot?: string;
   intentKey?: string;
 }
@@ -213,11 +219,20 @@ function hasOwnKey<K extends PropertyKey>(value: unknown, key: K): value is Reco
 }
 
 function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptions | undefined): void {
+  assertAtomicKnowledgeAssetShare(options);
   if (hasOwnKey(options, 'skipSeal') && options.skipSeal !== undefined) {
-    throw new Error('skipSeal is not supported for async share; use knowledgeAssetShare() for unsealed synchronous shares');
+    throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
   }
   if (hasOwnKey(options, 'awaitCuratorAck') && options.awaitCuratorAck !== undefined) {
     throw new Error('awaitCuratorAck is not supported for async share; use knowledgeAssetShare() when curator acknowledgement must block');
+  }
+}
+
+function assertAtomicKnowledgeAssetShare(options: KnowledgeAssetShareTargetOptions | undefined): void {
+  if (Array.isArray(options?.entities)) {
+    throw new Error(
+      'entities selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+    );
   }
 }
 
@@ -692,6 +707,7 @@ export class ApiClient {
     name: string,
     options?: {
       subGraphName?: string;
+      /** @deprecated Only WM finalization is supported. `swm` fails read-only. */
       layer?: 'wm' | 'swm';
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
@@ -702,7 +718,15 @@ export class ApiClient {
     // self-sign vs external-signer conflict client-side instead of relying on
     // the daemon, so every SDK surface enforces the same contract.
     assertExclusiveAuthorFields(options ?? {});
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...(options ?? {}) });
+    if (options?.layer === 'swm') {
+      throw Object.assign(
+        new Error('Legacy root-scoped Knowledge Assets are read-only'),
+        { code: 'LEGACY_KA_READ_ONLY' },
+      );
+    }
+    const wireOptions = { ...(options ?? {}) };
+    delete wireOptions.layer;
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...wireOptions });
   }
 
   /** Discard the WM draft. */
@@ -726,6 +750,10 @@ export class ApiClient {
     name: string,
     options?: KnowledgeAssetShareOptions,
   ): Promise<KnowledgeAssetShareResponse> {
+    assertAtomicKnowledgeAssetShare(options);
+    if (options?.skipSeal === true) {
+      throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
+    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
   }
 

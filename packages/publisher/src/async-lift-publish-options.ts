@@ -179,6 +179,9 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
   const publisherNodeIdentityIdOverride = input.request.publisherNodeIdentityIdOverride !== undefined
     ? BigInt(input.request.publisherNodeIdentityIdOverride)
     : undefined;
+  const privateMerkleRoot = input.request.privateMerkleRoot !== undefined
+    ? decodeSealField('privateMerkleRoot', input.request.privateMerkleRoot, 32)
+    : undefined;
 
   return {
     contextGraphId: input.request.contextGraphId,
@@ -195,6 +198,12 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     onPhase: input.resolved.onPhase,
     receiverSignatureProvider: input.resolved.receiverSignatureProvider,
     publishContextGraphId: input.resolved.publishContextGraphId,
+    contentScopeVersion: input.request.contentScopeVersion,
+    kaUal: input.request.kaUal,
+    assertionVersion: input.request.assertionVersion,
+    publicTripleCount: input.request.publicTripleCount,
+    privateMerkleRoot,
+    privateTripleCount: input.request.privateTripleCount,
     encryptInlinePayload,
     encryptInlineChunked,
     ...(publishEpochs !== undefined

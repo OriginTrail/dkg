@@ -117,8 +117,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -366,9 +365,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -474,6 +470,13 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => markProjectionDirty?.(),
       );
     },
+    replaceGraph: innerStore.replaceGraph
+      ? (graphUri, quads, options) => invalidateAfterMutation(
+          () => innerStore.replaceGraph!(graphUri, quads, options),
+          () => true,
+          () => markProjectionDirty?.(),
+        )
+      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },

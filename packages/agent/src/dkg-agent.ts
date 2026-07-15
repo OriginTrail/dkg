@@ -11,6 +11,9 @@ import {
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
@@ -83,6 +86,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   ENTITY_PRED_ALT,
+  LegacyKnowledgeAssetReadOnlyError,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -94,7 +98,6 @@ import {
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
-  generatedPrivateCatalogTripleKeys,
   resolveLiftWorkspaceSlice,
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
@@ -112,10 +115,9 @@ import {
   deriveStatus, type KaStatus,
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
   KA_ID_PRED, RESERVED_UAL_PRED,
-  type CollectedACK, type V10CoreNodeACK, type V10ACKProviderParams, type LiftAuthorityProof, type LiftTransitionType,
+  type CollectedACK, type V10CoreNodeACK, type V10ACKProviderParams,
   type ACKCollectorDeps,
   type ACKTransportFactory,
-  type LiftRequest, type LiftRequestAuthorSeal,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -363,9 +365,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -411,7 +410,6 @@ import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,
 } from './dkg-agent-publish.js';
-import { placeFinalizedLifecycleSwm } from './finalized-lifecycle-swm.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';
@@ -1983,10 +1981,15 @@ export class DKGAgent extends DKGAgentBase {
           `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
         );
       }
-      if (!Number.isInteger(params.merkleLeafCount) || params.merkleLeafCount < 1) {
+      const allowsEmptyPublicTree = params.ackMode.kind === 'curated-catalog';
+      if (
+        !Number.isInteger(params.merkleLeafCount)
+        || params.merkleLeafCount < 0
+        || (params.merkleLeafCount === 0 && !allowsEmptyPublicTree)
+      ) {
         throw new Error(
-          `V10 ACK collection requires a positive integer merkleLeafCount; got ${params.merkleLeafCount}. ` +
-          'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
+          `V10 ACK collection requires a positive integer merkleLeafCount for public KAs ` +
+          `(zero is valid only for curated-catalog ACKs); got ${params.merkleLeafCount}.`,
         );
       }
 
@@ -2048,6 +2051,14 @@ export class DKGAgent extends DKGAgentBase {
         subGraphName: params.subGraphName,
         merkleLeafCount: params.merkleLeafCount,
         assetUal: params.assetUal,
+        contentScopeVersion: params.contentScopeVersion,
+        kaUal: params.kaUal,
+        assertionVersion: params.assertionVersion,
+        publicTripleCount: params.publicTripleCount,
+        privateMerkleRoot: params.privateMerkleRoot,
+        privateTripleCount: params.privateTripleCount,
+        accessPolicy: params.accessPolicy,
+        allowedPeers: params.allowedPeers,
         ackMode: params.ackMode,
       });
       return result.acks;
@@ -2125,6 +2136,12 @@ export class DKGAgent extends DKGAgentBase {
       stagingQuads?: Uint8Array;
       swmGraphId?: string;
       subGraphName?: string;
+      contentScopeVersion?: number;
+      kaUal?: string;
+      assertionVersion?: string;
+      publicTripleCount?: number;
+      privateMerkleRoot?: Uint8Array;
+      privateTripleCount?: number;
     }): Promise<V10CoreNodeACK[]> => {
       // The TARGET cgId for the digest is the on-chain numeric id the
       // adapter resolved (`params.contextGraphId`). Reject non-numeric /
@@ -2143,9 +2160,15 @@ export class DKGAgent extends DKGAgentBase {
           `V10 UPDATE ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}.`,
         );
       }
-      if (!Number.isInteger(params.newMerkleLeafCount) || params.newMerkleLeafCount < 1) {
+      const allowsEmptyPublicTree = params.isEncryptedPayload === true;
+      if (
+        !Number.isInteger(params.newMerkleLeafCount)
+        || params.newMerkleLeafCount < 0
+        || (params.newMerkleLeafCount === 0 && !allowsEmptyPublicTree)
+      ) {
         throw new Error(
-          `V10 UPDATE ACK collection requires a positive integer newMerkleLeafCount; got ${params.newMerkleLeafCount}.`,
+          `V10 UPDATE ACK collection requires a positive integer newMerkleLeafCount for public KAs ` +
+          `(zero is valid only for curated encrypted updates); got ${params.newMerkleLeafCount}.`,
         );
       }
 
@@ -2198,31 +2221,66 @@ export class DKGAgent extends DKGAgentBase {
         // OT-RFC-49 / WS-D — stamp `UpdateIntent.isEncryptedPayload` for a
         // curated update so cores rebuild/verify/persist the inline catalog.
         isEncryptedPayload: params.isEncryptedPayload,
+        contentScopeVersion: params.contentScopeVersion,
+        kaUal: params.kaUal,
+        assertionVersion: params.assertionVersion,
+        publicTripleCount: params.publicTripleCount,
+        privateMerkleRoot: params.privateMerkleRoot,
+        privateTripleCount: params.privateTripleCount,
       });
       return result.acks;
     };
   }
 
-  async broadcastPublish(contextGraphId: string, result: PublishResult, ctx: OperationContext): Promise<void> {
+  async broadcastPublish(
+    contextGraphId: string,
+    result: PublishResult,
+    ctx: OperationContext,
+    policy?: {
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      allowedPeers?: string[];
+    },
+  ): Promise<void> {
     // Use the public quads from the publish result to avoid leaking private
     // triples that are stored in the same data graph.
     const publicQuads = result.publicQuads ?? [];
+    const isGraphScoped = result.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
+    const graphScope = isGraphScoped
+      ? createGraphKnowledgeAssetScope(result.ual, result.assertionVersion ?? '')
+      : undefined;
+    const exactGraph = graphScope
+      ? knowledgeAssetLayerGraphUri(
+          contextGraphId,
+          MemoryLayer.VerifiableMemory,
+          graphScope,
+          result.subGraphName,
+        )
+      : undefined;
     const ntriples = publicQuads.map(q => {
       const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-      return `<${q.subject}> <${q.predicate}> ${obj} .`;
+      return exactGraph
+        ? `<${q.subject}> <${q.predicate}> ${obj} <${exactGraph}> .`
+        : `<${q.subject}> <${q.predicate}> ${obj} .`;
     }).join('\n');
+
+    const accessPolicy = result.accessPolicy
+      ?? policy?.accessPolicy
+      ?? ((result.privateTripleCount ?? 0) > 0 ? 'ownerOnly' : 'public');
+    const allowedPeers = result.allowedPeers ?? policy?.allowedPeers ?? [];
 
     const onChain = result.onChainResult;
     const msg = encodePublishRequest({
       ual: result.ual,
       nquads: new TextEncoder().encode(ntriples),
       contextGraphId: contextGraphId,
-      kas: result.kaManifest.map(ka => ({
-        tokenId: ka.tokenId,
-        rootEntity: ka.rootEntity,
-        privateMerkleRoot: ka.privateMerkleRoot ?? new Uint8Array(0),
-        privateTripleCount: ka.privateTripleCount ?? 0,
-      })),
+      kas: isGraphScoped
+        ? []
+        : result.kaManifest.map(ka => ({
+            tokenId: ka.tokenId,
+            rootEntity: ka.rootEntity,
+            privateMerkleRoot: ka.privateMerkleRoot ?? new Uint8Array(0),
+            privateTripleCount: ka.privateTripleCount ?? 0,
+          })),
       publisherIdentity: this.wallet.keypair.publicKey,
       publisherAddress: onChain?.publisherAddress ?? '',
       startKAId: onChain?.startKAId ?? 0n,
@@ -2234,6 +2292,19 @@ export class DKGAgent extends DKGAgentBase {
       blockNumber: onChain?.blockNumber ?? 0,
       operationId: ctx.operationId,
       subGraphName: result.subGraphName,
+      ...(graphScope
+        ? {
+            contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+            assertionVersion: graphScope.assertionVersion,
+            publicTripleCount: result.publicTripleCount ?? 0,
+            ...(result.privateMerkleRoot
+              ? { privateMerkleRoot: result.privateMerkleRoot }
+              : {}),
+            privateTripleCount: result.privateTripleCount ?? 0,
+            accessPolicy,
+            allowedPeers,
+          }
+        : {}),
     });
 
     const topic = contextGraphPublishTopic(contextGraphId);
@@ -2287,30 +2358,62 @@ export class DKGAgent extends DKGAgentBase {
         opts?: { subGraphName?: string; agentAddress?: string },
       ): Promise<void> {
         const writeAgentAddress = opts?.agentAddress ?? agentAddress;
-        let quads: import('@origintrail-official/dkg-storage').Quad[];
+        let publicQuads: import('@origintrail-official/dkg-storage').Quad[] = [];
+        let privateQuads: import('@origintrail-official/dkg-storage').Quad[] = [];
         if (Array.isArray(input) && input.length > 0 && 'graph' in input[0]) {
-          quads = input as import('@origintrail-official/dkg-storage').Quad[];
+          publicQuads = input as import('@origintrail-official/dkg-storage').Quad[];
         } else if (!Array.isArray(input) || (input.length > 0 && !('subject' in input[0]))) {
-          const { publicQuads, privateQuads } = await jsonLdToQuads(input as JsonLdContent);
-          quads = [...publicQuads, ...privateQuads];
+          ({ publicQuads, privateQuads } = await jsonLdToQuads(
+            input as JsonLdContent,
+            { syntheticPrivateAnchor: false },
+          ));
         } else {
-          quads = (input as Array<{ subject: string; predicate: string; object: string }>)
+          publicQuads = (input as Array<{ subject: string; predicate: string; object: string }>)
             .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));
         }
-        return agent.publisher.assertionWrite(contextGraphId, name, writeAgentAddress, quads, opts?.subGraphName);
+        if (publicQuads.length > 0) {
+          await agent.publisher.assertionWrite(
+            contextGraphId,
+            name,
+            writeAgentAddress,
+            publicQuads,
+            opts?.subGraphName,
+          );
+        }
+        if (privateQuads.length > 0) {
+          await agent.publisher.assertionWritePrivate(
+            contextGraphId,
+            name,
+            writeAgentAddress,
+            privateQuads,
+            opts?.subGraphName,
+          );
+        }
       },
 
       async query(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
         const queryAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionQuery(contextGraphId, name, queryAgentAddress, opts?.subGraphName);
       },
-      /** OT-RFC-43 §10.5.3 — seed a fresh WM draft from this file's SWM/VM state. */
+      async queryPrivate(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
+        const queryAgentAddress = opts?.agentAddress ?? agentAddress;
+        return agent.publisher.assertionQueryPrivate(contextGraphId, name, queryAgentAddress, opts?.subGraphName);
+      },
+      /** Re-open a sealed rootless KA from its exact SWM/VM graph. */
       async pullFrom(
         contextGraphId: string,
         name: string,
         sourceLayer: 'swm' | 'vm',
         opts?: { subGraphName?: string; agentAddress?: string; onConflict?: 'reject' | 'replace' },
-      ): Promise<{ seeded: number; fromLayer: 'swm' | 'vm'; entities: number }> {
+      ): Promise<{
+        seeded: number;
+        seededPublic: number;
+        seededPrivate: number;
+        fromLayer: 'swm' | 'vm';
+        contentScopeVersion: number;
+        kaUal: string;
+        assertionVersion: string;
+      }> {
         const pullAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionPullFrom(contextGraphId, name, pullAgentAddress, sourceLayer, {
           ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
@@ -2319,6 +2422,14 @@ export class DKGAgent extends DKGAgentBase {
       },
       async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
+        if (opts?.skipSeal) {
+          throw Object.assign(
+            new Error(
+              'Graph-scoped Knowledge Assets must be finalized before sharing; unsealed SWM mutation is read-only legacy behavior.',
+            ),
+            { code: 'UNSEALED_SHARE_BLOCKED' },
+          );
+        }
         // Seal-before-share: the on-chain publish path
         // (`publishFromFinalizedAssertion`) requires a FINALIZED assertion, and
         // the seal must be computed over the Working-Memory content BEFORE
@@ -2339,33 +2450,46 @@ export class DKGAgent extends DKGAgentBase {
         // route) so the seal attests the intended author rather than silently
         // falling back to the daemon signer.
         //
-        // Only auto-finalize a FULL promote: the seal covers ALL roots, but a
-        // selective promote (`opts.entities` subset) ships only some — sealing
-        // all then promoting a subset makes `publishFromFinalizedAssertion`
-        // recompute a different merkleRoot. A selective promote must be finalized
-        // explicitly with a matching scope.
-        // #1116: a FULL share SEALS BY DEFAULT. `skipSeal:true` is the explicit
-        // opt-out into an unsealed SWM share (e.g. a deliberately local-only
-        // collaboration). A subset share never auto-seals (see above).
+        // A graph-scoped KA is atomic. Full sharing finalizes first; selective
+        // requests are rejected at the publisher boundary and skipSeal is rejected
+        // above. Keeping the full-selection check here avoids doing signing work
+        // before returning the stable KA_ATOMIC_SHARE_REQUIRED error.
         const promotingAllEntities = !opts?.entities || opts.entities === 'all';
         let sealed = false;
-        if (promotingAllEntities && !opts?.skipSeal) {
+        if (promotingAllEntities) {
+          const [publicDraft, privateDraft] = await Promise.all([
+            agent.publisher.assertionQuery(
+              contextGraphId,
+              name,
+              promoteAgentAddress,
+              opts?.subGraphName,
+            ),
+            agent.publisher.assertionQueryPrivate(
+              contextGraphId,
+              name,
+              promoteAgentAddress,
+              opts?.subGraphName,
+            ),
+          ]);
+          const hasOpenDraft = publicDraft.length > 0 || privateDraft.length > 0;
           try {
-            await agent.assertionFinalize(contextGraphId, name, promoteAgentAddress, {
-              subGraphName: opts?.subGraphName,
-              authorAgentAddress: opts?.authorAgentAddress,
-              preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-            });
+            if (hasOpenDraft) {
+              await agent.assertionFinalize(contextGraphId, name, promoteAgentAddress, {
+                subGraphName: opts?.subGraphName,
+                authorAgentAddress: opts?.authorAgentAddress,
+                preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+              });
+            }
+            // With no mutable draft, the publisher is the recovery authority:
+            // it verifies a sealed exact SWM/VM graph and either repairs the
+            // interrupted commit tail or returns the already-published no-op.
+            // Treat the call as sealed only after that downstream validation;
+            // any missing/corrupt seal still throws before a result is returned.
             sealed = true;
           } catch (err: any) {
             const msg = err?.message ?? String(err);
-            // #1116 (round 11, reviewer 🟡) — CLASSIFY the finalize failure. Only a
-            // genuine signing/chain CAPABILITY GAP is recoverable by skipSeal — a
-            // VALIDATION/INTEGRITY error (empty draft, reserved-only/unsafe content,
-            // preSigned mismatch, author change, stale/corrupt seal) is a real input
-            // problem: telling the caller to skipSeal would push invalid content into
-            // SWM. So translate ONLY capability gaps to UNSEALED_SHARE_BLOCKED and
-            // RETHROW everything else with its ORIGINAL message/code.
+            // Classify finalize failures so capability gaps retain a stable API
+            // code while validation/integrity errors keep their original detail.
             //
             // Capability gaps carry the stable SEAL_CAPABILITY_GAP code (tagged at the
             // assertionFinalize throw sites). The message regex is a back-compat
@@ -2381,10 +2505,7 @@ export class DKGAgent extends DKGAgentBase {
               // preserved because we throw BEFORE assertionPromote.
               throw err;
             }
-            // #1116 D1 — FAIL-CLOSED on a capability gap. Do NOT silently promote
-            // unsealed and empty WM (the original #1116 trap). Throw BEFORE
-            // assertionPromote so WM is preserved; the caller resolves the gap or
-            // passes skipSeal:true to deliberately share unsealed.
+            // Fail closed before assertionPromote so WM remains intact.
             throw Object.assign(
               new Error(
                 `Cannot seal "${name}" for sharing to Shared Memory — the asset would be left ` +
@@ -2393,29 +2514,11 @@ export class DKGAgent extends DKGAgentBase {
               {
                 code: 'UNSEALED_SHARE_BLOCKED',
                 recovery:
-                  'Resolve the signing capability (a local agent key + a V10 chain adapter), then retry; ' +
-                  'or pass skipSeal:true to share without sealing (you can seal it later with ' +
-                  'finalize layer=swm, then publish).',
+                  'Resolve the signing capability (a local agent key + a V10 chain adapter), then retry.',
               },
             );
           }
         }
-        // #1116 (round 9 → round 11, reviewer 🔴 #1) — a NON-SEALING share (a
-        // `skipSeal` full share OR any subset share — the inverse of the finalize
-        // block above) must leave NO full-share seal. Otherwise a prior FULL seal
-        // survives (it lives on the name-keyed assertion URI, outside the
-        // lifecycle-URN clean-slates) and could be published via the
-        // merkle-still-matches path under the KA name, even though the current share
-        // is a subset / explicitly-unsealed. The subsequent finalize(layer:"swm")
-        // re-stamps a fresh seal, so a legit skipSeal→seal-in-SWM flow is unaffected.
-        //
-        // Round 11: the seal-clear is now TRANSACTIONAL with the share — it runs
-        // AFTER assertionPromote SUCCEEDS (below), not before. If assertionPromote
-        // throws (gossip-signer resolution, curator confirmation, payload-size
-        // validation, …) the prior seal survives: the old content is still in SWM,
-        // so the old seal is still valid — a FAILED non-sealing share no longer
-        // strands a previously-publishable asset with no seal.
-        const isNonSealingShare = !(promotingAllEntities && !opts?.skipSeal);
         // Resolve the gossip signer up-front (mirrors `share()` /
         // `conditionalShare()` patterns) so the publisher can wrap the
         // promoted SWM gossip in the Sender Key encrypted envelope.
@@ -2434,11 +2537,6 @@ export class DKGAgent extends DKGAgentBase {
           { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
           createOperationContext('share'),
         );
-        const trustedCatalogOnChainContextGraphId = await agent.getContextGraphOnChainId(contextGraphId) ?? undefined;
-        const isPrivateContextGraph = await agent.isPrivateContextGraph(contextGraphId);
-        const trustedNonManifestCatalogTriples = isPrivateContextGraph
-          ? generatedPrivateCatalogTripleKeys(contextGraphId)
-          : undefined;
         const { promotedCount, gossipMessage, promotedAllRoots, shareOperationId } = await agent.publisher.assertionPromote(
           contextGraphId, name, promoteAgentAddress,
           {
@@ -2446,20 +2544,9 @@ export class DKGAgent extends DKGAgentBase {
             ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
             publisherPeerId: agent.node.peerId.toString(),
             senderAgentAddress: gossipSigner?.agentAddress,
-            trustedNonManifestCatalogTriples,
-            onChainContextGraphId: trustedCatalogOnChainContextGraphId,
             confirmBeforeCommit,
           },
         );
-        // #1116 (round 11, reviewer 🔴 #1) — clear the prior full-share seal NOW
-        // that assertionPromote has COMMITTED the (non-sealing) share to SWM. Doing
-        // it here (not before the promote) keeps the seal-clear transactional with
-        // the share: a promote that threw (curator-unconfirmed, payload-too-large,
-        // …) left the prior SWM content + seal intact, so the asset stays publishable
-        // under the old seal until a share actually succeeds.
-        if (isNonSealingShare) {
-          await agent.publisher.clearAssertionSeal(contextGraphId, name, promoteAgentAddress, opts?.subGraphName);
-        }
         if (gossipMessage) {
           try {
             await agent.publishWorkspaceGossip(contextGraphId, gossipMessage, createOperationContext('share'), gossipSigner);
@@ -2476,19 +2563,10 @@ export class DKGAgent extends DKGAgentBase {
         // same isFullCompletePromote), so it stays in lockstep with the rows for
         // EVERY caller of the public assertionPromote — not just this wrapper. The
         // `promotedAllRoots` result is still used below for `publishReady`.
-        // #1116: `sealed` reflects THIS share — a subset share or a skipSeal
-        // share is `sealed:false` BY DESIGN, not a failure. `publishReady` means
-        // a subsequent /vm/publish won't 409 on "not finalized"; it is true only
-        // for a sealed FULL share. Kept distinct from `sealed` for forward-compat.
-        //
-        // #1116 FIX 1 — the seal covers ALL roots, but assertionPromote's advisory
-        // ownership skip can promote only a SUBSET (foreign-owned roots are left in
-        // the owner's SWM copy). When that happens the SWM slice is missing part of
-        // the sealed set, so publishFromFinalizedAssertion would recompute a
-        // different merkleRoot and fail the seal guard. The seal still EXISTS
-        // (`sealed:true`), but the asset is NOT publish-ready. The single-author
-        // happy path skips no roots ⇒ promotedAllRoots:true ⇒ publishReady:true.
-        const publishReady = promotingAllEntities && sealed && promotedAllRoots && promotedCount > 0 && !!shareOperationId;
+        // A repaired/replayed share has promotedCount=0 but retains its durable
+        // shareOperationId. It is just as publish-ready as the first response;
+        // a VM no-op has no share operation id and remains false here.
+        const publishReady = promotingAllEntities && sealed && promotedAllRoots && !!shareOperationId;
         return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<void> {
@@ -2532,15 +2610,15 @@ export class DKGAgent extends DKGAgentBase {
           agentAddress?: string;
           authorAgentAddress?: string;
           preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+          authorSignTypedData?: (
+            typedData: AuthorAttestationTypedData,
+          ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
           schemeVersion?: number;
           /**
-           * #1116 — which layer holds the content to seal. `"wm"` (default)
-           * finalizes the Working-Memory draft. `"swm"` seals an asset whose
-           * content is already in Shared Working Memory (e.g. after a
-           * `skipSeal` share, or an asset stuck unsealed under the old
-           * behavior): it reconstructs a transient WM draft from SWM, then
-           * finalizes — no delete-and-recreate. The asset stays in SWM and
-           * becomes publishable.
+           * @deprecated `"swm"` remains recognizable only so mixed-version
+           * callers get the stable `LEGACY_KA_READ_ONLY` error. New KAs are
+           * sealed in WM and shared atomically; existing root-scoped SWM assets
+           * are readable but cannot be reconstructed, resealed, or migrated.
            */
           layer?: 'wm' | 'swm';
         },
@@ -2554,101 +2632,16 @@ export class DKGAgent extends DKGAgentBase {
         eip712Digest: string;
       }> {
         const finalizeAgentAddress = opts?.agentAddress ?? agentAddress;
-        // #1116 seal-in-SWM: pull the asset's roots back out of SWM into a
-        // transient WM draft (reusing pull-from — incl. its seal-independent
-        // root resolution), run the ordinary finalize over that draft, then DROP
-        // the transient draft so the asset is left resident PURELY in SWM (with
-        // its fresh seal), not duplicated across WM+SWM. The seal is
-        // content-based, so it is valid for the SWM-resident content; the SWM
-        // copy itself is never modified. We reconstruct unconditionally
-        // (onConflict 'replace') so a stale WM draft never blocks the re-seal;
-        // pull-from now PRESERVES the dkg:rootEntity recovery rows across its
-        // clean-slate, so a finalize that fails here leaves the asset safely
-        // re-tryable (seal-in-SWM is atomic-on-failure).
-        if (opts?.layer !== 'swm') {
-          return agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
-            subGraphName: opts?.subGraphName,
-            authorAgentAddress: opts?.authorAgentAddress,
-            preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-            schemeVersion: opts?.schemeVersion,
-          });
+        if (opts?.layer === 'swm') {
+          throw new LegacyKnowledgeAssetReadOnlyError();
         }
-        // #1116 (review A1) — seal-in-SWM is publishable-by-construction: it
-        // reconstructs a WM draft from the promoted root rows, seals it, and
-        // leaves the asset resident in SWM ready to publish under the KA name.
-        // A SUBSET share also stamps those root rows but is SWM-ONLY (not
-        // publishable) — so guard on the full-share marker BEFORE the pull-from.
-        // Without this, a {A,B} KA only SUBSET-shared (A) could be sealed and
-        // published as a partial asset, breaking the subset-shares-aren't-
-        // publishable invariant.
-        const fullyShared = await agent.publisher.hasSwmShareComplete(
-          contextGraphId, name, finalizeAgentAddress, opts?.subGraphName,
-        );
-        if (!fullyShared) {
-          throw Object.assign(
-            new Error(
-              'Cannot seal-in-SWM: this asset was not fully shared to SWM — subset shares are not publishable. ' +
-                'Share the full asset (entities:"all") first, then finalize(layer:"swm").',
-            ),
-            { code: 'SWM_SUBSET_NOT_SEALABLE' },
-          );
-        }
-        // #1116 (round 9) — NO pre-clear of the seal here. Round 8 made the SWM
-        // pull resolve entities from the member rows (NOT seal.rootEntities), so a
-        // stale seal can no longer mis-scope the reconstruction; and
-        // assertionPullFrom's INTERNAL teardown clears the seal AFTER it validates
-        // the source is non-empty. A pre-clear ran BEFORE the pull and stranded the
-        // asset (seal gone, no fresh seal) if the pull threw PULL_FROM_EMPTY_SOURCE.
-        // Dropping it makes finalize(layer:"swm") atomic-on-failure: on a failed
-        // pull the prior seal survives and the asset stays re-tryable.
-        await agent.publisher.assertionPullFrom(contextGraphId, name, finalizeAgentAddress, 'swm', {
-          subGraphName: opts?.subGraphName,
-          onConflict: 'replace',
-        });
-        const swmSeal = await agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
+        return agent.assertionFinalize(contextGraphId, name, finalizeAgentAddress, {
           subGraphName: opts?.subGraphName,
           authorAgentAddress: opts?.authorAgentAddress,
           preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+          authorSignTypedData: opts?.authorSignTypedData,
           schemeVersion: opts?.schemeVersion,
         });
-        // Upgraded full `skipSeal` shares may predate KA-number allocation and
-        // still live in the legacy SWM bucket. Finalize has now allocated the
-        // packed id bound by the seal; ensure that exact root closure also exists
-        // in its canonical named lifecycle before publish uses exact-scope reads.
-        // This is idempotent, so retrying after placement repairs the lifecycle
-        // pointer safely.
-        await placeFinalizedLifecycleSwm({
-          publisher: agent.publisher,
-          operationContext: createOperationContext('share'),
-          authorAddress: swmSeal.authorAddress,
-          packedKaId: swmSeal.reservedKaId,
-          contextGraphId,
-          assertionName: name,
-          assertionLifecycleAgentAddress: finalizeAgentAddress,
-          subGraphName: opts?.subGraphName,
-          rootEntities: swmSeal.rootEntities,
-        });
-        // #1116 FIX 2 — make the SWM-resident position observable. The original
-        // (possibly skipSeal) promote had no seal yet, so `_stampSwmPointer` ran a
-        // no-op then; now that the seal EXISTS, stamp dkg:swmCurrentAssertion to it
-        // so status reports "swm-shared". This must precede the WM-draft cleanup
-        // below, whose stale-WM-pointer retirement is gated on the SWM pointer
-        // being present (the content is genuinely SWM-resident).
-        await agent._stampSwmPointer(contextGraphId, name, finalizeAgentAddress, opts?.subGraphName);
-        // Best-effort: the seal (in _meta) and the SWM content are already
-        // durable, so a cleanup failure is harmless (it only leaves a sealed WM
-        // draft alongside SWM — which the finalize-after-edit guards still
-        // protect). Drop it so the post-condition is "purely in SWM".
-        try {
-          await agent.publisher.clearWmDraftDataGraph(contextGraphId, name, finalizeAgentAddress, opts?.subGraphName);
-        } catch (cleanupErr: any) {
-          agent.log.warn(
-            createOperationContext('share'),
-            `seal-in-SWM: WM-draft cleanup failed (asset is sealed and resident in SWM; ` +
-              `a harmless WM copy remains): ${cleanupErr?.message ?? String(cleanupErr)}`,
-          );
-        }
-        return swmSeal;
       },
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionHistoryDescriptor | null> {

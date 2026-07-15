@@ -486,6 +486,21 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads.some(q => q.includes('DROP'))).toBe(true);
   });
 
+  it('replaceGraph sends one staged MOVE update for the complete graph', async () => {
+    insertedQuads.length = 0;
+    await store.replaceGraph('http://ex.org/g1', [{
+      subject: 'http://ex.org/new',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }]);
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('urn:dkg:internal:atomic-graph-replace:');
+    expect(insertedQuads[0]).toContain('INSERT DATA');
+    expect(insertedQuads[0]).toContain('MOVE SILENT GRAPH');
+    expect(insertedQuads[0]).toContain('TO GRAPH <http://ex.org/g1>');
+  });
+
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });

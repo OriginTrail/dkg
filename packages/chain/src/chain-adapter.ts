@@ -271,6 +271,8 @@ export interface KAUpdateVerification {
   blockNumber?: number;
   /** The transaction index within the block (for deterministic same-block ordering). */
   txIndex?: number;
+  /** Chain-truth Merkle-root array length after this update. */
+  merkleRootCount?: bigint;
 }
 
 export interface ChainEvent {

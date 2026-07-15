@@ -11,7 +11,6 @@ import {
   decodeWorkspacePublishRequest,
   encodeEncryptedWorkspacePayload,
   encodeGossipEnvelope,
-  encodeWorkspacePublishRequest,
   encryptWorkspacePayload,
   generateWorkspaceRecipientEncryptionKey,
   GOSSIP_ENVELOPE_VERSION,
@@ -20,6 +19,7 @@ import {
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import { SharedMemoryHandler } from '../src/index.js';
+import { encodeRootlessWorkspaceRequest } from './_helpers/rootless-workspace.js';
 
 const CONTEXT_GRAPH_ID = 'workspace-handler-agent-gate';
 const DATA_GRAPH = contextGraphDataUri(CONTEXT_GRAPH_ID);
@@ -34,12 +34,11 @@ let workspaceOwned: Map<string, Map<string, string>>;
 let handler: SharedMemoryHandler;
 
 function workspaceMessage(name: string, operationId: string): Uint8Array {
-  return encodeWorkspacePublishRequest({
+  return encodeRootlessWorkspaceRequest({
     contextGraphId: CONTEXT_GRAPH_ID,
     nquads: new TextEncoder().encode(
       `<${ENTITY}> <http://schema.org/name> "${name}" <${DATA_GRAPH}> .`,
     ),
-    manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
     publisherPeerId: PEER_ID,
     shareOperationId: operationId,
     timestampMs: Date.now(),
@@ -135,7 +134,8 @@ async function insertPrivateAccessPolicy(graph: string): Promise<void> {
 
 async function expectStoredName(name: string): Promise<void> {
   const result = await store.query(
-    `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    `SELECT ?o WHERE { GRAPH ?g { <${ENTITY}> <http://schema.org/name> ?o } ` +
+      `FILTER(STRSTARTS(STR(?g), "${WORKSPACE_GRAPH}/")) }`,
   );
   expect(result.type).toBe('bindings');
   if (result.type === 'bindings') {
@@ -146,7 +146,8 @@ async function expectStoredName(name: string): Promise<void> {
 
 async function expectWorkspaceEmpty(): Promise<void> {
   const result = await store.query(
-    `ASK { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> ?p ?o } }`,
+    `ASK { GRAPH ?g { <${ENTITY}> ?p ?o } ` +
+      `FILTER(STRSTARTS(STR(?g), "${WORKSPACE_GRAPH}/")) }`,
   );
   expect(result.type).toBe('boolean');
   if (result.type === 'boolean') {
@@ -163,11 +164,17 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
     });
   });
 
-  it('accepts legacy raw SWM gossip for open context graphs with no policy or allowlist', async () => {
-    await handler.handle(workspaceMessage('Raw Open', 'ws-agent-gate-raw-open'), PEER_ID);
+  it('accepts unsigned V2 SWM gossip for open context graphs with no policy or allowlist', async () => {
+    const outcome = await handler.handle(
+      workspaceMessage('Raw Open', 'ws-agent-gate-raw-open'),
+      PEER_ID,
+    );
 
+    expect(outcome.applied).toBe(true);
     await expectStoredName('Raw Open');
-    expect(workspaceOwned.get(CONTEXT_GRAPH_ID)?.get(ENTITY)).toBe(PEER_ID);
+    // Graph-scoped KAs retain transport ownership in durable KA metadata, not
+    // in the legacy per-root in-memory ownership map.
+    expect(workspaceOwned.get(CONTEXT_GRAPH_ID)?.get(ENTITY)).toBeUndefined();
   });
 
   // GH #1124 (otReviewAgent #1239) — PUBLIC-CG host-catchup forgery gate.

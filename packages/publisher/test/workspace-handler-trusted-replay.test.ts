@@ -11,7 +11,6 @@ import {
   decodeWorkspacePublishRequest,
   encodeEncryptedWorkspacePayload,
   encodeGossipEnvelope,
-  encodeWorkspacePublishRequest,
   encryptWorkspacePayload,
   generateWorkspaceRecipientEncryptionKey,
   GOSSIP_ENVELOPE_VERSION,
@@ -19,6 +18,7 @@ import {
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import { SharedMemoryHandler } from '../src/index.js';
+import { encodeRootlessWorkspaceRequest } from './_helpers/rootless-workspace.js';
 
 // Coverage for the `trustedReplay` option on
 // SharedMemoryHandler.handle() — the bypass that lets LU-6
@@ -64,12 +64,11 @@ let store: OxigraphStore;
 let workspaceOwned: Map<string, Map<string, string>>;
 
 function workspaceMessage(name: string, operationId: string, cgId = CONTEXT_GRAPH_ID): Uint8Array {
-  return encodeWorkspacePublishRequest({
+  return encodeRootlessWorkspaceRequest({
     contextGraphId: cgId,
     nquads: new TextEncoder().encode(
       `<${ENTITY}> <http://schema.org/name> "${name}" <${contextGraphDataUri(cgId)}> .`,
     ),
-    manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
     publisherPeerId: PUBLISHER_PEER_ID,
     shareOperationId: operationId,
     timestampMs: Date.now(),
@@ -169,7 +168,8 @@ async function insertPrivateAccessPolicy(): Promise<void> {
 
 async function expectStoredName(name: string): Promise<void> {
   const result = await store.query(
-    `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    `SELECT ?o WHERE { GRAPH ?g { <${ENTITY}> <http://schema.org/name> ?o } ` +
+      `FILTER(STRSTARTS(STR(?g), "${WORKSPACE_GRAPH}/")) }`,
   );
   expect(result.type).toBe('bindings');
   if (result.type === 'bindings') {
@@ -180,7 +180,8 @@ async function expectStoredName(name: string): Promise<void> {
 
 async function expectWorkspaceEmpty(): Promise<void> {
   const result = await store.query(
-    `ASK { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> ?p ?o } }`,
+    `ASK { GRAPH ?g { <${ENTITY}> ?p ?o } ` +
+      `FILTER(STRSTARTS(STR(?g), "${WORKSPACE_GRAPH}/")) }`,
   );
   expect(result.type).toBe('boolean');
   if (result.type === 'boolean') {

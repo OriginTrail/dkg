@@ -1,5 +1,10 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  LegacyKnowledgeAssetReadOnlyError,
+  createGraphKnowledgeAssetScope,
+} from '@origintrail-official/dkg-core';
 import type { PhaseCallback, PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
@@ -80,6 +85,53 @@ type AsyncLiftJobHandler = {
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
 };
 
+function assertGraphScopedLiftSnapshot(request: LiftPublishSnapshotRequest): void {
+  if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new LegacyKnowledgeAssetReadOnlyError();
+  }
+  if (request.roots.length !== 0) {
+    throw new Error('Graph-scoped async publish must not contain root entities');
+  }
+  if (
+    request.kaUal === undefined
+    || request.assertionVersion === undefined
+    || request.publicTripleCount === undefined
+    || request.privateTripleCount === undefined
+  ) {
+    throw new Error('Graph-scoped async publish requires a complete KA content envelope');
+  }
+  createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+  if (
+    !Number.isSafeInteger(request.publicTripleCount)
+    || request.publicTripleCount < 0
+    || !Number.isSafeInteger(request.privateTripleCount)
+    || request.privateTripleCount < 0
+    || (request.publicTripleCount === 0 && request.privateTripleCount === 0)
+  ) {
+    throw new Error('Graph-scoped async publish has invalid public/private triple counts');
+  }
+  if (
+    request.privateTripleCount > 0
+    && !/^0x[0-9a-f]{64}$/i.test(request.privateMerkleRoot ?? '')
+  ) {
+    throw new Error('Graph-scoped async publish with private content requires one 32-byte privateMerkleRoot');
+  }
+  if (request.privateTripleCount === 0 && request.privateMerkleRoot !== undefined) {
+    throw new Error('Graph-scoped async publish privateMerkleRoot requires private content');
+  }
+  const accessPolicy = request.accessPolicy
+    ?? (request.privateTripleCount > 0 ? 'ownerOnly' : 'public');
+  const allowedPeers = [...new Set(
+    (request.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+  )];
+  if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+    throw new Error('Graph-scoped async publish allowList policy requires allowedPeers');
+  }
+  if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
+    throw new Error('Graph-scoped async publish allowedPeers requires allowList policy');
+  }
+}
+
 function resolveKnowledgeAssetVmPublishHandler(
   config: AsyncLiftPublisherConfig,
 ): AsyncKnowledgeAssetVmPublishJobHandler | undefined {
@@ -118,6 +170,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
+  private readonly legacyRawLiftWriteEnabled: boolean;
   private readonly graphManager: GraphManager;
   private paused = false;
   private graphEnsured = false;
@@ -167,10 +220,21 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.legacyRawLiftWriteEnabled = config.legacyRawLiftWriteCapability === 'migration-only';
     this.graphManager = new GraphManager(store);
   }
 
+  /**
+   * Restore a legacy raw-root queue item for an offline migration or a
+   * compatibility test. Normal runtime instances reject this operation.
+   * New Knowledge Assets must use enqueueKnowledgeAssetVmPublish().
+   *
+   * @deprecated Legacy root-scoped Knowledge Assets are read-only.
+   */
   async lift(request: RawLiftRequest): Promise<string> {
+    if (!this.legacyRawLiftWriteEnabled) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
     await this.ensureGraph();
 
     const now = this.now();
@@ -197,9 +261,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if (!request.shareOperationId.trim()) {
         throw new Error('Knowledge asset VM publish requires a shareOperationId');
       }
-      if (request.roots.length === 0) {
-        throw new Error('Knowledge asset VM publish requires at least one shared root');
-      }
+      assertGraphScopedLiftSnapshot(request);
       const existing = await this.findActiveKnowledgeAssetVmPublishJob(request);
       if (existing?.compatible) {
         if (isFailedJob(existing.job)) {

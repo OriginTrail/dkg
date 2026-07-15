@@ -561,6 +561,40 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('does not promote catch-up readiness when durable integrity verification rejects a KA', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('coalesced-cg');
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).syncFromPeerDetailed = async () => ({
+        ...cleanDurableSyncResult(),
+        insertedTriples: 3,
+        insertedDataTriples: 3,
+        rejectedKcs: 1,
+      });
+
+      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg');
+
+      expect(result.peersResponded).toBe(1);
+      expect(result.peersSucceeded).toBe(0);
+      expect(result.dataSynced).toBe(3);
+      expect(result.diagnostics.durable.rejectedKcs).toBe(1);
+      expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).not.toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not join catch-up rounds with different shareable identity fields', async () => {
     const cases: Array<{
       name: string;

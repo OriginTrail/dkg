@@ -19,6 +19,12 @@
 # Environment:
 #   DEVNET_DIR    Base directory for devnet data (default: .devnet)
 #   HARDHAT_PORT  Hardhat node port (default: 8545)
+#   DEVNET_BLAZEGRAPH_PORT
+#                 Host port for the devnet Blazegraph container (default: 9999)
+#   DEVNET_OXIGRAPH_SERVER_PORT_5 / DEVNET_OXIGRAPH_SERVER_PORT_6
+#                 Host ports for edge-node Oxigraph containers (defaults: 7878/7879)
+#   DEVNET_DOCKER_NAME_PREFIX
+#                 Prefix for devnet store container names (default: devnet)
 #   UI_PORT       node-ui Vite port (default: 5173)
 #   UI_NODE_ID    Which devnet node the UI talks to (default: 1)
 #   NUM_CORE_NODES
@@ -66,16 +72,17 @@ NUM_OP_WALLETS=3
 # overwhelming the prover loop. Set to 0 to disable (fall back to per-tx
 # mining) for tests that need deterministic block-per-tx semantics.
 HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
-BLAZEGRAPH_PORT=9999
-BLAZEGRAPH_CONTAINER="devnet-blazegraph"
+DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
+BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
+BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
 # Webapp context path: the 2.1.5 Docker image serves under /bigdata; a native
 # 2.1.6 JAR (the Apple-silicon workaround) serves under /blazegraph. Override with
 # DEVNET_BLAZEGRAPH_CTX to match whichever Blazegraph is actually running.
 BLAZEGRAPH_CTX="${DEVNET_BLAZEGRAPH_CTX:-bigdata}"
-OXIGRAPH_SERVER_PORT_5=7878
-OXIGRAPH_SERVER_PORT_6=7879
-OXIGRAPH_CONTAINER_5="devnet-oxigraph-5"
-OXIGRAPH_CONTAINER_6="devnet-oxigraph-6"
+OXIGRAPH_SERVER_PORT_5="${DEVNET_OXIGRAPH_SERVER_PORT_5:-7878}"
+OXIGRAPH_SERVER_PORT_6="${DEVNET_OXIGRAPH_SERVER_PORT_6:-7879}"
+OXIGRAPH_CONTAINER_5="${DEVNET_DOCKER_NAME_PREFIX}-oxigraph-5"
+OXIGRAPH_CONTAINER_6="${DEVNET_DOCKER_NAME_PREFIX}-oxigraph-6"
 
 # Hardhat default accounts (first 10 of the well-known mnemonic)
 # "test test test test test test test test test test test junk"

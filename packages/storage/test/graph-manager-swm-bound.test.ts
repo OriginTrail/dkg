@@ -6,7 +6,6 @@ import {
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   canonicalSharedMemoryScopeWriteGraph,
-  migrateSharedMemoryRootClosureToNamedLifecycle,
   resolveSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeGraphs,
   resolveSharedMemoryReadGraphs,
@@ -318,92 +317,6 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     }
   });
 
-  it('migration preserves graph-qualified selection without publishing its low-level loader', async () => {
-    const store = await createTripleStore({ backend: 'oxigraph' });
-    const swm = contextGraphSharedMemoryUri('named-qualified-selection');
-    const root = 'urn:test:named:qualified';
-    const child = `${root}/.well-known/genid/child`;
-    const alias = `${swm}/${AUTHOR_A_MIXED}/7`;
-    const scope = {
-      kind: 'named-lifecycle',
-      identity: { agentAddress: AUTHOR_A, kaNumber: 7n },
-    } as const;
-    try {
-      await store.insert([
-        { subject: root, predicate: 'urn:p', object: '"root"', graph: alias },
-        { subject: child, predicate: 'urn:p', object: '"child"', graph: alias },
-        { subject: 'urn:test:named:other', predicate: 'urn:p', object: '"other"', graph: alias },
-      ]);
-
-      const migration = await migrateSharedMemoryRootClosureToNamedLifecycle(
-        store,
-        swm,
-        { rootEntities: [root] },
-        scope.identity,
-      );
-      const canonical = await loadSharedMemoryQuadsForScope(
-        store,
-        swm,
-        { rootEntities: [root] },
-        scope,
-      );
-      const aliasRemainder = await store.query(
-        `SELECT ?s ?p ?o WHERE { GRAPH <${alias}> { ?s ?p ?o } }`,
-      );
-
-      expect(migration).toMatchObject({ sourceEmpty: false, migratedLegacyQuadCount: 0 });
-      expect(canonical.map((quad) => quad.object).sort()).toEqual(['"child"', '"root"']);
-      expect(aliasRemainder.type).toBe('bindings');
-      expect(aliasRemainder.type === 'bindings' ? aliasRemainder.bindings : []).toEqual([
-        expect.objectContaining({ s: 'urn:test:named:other', o: '"other"' }),
-      ]);
-    } finally {
-      await store.close();
-    }
-  });
-
-  it('keeps a same-root legacy bucket copy until every sibling can migrate', async () => {
-    const store = await createTripleStore({ backend: 'oxigraph' });
-    const swm = contextGraphSharedMemoryUri('named-shared-legacy-root');
-    const root = 'urn:test:named:shared-root';
-    const child = `${root}/.well-known/genid/child`;
-    const first = { agentAddress: AUTHOR_A, kaNumber: 7n };
-    const second = { agentAddress: AUTHOR_B, kaNumber: 9n };
-    try {
-      await store.insert([
-        { subject: root, predicate: 'urn:p', object: '"shared"', graph: swm },
-        { subject: child, predicate: 'urn:p', object: '"child"', graph: swm },
-      ]);
-
-      const firstMigration = await migrateSharedMemoryRootClosureToNamedLifecycle(
-        store, swm, { rootEntities: [root] }, first,
-      );
-      const legacyAfterFirst = await store.query(
-        `ASK { GRAPH <${swm}> { <${root}> <urn:p> "shared" } }`,
-      );
-      const secondMigration = await migrateSharedMemoryRootClosureToNamedLifecycle(
-        store, swm, { rootEntities: [root] }, second,
-      );
-      const firstQuads = await loadSharedMemoryQuadsForScope(
-        store, swm, { rootEntities: [root] }, { kind: 'named-lifecycle', identity: first },
-      );
-      const secondQuads = await loadSharedMemoryQuadsForScope(
-        store, swm, { rootEntities: [root] }, { kind: 'named-lifecycle', identity: second },
-      );
-      const legacyAfterSecond = await store.query(
-        `ASK { GRAPH <${swm}> { <${root}> <urn:p> "shared" } }`,
-      );
-
-      expect(firstMigration).toMatchObject({ sourceEmpty: false, migratedLegacyQuadCount: 2 });
-      expect(secondMigration).toMatchObject({ sourceEmpty: false, migratedLegacyQuadCount: 2 });
-      expect(legacyAfterFirst).toMatchObject({ type: 'boolean', value: true });
-      expect(legacyAfterSecond).toMatchObject({ type: 'boolean', value: true });
-      expect(keys(firstQuads)).toEqual(keys(secondQuads));
-      expect(firstQuads.map((quad) => quad.object).sort()).toEqual(['"child"', '"shared"']);
-    } finally {
-      await store.close();
-    }
-  });
 
   // `kaGraphBound` was removed from `LoadSelectedSharedMemoryQuadsOptions`, so the
   // four production callers — two of them merkle-DEFINING, one the ACK decline lane
@@ -471,7 +384,7 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     // Named publish flows get a scoped API, not a second range-shaped loader.
     expect(typeof storageIndex.loadSharedMemoryQuadsForScope).toBe('function');
     expect(storageIndex).not.toHaveProperty('loadGraphQualifiedSharedMemoryQuads');
-    expect(typeof storageIndex.migrateSharedMemoryRootClosureToNamedLifecycle).toBe('function');
+    expect(storageIndex).not.toHaveProperty('migrateSharedMemoryRootClosureToNamedLifecycle');
     expect(typeof storageIndex.canonicalSharedMemoryScopeWriteGraph).toBe('function');
     expect(typeof storageIndex.resolveSharedMemoryScopeWriteGraph).toBe('function');
     expect(storageIndex).not.toHaveProperty('loadNamedKnowledgeAssetSharedMemoryQuads');

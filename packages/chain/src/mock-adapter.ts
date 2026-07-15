@@ -74,6 +74,8 @@ export class MockChainAdapter implements ChainAdapter {
     kaCount: number;
     /** V10 flat-KC merkle leaf count (sorted + deduped). 0 for legacy V8 entries. */
     merkleLeafCount: number;
+    /** Number of committed Merkle roots, including the initial publish. */
+    merkleRootCount: bigint;
     /** Publisher EOA from `createKnowledgeAssets`; default to mock signer for V8 paths. */
     publisherAddress: string;
     /**
@@ -350,6 +352,7 @@ export class MockChainAdapter implements ChainAdapter {
     if (collection) {
       collection.merkleRoot = params.newMerkleRoot;
       collection.merkleLeafCount = params.newMerkleLeafCount;
+      collection.merkleRootCount += 1n;
     }
     const hintedPublisherAddress = params.publisherAddress
       ? ethers.getAddress(params.publisherAddress)
@@ -366,6 +369,7 @@ export class MockChainAdapter implements ChainAdapter {
       publisherAddress,
       txHash,
       txIndex,
+      merkleRootCount: collection?.merkleRootCount?.toString(),
     });
 
     return {
@@ -388,6 +392,9 @@ export class MockChainAdapter implements ChainAdapter {
       onChainMerkleRoot: fromHex(match.data.newMerkleRoot as string),
       blockNumber: match.blockNumber,
       txIndex: typeof match.data.txIndex === 'number' ? match.data.txIndex : 0,
+      merkleRootCount: match.data.merkleRootCount
+        ? BigInt(String(match.data.merkleRootCount))
+        : undefined,
     };
   }
 
@@ -399,6 +406,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
       merkleLeafCount: 0,
+      merkleRootCount: 1n,
       publisherAddress: this.signerAddress,
       // Legacy V8 path — no attestation, mirror the on-chain `address(0)`.
       authorAddress: ethers.ZeroAddress,
@@ -1494,6 +1502,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
       merkleLeafCount: params.merkleLeafCount,
+      merkleRootCount: 1n,
       publisherAddress,
       authorAddress: ethers.getAddress(params.author.address),
       cgId: params.contextGraphId,
@@ -1705,6 +1714,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: fromHex(input.merkleRootHex),
       kaCount: input.chunks.length,
       merkleLeafCount: input.merkleLeafCount ?? input.chunks.length,
+      merkleRootCount: 1n,
       publisherAddress: input.publisherAddress ?? this.signerAddress,
       // `__registerKC` is a Random-Sampling test bridge that bypasses the
       // V10 publish path entirely; no attestation is signed, so mirror

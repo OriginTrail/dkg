@@ -12,6 +12,8 @@ import {
   STORAGE_ACK_DECLINE_CODES,
   boundedDeclineCodeLabel,
   isSubscriptionSource,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
   withSpan,
   getMetrics,
   type PublishIntentMsg,
@@ -119,6 +121,15 @@ export interface ACKCollectorParams {
   merkleLeafCount: number;
   /** Canonical KA UAL for publisher-local lifecycle context. Not sent on the PublishIntent wire. */
   assetUal?: string;
+  /** Complete rootless-KA envelope; omitted together for legacy intents. */
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
   ackMode?: V10ACKMode;
 }
 
@@ -280,9 +291,20 @@ export class ACKCollector {
     } = ctx;
 
     const log = this.deps.log ?? (() => {});
-    if (!Number.isInteger(params.merkleLeafCount) || params.merkleLeafCount < 1) {
+    const ackMode = params.ackMode ?? { kind: 'public' as const };
+    // Curated KAs are challenged against their public catalog commitment,
+    // not the private assertion's public-leaf tree. The lifecycle contract
+    // consequently permits merkleLeafCount=0 for curated KAs while rejecting
+    // it for public KAs. Keep that distinction on the ACK wire too so a fully
+    // private curated KA does not need a synthetic public placeholder triple.
+    if (
+      !Number.isInteger(params.merkleLeafCount)
+      || params.merkleLeafCount < 0
+      || (params.merkleLeafCount === 0 && ackMode.kind !== 'curated-catalog')
+    ) {
       throw new Error(
-        `ACK collection failed: merkleLeafCount must be a positive integer, got ${params.merkleLeafCount}`,
+        `ACK collection failed: merkleLeafCount must be positive for public KAs ` +
+          `(zero is valid only for curated-catalog ACKs), got ${params.merkleLeafCount}`,
       );
     }
     if (params.kaCount !== 1) {
@@ -290,7 +312,14 @@ export class ACKCollector {
         `ACK collection failed: V10 publish requires exactly one Knowledge Asset (kaCount=1); got ${params.kaCount}`,
       );
     }
-    const ackMode = params.ackMode ?? { kind: 'public' as const };
+    const isGraphScoped = params.contentScopeVersion !== undefined
+      || params.kaUal !== undefined
+      || params.assertionVersion !== undefined
+      || params.publicTripleCount !== undefined
+      || params.privateMerkleRoot !== undefined
+      || params.privateTripleCount !== undefined
+      || params.accessPolicy !== undefined
+      || params.allowedPeers !== undefined;
     const privateMerkleRoots = ackMode.kind === 'folded-private'
       ? ackMode.privateMerkleRoots
       : [];
@@ -307,6 +336,64 @@ export class ACKCollector {
     }
     if (ackMode.kind === 'folded-private' && privateMerkleRoots.length === 0) {
       throw new Error('ACK collection failed: folded-private ACK mode requires at least one privateMerkleRoot');
+    }
+    if (isGraphScoped) {
+      if (
+        params.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+        || !params.kaUal
+        || !params.assertionVersion
+        || params.publicTripleCount === undefined
+        || params.privateTripleCount === undefined
+      ) {
+        throw new Error('ACK collection failed: graph-scoped publish requires a complete content envelope');
+      }
+      const allowedPeers = params.allowedPeers ?? [];
+      if (
+        (params.accessPolicy !== 'public'
+          && params.accessPolicy !== 'ownerOnly'
+          && params.accessPolicy !== 'allowList')
+        || new Set(allowedPeers).size !== allowedPeers.length
+        || allowedPeers.some((peer) => peer.trim() !== peer || peer.length === 0)
+        || (params.accessPolicy === 'allowList' && allowedPeers.length === 0)
+        || (params.accessPolicy !== 'allowList' && allowedPeers.length > 0)
+      ) {
+        throw new Error('ACK collection failed: graph-scoped publish has an invalid access envelope');
+      }
+      if (params.rootEntities.length !== 0) {
+        throw new Error('ACK collection failed: graph-scoped publish must not carry rootEntities');
+      }
+      if (privateMerkleRoots.length > 1) {
+        throw new Error('ACK collection failed: graph-scoped publish supports one KA-level private commitment');
+      }
+      const graphScope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
+      if (graphScope.ual !== params.kaUal || graphScope.assertionVersion !== '1') {
+        throw new Error('ACK collection failed: graph-scoped publish requires a canonical version-1 UAL');
+      }
+      if (
+        !Number.isSafeInteger(params.publicTripleCount)
+        || params.publicTripleCount < 0
+        || !Number.isSafeInteger(params.privateTripleCount)
+        || params.privateTripleCount < 0
+        || (params.publicTripleCount === 0 && params.privateTripleCount === 0)
+        || (params.privateTripleCount > 0 && params.privateMerkleRoot?.length !== 32)
+        || (params.privateTripleCount === 0 && params.privateMerkleRoot !== undefined)
+      ) {
+        throw new Error('ACK collection failed: graph-scoped publish has an invalid content envelope');
+      }
+      if (
+        params.privateMerkleRoot
+        && ackMode.kind === 'folded-private'
+        && (privateMerkleRoots.length !== 1
+          || !privateMerkleRoots[0].every((byte, index) => byte === params.privateMerkleRoot![index]))
+      ) {
+        throw new Error('ACK collection failed: graph-scoped private commitment differs from ACK mode');
+      }
+      if (
+        (params.privateMerkleRoot === undefined && privateMerkleRoots.length > 0)
+        || (params.privateMerkleRoot !== undefined && ackMode.kind === 'public')
+      ) {
+        throw new Error('ACK collection failed: graph-scoped ACK mode carries an undeclared private commitment');
+      }
     }
     for (const [idx, root] of privateMerkleRoots.entries()) {
       if (root.length !== 32) {
@@ -353,7 +440,7 @@ export class ACKCollector {
     // the V2 storage-ack protocol. This makes mixed-version clusters fail at
     // protocol/capability selection instead of dialing V1-only cores that would
     // ignore field 20 and sign/decline against a public-only root.
-    const ackProtocolId = privateMerkleRoots.length > 0
+    const ackProtocolId = privateMerkleRoots.length > 0 || isGraphScoped
       ? PROTOCOL_STORAGE_ACK_V2
       : PROTOCOL_STORAGE_ACK;
     const p2pMsg: PublishIntentMsg = {
@@ -376,8 +463,17 @@ export class ACKCollector {
       catalogRoot: catalogCommitment?.catalogRoot,
       catalogLeafCount: catalogCommitment?.catalogLeafCount,
       privateMerkleRoots: privateMerkleRoots.length > 0
+        && !isGraphScoped
         ? [...privateMerkleRoots]
         : undefined,
+      contentScopeVersion: params.contentScopeVersion,
+      kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion,
+      publicTripleCount: params.publicTripleCount,
+      privateMerkleRoot: params.privateMerkleRoot,
+      privateTripleCount: params.privateTripleCount,
+      accessPolicy: params.accessPolicy,
+      allowedPeers: params.allowedPeers,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
@@ -486,6 +582,12 @@ export class ACKCollector {
     stagingQuads?: Uint8Array;
     isEncryptedPayload?: boolean;
     ackProtocolVersion?: number;
+    contentScopeVersion?: number;
+    kaUal?: string;
+    assertionVersion?: string;
+    publicTripleCount?: number;
+    privateMerkleRoot?: Uint8Array;
+    privateTripleCount?: number;
   }): Promise<ACKCollectionResult> {
     const {
       kaId, contextGraphId, preUpdateMerkleRootCount, newMerkleRoot,
@@ -500,9 +602,17 @@ export class ACKCollector {
         `UPDATE ACK collection failed: newMerkleRoot must be 32 bytes, got ${newMerkleRoot.length}`,
       );
     }
-    if (!Number.isInteger(newMerkleLeafCount) || newMerkleLeafCount < 1) {
+    // The contract samples curated KAs through newCatalogLeafCount, so their
+    // private assertion may legitimately have zero public challenge leaves.
+    // Public updates must remain positive or the on-chain update reverts.
+    if (
+      !Number.isInteger(newMerkleLeafCount)
+      || newMerkleLeafCount < 0
+      || (newMerkleLeafCount === 0 && params.isEncryptedPayload !== true)
+    ) {
       throw new Error(
-        `UPDATE ACK collection failed: newMerkleLeafCount must be a positive integer, got ${newMerkleLeafCount}`,
+        `UPDATE ACK collection failed: newMerkleLeafCount must be positive for public KAs ` +
+          `(zero is valid only for curated encrypted updates), got ${newMerkleLeafCount}`,
       );
     }
 
@@ -530,6 +640,12 @@ export class ACKCollector {
       stagingQuads: params.stagingQuads,
       isEncryptedPayload: params.isEncryptedPayload === true ? true : undefined,
       ackProtocolVersion: params.ackProtocolVersion,
+      contentScopeVersion: params.contentScopeVersion,
+      kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion,
+      publicTripleCount: params.publicTripleCount,
+      privateMerkleRoot: params.privateMerkleRoot,
+      privateTripleCount: params.privateTripleCount,
     };
     const intentBytes = encodeUpdateIntent(p2pMsg);
 

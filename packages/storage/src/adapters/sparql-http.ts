@@ -41,6 +41,10 @@ import {
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
+import {
+  buildAtomicGraphReplaceUpdate,
+  isAtomicGraphReplaceStagingGraph,
+} from '../atomic-graph-replace.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -409,6 +413,38 @@ export class SparqlHttpStore implements TripleStore {
     this.writeGen.recordUnscopedWrite();
   }
 
+  async replaceGraph(
+    graphUri: string,
+    quads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceGraph',
+    });
+    const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    const execute = async (update: string, source: string): Promise<void> => {
+      const res = await this.postUpdate(update, { ...options, source }, 'replaceGraph');
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(
+          `SPARQL HTTP replaceGraph failed (${res.status}): ${body.slice(0, 300)}`,
+        );
+      }
+    };
+    try {
+      await execute(plan.update, options?.source ?? 'sparql-http.replaceGraph');
+    } catch (error) {
+      if (plan.cleanup) {
+        await execute(plan.cleanup, 'sparql-http.replaceGraph.cleanup').catch(() => undefined);
+      }
+      this.invalidateListGraphsCache();
+      throw error;
+    }
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
+
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
     return this.runStoreWork('query', options, async () => {
       const startedAt = this.now();
@@ -513,7 +549,11 @@ export class SparqlHttpStore implements TripleStore {
       NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY,
       { ...options, source: options?.source ?? 'sparql-http.listGraphs' },
     );
-    return r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
+    return r.type === 'bindings'
+      ? r.bindings
+          .map((b) => b.g)
+          .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph))
+      : [];
   }
 
   private refreshListGraphsCache(options?: QueryOptions): Promise<string[]> {

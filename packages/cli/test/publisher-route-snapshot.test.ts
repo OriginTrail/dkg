@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, FileWorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  DKGPublisher,
+  FileWorkspacePublicSnapshotStore,
+  TripleStoreAsyncLiftPublisher,
+} from '@origintrail-official/dkg-publisher';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -42,7 +46,10 @@ describe('publisher routes with disk public snapshot refs', () => {
     ], { publisherPeerId: 'peer-route' });
 
     const publisherControl = createPublisherControlFromStore(store, publicSnapshotStore);
-    const jobId = await publisherControl.lift({
+    const jobId = await new TripleStoreAsyncLiftPublisher(store, {
+      publicSnapshotStore,
+      legacyRawLiftWriteCapability: 'migration-only',
+    }).lift({
       contextGraphId: CONTEXT_GRAPH,
       swmId: write.shareOperationId,
       shareOperationId: write.shareOperationId,

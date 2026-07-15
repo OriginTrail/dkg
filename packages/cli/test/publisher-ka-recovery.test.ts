@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import {
   TripleStoreAsyncLiftPublisher,
   type DKGPublisher,
@@ -14,10 +15,12 @@ import {
 } from '../src/publisher-runner.js';
 
 describe('named KA publisher recovery wiring', () => {
-  it('reconstructs the canonical V10 UAL from a confirmed transaction receipt', async () => {
+  it('preserves the queued graph UAL while generic recovery retains the public token UAL', async () => {
     const txHash = `0x${'ab'.repeat(32)}` as `0x${string}`;
-    const kaId = 123456789n;
     const walletId = '0x1111111111111111111111111111111111111111';
+    const kaNumber = 7n;
+    const kaId = (BigInt(walletId) << 96n) | kaNumber;
+    const graphUal = `did:dkg:evm:31337/${walletId}/${kaNumber}`;
     const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
     const resolvePublishByTxHash = vi.fn(async () => ({
       batchId: kaId,
@@ -38,12 +41,21 @@ describe('named KA publisher recovery wiring', () => {
         resolvePublishByTxHash,
       },
     } as unknown as DKGPublisher;
-    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(new Map([[walletId, publisher]]));
+    const publishers = new Map([[walletId, publisher]]);
+    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
 
-    const resolved = await resolver({
+    const job = {
       status: 'broadcast',
+      request: {
+        jobType: 'knowledge-asset-vm-publish',
+        knowledgeAssetVmPublish: {
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: graphUal,
+        },
+      },
       broadcast: { txHash, walletId },
-    } as LiftJobBroadcast);
+    } as LiftJobBroadcast;
+    const resolved = await resolver(job);
 
     expect(resolvePublishByTxHash).toHaveBeenCalledWith(txHash);
     expect(resolved).toEqual({
@@ -55,13 +67,18 @@ describe('named KA publisher recovery wiring', () => {
       finalization: {
         mode: 'published',
         txHash,
-        ual: `did:dkg:evm:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/${kaId}`,
+        ual: graphUal,
         batchId: kaId.toString(),
         startKAId: kaId.toString(),
         endKAId: kaId.toString(),
         publisherAddress: walletId,
       },
       publishProof: { merkleRoot, authorAddress: walletId },
+    });
+    await expect(createChainRecoveryResolver(publishers)(job)).resolves.toMatchObject({
+      finalization: {
+        ual: `did:dkg:evm:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/${kaId}`,
+      },
     });
   });
 
@@ -164,11 +181,17 @@ describe('named KA publisher recovery wiring', () => {
     const txHash = `0x${'ef'.repeat(32)}` as `0x${string}`;
     const authorAddress = '0x3333333333333333333333333333333333333333';
     const kaId = (BigInt(authorAddress) << 96n) | 7n;
+    const recoveredUal = `did:dkg:evm:31337/${authorAddress.toLowerCase()}/7`;
     const request = {
       contextGraphId: 'music-social',
       name: 'albums',
       shareOperationId: 'share-op-1',
-      roots: ['urn:album:one'],
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: recoveredUal,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: `0x${'12'.repeat(32)}`,
         authorAddress,
@@ -189,7 +212,7 @@ describe('named KA publisher recovery wiring', () => {
         finalization: {
           mode: 'published',
           txHash,
-          ual: `did:dkg:evm:31337/0x4444444444444444444444444444444444444444/${kaId}`,
+          ual: recoveredUal,
           batchId: kaId.toString(),
           startKAId: kaId.toString(),
           endKAId: kaId.toString(),
@@ -205,7 +228,7 @@ describe('named KA publisher recovery wiring', () => {
     await runtimePublisher.claimNext(walletB);
     await runtimePublisher.update(jobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one'],
+        canonicalRoots: [],
         canonicalRootMap: {},
         swmQuadCount: 1,
         authorityProofRef: 'knowledge-asset-lifecycle',

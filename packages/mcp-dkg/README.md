@@ -179,7 +179,7 @@ The lifecycle tool family that lets agents stage memory, seal it, share it, publ
 | `dkg_knowledge_asset_create` | 1 | Create an empty Working Memory assertion graph (knowledge asset). Idempotent — duplicate names land as `alreadyExists: true`. Name validation matches the daemon's `validateAssertionName`: any IRI-safe name up to 256 chars (no `/`, no whitespace, no `` <>"{}|^`\ `` characters), and not a reserved B3 KA id — NOT restricted to a lowercase-hyphen slug. |
 | `dkg_knowledge_asset_write` | 2 | Append RDF quads into an existing WM assertion. Set-merge — duplicates collapse. To replace, call `dkg_knowledge_asset_discard` first or mint a unique name. |
 | `dkg_knowledge_asset_finalize` | 3 | **Seal** the WM draft (the "git commit"): compute the merkleRoot over the whole assertion, build + sign an EIP-712 AuthorAttestation, stamp the seal. Returns `merkleRoot`, `authorAddress`, `schemeVersion`, `chainId`, `kav10Address`, `eip712Digest`. Seals the entire draft — no subset parameter. |
-| `dkg_knowledge_asset_share` | 4 | Share a WM assertion (or specific root entities) from private WM to Shared Working Memory so teammates see it (formerly "promote"). Omit `entities` for a full share, which auto-seals best-effort; a subset share is SWM-only and not publishable to VM as a subset. |
+| `dkg_knowledge_asset_share` | 4 | Atomically seal and share the complete KA triple set from private WM to Shared Working Memory. Root-entity subsets and unsealed shares are unsupported. |
 | `dkg_knowledge_asset_publish` | 5 | **Mint / update on chain** (the sealed assertion → Verifiable Memory). Takes no selector (the seal commits the whole assertion). Returns the **UAL** + `kaId` + `txHash` — see "The canonical round-trip" below. |
 | `dkg_knowledge_asset_pull_from` | edit-loop | Seed a fresh WM draft from the current SWM or VM state (the "git checkout"). Body `{ layer: "swm" \| "vm", onConflict?: "reject" \| "replace" }`; `409 WM_DRAFT_CONFLICT` on a dirty draft unless `replace`. |
 | `dkg_knowledge_asset_discard` | rollback | Discard a WM assertion without sharing it. Idempotent — no-op on a missing assertion. Use before re-writing an assertion whose name you want to keep stable. |
@@ -218,7 +218,7 @@ Lifted from the repo-root README's [DKG V10 as agent memory quickstart](../../RE
 2. `dkg_knowledge_asset_write` with one or more quads (additive set-merge).
 3. `dkg_memory_search` with a keyword from the write — the just-written triple comes back from the WM layer with `trustWeight` set.
 4. *(optional)* `dkg_knowledge_asset_finalize` to **seal** the draft (the EIP-712 "git commit" — note: this is the rc.17 *seal* verb, distinct from the on-chain mint in step 6).
-5. *(optional)* `dkg_knowledge_asset_share` to advance the lifecycle to SWM and gossip to peers (a full share auto-seals best-effort, so step 4 can be skipped for the common case).
+5. *(optional)* `dkg_knowledge_asset_share` to atomically seal, advance the complete KA to SWM, and gossip it to peers (step 4 can be skipped when the default authorship options are sufficient).
 6. *(optional)* `dkg_knowledge_asset_publish` to **mint on chain** (costs TRAC + gas, clears SWM). The response carries the asset's **UAL** (`did:dkg:<chainId>/<addr>/<number>`) plus `kaId` and `txHash` — store the UAL to reference the asset later.
 
 For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. To put fresh quads on chain, author them as a named knowledge asset and publish through the lifecycle (`create → write → finalize → share → publish`).

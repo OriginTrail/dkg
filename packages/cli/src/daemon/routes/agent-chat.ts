@@ -953,11 +953,19 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/update  { kaId, contextGraphId, quads, privateQuads?, precomputedUpdateAttestation? }
+  // POST /api/update  { kaId, contextGraphId, quads?, privateQuads?, precomputedUpdateAttestation? }
   if (req.method === "POST" && path === "/api/update") {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
-    const { kaId, quads, privateQuads } = parsed;
+    const { kaId } = parsed;
+    if (parsed.quads !== undefined && !Array.isArray(parsed.quads)) {
+      return jsonResponse(res, 400, { error: '"quads" must be an array when provided' });
+    }
+    if (parsed.privateQuads !== undefined && !Array.isArray(parsed.privateQuads)) {
+      return jsonResponse(res, 400, { error: '"privateQuads" must be an array when provided' });
+    }
+    const quads = Array.isArray(parsed.quads) ? parsed.quads : [];
+    const privateQuads = Array.isArray(parsed.privateQuads) ? parsed.privateQuads : [];
     const contextGraphId = parsed.contextGraphId;
     const precomputedUpdateAttestation = parsePrecomputedUpdateAttestation(
       parsed.precomputedUpdateAttestation,
@@ -975,9 +983,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     )) {
       return;
     }
-    if (!kaId || !contextGraphId || !quads?.length) {
+    if (!kaId || !contextGraphId || (quads.length === 0 && privateQuads.length === 0)) {
       return jsonResponse(res, 400, {
-        error: 'Missing "kaId", "contextGraphId", or "quads"',
+        error: 'Missing "kaId", "contextGraphId", or update content in "quads"/"privateQuads"',
       });
     }
     let kcIdBigInt: bigint;
@@ -1060,6 +1068,15 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       const message = err instanceof Error ? err.message : String(err);
       if ((err as any)?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
+      }
+      if ((err as any)?.code === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
+        return jsonResponse(res, 400, { error: message });
+      }
+      if ((err as any)?.code === "LEGACY_KA_READ_ONLY") {
+        return jsonResponse(res, 409, { error: message, code: "LEGACY_KA_READ_ONLY" });
+      }
+      if (String((err as any)?.code ?? '').startsWith("ROOTLESS_")) {
+        return jsonResponse(res, 422, { error: message, code: (err as any).code });
       }
       if (message.includes('precomputedUpdateAttestation')) {
         return jsonResponse(res, 422, { error: message });

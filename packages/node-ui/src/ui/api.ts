@@ -831,14 +831,19 @@ export const knowledgeAssetFinalize = (
     authorAgentAddress?: string;
     preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
     schemeVersion?: number;
-    // #1116 — `layer:"swm"` seals content already shared to SWM (the daemon
-    // reconstructs a transient WM draft from SWM, finalizes, drops the draft);
-    // default ("wm") seals the open Working-Memory draft. Lets a publish path
-    // seal an unsealed-in-SWM asset in place before retrying /vm/publish.
+    /** @deprecated Only Working Memory finalization is supported. */
     layer?: 'wm' | 'swm';
   } = {},
 ) => {
   assertExclusiveAuthorFields(opts);
+  if (opts.layer === 'swm') {
+    throw Object.assign(new Error('Legacy root-scoped Knowledge Assets are read-only'), {
+      code: 'LEGACY_KA_READ_ONLY',
+    });
+  }
+  if (opts.layer !== undefined && opts.layer !== 'wm') {
+    throw new TypeError('Only Working Memory finalization is supported');
+  }
   return post<{ merkleRoot: string; eip712Digest: string }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,
     { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
@@ -868,16 +873,44 @@ export const knowledgeAssetPullFrom = (
     { contextGraphId: normalizeContextGraphId(contextGraphId), layer, ...opts },
   );
 
-/** Advance the SWM pointer (WM → SWM; git push origin <branch>). */
+/** Atomically seal and share the complete WM Knowledge Asset to SWM. */
 export const knowledgeAssetShare = (
   contextGraphId: string,
   name: string,
-  opts: { subGraphName?: string; entities?: string[] | 'all' } = {},
-) =>
-  post<{ swmShared: boolean; promotedCount: number }>(
+  opts: {
+    subGraphName?: string;
+    /** @deprecated Knowledge Assets are shared atomically. */
+    entities?: string[] | 'all';
+    /** @deprecated Unsealed Knowledge Asset shares are unsupported. */
+    skipSeal?: boolean;
+  } = {},
+) => {
+  if (Array.isArray(opts.entities)) {
+    throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    });
+  }
+  if (opts.entities !== undefined && opts.entities !== 'all') {
+    throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    });
+  }
+  if (opts.skipSeal === true) {
+    throw Object.assign(new Error('Knowledge Assets are always sealed before sharing'), {
+      code: 'UNSEALED_SHARE_BLOCKED',
+    });
+  }
+  if (opts.skipSeal !== undefined && opts.skipSeal !== false) {
+    throw new TypeError('skipSeal must be false or omitted');
+  }
+  return post<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
-    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
+    {
+      contextGraphId: normalizeContextGraphId(contextGraphId),
+      ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+    },
   );
+};
 
 /** Publish to VM — mint or update on chain (git push origin main). */
 export const knowledgeAssetPublish = (
@@ -897,71 +930,23 @@ export const knowledgeAssetPublish = (
 };
 
 /**
- * Thrown by `knowledgeAssetPublishWithSeal` when a SWM asset can't be sealed in
- * place because only a subset of it was shared (daemon `SWM_SUBSET_NOT_SEALABLE`).
- * The UI surfaces this as "share the full asset first" — it is NOT retried.
- */
-export class SwmSubsetNotSealableError extends Error {
-  constructor(message?: string) {
-    super(message ?? 'Share the full asset to Shared Memory before publishing.');
-    this.name = 'SwmSubsetNotSealableError';
-  }
-}
-
-/**
- * Publish a named SWM assertion to VM, sealing it in place first if the daemon
- * reports it isn't finalized (the #1116 / §4.4 catch→seal→retry contract).
- *
- * Normal path: by the time content reaches SWM it is sealed (seal-on-share is
- * the default), so the first `/vm/publish` succeeds. This is the robustness
- * safety net for the rare unsealed-in-SWM case:
- *   - `PUBLISH_NOT_FULL_SHARE` / `VM_PUBLISH_PRECONDITION` (409) → seal in place
- *     via `wm/finalize {layer:"swm"}`, then retry publish ONCE.
- *   - `SWM_SUBSET_NOT_SEALABLE` (409, on the seal) → throw
- *     `SwmSubsetNotSealableError` (caller tells the user to share the full
- *     asset); never loops.
- * `sealed` in the result tells the caller a seal step ran so it can surface
- * "sealing then publishing" instead of a silent skip.
+ * Publish a named, already-sealed SWM Knowledge Asset to VM.
  *
  * A daemon HTTP-207 partial publish (KA minted on-chain but the context-graph
  * binding failed) comes back as `res.ok`, so it is NOT thrown — the body
  * carries `contextGraphError`. Callers MUST check that field and surface a
  * partial/warning state rather than treating it as a clean success.
+ *
+ * The historical function name is retained for UI source compatibility. It no
+ * longer finalizes or mutates SWM: legacy root-scoped SWM assets are read-only,
+ * and a publish precondition is surfaced to the caller without retrying.
  */
 export async function knowledgeAssetPublishWithSeal(
   contextGraphId: string,
   name: string,
   opts: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions = {},
-): Promise<Record<string, unknown> & { sealed?: boolean; contextGraphError?: string }> {
-  try {
-    return await knowledgeAssetPublish(contextGraphId, name, opts);
-  } catch (err: unknown) {
-    const code =
-      err instanceof HttpError && err.status === 409
-        ? (err.body as { code?: string } | undefined)?.code
-        : undefined;
-    if (code !== 'PUBLISH_NOT_FULL_SHARE' && code !== 'VM_PUBLISH_PRECONDITION') throw err;
-    // Unsealed in SWM — seal in place, then retry the publish once.
-    try {
-      await knowledgeAssetFinalize(contextGraphId, name, {
-        layer: 'swm',
-        ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
-      });
-    } catch (sealErr: unknown) {
-      if (
-        sealErr instanceof HttpError &&
-        sealErr.status === 409 &&
-        (sealErr.body as { code?: string } | undefined)?.code === 'SWM_SUBSET_NOT_SEALABLE'
-      ) {
-        throw new SwmSubsetNotSealableError(
-          (sealErr.body as { error?: string } | undefined)?.error,
-        );
-      }
-      throw sealErr;
-    }
-    const result = await knowledgeAssetPublish(contextGraphId, name, opts);
-    return { ...result, sealed: true };
-  }
+): Promise<Record<string, unknown> & { contextGraphError?: string }> {
+  return knowledgeAssetPublish(contextGraphId, name, opts);
 }
 
 /**
@@ -971,7 +956,6 @@ export async function knowledgeAssetPublishWithSeal(
 export interface BatchPublishResult {
   published: number;
   total: number;
-  sealed: number;        // how many needed an in-place seal before publishing
   partial: number;       // how many minted on-chain but failed the CG binding (207)
   partialError?: string; // a sample contextGraphError detail (the first 207's reason)
   // Every per-KA failure (not just the last), so callers can report the count + the
@@ -988,7 +972,7 @@ export interface BatchPublishResult {
 
 /**
  * Publish each named SWM assertion to Verifiable Memory through
- * `knowledgeAssetPublishWithSeal` (seal-in-SWM retry + 207 partial handling), aggregating
+ * `knowledgeAssetPublishWithSeal` (direct publish + 207 partial handling), aggregating
  * into ONE `BatchPublishResult`. The canonical batch-publish loop reused by every CTA
  * (MemoryLayerView / entities / layer-widgets) so the partial-detail, sample, and per-KA
  * error accounting cannot drift between them. Per-KA failures are collected into
@@ -999,7 +983,6 @@ export async function publishAssertionsToVm(
   items: Array<{ name: string; subGraph?: string }>,
 ): Promise<BatchPublishResult> {
   let published = 0;
-  let sealed = 0;
   let partial = 0;
   let firstPartialError: string | undefined;
   const failures: BatchPublishResult['failures'] = [];
@@ -1024,7 +1007,6 @@ export async function publishAssertionsToVm(
         a.subGraph ? { subGraphName: a.subGraph } : {},
       );
       published += 1;
-      if (res.sealed) sealed += 1;
       // PR #972 — a 207 partial: minted on-chain but the CG binding failed.
       if (res.contextGraphError) {
         partial += 1;
@@ -1052,10 +1034,7 @@ export async function publishAssertionsToVm(
         }
       }
     } catch (err: unknown) {
-      const message =
-        err instanceof SwmSubsetNotSealableError
-          ? err.message
-          : (err as { message?: string })?.message ?? 'publish failed';
+      const message = (err as { message?: string })?.message ?? 'publish failed';
       failures.push({ name: a.name, ...(a.subGraph ? { subGraph: a.subGraph } : {}), error: message });
     }
   }
@@ -1069,7 +1048,7 @@ export async function publishAssertionsToVm(
         drawnFromTopUp: aggDrawnTopUp.toString(),
       }
     : undefined;
-  return { published, total: items.length, sealed, partial, partialError: firstPartialError, failures, sample, convictionCostCovered };
+  return { published, total: items.length, partial, partialError: firstPartialError, failures, sample, convictionCostCovered };
 }
 
 // --- Assertions (WM objects) ---
@@ -1406,27 +1385,42 @@ export async function listAssertions(
 }
 
 /**
- * Promote an assertion from WM to SWM.
+ * Atomically seal and share a complete assertion from WM to SWM.
  *
- * PR #710 fix — `subGraphName` is the third part of the daemon's
- * lookup key alongside `(contextGraphId, assertionName)`. Without
- * it, promoting a sub-graph-scoped assertion either 404s or
- * silently promotes a same-named root-bucket assertion. The
- * daemon route already accepts the field
- * (`packages/cli/src/daemon/routes/assertion.ts:820-823`); only
- * spread it when supplied so root-bucket promotes keep the prior
- * wire shape.
+ * `subGraphName` is part of the daemon lookup key alongside
+ * `(contextGraphId, assertionName)`, so callers must preserve it for
+ * sub-graph-scoped assets. The legacy positional `"all"` form remains a
+ * neutral compatibility input, but root-entity arrays are rejected before
+ * any request so an old subset caller can never be silently widened.
  */
 export const promoteAssertion = (
   contextGraphId: string,
   assertionName: string,
-  entities: string | string[] = 'all',
-  subGraphName?: string,
-) =>
-  post<{ promotedCount: number }>(
+  optionsOrLegacyEntities: { subGraphName?: string } | string | string[] | undefined = {},
+  legacySubGraphName?: string,
+) => {
+  if (Array.isArray(optionsOrLegacyEntities)) {
+    throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    });
+  }
+  if (typeof optionsOrLegacyEntities === 'string' && optionsOrLegacyEntities !== 'all') {
+    throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    });
+  }
+  const subGraphName =
+    typeof optionsOrLegacyEntities === 'string'
+      ? legacySubGraphName
+      : optionsOrLegacyEntities?.subGraphName ?? legacySubGraphName;
+  return post<{ promotedCount: number; sealed: boolean; publishReady: boolean }>(
     `/api/knowledge-assets/${encodeURIComponent(assertionName)}/swm/share`,
-    { contextGraphId, entities, ...(subGraphName ? { subGraphName } : {}) },
+    {
+      contextGraphId: normalizeContextGraphId(contextGraphId),
+      ...(subGraphName ? { subGraphName } : {}),
+    },
   );
+};
 
 // Issue #864 — central UI translator for `promoteAssertion` outcomes so
 // every call-site speaks the same language. Two shapes get massaged

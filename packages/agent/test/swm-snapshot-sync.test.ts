@@ -58,7 +58,10 @@ describe('SWM snapshot catch-up sync', () => {
       expect(legacyPayloads.bindings).toHaveLength(0);
     }
 
-    const asyncPublisher = new TripleStoreAsyncLiftPublisher(nodeB.store, { publicSnapshotStore: targetSnapshots });
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(nodeB.store, {
+      publicSnapshotStore: targetSnapshots,
+      legacyRawLiftWriteCapability: 'migration-only',
+    });
     const jobId = await asyncPublisher.lift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,

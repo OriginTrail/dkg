@@ -2,7 +2,7 @@
  * Optional TripleStore operations that a decorator may expose even when its
  * wrapped backend cannot perform them.
  */
-export type TripleStoreCapability = 'update';
+export type TripleStoreCapability = 'update' | 'replaceGraph';
 
 /**
  * Typed signal that an optional store capability is unavailable.

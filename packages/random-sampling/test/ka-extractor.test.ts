@@ -33,6 +33,9 @@ import {
   contextGraphMetaUri,
   contextGraphLayerUri,
   contextGraphSubGraphUri,
+  createGraphKnowledgeAssetScope,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  knowledgeAssetLayerGraphUri,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import {
@@ -133,6 +136,85 @@ async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<void> {
     fixture.publicTriples.map((t) => ({ ...t, graph: dataGraph })),
   );
 }
+
+describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
+  const CG_ID = 77n;
+  const CG_NAME = 'rootless-rs';
+  const AUTHOR = '0x1111111111111111111111111111111111111111';
+  const KA_NUMBER = 9n;
+  const KA_ID = (BigInt(AUTHOR) << 96n) | KA_NUMBER;
+  const UAL = `did:dkg:otp:20430/${AUTHOR}/${KA_NUMBER}`;
+
+  async function seedGraphScoped(
+    store: OxigraphStore,
+    publicTriples: Array<{ subject: string; predicate: string; object: string }>,
+    privateRoot?: Uint8Array,
+  ): Promise<string> {
+    await seedOntology(store, CG_NAME, CG_ID);
+    const scope = createGraphKnowledgeAssetScope(UAL, '2');
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CG_NAME,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const metaGraph = contextGraphMetaUri(CG_NAME);
+    const metadata: Quad[] = [
+      { subject: UAL, predicate: `${DKG}batchId`, object: `"${KA_ID}"^^<${XSD}integer>`, graph: metaGraph },
+      { subject: UAL, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD}integer>`, graph: metaGraph },
+      { subject: UAL, predicate: `${DKG}assertionVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: metaGraph },
+      { subject: UAL, predicate: `${DKG}publicTripleCount`, object: `"${publicTriples.length}"^^<${XSD}integer>`, graph: metaGraph },
+      { subject: UAL, predicate: `${DKG}privateTripleCount`, object: `"${privateRoot ? 1 : 0}"^^<${XSD}integer>`, graph: metaGraph },
+      { subject: UAL, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: metaGraph },
+    ];
+    if (privateRoot) {
+      metadata.push({
+        subject: UAL,
+        predicate: `${DKG}privateMerkleRoot`,
+        object: `"${toHexNoPrefix(privateRoot)}"`,
+        graph: metaGraph,
+      });
+    }
+    await store.insert(metadata);
+    await store.insert(publicTriples.map((triple) => ({ ...triple, graph: vmGraph })));
+    return vmGraph;
+  }
+
+  it('reads the complete exact VM graph without discovering RDF roots', async () => {
+    const store = new OxigraphStore();
+    const privateRoot = new Uint8Array(32).fill(0x5a);
+    const triples = [
+      { subject: 'urn:any:one', predicate: 'urn:p:value', object: '"one"' },
+      { subject: 'urn:unrelated:two', predicate: 'urn:p:value', object: '"two"' },
+    ];
+    const vmGraph = await seedGraphScoped(store, triples, privateRoot);
+
+    const result = await extractV10KCFromStore(store, CG_ID, KA_ID);
+
+    expect(result.dataGraph).toBe(vmGraph);
+    expect(result.rootEntities).toEqual([]);
+    expect(result.triples).toHaveLength(2);
+    expect(result.privateRoots).toEqual([privateRoot]);
+    const expectedLeaves = [
+      ...triples.map((triple) => hashTripleV10(triple.subject, triple.predicate, triple.object)),
+      privateRoot,
+    ];
+    expect(new V10MerkleTree(result.leaves).root)
+      .toEqual(new V10MerkleTree(expectedLeaves).root);
+  });
+
+  it('supports a fully private KA with an empty public VM graph', async () => {
+    const store = new OxigraphStore();
+    const privateRoot = new Uint8Array(32).fill(0x33);
+    const vmGraph = await seedGraphScoped(store, [], privateRoot);
+
+    const result = await extractV10KCFromStore(store, CG_ID, KA_ID);
+
+    expect(result.dataGraph).toBe(vmGraph);
+    expect(result.triples).toEqual([]);
+    expect(result.rootEntities).toEqual([]);
+    expect(result.leaves).toEqual([privateRoot]);
+  });
+});
 
 describe('extractV10KCFromStore — happy path / publisher round-trip parity', () => {
   let store: OxigraphStore;

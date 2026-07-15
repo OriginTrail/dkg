@@ -16,10 +16,17 @@ export {
   registerTripleStoreAdapter,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
+  tryReplaceGraphAtomically,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
 } from './triple-store.js';
+export {
+  ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  buildAtomicGraphReplaceUpdate,
+  isAtomicGraphReplaceStagingGraph,
+  type AtomicGraphReplaceUpdate,
+} from './atomic-graph-replace.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   type TripleStoreCapability,
@@ -88,7 +95,6 @@ export {
   GraphManager,
   loadSelectedSharedMemoryQuads,
   loadSharedMemoryQuadsForScope,
-  migrateSharedMemoryRootClosureToNamedLifecycle,
   loadSharedMemorySliceWithKaBoundFallback,
   canonicalSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeGraphs,
@@ -97,8 +103,6 @@ export {
   resolveSharedMemoryReadGraphs,
   resolveVerifiableMemoryReadGraphs,
   type LoadSelectedSharedMemoryQuadsOptions,
-  type MigrateNamedLifecycleSharedMemoryOptions,
-  type NamedLifecycleSharedMemoryMigrationResult,
   type LoadSelectedVerifiableMemoryQuadsOptions,
   type NonEmptyGraphList,
   type NamedKnowledgeAssetGraphIdentity,

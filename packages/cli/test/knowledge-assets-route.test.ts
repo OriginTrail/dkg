@@ -585,18 +585,26 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
         expect(res.body.publishReady).toBe(true);
       });
 
-      it('a skipSeal:true full share → 200 sealed:false / publishReady:false (unsealed in SWM)', async () => {
+      it('a skipSeal:true full share is rejected before SWM mutation', async () => {
         await createKa(REG, 'share-skip-seal');
         await write(REG, 'share-skip-seal', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
         const res = await postJson(daemon, '/api/knowledge-assets/share-skip-seal/swm/share', {
           contextGraphId: REG,
           skipSeal: true,
         });
-        expect(res.status).toBe(200);
-        expect(res.body.swmShared).toBe(true);
-        expect(res.body.promotedCount).toBeGreaterThan(0);
-        expect(res.body.sealed).toBe(false);
-        expect(res.body.publishReady).toBe(false);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('UNSEALED_SHARE_UNSUPPORTED');
+      });
+
+      it('rejects root-entity selection before SWM mutation', async () => {
+        await createKa(REG, 'share-subset-rejected');
+        await write(REG, 'share-subset-rejected', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+        const res = await postJson(daemon, '/api/knowledge-assets/share-subset-rejected/swm/share', {
+          contextGraphId: REG,
+          entities: ['ex:A'],
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('KA_ATOMIC_SHARE_REQUIRED');
       });
 
       // UNSEALED_SHARE_BLOCKED → 409: NOT covered here. It needs a residual
@@ -872,7 +880,7 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(res.body.fromLayer).toBe('swm');
       expect(typeof res.body.seeded).toBe('number');
       expect(res.body.seeded).toBeGreaterThanOrEqual(1);
-      expect(res.body.entities).toBeGreaterThanOrEqual(1);
+      expect(res.body.seededPublic).toBeGreaterThanOrEqual(1);
     });
 
     it('agent-token pulls from its own SWM lane without an explicit agentAddress body field', async () => {
@@ -889,7 +897,6 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
 
       const shareRes = await agent.post(`/api/knowledge-assets/${name}/swm/share`, {
         contextGraphId: cg,
-        skipSeal: true,
       });
       expect(shareRes.status, `share: ${JSON.stringify(shareRes.body)}`).toBe(200);
 
@@ -1053,6 +1060,15 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(res.status).toBe(200);
       expect(res.body.state).toBe('queued');
       expect(res.body.jobId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    it('rejects root-entity selection instead of enqueueing a partial KA', async () => {
+      const res = await postJson(daemon, '/api/knowledge-assets/async/swm/share-async', {
+        contextGraphId: LOCAL,
+        entities: ['ex:A'],
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('KA_ATOMIC_SHARE_REQUIRED');
     });
 
     it('GET swm/share-jobs returns a jobs array', async () => {

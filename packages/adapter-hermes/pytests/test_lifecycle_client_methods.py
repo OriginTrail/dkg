@@ -7,6 +7,8 @@ daemon — only the request body / path the client builds is asserted.
 
 from __future__ import annotations
 
+import pytest
+
 
 # -- finalize_assertion -----------------------------------------------------
 
@@ -49,14 +51,12 @@ def test_finalize_url_encodes_name(recording_client):
     assert path == "/api/knowledge-assets/a%20b/wm/finalize"
 
 
-def test_finalize_puts_layer_swm_in_body(recording_client):
-    # #1116 — the `layer` field must reach the wire (the FakeClient handler tests
-    # only prove the tool→client arg pass-through; this pins the actual POST body).
+def test_finalize_rejects_layer_swm_before_http(recording_client):
     client = recording_client
-    client.finalize_assertion("k", "cg1", layer="swm")
-    path, body = client.posts[-1]
-    assert path == "/api/knowledge-assets/k/wm/finalize"
-    assert body == {"contextGraphId": "cg1", "layer": "swm"}
+    before = len(client.posts)
+    with pytest.raises(ValueError, match="read-only"):
+        client.finalize_assertion("k", "cg1", layer="swm")
+    assert len(client.posts) == before
 
 
 def test_finalize_omits_layer_when_none(recording_client):
@@ -66,15 +66,22 @@ def test_finalize_omits_layer_when_none(recording_client):
     assert "layer" not in body
 
 
+def test_finalize_rejects_non_wm_layer_before_http(recording_client):
+    client = recording_client
+    before = len(client.posts)
+    with pytest.raises(ValueError, match="Working Memory"):
+        client.finalize_assertion("k", "cg1", layer="vm")
+    assert len(client.posts) == before
+
+
 # -- promote_assertion (swm/share) ------------------------------------------
 
-def test_promote_puts_skip_seal_in_body(recording_client):
-    # #1116 — `skip_seal=True` must reach the wire as camelCase `skipSeal:true`.
+def test_promote_rejects_skip_seal_before_http(recording_client):
     client = recording_client
-    client.promote_assertion("k", "cg1", None, skip_seal=True)
-    path, body = client.posts[-1]
-    assert path == "/api/knowledge-assets/k/swm/share"
-    assert body == {"contextGraphId": "cg1", "skipSeal": True}
+    before = len(client.posts)
+    with pytest.raises(ValueError, match="always sealed"):
+        client.promote_assertion("k", "cg1", None, skip_seal=True)
+    assert len(client.posts) == before
 
 
 def test_promote_omits_skip_seal_when_none(recording_client):
@@ -86,11 +93,29 @@ def test_promote_omits_skip_seal_when_none(recording_client):
     assert "entities" not in body
 
 
-def test_promote_forwards_entities_and_skip_seal_together(recording_client):
+def test_promote_accepts_legacy_all_but_serializes_no_scope_fields(recording_client):
     client = recording_client
     client.promote_assertion("k", "cg1", "all", skip_seal=False)
     _, body = client.posts[-1]
-    assert body == {"contextGraphId": "cg1", "entities": "all", "skipSeal": False}
+    assert body == {"contextGraphId": "cg1"}
+
+
+def test_promote_rejects_root_selection_before_http(recording_client):
+    client = recording_client
+    before = len(client.posts)
+    with pytest.raises(ValueError, match="shared atomically"):
+        client.promote_assertion("k", "cg1", ["urn:a"])
+    assert len(client.posts) == before
+
+
+def test_promote_rejects_malformed_legacy_values_before_http(recording_client):
+    client = recording_client
+    before = len(client.posts)
+    with pytest.raises(ValueError, match="shared atomically"):
+        client.promote_assertion("k", "cg1", "urn:not-all")
+    with pytest.raises(TypeError, match="false or omitted"):
+        client.promote_assertion("k", "cg1", None, skip_seal="yes")
+    assert len(client.posts) == before
 
 
 # -- publish_finalized_assertion --------------------------------------------

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { useFetch } from '../../../hooks.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetFinalize, knowledgeAssetPublishWithSeal, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublishWithSeal, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
@@ -344,7 +344,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
           tone="vm"
           icon={LAYER_CONFIG.vm.icon}
           title="No Knowledge Assets yet."
-          description="Publish entities from Shared Working Memory to verify them on-chain."
+          description="Publish complete Knowledge Assets from Shared Working Memory to verify them on-chain."
         />
       </div>
     );
@@ -425,27 +425,20 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     setResult(null);
     setError(null);
     try {
-      // VM is the on-chain layer; finalize/publish need the CG registered, so
-      // auto-register transparently first.
-      // No client-side CG pre-registration: the seal is CG-independent (#1116 —
-      // finalize works on an unregistered CG with no chain write), WM→SWM promote is
-      // off-chain, and /vm/publish owns register-then-mint (it registers ONLY after
+      // No client-side CG pre-registration: atomic WM→SWM sharing is off-chain,
+      // and /vm/publish owns register-then-mint (it registers ONLY after
       // publish preconditions pass, so a doomed publish never burns registration gas).
       if (layer === 'wm') {
-        // Seal the draft before sharing — promote moves content out of WM and a
-        // later vm/publish requires a finalized assertion, so finalize must run
-        // here. Tolerate already-sealed / nothing-to-seal.
-        try {
-          await knowledgeAssetFinalize(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
-        } catch (e: any) {
-          const m = String(e?.message ?? '');
-          if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
-        }
+        // The share route seals and transfers the complete KA atomically.
         // PR #710 Fix A — sub-graph slug threads into the daemon's
         // `(cg, name, subGraph)` lookup so a row clicked from a
         // sub-graph partition resolves to that partition's
         // assertion, not a same-named root one.
-        const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
+        const res = await promoteAssertion(
+          contextGraphId,
+          assertion.name,
+          assertion.subGraph ? { subGraphName: assertion.subGraph } : {},
+        );
         // Issue #864 — fan the promote response through the central
         // describe helper so 0-count returns get an actionable hint
         // instead of the misleading "Promoted 0 triples" toast.
@@ -453,8 +446,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         setResult(outcome.message);
       } else {
         // Publish THIS assertion as one Knowledge Asset (Design B, any entity
-        // count) via the shared knowledgeAssetPublishWithSeal wrapper — gets the
-        // seal-in-SWM retry + 207 partial-publish handling like the other CTAs.
+        // count) via the shared knowledgeAssetPublishWithSeal wrapper — direct,
+        // fail-closed publishing with 207 partial-publish handling like the other CTAs.
         const res = await knowledgeAssetPublishWithSeal(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
         setResult(
           res.contextGraphError
@@ -482,22 +475,20 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     // "selected assertion …".
     let currentAssertion: string | null = null;
     try {
-      // No client-side CG pre-registration (see handleAction): the seal is
-      // CG-independent (#1116), promote is off-chain, and /vm/publish registers-then-
+      // No client-side CG pre-registration (see handleAction): atomic sharing is
+      // off-chain, and /vm/publish registers-then-
       // mints only after preconditions pass.
       if (layer === 'wm') {
         let total = 0;
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
-          try {
-            await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
-          } catch (e: any) {
-            const m = String(e?.message ?? '');
-            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
-          }
           // PR #710 — see comment on the single-row handler above.
-          const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
+          const res = await promoteAssertion(
+            contextGraphId,
+            a.name,
+            a.subGraph ? { subGraphName: a.subGraph } : {},
+          );
           total += res.promotedCount;
           if (res.promotedCount === 0) noopCount += 1;
         }
@@ -511,7 +502,7 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         }
       } else {
         // Publish each shared assertion as its own Knowledge Asset (Design B) via the
-        // shared batch loop (api.ts publishAssertionsToVm) — seal-retry + 207 partial
+        // shared batch loop (api.ts publishAssertionsToVm) — fail-closed direct publish + 207 partial
         // handling, uniform with the other batch-publish CTAs (carries the partial detail).
         const r = await publishAssertionsToVm(contextGraphId, assertions);
         if (r.published > 0) {

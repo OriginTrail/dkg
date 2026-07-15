@@ -10,7 +10,7 @@ import {
   jobSubject,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
-import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
+import { storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
 
 describe('KA async VM publish broadcast progress', () => {
   let now = 1_000;
@@ -38,11 +38,17 @@ describe('KA async VM publish broadcast progress', () => {
   function kaVmPublishRequest(overrides: Partial<Parameters<TripleStoreAsyncLiftPublisher['enqueueKnowledgeAssetVmPublish']>[0]> = {}) {
     const authorAddress = '0x1111111111111111111111111111111111111111';
     const kaNumber = 7n;
+    const kaUal = `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`;
     return {
       contextGraphId: 'music-social',
       name: 'albums',
       shareOperationId: 'share-op-1',
-      roots: ['urn:album:one', 'urn:album:two'],
+      roots: [],
+      contentScopeVersion: 2 as const,
+      kaUal,
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
         authorAddress: authorAddress as `0x${string}`,
@@ -61,18 +67,20 @@ describe('KA async VM publish broadcast progress', () => {
       wmCurrentAssertion: '12'.repeat(32),
       swmCurrentAssertion: '12'.repeat(32),
       kaNumber: kaNumber.toString(),
-      reservedUal: `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`,
+      reservedUal: kaUal,
       ...overrides,
     };
   }
 
   async function stageShareSnapshot(): Promise<void> {
-    await storeWorkspaceOperationPublicQuads({
+    const request = kaVmPublishRequest();
+    await storeKnowledgeAssetOperationPublicQuads({
       store,
       graphManager,
       contextGraphId: 'music-social',
       shareOperationId: 'share-op-1',
-      rootEntities: ['urn:album:one', 'urn:album:two'],
+      kaUal: request.kaUal,
+      assertionVersion: request.assertionVersion,
       publisherPeerId: 'peer-1',
       quads: [
         { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
@@ -120,7 +128,7 @@ describe('KA async VM publish broadcast progress', () => {
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRoots: [],
         canonicalRootMap: {},
         swmQuadCount: 2,
         authorityProofRef: 'knowledge-asset-lifecycle',
@@ -188,7 +196,7 @@ describe('KA async VM publish broadcast progress', () => {
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRoots: [],
         canonicalRootMap: {},
         swmQuadCount: 2,
         authorityProofRef: 'knowledge-asset-lifecycle',
@@ -214,7 +222,7 @@ describe('KA async VM publish broadcast progress', () => {
     await publisher.claimNext('wallet-1');
     await publisher.update(includedJobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRoots: [],
         canonicalRootMap: {},
         swmQuadCount: 2,
         authorityProofRef: 'knowledge-asset-lifecycle',
@@ -274,7 +282,7 @@ describe('KA async VM publish broadcast progress', () => {
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRoots: [],
         canonicalRootMap: {},
         swmQuadCount: 2,
         authorityProofRef: 'knowledge-asset-lifecycle',

@@ -33,8 +33,6 @@ import type {
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
-  LiftTransitionType,
-  LiftAuthorityProof,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
   CursorPersistence as ChainEventCursorPersistence,
@@ -71,6 +69,8 @@ import type {
  */
 export type PreSignedAuthorAttestation = {
   address: string;
+  /** Optional caller commitment checked against the canonicalized KA before sealing. */
+  expectedMerkleRoot?: Uint8Array;
   /**
    * OT-RFC-43 §F2 — the packed reservedKaId the self-sovereign author signed the
    * AuthorAttestation over `(uint160(address)<<96)|uint96(number)`. Required: the
@@ -318,12 +318,16 @@ export interface PublishOpts {
 }
 
 export interface PublishAsyncOpts extends PublishOpts {
-  namespace?: string;
-  scope?: string;
-  transitionType?: LiftTransitionType;
-  authority?: LiftAuthorityProof;
-  /** Prior KC reference; required for MUTATE/REVOKE. */
-  priorVersion?: string;
+  /** @deprecated Raw-root lifts were removed; async publish always creates one KA. */
+  namespace?: never;
+  /** @deprecated Raw-root lifts were removed; async publish always creates one KA. */
+  scope?: never;
+  /** @deprecated Use the named KA mutation API for updates or revocation. */
+  transitionType?: never;
+  /** @deprecated Authorship is carried by the canonical KA seal. */
+  authority?: never;
+  /** @deprecated Use the named KA mutation API for updates. */
+  priorVersion?: never;
   /** V10 selective-disclosure: per-entity kaRoot instead of flat-hash KC. */
   entityProofs?: boolean;
   localOnly?: boolean;
