@@ -9,6 +9,7 @@ export {
   autoPartition,
   type SkolemizedKnowledgeAssetParts,
 } from './auto-partition.js';
+export { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 export {
   ASSERTION_NAMED_GRAPH_PREFIX,
   assertionOriginalGraph,

@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore, type Quad, GraphManager } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, encodeKAUpdateRequest, encodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
+import { TypedEventBus, encodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
@@ -19,6 +19,10 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
 import { hardhatACKProvider } from './_helpers/acks.js';
+import {
+  encodeRootlessWorkspaceRequest,
+  rootlessSharedMemoryGraphFromWire,
+} from './_helpers/rootless-workspace.js';
 
 let CONTEXT_GRAPH: string;
 let _kav10Address: string;
@@ -175,20 +179,18 @@ describe('Prefix deletion safety', () => {
     it('gossip upsert of urn:x:foo does NOT delete urn:x:foobar triples', async () => {
       const peerId = '12D3KooWPrefixTest';
 
-      const msg1 = encodeWorkspacePublishRequest({
+      const msg1 = encodeRootlessWorkspaceRequest({
         contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
         shareOperationId: 'ws-prefix-1',
         timestampMs: Date.now(),
       });
       await handler.handle(msg1, peerId);
 
-      const msg2 = encodeWorkspacePublishRequest({
+      const msg2 = encodeRootlessWorkspaceRequest({
         contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foobar> <http://schema.org/name> "Foobar" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foobar', privateTripleCount: 0 }],
         publisherPeerId: peerId,
         shareOperationId: 'ws-prefix-2',
         timestampMs: Date.now(),
@@ -196,18 +198,17 @@ describe('Prefix deletion safety', () => {
       await handler.handle(msg2, peerId);
 
       // Upsert urn:x:foo
-      const msg3 = encodeWorkspacePublishRequest({
+      const msg3 = encodeRootlessWorkspaceRequest({
         contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo Updated" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
         shareOperationId: 'ws-prefix-3',
+        assertionVersion: '2',
         timestampMs: Date.now(),
       });
       await handler.handle(msg3, peerId);
 
-      const gm = new GraphManager(store);
-      const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+      const wsGraph = rootlessSharedMemoryGraphFromWire(msg2);
 
       const foobarResult = await store.query(
         `SELECT ?o WHERE { GRAPH <${wsGraph}> { <urn:x:foobar> <http://schema.org/name> ?o } }`,
@@ -801,10 +802,9 @@ describe('Workspace peerId spoofing', () => {
     const victimPeerId = '12D3KooWVictim';
     const attackerPeerId = '12D3KooWAttacker';
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<urn:spoof> <http://schema.org/name> "Spoofed" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: 'urn:spoof', privateTripleCount: 0 }],
       publisherPeerId: victimPeerId,
       shareOperationId: 'ws-spoof-1',
       timestampMs: Date.now(),
@@ -812,8 +812,7 @@ describe('Workspace peerId spoofing', () => {
 
     await handler.handle(msg, attackerPeerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <urn:spoof> ?p ?o } }`,
     );
@@ -826,10 +825,9 @@ describe('Workspace peerId spoofing', () => {
   it('accepts message where publisherPeerId matches fromPeerId', async () => {
     const peerId = '12D3KooWLegit';
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<urn:legit> <http://schema.org/name> "Legit" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: 'urn:legit', privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-legit-1',
       timestampMs: Date.now(),
@@ -837,8 +835,7 @@ describe('Workspace peerId spoofing', () => {
 
     await handler.handle(msg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <urn:legit> <http://schema.org/name> ?o } }`,
     );

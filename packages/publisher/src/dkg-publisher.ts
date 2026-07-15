@@ -2,10 +2,12 @@ import type { NamedKnowledgeAssetGraphIdentity, Quad, SharedMemoryGraphScope, Tr
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import type { AssertionSeal } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, migrateSharedMemoryRootClosureToNamedLifecycle, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically, type NamedLifecycleSharedMemoryMigrationResult } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
+import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
@@ -106,6 +108,67 @@ export {
 // member rows — cannot be sealed-in-SWM and published as a partial asset.
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 const SHARE_OPERATION_ID_PRED = 'http://dkg.io/ontology/shareOperationId';
+
+async function validateGraphScopedPayloadAgainstSeal(
+  seal: AssertionSeal,
+  publicQuads: readonly Quad[],
+  privateQuads: readonly Quad[],
+  sourceLabel: string,
+): Promise<{
+  normalizedPublicQuads: Quad[];
+  normalizedPrivateQuads: Quad[];
+  privateMerkleRoot: Uint8Array | undefined;
+}> {
+  assertNoKnowledgeAssetPayloadNamedGraphs(publicQuads, privateQuads);
+  const normalizedParts = await skolemizeKnowledgeAssetParts(
+    [...publicQuads],
+    [...privateQuads],
+    { allowCanonicalSkolemTerms: true },
+  );
+  const normalizedPublicQuads = normalizedParts.publicQuads;
+  const normalizedPrivateQuads = normalizedParts.privateQuads;
+  if (normalizedPublicQuads.length !== seal.publicTripleCount) {
+    throw new Error(
+      `Graph-scoped assertion triple-count mismatch: seal=${seal.publicTripleCount}, `
+      + `${sourceLabel}=${normalizedPublicQuads.length}`,
+    );
+  }
+  if (normalizedPrivateQuads.length !== seal.privateTripleCount) {
+    throw new Error(
+      `Graph-scoped assertion private triple-count mismatch: seal=${seal.privateTripleCount}, `
+      + `private-store=${normalizedPrivateQuads.length}`,
+    );
+  }
+  const privateMerkleRoot = computePrivateRoot(normalizedPrivateQuads);
+  const privateRootMatches = seal.privateMerkleRoot === undefined
+    ? privateMerkleRoot === undefined
+    : privateMerkleRoot !== undefined
+      && seal.privateMerkleRoot.length === privateMerkleRoot.length
+      && seal.privateMerkleRoot.every((byte, index) => byte === privateMerkleRoot[index]);
+  if (!privateRootMatches) {
+    throw new Error(
+      `Graph-scoped assertion private Merkle mismatch: seal=${seal.privateMerkleRoot
+        ? ethers.hexlify(seal.privateMerkleRoot)
+        : '(none)'}, private-store=${privateMerkleRoot
+        ? ethers.hexlify(privateMerkleRoot)
+        : '(none)'}`,
+    );
+  }
+  const merkleRoot = computeFlatKCRoot(
+    normalizedPublicQuads,
+    privateMerkleRoot ? [privateMerkleRoot] : [],
+  );
+  if (
+    merkleRoot.length !== seal.merkleRoot.length
+    || !merkleRoot.every((byte, index) => byte === seal.merkleRoot[index])
+  ) {
+    throw new Error(
+      `Graph-scoped assertion Merkle mismatch: seal=${ethers.hexlify(seal.merkleRoot)}, `
+      + `${sourceLabel}=${ethers.hexlify(merkleRoot)}`,
+    );
+  }
+  return { normalizedPublicQuads, normalizedPrivateQuads, privateMerkleRoot };
+}
 
 async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
   const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
@@ -6314,15 +6377,6 @@ export class DKGPublisher implements Publisher {
       `${A2_DKG}contentScopeVersion`,
       `${A2_DKG}assertionVersion`,
       'http://www.w3.org/ns/prov#wasRevisionOf',
-      // #1116: the promote-stamped member rows (dkg:rootEntity / dkg:entity) are
-      // the SEAL-INDEPENDENT recovery source readPromotedRootEntities uses. Pull-from
-      // (the seal-in-SWM reconstruction path) MUST preserve them across this
-      // clean-slate, otherwise a finalize that fails AFTER the re-seed would leave
-      // the asset with neither a seal nor the member rows — stranding the very asset
-      // seal-in-SWM exists to rescue (a non-atomic recovery). Keeping them makes
-      // finalize layer=swm safely retryable.
-      `${A2_DKG}rootEntity`,
-      `${A2_DKG}entity`,
       // #1116 (review A1): the full-SWM-share marker that gates finalize(layer:"swm").
       // pull-from's clean-slate (the seal-in-SWM reconstruction) MUST preserve it,
       // or a finalize that fails after the re-seed would strip the marker and make
@@ -6493,6 +6547,10 @@ export class DKGPublisher implements Publisher {
     input: Quad[],
     subGraphName?: string,
   ): Promise<void> {
+    // Private draft storage is triple-scoped and deliberately replaces the
+    // physical graph term. Reject RDF named-graph identity before that write so
+    // it cannot be silently erased and later sealed as a different dataset.
+    assertNoKnowledgeAssetPayloadNamedGraphs(input);
     rejectUserAuthoredProtocolMetadata(input.map((quad) => ({ ...quad, graph: '' })));
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     await this.assertGraphScopedLifecycleWritable(
@@ -6538,18 +6596,13 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * OT-RFC-43 §10.5.3 — `wm/pull-from`: seed a fresh WM draft from this file's
-   * current SWM or VM state (the `git checkout origin/<branch>` equivalent).
+   * Re-open one sealed rootless KA from its exact SWM or VM graph.
    *
-   * WM is the only writable surface; to edit content that already lives in SWM
-   * or VM you pull it into a new WM draft, edit, then re-share / re-publish.
-   * The file's entity set is read from the assertion seal (on the lifecycle
-   * URN); the source layer's quads for those entities (+ their skolemized
-   * children) are gathered and written into a fresh WM draft.
-   *
-   * `onConflict` applies only when the WM draft already holds content:
-   *   - 'reject' (default): throw `WM_DRAFT_CONFLICT` — the caller decides.
-   *   - 'replace': discard the open draft, then seed fresh (git force-checkout).
+   * V2 never reconstructs content from root/member rows or scans a shared
+   * bucket. The seal's (UAL, assertionVersion) tuple resolves one physical
+   * source graph, and the complete public/private payload is verified against
+   * that seal before any existing draft is removed. Legacy KAs remain readable
+   * through query/export surfaces but cannot enter this mutation path.
    */
   async assertionPullFrom(
     contextGraphId: string,
@@ -6557,26 +6610,85 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     sourceLayer: 'swm' | 'vm',
     opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
-  ): Promise<{ seeded: number; fromLayer: 'swm' | 'vm'; entities: number }> {
+  ): Promise<{
+    seeded: number;
+    seededPublic: number;
+    seededPrivate: number;
+    fromLayer: 'swm' | 'vm';
+    contentScopeVersion: number;
+    kaUal: string;
+    assertionVersion: string;
+  }> {
     const subGraphName = opts?.subGraphName;
-    // PR #972/a6740ac: ensure the (sub)graph is registered so a sub-scoped VM
-    // pull can resolve its data graph below (was a pure name-format validation).
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
-    const wmGraph = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    const sourceGraph = sourceLayer === 'swm'
-      ? this.graphManager.sharedMemoryUri(contextGraphId, subGraphName)
-      // PR #972/a6740ac: a sub-scoped VM pull reads the SUBGRAPH's data graph,
-      // not the root data graph (mirrors the SWM branch's subGraphName handling).
-      : subGraphName
-        ? this.graphManager.subGraphUri(contextGraphId, subGraphName)
-        : this.graphManager.dataGraphUri(contextGraphId);
+    const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
+    const currentWmGraph = await this.wmGraphUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
+    const candidateSealSubjects = currentWmGraph === sealSubject
+      ? [sealSubject]
+      : [sealSubject, currentWmGraph];
+    let seal: AssertionSeal | undefined;
+    for (const candidate of candidateSealSubjects) {
+      const sealResult = await this.store.query(
+        `CONSTRUCT { <${candidate}> ?p ?o } WHERE {
+          GRAPH <${metaGraph}> { <${candidate}> ?p ?o }
+        }`,
+      );
+      seal = parseAssertionSealQuads(
+        sealResult.type === 'quads' ? sealResult.quads : [],
+        candidate,
+      );
+      if (seal) break;
+    }
+    if (!seal) {
+      throw Object.assign(
+        new Error(
+          `Cannot pull "${name}" from ${sourceLayer.toUpperCase()}: rootless mutation requires a finalized v2 assertion seal`,
+        ),
+        { code: 'UNSEALED_PULL_FROM_BLOCKED' },
+      );
+    }
+    if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    if (
+      !seal.kaUal
+      || !seal.assertionVersion
+      || seal.publicTripleCount === undefined
+      || seal.privateTripleCount === undefined
+    ) {
+      throw new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
+    }
 
-    // onConflict: refuse to clobber a dirty WM draft unless told to replace it.
-    // NB: the actual DROP happens only AFTER the source is validated non-empty
-    // (below) — PR #972/335e8d8: dropping first could destroy an open draft when
-    // the pull turns out to have no source quads.
-    const hasDraft = await this.assertionScopedHasQuads(wmGraph);
+    const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+    const wmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.WorkingMemory,
+      scope,
+      subGraphName,
+    );
+    const sourceGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      sourceLayer === 'swm'
+        ? MemoryLayer.SharedWorkingMemory
+        : MemoryLayer.VerifiableMemory,
+      scope,
+      subGraphName,
+    );
+
+    const publicDraftExists = await this.assertionScopedHasQuads(wmGraph);
+    const privateDraft = await this.privateStore.getKnowledgeAssetPrivateDraftTriples(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
+    const hasDraft = publicDraftExists || privateDraft.length > 0;
     if (hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
       throw Object.assign(
         new Error(`A WM draft already exists for "${name}" in context graph "${contextGraphId}"; pass onConflict:"replace" to overwrite it.`),
@@ -6584,149 +6696,68 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    // Resolve the file's member entities from the SEAL. PR #972/335e8d8: the
-    // seal is stamped at finalize under the assertion-graph URI
-    // (`contextGraphAssertionUri`) in the meta graph — NOT under the
-    // lifecycle URN. The prior code read `assertionLifecycleUri`, a
-    // different subject, so the lookup found nothing and pull-from failed for
-    // EVERY finalized assertion.
-    //
-    // #1094: the same class of bug, second occurrence. `wmGraphUri()` only
-    // equals `contextGraphAssertionUri` BEFORE a kaId is minted; finalize
-    // stamps `dkg:kaId`, after which `wmGraphUri()` resolves to the numbered
-    // per-KA layer URI (`…/_working_memory/<addr>/<n>`). Reading the seal
-    // under `wmGraph` therefore failed for every finalized-AND-minted
-    // assertion — exactly the population pull-from exists for. The seal's
-    // canonical subject is the name-keyed assertion URI; check it first and
-    // keep the wmGraph subject as a legacy fallback (they coincide pre-mint).
-    const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    let sealRes = await this.store.query(
-      `CONSTRUCT { <${sealSubject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${sealSubject}> ?p ?o } }`,
+    const sourcePublicQuads = (await this.assertionScopedQuads(sourceGraph)).filter(
+      (quad) => !isSwmMerkleExcludedQuad(quad),
     );
-    let seal = parseAssertionSealQuads(sealRes.type === 'quads' ? sealRes.quads : [], sealSubject);
-    if (!seal && wmGraph !== sealSubject) {
-      sealRes = await this.store.query(
-        `CONSTRUCT { <${wmGraph}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${wmGraph}> ?p ?o } }`,
-      );
-      seal = parseAssertionSealQuads(sealRes.type === 'quads' ? sealRes.quads : [], wmGraph);
-    }
-    // #1116: a seal is no longer required to pull from SWM. When the asset was
-    // shared UNSEALED (a `skipSeal` share, or an asset stuck unsealed under the
-    // old auto-finalize-swallow behavior), fall back to the member entities
-    // stamped on the lifecycle URN by every promote
-    // (`generateAssertionPromotedMetadata`, predicate dkg:rootEntity) — recorded
-    // independent of any seal. This is what lets seal-in-SWM (finalize
-    // layer=swm) and recovery reconstruct the WM draft without first finalizing.
-    // VM pulls still require the seal (VM content is keyed by the published
-    // roots, which only the seal records).
-    // #1116 (review A1, rounds 5/7/8) — the SWM reconstruction is the ROOT of the
-    // subset-publishability bypass, and the guard MUST live here at the single
-    // publisher chokepoint so EVERY caller is covered (the finalize(layer:"swm")
-    // wrapper AND the direct wm/pull-from route + a plain finalize).
-    //
-    // Crucially, an SWM pull must NEVER trust the seal's rootEntities for scope:
-    // a stale FULL seal survives a SUBSET re-share (a subset share never
-    // re-seals, and `create` without a discard does not clear the seal — it lives
-    // on the name-keyed assertion URI, outside the lifecycle-URN clean-slate). If
-    // we read that stale seal it would short-circuit the subset gate below and let
-    // the direct route reconstruct + publish a superseded/partial asset under the
-    // KA name (round-8 live repro). So for SWM we ALWAYS resolve from the
-    // promote-stamped member rows, gated on the full-share completeness marker —
-    // the seal is rebuilt at the next finalize anyway (and torn down below). VM
-    // pulls still use the seal (VM content is keyed by the published roots, which
-    // only the seal records).
-    let entities: string[];
-    if (sourceLayer === 'swm') {
-      const promotedRoots = await this.readPromotedRootEntities(contextGraphId, agentAddress, name, subGraphName);
-      if (promotedRoots.length > 0) {
-        const fullyShared = await this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName);
-        if (!fullyShared) {
-          throw Object.assign(
-            new Error(
-              `"${name}" in context graph "${contextGraphId}" was only shared to SWM as a SUBSET — `
-              + `reconstructing or sealing it would publish a partial asset under the KA name. `
-              + `Share the full asset (entities:"all") before sealing in SWM.`,
-            ),
-            { code: 'SWM_SUBSET_NOT_SEALABLE' },
-          );
-        }
-      }
-      entities = promotedRoots;
-    } else {
-      entities = seal?.rootEntities ?? [];
-    }
-    if (entities.length === 0) {
-      throw new Error(
-        `No member entities for "${name}" in context graph "${contextGraphId}" — pull-from `
-        + `requires either a finalized assertion (its seal records the members) or a prior `
-        + `promote to SWM (which stamps the members on the lifecycle record). Found neither.`,
-      );
-    }
-
-    // Gather the source-layer quads scoped to the entity set + skolem children
-    // (same filter the publish gather / RS prover use), minus trust/ownership
-    // bookkeeping that never belongs in a working draft.
-    const values = entities.map((e) => `<${e}>`).join(' ');
-    // #1094: a per-KA `vm/publish` writes the canonical quads into the
-    // numbered per-KA VM graph `…/_verifiable_memory/{author}/{number}`
-    // (see SUBSTRATE-2 in dkg-agent-publish.ts) and, for on-chain CGs,
-    // into the per-on-chain-id partition `…/context/{ctxGraphId}` — NOT
-    // (only) the bare data graph this branch used to read. Pulling from
-    // "vm" therefore came back empty for exactly the published KAs the
-    // edit loop exists for. Scan the data graph PLUS both VM-side graph
-    // families; CONSTRUCT output is a set, so overlapping copies dedup.
-    const vmBase = subGraphName
-      ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
-      : `did:dkg:context-graph:${contextGraphId}`;
-    const vmGraphFilter =
-      `FILTER(STR(?g) = "${sourceGraph}" ` +
-      `|| STRSTARTS(STR(?g), "${vmBase}/_verifiable_memory/") ` +
-      `|| STRSTARTS(STR(?g), "did:dkg:context-graph:${contextGraphId}/context/"))`;
-    // Per-KA SWM: when pulling from SWM the source spans the per-KA prefix, not one bucket.
-    const sourcePattern = sourceLayer === 'swm'
-      ? `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } ${sharedMemoryReadBothFilter(sourceGraph)}`
-      : `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } ${vmGraphFilter}`;
-    const gather = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { ${sourcePattern} }`,
+    const sourcePrivateQuads = await this.privateStore.getKnowledgeAssetPrivateTriples(
+      contextGraphId,
+      scope,
+      subGraphName,
     );
-    const gathered = gather.type === 'quads'
-      ? gather.quads.filter((q) => !isSwmMerkleExcludedQuad(q))
-      : [];
-
-    // Validate the source has content BEFORE touching the draft (PR #972/335e8d8:
-    // a drop-before-validate could destroy an open WM draft when the source
-    // turned out empty — e.g. pulling from a layer the file was never shared to).
-    if (gathered.length === 0) {
+    if (sourcePublicQuads.length === 0 && sourcePrivateQuads.length === 0) {
       throw Object.assign(
         new Error(
-          `No ${sourceLayer.toUpperCase()} quads found for "${name}" in context graph "${contextGraphId}" `
-          + `using the assertion seal's ${entities.length} root entit${entities.length === 1 ? 'y' : 'ies'}; `
-          + `WM draft was not modified.`,
+          `No exact ${sourceLayer.toUpperCase()} content found for sealed KA ${scope.ual} assertion ${scope.assertionVersion}; WM draft was not modified.`,
         ),
         { code: 'PULL_FROM_EMPTY_SOURCE' },
       );
     }
+    const validated = await validateGraphScopedPayloadAgainstSeal(
+      seal,
+      sourcePublicQuads,
+      sourcePrivateQuads,
+      `${sourceLayer}-memory`,
+    );
 
-    // Source validated — now (re)open a fresh WM draft (clears stale
-    // lifecycle/seal) and seed it.
+    // The complete source has been validated. Only now is replace allowed to
+    // remove a dirty public or private draft.
     if (hasDraft) {
-      await this.dropAssertionScopedGraphs(wmGraph); // 'replace' — git force-checkout, after source validation
+      await this.dropAssertionScopedGraphs(wmGraph);
+      await this.privateStore.deleteKnowledgeAssetPrivateDraft(
+        contextGraphId,
+        agentAddress,
+        name,
+        subGraphName,
+      );
     }
     await this.assertionCreate(contextGraphId, name, agentAddress, subGraphName);
-    // #1094: `assertionCreate`'s clean-slate wipe only covers subjects under
-    // the lifecycle URN — the SEAL lives under the name-keyed assertion URI
-    // (and pre-mint legacy seals under the numbered WM URI), so it survived
-    // every pull-from. The next `wm/finalize` of the edited draft then hit
-    // "already finalized with a different merkleRoot" and the edit loop was
-    // permanently wedged. Pull-from re-opens the draft for editing, so the
-    // stale seal MUST go (it is rebuilt — same reservedKaId, preserved by
-    // assertionCreate's A2 carry-over — at the next finalize). Reuse the single
-    // clearAssertionSeal helper so the seal subject/predicate set has one source
-    // of truth (sealSubject == the helper's name-keyed assertion URI; wmGraph is
-    // re-resolved identically).
     await this.clearAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
-    await this.assertionWrite(contextGraphId, name, agentAddress, gathered, subGraphName);
-    return { seeded: gathered.length, fromLayer: sourceLayer, entities: entities.length };
+    // The source was already canonicalized and seal-verified. Re-materialize it
+    // through the internal exact-graph primitive: public assertionWrite rightly
+    // rejects protocol-owned c14n skolem IRIs as user input.
+    await this.replaceExactKnowledgeAssetGraph(
+      wmGraph,
+      validated.normalizedPublicQuads,
+      'Knowledge Asset pull-from',
+    );
+    if (validated.normalizedPrivateQuads.length > 0) {
+      await this.privateStore.storeKnowledgeAssetPrivateDraftTriples(
+        contextGraphId,
+        agentAddress,
+        name,
+        validated.normalizedPrivateQuads,
+        subGraphName,
+      );
+    }
+    return {
+      seeded: validated.normalizedPublicQuads.length + validated.normalizedPrivateQuads.length,
+      seededPublic: validated.normalizedPublicQuads.length,
+      seededPrivate: validated.normalizedPrivateQuads.length,
+      fromLayer: sourceLayer,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+    };
   }
 
   async assertionPromote(
@@ -6832,6 +6863,12 @@ export class DKGPublisher implements Publisher {
       contentScope,
       opts?.subGraphName,
     );
+    const vmGraphUri = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      contentScope,
+      opts?.subGraphName,
+    );
 
     // #1116 (round 10) — the swmShareComplete marker MUST be maintained on EVERY
     // return path of assertionPromote, not just the success tail. A non-full share
@@ -6861,7 +6898,88 @@ export class DKGPublisher implements Publisher {
       }
     };
 
-    const assertionQuads = await tagPromoteStep('assertionScopedQuads', () => this.assertionScopedQuads(graphUri));
+    let assertionQuads = await tagPromoteStep(
+      'assertionScopedQuads',
+      () => this.assertionScopedQuads(graphUri),
+    );
+    const lifecycleStateResult = await this.store.query(
+      `SELECT ?layer ?shareOperationId WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
+        OPTIONAL {
+          <${assertSafeIri(lifecycleSubject)}> <http://dkg.io/ontology/memoryLayer> ?layer
+        }
+        OPTIONAL {
+          <${assertSafeIri(lifecycleSubject)}> <${SHARE_OPERATION_ID_PRED}> ?shareOperationId
+        }
+      } } LIMIT 1`,
+    );
+    const lifecycleState = lifecycleStateResult.type === 'bindings'
+      ? lifecycleStateResult.bindings[0]
+      : undefined;
+    const lifecycleLayer = stripOptionalLiteral(lifecycleState?.['layer']);
+    const durableShareOperationId = stripOptionalLiteral(
+      lifecycleState?.['shareOperationId'],
+    );
+    let resumingCommittedSwm = false;
+    if (assertionQuads.length === 0) {
+      if (lifecycleLayer === MemoryLayer.VerifiableMemory) {
+        // A confirmed publish consumes SWM and leaves WM empty. A stale retry
+        // must be a non-mutating no-op, but only after the exact VM graph and
+        // immutable private partition still validate against the persisted seal.
+        // This retains the old idempotency guarantee without trusting legacy
+        // extraction markers or reconstructing scope from RDF subjects.
+        const existingVmQuads = (await this.assertionScopedQuads(vmGraphUri)).filter(
+          (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
+        );
+        const existingPrivateQuads = immutablePrivateQuads.filter(
+          (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
+        );
+        await validateGraphScopedPayloadAgainstSeal(
+          seal,
+          existingVmQuads,
+          existingPrivateQuads,
+          'verifiable-memory',
+        );
+        await maintainMarker(false);
+        return { promotedCount: 0, promotedAllRoots: false };
+      }
+
+      const existingSwmQuads = (await this.assertionScopedQuads(swmGraphUri)).filter(
+        (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
+      );
+      const hasCompletionMarker = await this.hasSwmShareComplete(
+        contextGraphId,
+        name,
+        agentAddress,
+        opts?.subGraphName,
+      );
+      if (
+        hasCompletionMarker
+        || lifecycleLayer === MemoryLayer.SharedWorkingMemory
+        || existingSwmQuads.length > 0
+      ) {
+        // A completed promote deliberately removes WM. A crash can also land
+        // the exact SWM graph before the lifecycle, operation snapshot, head,
+        // or completion marker. Validate the complete sealed payload and then
+        // run the idempotent commit tail again so a retry repairs every durable
+        // record and returns gossip for replay instead of merely saying no-op.
+        const existingPrivateQuads = immutablePrivateQuads.filter(
+          (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
+        );
+        try {
+          await validateGraphScopedPayloadAgainstSeal(
+            seal,
+            existingSwmQuads,
+            existingPrivateQuads,
+            'shared-memory',
+          );
+        } catch (error) {
+          await maintainMarker(false);
+          throw error;
+        }
+        assertionQuads = existingSwmQuads;
+        resumingCommittedSwm = true;
+      }
+    }
     if (assertionQuads.length === 0 && immutablePrivateQuads.length === 0) {
       await maintainMarker(false);
       throw Object.assign(
@@ -6955,33 +7073,27 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    const namedGraphs = [...new Set(quadsToPromote
-      .map((q) => q.graph)
-      .filter((graph): graph is string => typeof graph === 'string' && graph.length > 0))];
-    if (namedGraphs.length > 0) {
-      await maintainMarker(false);
-      throw Object.assign(
-        new Error(
-          'Knowledge Asset contains RDF named-graph quads, but SWM share and VM publish do not yet preserve original graph identity. '
-          + 'Rewrite the payload into the default graph before sharing, or keep the KA in WM until graph-preserving SWM/VM semantics are implemented.',
-        ),
-        { code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED', namedGraphs },
-      );
-    }
-
-    const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const operationId = resumingCommittedSwm && durableShareOperationId
+      ? durableShareOperationId
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Canonicalize both partitions together so blank-node labels stay stable
     // across the public/private boundary and validate the complete sealed KA.
-    const normalizedParts = await skolemizeKnowledgeAssetParts(
-      quadsToPromote,
-      privateQuadsToPromote,
-      {
-      allowCanonicalSkolemTerms: true,
-      },
-    );
-    const normalizedQuads = normalizedParts.publicQuads;
-    const normalizedPrivateQuads = normalizedParts.privateQuads;
+    let validatedPayload: Awaited<ReturnType<typeof validateGraphScopedPayloadAgainstSeal>>;
+    try {
+      validatedPayload = await validateGraphScopedPayloadAgainstSeal(
+        seal,
+        quadsToPromote,
+        privateQuadsToPromote,
+        'working-memory',
+      );
+    } catch (error) {
+      await maintainMarker(false);
+      throw error;
+    }
+    const normalizedQuads = validatedPayload.normalizedPublicQuads;
+    const normalizedPrivateQuads = validatedPayload.normalizedPrivateQuads;
+    const promotedPrivateRoot = validatedPayload.privateMerkleRoot;
     const accessPolicy = opts?.accessPolicy
       ?? (normalizedPrivateQuads.length > 0 ? 'ownerOnly' : 'public');
     const allowedPeers = [...new Set(
@@ -6993,47 +7105,6 @@ export class DKGPublisher implements Publisher {
     if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
       throw new Error('Graph-scoped assertion allowedPeers requires allowList policy');
     }
-    if (normalizedQuads.length !== seal.publicTripleCount) {
-      throw new Error(
-        `Graph-scoped assertion triple-count mismatch: seal=${seal.publicTripleCount}, ` +
-        `working-memory=${normalizedQuads.length}`,
-      );
-    }
-    if (normalizedPrivateQuads.length !== seal.privateTripleCount) {
-      throw new Error(
-        `Graph-scoped assertion private triple-count mismatch: seal=${seal.privateTripleCount}, ` +
-        `private-store=${normalizedPrivateQuads.length}`,
-      );
-    }
-    const promotedPrivateRoot = computePrivateRoot(normalizedPrivateQuads);
-    const privateRootMatches = seal.privateMerkleRoot === undefined
-      ? promotedPrivateRoot === undefined
-      : promotedPrivateRoot !== undefined
-        && seal.privateMerkleRoot.length === promotedPrivateRoot.length
-        && seal.privateMerkleRoot.every((byte, index) => byte === promotedPrivateRoot[index]);
-    if (!privateRootMatches) {
-      throw new Error(
-        `Graph-scoped assertion private Merkle mismatch: seal=${seal.privateMerkleRoot
-          ? ethers.hexlify(seal.privateMerkleRoot)
-          : '(none)'}, private-store=${promotedPrivateRoot
-          ? ethers.hexlify(promotedPrivateRoot)
-          : '(none)'}`,
-      );
-    }
-    const promotedMerkleRoot = computeFlatKCRoot(
-      normalizedQuads,
-      promotedPrivateRoot ? [promotedPrivateRoot] : [],
-    );
-    if (
-      promotedMerkleRoot.length !== seal.merkleRoot.length ||
-      !promotedMerkleRoot.every((byte, index) => byte === seal.merkleRoot[index])
-    ) {
-      throw new Error(
-        `Graph-scoped assertion Merkle mismatch: seal=${ethers.hexlify(seal.merkleRoot)}, ` +
-        `working-memory=${ethers.hexlify(promotedMerkleRoot)}`,
-      );
-    }
-
     // Pre-encode gossip message and enforce size limit BEFORE any destructive
     // mutations, so oversized promotions are rejected cleanly while the
     // assertion is still intact in WM.
@@ -7125,6 +7196,14 @@ export class DKGPublisher implements Publisher {
       }
     }
 
+    // A marker from an older interrupted ordering is not a completion proof:
+    // the immutable operation snapshot/head may still be missing. Clear it only
+    // after any required curator confirmation, then re-stamp it at the very end
+    // of the repaired commit tail.
+    if (resumingCommittedSwm) {
+      await maintainMarker(false);
+    }
+
     // The UAL-derived graph is the ownership boundary. Replace the complete
     // graph; never inspect, claim, skip, or delete individual RDF subjects.
     const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
@@ -7169,16 +7248,6 @@ export class DKGPublisher implements Publisher {
     await this.store.delete(promoted.delete);
     await this.store.insert(promoted.insert);
 
-    // #1116 (round 9/10) — CO-LOCATE the swmShareComplete marker with the
-    // member-row REPLACE above, at the single publisher chokepoint, via the same
-    // `maintainMarker` helper every early-return uses. The marker and the member
-    // rows MUST stay in lockstep: the marker says "the member rows describe a
-    // complete full share". A FULL-COMPLETE promote (entities:"all" + no foreign
-    // root skipped) SETS it; any other promote (subset/foreign-skipped) CLEARS it.
-    // Doing it in the publisher (not the agent wrapper) keeps the invariant for
-    // EVERY caller of the public assertionPromote — no desync on a direct caller.
-    await maintainMarker(isFullCompletePromote);
-
     await storeKnowledgeAssetOperationPublicQuads({
       store: this.store,
       graphManager: this.graphManager,
@@ -7211,8 +7280,16 @@ export class DKGPublisher implements Publisher {
       subGraphName: opts?.subGraphName,
     });
 
+    // This is the final commit record. It is intentionally written only after
+    // the exact SWM graph, lifecycle operation id, immutable operation snapshot,
+    // and monotonic KA head are durable. A retry that sees any earlier partial
+    // state repairs the tail above before this marker can become visible.
+    await maintainMarker(isFullCompletePromote);
+
     return {
-      promotedCount: swmQuads.length + normalizedPrivateQuads.length,
+      promotedCount: resumingCommittedSwm
+        ? 0
+        : swmQuads.length + normalizedPrivateQuads.length,
       gossipMessage,
       promotedAllRoots,
       shareOperationId: operationId,
