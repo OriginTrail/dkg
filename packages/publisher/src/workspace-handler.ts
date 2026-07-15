@@ -31,6 +31,7 @@ import { generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
   resolveKnowledgeAssetWorkspaceHead,
+  resolveWorkspaceOperationIdentity,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
@@ -225,6 +226,20 @@ export type SharedMemoryApplyOutcome =
       shareOperationId?: string;
       publisherPeerId?: string;
     };
+
+/**
+ * Result of the locked graph-scoped apply step. Discriminated instead of a
+ * boolean plus mutable sentinels so the post-lock code maps each outcome
+ * explicitly: `applied` is the only state mutation; `replay` acknowledges an
+ * exact redelivery with zero inserts and no change events; `cas_rejected` is
+ * transient (out-of-order gossip may still converge); `validation_rejected`
+ * is deterministic and permanent.
+ */
+type GraphScopedApplyResult =
+  | { status: 'applied' }
+  | { status: 'replay' }
+  | { status: 'validation_rejected'; reason: string }
+  | { status: 'cas_rejected' };
 
 /**
  * Structured rejection code for {@link SharedMemoryHandler.verifyHostModeEnvelopeAuthority}.
@@ -921,15 +936,6 @@ export class SharedMemoryHandler {
       this.log.warn(ctx, `SWM write rejected: protobuf decode failed: ${reason}`);
       return { applied: false, reason: `protobuf decode failed: ${reason}`, retryable: false };
     }
-    // PR-C codex R4 (dropped review comment): inside the inner
-    // try, `withWriteLocks` returns false for TWO distinct
-    // reasons — validation rejection (deterministic, payload
-    // can never apply) and CAS-not-met (TRANSIENT when SWM
-    // writes arrive out of order). Hoisted here so the closure
-    // can signal which branch fired; the post-closure code
-    // maps `cas` → retryable and `validation` → permanent.
-    let withWriteLocksRejection: 'validation' | 'cas' | undefined;
-    let validationRejectionReason: string | undefined;
     let verifiedLifecycleFields: SharedMemoryLifecycleFields | undefined;
     try {
       const { envelope, signedPayload } = decoded;
@@ -1223,8 +1229,63 @@ export class SharedMemoryHandler {
             'privateMerkleRoot requires a positive privateTripleCount',
           );
         }
+        // Non-empty content invariant, enforced BEFORE any store mutation:
+        // a zero-public zero-private assertion cannot represent a valid KA
+        // payload, and letting it reach the commit path would clear the live
+        // per-KA graph before the metadata generator rejects it.
+        if ((publicTripleCount ?? 0) === 0 && privateCount === 0) {
+          throw new Error(
+            'EMPTY_KA_CONTENT: a graph-scoped share requires at least one public or private triple',
+          );
+        }
       } catch (error) {
         const reason = `INVALID_KA_CONTENT_SCOPE: ${error instanceof Error ? error.message : String(error)}`;
+        this.log.warn(ctx, `SWM write rejected: ${reason}`);
+        return rejectOutcome(reason, false);
+      }
+
+      // Bind the UAL author to a cryptographically verified signer whenever a
+      // signer is available. `kaUal` is the storage and ownership identity of
+      // the KA, so a signed envelope whose verified signer differs from the
+      // UAL author is an attempt to write under someone else's identity.
+      // Agent-gated CGs and `trustedReplay` verified the envelope signature
+      // above; a signed envelope on an ungated public CG is verified
+      // self-consistently here before its address is trusted. Unsigned public
+      // live writes carry no verifiable author: they stay accepted (same
+      // peer-id transport binding and first-writer head fence as the legacy
+      // v1 ownership model) but are attributed to the transport peer, never
+      // to the unverified UAL author.
+      let verifiedSignerAddress: string | undefined;
+      if (envelope?.agentAddress && envelope.agentAddress.length > 0) {
+        let claimedSigner: string | undefined;
+        try {
+          claimedSigner = ethers.getAddress(envelope.agentAddress);
+        } catch {
+          claimedSigner = undefined;
+        }
+        if (claimedSigner) {
+          const alreadyVerified = agentGateAddresses !== null || trustedReplay;
+          if (!alreadyVerified) {
+            const selfConsistent = await this.verifyAgentEnvelope(
+              envelope, signedPayload, contextGraphId, [claimedSigner], ctx,
+              { requireLocalMembership: false },
+            );
+            if (!selfConsistent) {
+              const reason = 'graph-scoped envelope signature failed verification for its claimed signer';
+              this.log.warn(ctx, `SWM write rejected: ${reason}`);
+              return rejectOutcome(reason, false);
+            }
+          }
+          verifiedSignerAddress = claimedSigner;
+        }
+      }
+      if (
+        verifiedSignerAddress &&
+        !knowledgeAssetAgentAddressesEqual(verifiedSignerAddress, contentScope.agentAddress)
+      ) {
+        const reason =
+          `KA_AUTHOR_SIGNER_MISMATCH: kaUal author "${contentScope.agentAddress}" is not the ` +
+          `verified envelope signer "${verifiedSignerAddress}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
         return rejectOutcome(reason, false);
       }
@@ -1292,7 +1353,7 @@ export class SharedMemoryHandler {
       const lockKeys = [`${lockNamespace}\0ka\0${contentScope.ual}`];
 
       onPhase?.('store', 'start');
-      const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
+      const applyResult = await this.withWriteLocks(lockKeys, async (): Promise<GraphScopedApplyResult> => {
         onPhase?.('validate', 'start');
         const validation = validateKnowledgeAssetPublishRequest(
           quads,
@@ -1310,9 +1371,7 @@ export class SharedMemoryHandler {
             reason,
             validationErrorCount: validation.errors.length,
           }, 'warn');
-          withWriteLocksRejection = 'validation';
-          validationRejectionReason = reason;
-          return false;
+          return { status: 'validation_rejected', reason };
         }
         this.logSwmLifecycleEvent(ctx, 'swm_validation_passed', {
           ...verifiedFields,
@@ -1329,6 +1388,33 @@ export class SharedMemoryHandler {
         const incomingPrivateRootHex = privateMerkleRoot?.length
           ? ethers.hexlify(privateMerkleRoot).toLowerCase()
           : undefined;
+
+        // Operation identity is keyed by (contextGraphId, shareOperationId)
+        // only; a redelivered id bound to a DIFFERENT assertion identity would
+        // overwrite the first operation's immutable metadata and corrupt that
+        // KA's head. Rejected here (permanent) before any mutation; the
+        // storage layer enforces the same invariant as a throwing backstop
+        // for non-gossip callers.
+        const existingOperation = await resolveWorkspaceOperationIdentity({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          shareOperationId,
+          subGraphName,
+        });
+        if (
+          existingOperation &&
+          (existingOperation.kaUal !== contentScope.ual ||
+            existingOperation.assertionVersion !== contentScope.assertionVersion)
+        ) {
+          const reason =
+            `SHARE_OPERATION_ID_REUSE: share operation "${shareOperationId}" is already bound to ` +
+            `${existingOperation.kaUal} version ${existingOperation.assertionVersion}; ` +
+            `refusing to rebind it to ${contentScope.ual} version ${contentScope.assertionVersion}`;
+          this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+          return { status: 'validation_rejected', reason };
+        }
+
         const currentHead = await resolveKnowledgeAssetWorkspaceHead({
           store: this.store,
           graphManager: this.graphManager,
@@ -1340,11 +1426,10 @@ export class SharedMemoryHandler {
           const incomingVersion = BigInt(contentScope.assertionVersion);
           const currentVersion = BigInt(currentHead.assertionVersion);
           if (incomingVersion < currentVersion) {
-            validationRejectionReason =
+            const reason =
               `STALE_KA_ASSERTION_VERSION: incoming=${incomingVersion}, current=${currentVersion}`;
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return { status: 'validation_rejected', reason };
           }
           if (incomingVersion === currentVersion) {
             const sameAssertion =
@@ -1358,22 +1443,20 @@ export class SharedMemoryHandler {
             if (sameAssertion) {
               // Exact replay: acknowledge idempotently without churning the
               // graph or immutable operation snapshot.
-              return true;
+              return { status: 'replay' };
             }
-            validationRejectionReason =
+            const reason =
               `CONFLICTING_KA_ASSERTION_VERSION: ${contentScope.ual} version ${incomingVersion} ` +
               'is already bound to a different operation or content digest';
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return { status: 'validation_rejected', reason };
           }
           if (currentHead.publisherPeerId !== publisherPeerId) {
-            validationRejectionReason =
+            const reason =
               `KA_PUBLISHER_MISMATCH: ${contentScope.ual} is owned in SWM by ` +
               `${currentHead.publisherPeerId}, not ${publisherPeerId}`;
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return { status: 'validation_rejected', reason };
           }
         }
 
@@ -1386,17 +1469,15 @@ export class SharedMemoryHandler {
             // replays missed writes on reconnect, converging replicas eventually.
             // Accepting stale-CAS writes would silently corrupt local state.
             this.log.info(ctx, `Skipping SWM write ${shareOperationId} — remote CAS conditions not met`);
-            withWriteLocksRejection = 'cas';
-            return false;
+            return { status: 'cas_rejected' };
           }
         }
 
         const operationTimestamp = new Date(Number(timestampMs));
         if (Number.isNaN(operationTimestamp.getTime())) {
-          validationRejectionReason = `invalid timestampMs ${String(timestampMs)}`;
-          this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-          withWriteLocksRejection = 'validation';
-          return false;
+          const reason = `invalid timestampMs ${String(timestampMs)}`;
+          this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+          return { status: 'validation_rejected', reason };
         }
 
         const replacedAtomically = await tryReplaceGraphAtomically(
@@ -1411,20 +1492,11 @@ export class SharedMemoryHandler {
             { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
           );
         }
-        // The gossip envelope carries the verified author address
-        // (`verifyAgentEnvelope` above already cryptographically bound
-        // it to `recovered`); use it for SWM `prov:wasAttributedTo` so
-        // attribution survives peer-key rotation. Falls back to peer-ID
-        // literal in the writer if envelope agentAddress is missing or
-        // unparseable. See GH #748.
-        let senderAgentAddress: string | undefined;
-        if (envelope?.agentAddress && envelope.agentAddress.length > 0) {
-          try {
-            senderAgentAddress = ethers.getAddress(envelope.agentAddress);
-          } catch {
-            senderAgentAddress = undefined;
-          }
-        }
+        // `prov:wasAttributedTo` records only identities this node verified:
+        // the envelope signer when one was cryptographically bound above
+        // (and required to equal the UAL author), else the transport peer-ID
+        // literal via the writer's fallback. The claimed-but-unverified UAL
+        // author is never used for attribution. See GH #748.
         await storeKnowledgeAssetOperationPublicQuads({
           store: this.store,
           graphManager: this.graphManager,
@@ -1436,7 +1508,7 @@ export class SharedMemoryHandler {
           privateMerkleRoot,
           privateTripleCount: privateTripleCount ?? 0,
           publisherPeerId,
-          agentAddress: senderAgentAddress ?? contentScope.agentAddress,
+          agentAddress: verifiedSignerAddress,
           subGraphName,
           timestamp: operationTimestamp,
           publicSnapshotStore: this.publicSnapshotStore,
@@ -1451,11 +1523,11 @@ export class SharedMemoryHandler {
           subGraphName,
         });
 
-        return true;
+        return { status: 'applied' };
       });
 
       onPhase?.('store', 'end');
-      if (applied) {
+      if (applyResult.status === 'applied') {
         // PR-A R1: only record the observation after the apply actually
         // succeeded — passing allowlist + sub-graph validation + CAS +
         // the durable store insert. Recording earlier would let
@@ -1480,15 +1552,25 @@ export class SharedMemoryHandler {
         });
         return appliedSharedMemoryOutcome(verifiedFields, quads.length);
       }
-      // `applied === false` from the withWriteLocks closure. PR-C
-      // codex R4: validation rejection is deterministic (retry
+      if (applyResult.status === 'replay') {
+        // Exact redelivery of the already-current assertion: acknowledge
+        // idempotently. Nothing was written, so `insertedTriples` is 0 and
+        // neither `swm_state_changed` nor MEMORY_GRAPH_CHANGED fires — those
+        // report state mutations. recordSeenShareOp still runs: redundant
+        // deliveries are exactly what the `/api/slo` `redundantApplies`
+        // gauge exists to count.
+        this.recordSeenShareOp(contextGraphId, shareOperationId, ctx);
+        this.log.info(ctx, `SWM write ${shareOperationId} acknowledged as exact replay (no state change)`);
+        return appliedSharedMemoryOutcome(verifiedFields, 0);
+      }
+      // PR-C codex R4: validation rejection is deterministic (retry
       // produces the same outcome), but CAS-not-met is
       // TRANSIENT — the missed write upstream might still arrive
       // via gossip and bring local state up to where the CAS
       // condition would pass. Keep retrying so the sender's
       // outbox doesn't drop a payload that would apply after
       // out-of-order delivery converges.
-      if (withWriteLocksRejection === 'cas') {
+      if (applyResult.status === 'cas_rejected') {
         return rejectedSharedMemoryOutcome(
           verifiedFields,
           'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
@@ -1498,7 +1580,7 @@ export class SharedMemoryHandler {
       }
       return rejectedSharedMemoryOutcome(
         verifiedFields,
-        validationRejectionReason ?? 'validation rejected graph-scoped KA payload (permanent)',
+        applyResult.reason,
         false,
         true,
       );

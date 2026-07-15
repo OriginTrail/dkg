@@ -338,6 +338,46 @@ export async function storeWorkspaceOperationPublicQuads(params: {
 }
 
 /**
+ * Assertion identity already durably bound to a share-operation id, if any.
+ * Operation subjects and snapshot graphs are keyed by
+ * `(contextGraphId, shareOperationId)` only, so reusing an id for a different
+ * KA would overwrite the first operation's immutable metadata and corrupt its
+ * head. Callers use this to reject reuse instead of widening the identity key
+ * (which would change the durable subject/graph shapes mid-stack).
+ */
+export async function resolveWorkspaceOperationIdentity(params: {
+  store: TripleStore;
+  graphManager: GraphManager;
+  contextGraphId: string;
+  shareOperationId: string;
+  subGraphName?: string;
+}): Promise<{ kaUal: string; assertionVersion: string } | undefined> {
+  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
+  const metaGraph = params.graphManager.sharedMemoryMetaUri(
+    params.contextGraphId,
+    subGraphName,
+  );
+  const subject = workspaceOperationSubject(params.contextGraphId, params.shareOperationId);
+  const result = await params.store.query(
+    `SELECT ?kaUal ?assertionVersion WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        <${assertSafeIri(subject)}> <${DKG}contentScopeVersion> ?scopeVersion ;
+          <${DKG}kaUal> ?kaUal ;
+          <${DKG}assertionVersion> ?assertionVersion .
+      }
+    } LIMIT 1`,
+  );
+  if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+  const row = result.bindings[0];
+  const kaUal = row?.['kaUal'];
+  if (!kaUal) return undefined;
+  return {
+    kaUal,
+    assertionVersion: parsePositiveBigIntLiteral(row?.['assertionVersion']).toString(),
+  };
+}
+
+/**
  * Store one immutable public snapshot for one complete graph-scoped KA.
  * Metadata and snapshot count are constant in the number of RDF subjects.
  */
@@ -371,6 +411,45 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
   const timestamp = params.timestamp ?? new Date();
   const normalizedQuads = params.quads.map((quad) => ({ ...quad, graph: '' }));
   const digest = workspacePublicQuadsDigest(normalizedQuads);
+  // Generate metadata BEFORE any store mutation: the generator is the
+  // fail-closed validator for the commitment shape (zero-content, count and
+  // private-root invariants), so a payload it rejects must not have already
+  // destroyed the prior snapshot or metadata rows.
+  const metadata = generateKnowledgeAssetShareMetadata(
+    {
+      shareOperationId: params.shareOperationId,
+      contextGraphId: params.contextGraphId,
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      publicTripleCount: normalizedQuads.length,
+      privateMerkleRoot: params.privateMerkleRoot,
+      privateTripleCount: params.privateTripleCount,
+      publisherPeerId,
+      agentAddress: params.agentAddress?.trim() || undefined,
+      timestamp,
+      subGraphName,
+    },
+    workspaceMetaGraph,
+  );
+  const existingIdentity = await resolveWorkspaceOperationIdentity({
+    store: params.store,
+    graphManager: params.graphManager,
+    contextGraphId: params.contextGraphId,
+    shareOperationId: params.shareOperationId,
+    subGraphName,
+  });
+  if (
+    existingIdentity &&
+    (existingIdentity.kaUal !== scope.ual ||
+      existingIdentity.assertionVersion !== scope.assertionVersion)
+  ) {
+    throw new Error(
+      `SHARE_OPERATION_ID_REUSE: share operation "${params.shareOperationId}" in context graph ` +
+      `"${params.contextGraphId}" is already bound to ${existingIdentity.kaUal} ` +
+      `version ${existingIdentity.assertionVersion}; refusing to overwrite it with ` +
+      `${scope.ual} version ${scope.assertionVersion}`,
+    );
+  }
   let snapshotGraph: string | undefined;
   if (params.publicSnapshotStore) {
     await params.publicSnapshotStore.putSnapshot({ digest, quads: normalizedQuads });
@@ -390,22 +469,6 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
     graph: workspaceMetaGraph,
     subject: operationSubject,
   });
-  const metadata = generateKnowledgeAssetShareMetadata(
-    {
-      shareOperationId: params.shareOperationId,
-      contextGraphId: params.contextGraphId,
-      kaUal: scope.ual,
-      assertionVersion: scope.assertionVersion,
-      publicTripleCount: normalizedQuads.length,
-      privateMerkleRoot: params.privateMerkleRoot,
-      privateTripleCount: params.privateTripleCount,
-      publisherPeerId,
-      agentAddress: params.agentAddress?.trim() || undefined,
-      timestamp,
-      subGraphName,
-    },
-    workspaceMetaGraph,
-  );
   metadata.push({
     subject: operationSubject,
     predicate: `${DKG}publicQuadsDigest`,
