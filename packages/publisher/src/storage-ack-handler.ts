@@ -1834,6 +1834,14 @@ export class StorageACKHandler {
           subGraphName,
         )
       : this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
+    const inlineVmGraphUri = graphUpdate
+      ? knowledgeAssetLayerGraphUri(
+          swmGraphId,
+          MemoryLayer.VerifiableMemory,
+          graphUpdate.scope,
+          subGraphName,
+        )
+      : undefined;
 
     // Verify the new Merkle root the same way the publish path does:
     // recompute over the updated quads and compare to the publisher's
@@ -1998,7 +2006,13 @@ export class StorageACKHandler {
         inlineByteLength === undefined
           ? publicQuads.map((quad) => ({ ...quad, graph: swmGraphUri }))
           : publicQuads,
-        swmGraphUri,
+        // Inline public graph updates are emitted by DKGPublisher from its
+        // materialized per-KA VM graph. Only the no-inline fallback loads the
+        // source per-KA SWM graph. Keeping these provenance-specific graph
+        // expectations separate prevents every ordinary public update from
+        // being declined while still rejecting a payload stamped for an
+        // unrelated graph.
+        inlineByteLength === undefined ? swmGraphUri : inlineVmGraphUri!,
         graphUpdate.publicTripleCount,
       );
       if (!validation.valid) {

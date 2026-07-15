@@ -450,6 +450,16 @@ function rootlessUpdateError(code: RootlessUpdateErrorCode, message: string): Er
   return new RootlessUpdateError(code, message);
 }
 
+function latestShareOperationId(history: {
+  events: readonly AssertionEvent[];
+  currentShareOperationId?: string;
+}): string | undefined {
+  const promoted = [...history.events]
+    .reverse()
+    .find((event) => event.type === 'promoted' && event.shareOperationId);
+  return promoted?.shareOperationId?.trim() || history.currentShareOperationId?.trim() || undefined;
+}
+
 function distinctMetadataObjects(
   rows: readonly Quad[],
   predicate: string,
@@ -4152,10 +4162,7 @@ export class PublishMethods extends DKGAgentBase {
     if (opts?.entityProofs === true) {
       throw new Error('Graph-scoped async publish does not support entityProofs');
     }
-    const latestPromote = [...history.events]
-      .reverse()
-      .find((event) => event.type === 'promoted' && event.shareOperationId);
-    const shareOperationId = latestPromote?.shareOperationId?.trim() ?? history.currentShareOperationId?.trim();
+    const shareOperationId = latestShareOperationId(history);
     if (!shareOperationId) {
       throw Object.assign(
         new Error(
@@ -4432,7 +4439,13 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    const liveShareOperationId = history.currentShareOperationId?.trim();
+    // Completed graph-scoped promotions intentionally consume the temporary
+    // lifecycle-level operation row. The durable operation identity remains
+    // on the canonical promoted event and immutable SWM head. Read the same
+    // metadata shapes used when the intent was enqueued so a valid queued job
+    // cannot become stale merely because redundant lifecycle metadata was
+    // trimmed after the promote commit.
+    const liveShareOperationId = latestShareOperationId(history);
     if (!liveShareOperationId || liveShareOperationId !== request.shareOperationId.trim()) {
       throw stale(
         `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +

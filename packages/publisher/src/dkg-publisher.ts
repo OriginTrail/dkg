@@ -165,6 +165,7 @@ function resolveCatalogProofMaterial(
   contextGraphId: string,
   graphScoped: boolean,
   trustedKeys: PublishOptions['trustedNonManifestCatalogTriples'],
+  memberDataGraph: string,
 ): { catalogQuads: Quad[]; otherQuads: Quad[] } {
   if (!graphScoped) {
     return partitionCatalogQuads(quads, contextGraphDataUri(contextGraphId));
@@ -173,7 +174,11 @@ function resolveCatalogProofMaterial(
     catalogQuads: trustedCatalogTripleKeySet(trustedKeys).size > 0
       ? generatedPrivateCatalogFloorQuads(contextGraphId)
       : [],
-    otherQuads: [...quads],
+    // Graph-scoped canonicalization deliberately hashes graph-less triples,
+    // but the same payload is later serialized as N-Quads for member-side
+    // encryption. Stamp the exact per-KA VM graph here so that serialization
+    // cannot emit the invalid empty graph IRI `<>`.
+    otherQuads: quads.map((quad) => ({ ...quad, graph: memberDataGraph })),
   };
 }
 
@@ -2779,7 +2784,7 @@ export class DKGPublisher implements Publisher {
     const nquadsStr = allSkolemizedQuads
       .map(
         (q) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
+          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || dataGraph}> .`,
       )
       .join('\n');
     const publicNquadsBytes = new TextEncoder().encode(nquadsStr);
@@ -2796,6 +2801,7 @@ export class DKGPublisher implements Publisher {
       contextGraphId,
       graphPublish !== undefined,
       options.trustedNonManifestCatalogTriples,
+      dataGraph,
     );
     const encryptableNquadsStr = catalogQuads.length === 0
       ? nquadsStr
@@ -4809,6 +4815,7 @@ export class DKGPublisher implements Publisher {
         contextGraphId,
         graphUpdate !== undefined,
         options.trustedNonManifestCatalogTriples,
+        dataGraph,
       );
     // Non-catalog plaintext fed to the MEMBER encryptor (graph term retained,
     // mirror 2031-2038). No-op for public updates / curated updates with no

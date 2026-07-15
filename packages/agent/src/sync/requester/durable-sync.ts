@@ -32,6 +32,15 @@ export interface DurableSyncSummary {
   deferredBackpressure: number;
 }
 
+/** Graph inventory from one clean, complete legacy full snapshot. */
+export interface VerifiedFullSnapshot {
+  contextGraphId: string;
+  verifiedDataGraphs: ReadonlySet<string>;
+  verifiedMetaGraphs: ReadonlySet<string>;
+  /** False only when this CG's metadata phase was intentionally disabled. */
+  metaFetched: boolean;
+}
+
 interface DurableSyncContext {
   ctx: OperationContext;
   remotePeerId: string;
@@ -76,6 +85,7 @@ interface DurableSyncContext {
   ) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
+    verifiedGraphScopedDataGraphs?: string[];
     totalFetchedDataQuads: number;
     totalFetchedMetaQuads: number;
     rejectedKcs: number;
@@ -85,6 +95,8 @@ interface DurableSyncContext {
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (quads: Quad[]) => Promise<void>;
+  /** Runs after verified snapshot writes and before phase checkpoints advance. */
+  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -106,6 +118,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
+    onVerifiedFullSnapshot,
     deleteCheckpoint,
     setCheckpoint,
     logInfo,
@@ -263,6 +276,31 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.rejectedKcs += processed.rejectedKcs;
       }
 
+      const notifyVerifiedFullSnapshot = async (): Promise<void> => {
+        if (
+          !onVerifiedFullSnapshot
+          || sinceBatchId !== undefined
+          || !batchVerifiedCleanly
+          || processed.dataRejectedMissingMeta !== 0
+          || !dataResult.completed
+          || dataResult.timedOut
+          || dataResult.resumedFromOffset !== 0
+          || (!skipAgentsMeta && (!metaResult.completed || metaResult.timedOut))
+          || (!skipAgentsMeta && metaResult.resumedFromOffset !== 0)
+        ) return;
+
+        const verifiedDataGraphs = new Set(processed.verifiedData.map((quad) => quad.graph));
+        for (const graph of processed.verifiedGraphScopedDataGraphs ?? []) {
+          verifiedDataGraphs.add(graph);
+        }
+        await onVerifiedFullSnapshot({
+          contextGraphId: pid,
+          verifiedDataGraphs,
+          verifiedMetaGraphs: new Set(processed.verifiedMeta.map((quad) => quad.graph)),
+          metaFetched: !skipAgentsMeta,
+        });
+      };
+
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
       const updateMetaCheckpoint = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
@@ -277,6 +315,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         processed.dataRejectedMissingMeta > 0 ||
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
+        await notifyVerifiedFullSnapshot();
         // The verifier reports an empty batch only when both fetched phase
         // payloads are empty. Record each phase independently: a completed
         // zero-offset phase is a real clean-empty response, while a sibling
@@ -309,6 +348,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
+      await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
       endPhase();

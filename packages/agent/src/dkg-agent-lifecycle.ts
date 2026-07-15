@@ -227,7 +227,7 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
-import { runDurableSync } from './sync/requester/durable-sync.js';
+import { runDurableSync, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import {
@@ -4000,6 +4000,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     onAccessDenied?: (contextGraphId: string) => void,
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     stopOnBackoffWorthyFailure?: boolean,
+    onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>,
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     return runDurableSync({
@@ -4010,7 +4011,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onAccessDenied,
       syncAgentsMeta,
       createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
-      fetchSyncPages: this.fetchSyncPages.bind(this),
+      fetchSyncPages: (
+        opCtx,
+        peerId,
+        cgId,
+        includeSharedMemory,
+        phase,
+        graphUri,
+        deadline,
+        snapshotRef,
+        sinceBatchId,
+      ) => this.fetchSyncPages(
+        opCtx,
+        peerId,
+        cgId,
+        includeSharedMemory,
+        phase,
+        graphUri,
+        deadline,
+        snapshotRef,
+        sinceBatchId,
+        undefined,
+        undefined,
+        onVerifiedFullSnapshot !== undefined,
+      ),
       sinceBatchIdFor,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
@@ -4018,6 +4042,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         priority: 'background',
         source: 'agent.durableSync.storeInsert',
       }),
+      onVerifiedFullSnapshot,
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
@@ -4135,7 +4160,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Resync = the legacy verified lane for just this CG (no re-entry into the changelog
       // branch). Fold its result in, and report completeness so the driver only advances
       // the cursor to headSeq when the resync verifiably fetched everything below it.
-      runResync: async () => {
+      runResync: async (dropCandidates) => {
+        const pendingDrops = [...new Set(dropCandidates)].filter((graph) => !isForeignGraph(graph));
+        let dropsReconciled = pendingDrops.length === 0;
+        let curatorAuthoritative = false;
+        if (pendingDrops.length > 0) {
+          const curator = await this.resolveCuratorPeerIdsForCg(contextGraphId);
+          // Merkle verification authenticates returned KAs, not snapshot completeness.
+          // Only the uniquely resolved structural curator may make absence authoritative;
+          // legacy triples and ambiguous/mismatched registry entries fail closed.
+          curatorAuthoritative = !curator.curatorIsLocal
+            && !curator.legacyTripleResolved
+            && curator.peerIds.length === 1
+            && curator.peerIds[0] === remotePeerId;
+          if (!curatorAuthoritative) {
+            this.log.warn(
+              ctx,
+              `Leaving ${pendingDrops.length} changelog drop(s) pending for CG ${contextGraphId}: `
+              + `peer ${remotePeerId.slice(-8)} is not the uniquely resolved structural curator`,
+            );
+          }
+        }
         const r = await this.runLegacyDurableSyncForContextGraph(
           ctx,
           remotePeerId,
@@ -4144,9 +4189,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           undefined,
           undefined,
           undefined,
+          undefined,
+          curatorAuthoritative ? async (snapshot) => {
+            let reconciled = true;
+            for (const graph of pendingDrops) {
+              const metadataGraph = graph.endsWith('/_meta');
+              if (metadataGraph && !snapshot.metaFetched) {
+                reconciled = false;
+                continue;
+              }
+              const present = metadataGraph
+                ? snapshot.verifiedMetaGraphs.has(graph)
+                : snapshot.verifiedDataGraphs.has(graph);
+              if (!present) await this.store.dropGraph(graph);
+            }
+            dropsReconciled = reconciled;
+          } : undefined,
         );
         result = mergeDurableSyncResults(result, r);
-        const complete = r.timedOutPhases === 0 && r.failedPhases === 0
+        const complete = dropsReconciled
+          && r.timedOutPhases === 0 && r.failedPhases === 0
           && r.failedPeers === 0 && r.dataRejectedMissingMeta === 0
           && r.rejectedKcs === 0;
         return { complete, insertedTriples: r.insertedTriples };
@@ -4232,8 +4294,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     result.insertedDataTriples += insertedDataTriples;
     result.insertedMetaTriples += insertedMetaTriples;
     result.insertedTriples += insertedDataTriples + insertedMetaTriples;
+    const changelogComplete = outcome.kind === 'delta'
+      || (outcome.kind === 'resync' && outcome.complete);
+    if (!changelogComplete) {
+      // A legacy fallback may have completed its own fetch phases while the
+      // changelog drop remains unauthoritative. Preserve inserted progress,
+      // but do not surface those phase completions as CG readiness evidence.
+      result.completedPhases = 0;
+    }
     if (
-      outcome.kind !== 'denied'
+      changelogComplete
       && result.timedOutPhases === 0
       && result.failedPhases === 0
       && result.failedPeers === 0
