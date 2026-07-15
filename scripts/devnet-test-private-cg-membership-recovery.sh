@@ -197,6 +197,7 @@ fi
 BROKEN_RECOVERY_OBSERVE_S="${BROKEN_RECOVERY_OBSERVE_S:-35}"
 BROKEN_POST_RESTART_OBSERVE_S="${BROKEN_POST_RESTART_OBSERVE_S:-20}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-2}"
+RECOVERY_EXACT_RECHECK_INTERVAL_S="${RECOVERY_EXACT_RECHECK_INTERVAL_S:-30}"
 DEVNET_SH="$SCRIPT_DIR/devnet.sh"
 TESTNET_NODE_1_SSH="${TESTNET_NODE_1_SSH:-}"
 TESTNET_NODE_2_SSH="${TESTNET_NODE_2_SSH:-}"
@@ -270,6 +271,7 @@ for numeric in \
   "$VM_PUBLISH_TIMEOUT_S" "$VM_PUBLISH_POLL_INTERVAL_S" \
   "$VM_PUBLISH_PROGRESS_EVERY_KAS" \
   "$RECOVERY_TIMEOUT_S" "$POST_RESTART_TIMEOUT_S" \
+  "$RECOVERY_EXACT_RECHECK_INTERVAL_S" \
   "$TESTNET_MAX_ACCEPT_QUEUE" "$TESTNET_SSH_CONNECT_TIMEOUT" \
   "$INTEGRITY_PROGRESS_EVERY_KAS" "$HEALTH_SAMPLE_EVERY_KAS" \
   "$HEALTH_SAMPLE_INTERVAL_S" "$TESTNET_MAX_MEMORY_USED_PERCENT" \
@@ -288,6 +290,8 @@ done
   || { echo "VM_PUBLISH_POLL_INTERVAL_S must be at least 1." >&2; exit 2; }
 [ "$VM_PUBLISH_PROGRESS_EVERY_KAS" -ge 1 ] \
   || { echo "VM_PUBLISH_PROGRESS_EVERY_KAS must be at least 1." >&2; exit 2; }
+[ "$RECOVERY_EXACT_RECHECK_INTERVAL_S" -ge 1 ] \
+  || { echo "RECOVERY_EXACT_RECHECK_INTERVAL_S must be at least 1." >&2; exit 2; }
 [ "$HEALTH_SAMPLE_EVERY_KAS" -ge 1 ] \
   || { echo "HEALTH_SAMPLE_EVERY_KAS must be at least 1." >&2; exit 2; }
 [ "$HEALTH_SAMPLE_INTERVAL_S" -ge 1 ] \
@@ -2357,8 +2361,8 @@ subscription_flags_ready() {
 }
 
 full_recovery_present() {
-  local row bound_on_chain_id root sub root_vm sub_vm meta knowledge_assets policy allowed delegation
-  row="$(db_subscription_row "$JOINER_NODE")"
+  local row="${1:-}" bound_on_chain_id root sub root_vm sub_vm meta knowledge_assets policy allowed delegation
+  [ -n "$row" ] || row="$(db_subscription_row "$JOINER_NODE")"
   subscription_flags_ready "$row" || return 1
   bound_on_chain_id="$(json_get "$row" on_chain_id)"
   root="$(root_count "$JOINER_NODE")"
@@ -2383,10 +2387,24 @@ full_recovery_present() {
 }
 
 wait_full_recovery() {
-  local timeout="$1" start
+  local timeout="$1" start now row next_exact_check=0
   start="$(date +%s)"
-  while [ $(( $(date +%s) - start )) -lt "$timeout" ]; do
-    if full_recovery_present; then return 0; fi
+  while true; do
+    now="$(date +%s)"
+    [ $((now - start)) -lt "$timeout" ] || break
+    # Poll only the durable SQLite readiness flags while sync is in flight.
+    # The previous loop ran nine exact SPARQL counts every two seconds, adding
+    # store load precisely while the joiner was trying to ingest data. Flags
+    # are only a readiness hint: once they are complete, run the original full
+    # count/ACL assertion. If that assertion catches an eventual-consistency or
+    # product bug, retry it at a bounded cadence instead of hammering the store.
+    row="$(db_subscription_row "$JOINER_NODE" 2>/dev/null || printf 'null')"
+    if subscription_flags_ready "$row" \
+      && [ "$(json_get "$row" on_chain_id)" = "$ON_CHAIN_ID" ] \
+      && [ "$now" -ge "$next_exact_check" ]; then
+      if full_recovery_present "$row"; then return 0; fi
+      next_exact_check=$((now + RECOVERY_EXACT_RECHECK_INTERVAL_S))
+    fi
     maybe_sample_node_health recovery-wait
     sleep "$POLL_INTERVAL_S"
   done
@@ -2939,6 +2957,7 @@ PACKAGE_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || tr
   echo "apiTimeoutSeconds=$API_TIMEOUT_S"
   echo "recoveryTimeoutSeconds=$RECOVERY_TIMEOUT_S"
   echo "postRestartTimeoutSeconds=$POST_RESTART_TIMEOUT_S"
+  echo "recoveryExactRecheckIntervalSeconds=$RECOVERY_EXACT_RECHECK_INTERVAL_S"
   echo "catchupTimeoutSeconds=$CATCHUP_TIMEOUT_S"
   echo "vmPublishMode=$VM_PUBLISH_MODE"
   echo "vmPublishTimeoutSeconds=$VM_PUBLISH_TIMEOUT_S"
