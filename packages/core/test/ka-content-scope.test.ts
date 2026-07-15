@@ -31,6 +31,14 @@ describe('KA content scope', () => {
     });
   });
 
+  it('rejects KA numbers outside the uint96 on-chain identity domain', () => {
+    const tooLarge = 1n << 96n;
+    const ual = `did:dkg:base:8453/0x70997970c51812dc3a010C7d01b50e0d17dc79C8/${tooLarge}`;
+
+    expect(() => parseDeterministicKnowledgeAssetUal(ual))
+      .toThrow(/uint96 on-chain identity field/);
+  });
+
   it('derives one stable per-KA graph while assertion version remains explicit', () => {
     const v1 = createGraphKnowledgeAssetScope(UAL, 1);
     const v2 = createGraphKnowledgeAssetScope(UAL, 2);

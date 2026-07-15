@@ -70,7 +70,6 @@ export class LegacyKnowledgeAssetReadOnlyError extends Error {
 }
 
 const DETERMINISTIC_KA_UAL_RE = /^did:dkg:([^/]+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)$/;
-
 /**
  * The on-chain allocator packs `kaId = (uint160(author) << 96) | uint96(number)`.
  * A number at or above 2^96 would spill into the author bits, so two distinct
