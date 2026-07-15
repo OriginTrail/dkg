@@ -7,6 +7,10 @@ import {
   encodeChangelogResponse, decodeChangelogRequest, decodeChangelogResponse,
   type ChangelogDeltaRecord, type ChangelogSyncRequest, type ChangelogSyncResponse,
 } from '../src/sync/changelog/wire.js';
+import {
+  DURABLE_INTEGRITY_META_PREDICATES,
+  classifyDurableMetaGraph,
+} from '../src/sync/durable-integrity.js';
 
 const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: 'p', object: `o${n}`, graph });
 
@@ -24,6 +28,7 @@ function buildPage(specs: Array<{
   count?: number;
   verified?: number;
   noRoot?: boolean;
+  parsedQuads?: Quad[];
 }>) {
   const records: ChangelogDeltaRecord[] = [];
   const verifiedByGraph = new Map<string, Quad[]>();
@@ -32,13 +37,18 @@ function buildPage(specs: Array<{
   for (const s of specs) {
     const op = s.op ?? 'upsert';
     if (op === 'drop') { records.push({ seq: s.seq, graph: s.graph, op }); continue; }
-    const count = s.count ?? 1;
+    const count = s.count ?? s.parsedQuads?.length ?? 1;
     const verified = s.verified ?? count;
     records.push({ seq: s.seq, graph: s.graph, op, quads: `nq:${s.graph}` });
     recordQuadCountByGraph.set(s.graph, count);
-    verifiedByGraph.set(s.graph, Array.from({ length: verified }, (_, i) => qd(s.graph, i)));
-    if (s.graph.endsWith('/_meta') && !s.noRoot) {
-      metaGraphsWithRoot.add(s.graph);
+    const recordQuads = s.parsedQuads ?? Array.from({ length: count }, (_, i) => qd(s.graph, i));
+    verifiedByGraph.set(s.graph, recordQuads.slice(0, verified));
+    if (s.graph.endsWith('/_meta')) {
+      if (s.parsedQuads) {
+        if (classifyDurableMetaGraph(s.parsedQuads).hasMerkleRoot) metaGraphsWithRoot.add(s.graph);
+      } else if (!s.noRoot) {
+        metaGraphsWithRoot.add(s.graph);
+      }
     }
   }
   return {
@@ -118,6 +128,30 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.ops).toEqual([]);
   });
 
+  it.each(DURABLE_INTEGRITY_META_PREDICATES.filter(
+    (predicate) => predicate !== 'http://dkg.io/ontology/merkleRoot',
+  ))('does not acknowledge rejected V2 metadata containing %s without a merkle root', (predicate) => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const subject = 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7';
+    const page = buildPage([
+      {
+        seq: 7,
+        graph: topMeta,
+        verified: 0,
+        parsedQuads: [{
+          subject,
+          predicate,
+          object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: topMeta,
+        }],
+      },
+    ]);
+    const p = plan(page, { nextSeq: 7, priorSeq: 6, batchClean: false });
+    expect(p.deferred).toBe(true);
+    expect(p.ops).toEqual([]);
+    expect(p.advanceTo).toBe(6);
+  });
+
   it('defers duplicate graph records before an empty tail can hide non-empty metadata', () => {
     const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/8';
     const page = buildPage([
@@ -133,6 +167,28 @@ describe('planPageApply — verified-apply planner', () => {
 
     expect(p).toMatchObject({ deferred: true, advanceTo: 0, applied: 0 });
     expect(p.ops).toEqual([]);
+  });
+
+  it.each(DURABLE_INTEGRITY_META_PREDICATES)(
+    'classifies %s as part of the durable integrity envelope',
+    (predicate) => {
+      expect(classifyDurableMetaGraph([{
+        subject: 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7',
+        predicate,
+        object: '"value"',
+        graph: 'urn:meta',
+      }]).hasIntegrityEnvelope).toBe(true);
+    },
+  );
+
+  it('classifies ordinary CG metadata as non-integrity configuration', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    expect(classifyDurableMetaGraph([{
+      subject: 'did:dkg:context-graph:cg',
+      predicate: 'http://schema.org/name',
+      object: '"Context graph"',
+      graph: topMeta,
+    }])).toEqual({ hasMerkleRoot: false, hasIntegrityEnvelope: false });
   });
 
   it('defers rootless data paired with a whole shared metadata snapshot', () => {

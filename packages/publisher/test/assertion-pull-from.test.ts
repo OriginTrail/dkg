@@ -486,6 +486,29 @@ describe('rootless assertionPullFrom', () => {
       .toEqual(new Set(finalized.publicQuads.map(key)));
   });
 
+  it('retains private commitments and content across SWM pull, discard, and reopen', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store, {
+      publicQuads: [q(ENTITY_1, SCHEMA, '"Public recovery content"')],
+      privateQuads: [
+        q(ENTITY_1, 'urn:predicate:secret', '"Private recovery content"'),
+        q(ENTITY_2, 'urn:predicate:secret', '"Second private recovery content"'),
+      ],
+    });
+
+    await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
+    await publisher.assertionDiscard(CG, NAME, AGENT);
+    const reopened = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
+
+    expect(reopened).toMatchObject({
+      kaUal: finalized.kaUal,
+      assertionVersion: finalized.assertionVersion,
+      seededPrivate: finalized.privateQuads.length,
+    });
+    expect(new Set((await publisher.assertionQueryPrivate(CG, NAME, AGENT)).map(key)))
+      .toEqual(new Set(finalized.privateQuads.map(key)));
+  });
+
   it('keeps a sub-graph recovery seal inside its private partition across pull and discard', async () => {
     const { publisher, store } = await makePublisher();
     const subGraphName = 'code';

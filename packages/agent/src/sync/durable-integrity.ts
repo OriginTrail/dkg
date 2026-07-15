@@ -34,7 +34,7 @@ const SKOLEM_SUFFIX = '/.well-known/genid/';
  * changelog cursor planning must fail closed when any one of these fields is
  * present, even when a malformed record is missing its Merkle root.
  */
-const DURABLE_INTEGRITY_META_PREDICATES: ReadonlySet<string> = new Set([
+export const DURABLE_INTEGRITY_META_PREDICATES = [
   MERKLE_ROOT,
   CONTENT_SCOPE_VERSION,
   KA_UAL,
@@ -43,7 +43,11 @@ const DURABLE_INTEGRITY_META_PREDICATES: ReadonlySet<string> = new Set([
   PUBLIC_TRIPLE_COUNT,
   PRIVATE_TRIPLE_COUNT,
   PRIVATE_MERKLE_ROOT,
-]);
+] as const;
+
+const DURABLE_INTEGRITY_META_PREDICATE_SET: ReadonlySet<string> = new Set(
+  DURABLE_INTEGRITY_META_PREDICATES,
+);
 
 export interface DurableMetaGraphClassification {
   hasMerkleRoot: boolean;
@@ -59,7 +63,7 @@ export function classifyDurableMetaGraph(
   for (const quad of quads) {
     if (quad.predicate === MERKLE_ROOT) hasMerkleRoot = true;
     if (
-      DURABLE_INTEGRITY_META_PREDICATES.has(quad.predicate)
+      DURABLE_INTEGRITY_META_PREDICATE_SET.has(quad.predicate)
       && (quad.predicate === MERKLE_ROOT || isDeterministicKaMetadataSubject(quad.subject))
     ) {
       hasIntegrityEnvelope = true;

@@ -148,6 +148,12 @@ export {
   type VerifyMemberAttestationResult,
 } from './swm/member-attestation.js';
 export {
+  ROOTLESS_UPDATE_ERROR_CODES,
+  RootlessUpdateError,
+  isRootlessUpdateError,
+  type RootlessUpdateErrorCode,
+} from './rootless-update-error.js';
+export {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,

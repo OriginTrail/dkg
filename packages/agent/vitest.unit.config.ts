@@ -76,6 +76,8 @@ export default defineConfig({
       "test/v10-ack-provider-wiring.test.ts",
       "test/direct-rootless-publish.test.ts",
       "test/rootless-update-boundary.test.ts",
+      "test/rootless-update-error.test.ts",
+      "test/changelog-requester.test.ts",
       "test/encrypt-inline-policy.test.ts",
       "test/queued-publish-options.test.ts",
       "test/agents-meta-policy.test.ts",

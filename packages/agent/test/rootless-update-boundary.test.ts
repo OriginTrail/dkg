@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUTHOR_SCHEME_VERSION_V1,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  buildUpdateAuthorAttestationTypedData,
   contextGraphDataUri,
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
@@ -21,12 +23,21 @@ import {
   computePrivateRootV10,
   skolemizeKnowledgeAssetParts,
 } from '@origintrail-official/dkg-publisher';
+import { ethers } from 'ethers';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
 
 const CG = 'rootless-update-boundary';
 const CHAIN_ID = 'mock:31337';
 const ORIGINAL_AUTHOR = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const CURRENT_OWNER = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const EVM_CHAIN_ID = 31337n;
+const KAV_ADDRESS = '0x1111111111111111111111111111111111111111';
+const CURRENT_OWNER_WALLET = new ethers.Wallet(
+  '0x59c6995e998f97a5a0044976f7d4b21ddc10b15f2b79366a0a69c3fcf4e7f5c2',
+);
+const ATTACKER_WALLET = new ethers.Wallet(
+  '0x8b3a350cf5c34c9194ca3a545d05a0f4f70e6fb072cf5f77b905d8b317f2f3d0',
+);
+const CURRENT_OWNER = CURRENT_OWNER_WALLET.address;
 const KA_NUMBER = 7n;
 const KA_ID = (BigInt(ORIGINAL_AUTHOR) << 96n) | KA_NUMBER;
 const UAL = `did:dkg:${CHAIN_ID}/${ORIGINAL_AUTHOR}/${KA_NUMBER.toString()}`;
@@ -64,24 +75,39 @@ async function seedConfirmedRootlessHead(store: OxigraphStore): Promise<void> {
 async function updateAttestation(
   publicQuads: Quad[],
   privateQuads: Quad[] = [],
-  authorAddress = CURRENT_OWNER,
+  signer = CURRENT_OWNER_WALLET,
+  authorAddress = signer.address,
 ) {
   const canonical = await skolemizeKnowledgeAssetParts(publicQuads, privateQuads);
   const privateRoot = computePrivateRootV10(canonical.privateQuads);
+  const expectedNewMerkleRoot = computeFlatKCRootV10(
+    canonical.publicQuads,
+    privateRoot ? [privateRoot] : [],
+  );
+  const typedData = buildUpdateAuthorAttestationTypedData({
+    chainId: EVM_CHAIN_ID,
+    kav10Address: KAV_ADDRESS,
+    kaId: KA_ID,
+    newMerkleRoot: expectedNewMerkleRoot,
+    authorAddress,
+    schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+  });
+  const signed = ethers.Signature.from(await signer.signTypedData(
+    typedData.domain,
+    typedData.types,
+    typedData.message,
+  ));
   return {
     canonical,
     privateRoot,
     attestation: {
-      expectedNewMerkleRoot: computeFlatKCRootV10(
-        canonical.publicQuads,
-        privateRoot ? [privateRoot] : [],
-      ),
+      expectedNewMerkleRoot,
       authorAddress,
       signature: {
-        r: new Uint8Array(32),
-        vs: new Uint8Array(32),
+        r: ethers.getBytes(signed.r),
+        vs: ethers.getBytes(signed.yParityAndS),
       },
-      schemeVersion: 1,
+      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
     },
   };
 }
@@ -92,7 +118,12 @@ function makeAgentLike(
 ) {
   return {
     store,
-    chain: { chainId: CHAIN_ID },
+    chain: {
+      chainId: CHAIN_ID,
+      getEvmChainId: async () => EVM_CHAIN_ID,
+      getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
+      hasContractCode: async () => false,
+    },
     log: {
       info: () => undefined,
       warn: () => undefined,
@@ -121,7 +152,6 @@ describe('DKGAgent rootless update boundary', () => {
     const { canonical, privateRoot, attestation } = await updateAttestation(
       publicQuads,
       privateQuads,
-      CURRENT_OWNER,
     );
 
     const graphManager = new GraphManager(store);
@@ -229,6 +259,133 @@ describe('DKGAgent rootless update boundary', () => {
       .getKnowledgeAssetPrivateTriples(CG, createGraphKnowledgeAssetScope(UAL, 2)))
       .toEqual([]);
     expect(publisherCalls).toBe(0);
+  });
+
+  it('rejects an invalid update signer before replacing existing SWM or private state', async () => {
+    const store = new OxigraphStore();
+    await seedConfirmedRootlessHead(store);
+    const replacementPublic = [q('urn:update:new', 'urn:value', '"replacement"')];
+    const replacementPrivate = [q('urn:update:secret', 'urn:value', '"replacement-secret"')];
+    const { attestation } = await updateAttestation(
+      replacementPublic,
+      replacementPrivate,
+      ATTACKER_WALLET,
+      CURRENT_OWNER,
+    );
+
+    const graphManager = new GraphManager(store);
+    const swmBucket = graphManager.sharedMemoryUri(CG);
+    const swmScope: SharedMemoryGraphScope = {
+      kind: 'named-lifecycle',
+      identity: { agentAddress: ORIGINAL_AUTHOR, kaNumber: KA_NUMBER },
+    };
+    const canonicalSwm = canonicalSharedMemoryScopeWriteGraph(swmBucket, swmScope);
+    const priorPublic = [q('urn:update:prior', 'urn:value', '"prior"', canonicalSwm)];
+    await store.insert(priorPublic);
+    const privateStore = new PrivateContentStore(store, graphManager);
+    const nextScope = createGraphKnowledgeAssetScope(UAL, 2);
+    const priorPrivate = [q('urn:update:prior-secret', 'urn:value', '"prior-secret"')];
+    await privateStore.replaceKnowledgeAssetPrivateTriples(CG, nextScope, priorPrivate);
+
+    let publisherCalls = 0;
+    const agent = makeAgentLike(store, async () => {
+      publisherCalls += 1;
+      throw new Error('publisher must not be called');
+    });
+
+    await expect((PublishMethods.prototype as any).update.call(
+      agent,
+      KA_ID,
+      CG,
+      replacementPublic,
+      replacementPrivate,
+      { precomputedUpdateAttestation: attestation },
+    )).rejects.toThrow(/signer mismatch/);
+
+    const persistedPublic = await loadSharedMemoryQuadsForScope(
+      store,
+      swmBucket,
+      'all',
+      swmScope,
+    );
+    expect(persistedPublic.map(({ graph: _graph, ...quad }) => quad)).toEqual(
+      priorPublic.map(({ graph: _graph, ...quad }) => quad),
+    );
+    expect(await privateStore.getKnowledgeAssetPrivateTriples(CG, nextScope))
+      .toEqual(priorPrivate);
+    expect(publisherCalls).toBe(0);
+  });
+
+  it('serializes same-KA updates so each publisher call reads its own staged graph', async () => {
+    const store = new OxigraphStore();
+    await seedConfirmedRootlessHead(store);
+    const publicA = [q('urn:update:a', 'urn:value', '"A"')];
+    const publicB = [q('urn:update:b', 'urn:value', '"B"')];
+    const signedA = await updateAttestation(publicA);
+    const signedB = await updateAttestation(publicB);
+    const graphManager = new GraphManager(store);
+    const swmBucket = graphManager.sharedMemoryUri(CG);
+    const swmScope: SharedMemoryGraphScope = {
+      kind: 'named-lifecycle',
+      identity: { agentAddress: ORIGINAL_AUTHOR, kaNumber: KA_NUMBER },
+    };
+
+    let releaseFirst!: () => void;
+    const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstPublisherEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { firstPublisherEntered = resolve; });
+    const stagedByCall: Quad[][] = [];
+    const agent = makeAgentLike(store, async (kaId) => {
+      const staged = await loadSharedMemoryQuadsForScope(
+        store,
+        swmBucket,
+        'all',
+        swmScope,
+      );
+      stagedByCall.push(staged.map(({ graph: _graph, ...quad }) => quad));
+      if (stagedByCall.length === 1) {
+        firstPublisherEntered();
+        await holdFirst;
+      }
+      return {
+        kaId,
+        ual: UAL,
+        merkleRoot: stagedByCall.length === 1
+          ? signedA.attestation.expectedNewMerkleRoot
+          : signedB.attestation.expectedNewMerkleRoot,
+        kaManifest: [],
+        status: 'tentative',
+        publicQuads: staged,
+      };
+    });
+
+    const first = (PublishMethods.prototype as any).update.call(
+      agent,
+      KA_ID,
+      CG,
+      publicA,
+      [],
+      { precomputedUpdateAttestation: signedA.attestation },
+    );
+    await firstEntered;
+    const second = (PublishMethods.prototype as any).update.call(
+      agent,
+      KA_ID,
+      CG,
+      publicB,
+      [],
+      { precomputedUpdateAttestation: signedB.attestation },
+    );
+
+    await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+    expect(stagedByCall).toHaveLength(1);
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(stagedByCall).toEqual([
+      signedA.canonical.publicQuads.map(({ graph: _graph, ...quad }) => quad),
+      signedB.canonical.publicQuads.map(({ graph: _graph, ...quad }) => quad),
+    ]);
   });
 
   it('stages a fully private update without inventing a public placeholder', async () => {
