@@ -489,6 +489,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const mixedCaseGraph = `${SWM_GRAPH}/${mixedAuthor}/1`;
     await store.insert([
       q(root, 'http://schema.org/name', '"local"', mixedCaseGraph),
+      q(`${root}/.well-known/genid/local`, 'http://schema.org/name', '"child"', mixedCaseGraph),
       q(root, WORKSPACE_OWNER_PREDICATE, '"peer-a"', SWM_META_GRAPH),
     ]);
 
@@ -503,6 +504,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     });
 
     expect(await store.deleteByPattern({ graph: mixedCaseGraph, subject: root })).toBe(0);
+    expect(await store.deleteBySubjectPrefix(mixedCaseGraph, `${root}/.well-known/genid/`)).toBe(0);
     expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(0);
     const owners = await (publisher as any).sharedMemoryOwnersForPromotion(
       CONTEXT_GRAPH, undefined, CONTEXT_GRAPH, [root],
@@ -515,8 +517,12 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const root = 'urn:test:root:one';
     await store.insert([
       q(root, 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
+      q(`${root}/.well-known/genid/local`, 'http://schema.org/name', '"local-child"', PER_KA_SWM_GRAPH),
       q(root, 'http://schema.org/name', '"same-author-sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
+      q(`${root}/.well-known/genid/sibling`, 'http://schema.org/name', '"sibling-child"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
       q(root, 'http://schema.org/name', '"foreign"', FOREIGN_PER_KA_SWM_GRAPH),
+      q(`${root}/.well-known/genid/foreign`, 'http://schema.org/name', '"foreign-child"', FOREIGN_PER_KA_SWM_GRAPH),
+      q(`${root}-nearby`, 'http://schema.org/name', '"not-a-child"', PER_KA_SWM_GRAPH),
       q(root, WORKSPACE_OWNER_PREDICATE, '"peer-foreign"', SWM_META_GRAPH),
     ]);
 
@@ -531,10 +537,15 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     });
 
     expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: root })).toBe(0);
+    expect(await store.deleteBySubjectPrefix(PER_KA_SWM_GRAPH, `${root}/.well-known/genid/`)).toBe(0);
+    expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH, subject: `${root}-nearby` })).toBe(1);
     expect(await store.deleteByPattern({ graph: SAME_AUTHOR_SIBLING_SWM_GRAPH, subject: root })).toBe(1);
+    expect(await store.deleteBySubjectPrefix(SAME_AUTHOR_SIBLING_SWM_GRAPH, `${root}/.well-known/genid/`)).toBe(1);
     expect(await store.deleteByPattern({ graph: FOREIGN_PER_KA_SWM_GRAPH, subject: root })).toBe(1);
+    expect(await store.deleteBySubjectPrefix(FOREIGN_PER_KA_SWM_GRAPH, `${root}/.well-known/genid/`)).toBe(1);
     expect(await store.deleteByPattern({ graph: SWM_META_GRAPH, subject: root })).toBe(1);
   });
+
 
   it('batches multi-root exact-cleanup metadata reconciliation into one family read', async () => {
     const { publisher, store } = await makePublisher(new NoChainAdapter(), 'confirmed');

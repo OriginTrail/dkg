@@ -72,6 +72,11 @@ import {
 import { isQuorumUnmetError } from './ack-errors.js';
 import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
 import {
+  clearPublishedSwmRootMetadata,
+  deletePublishedSwmRootData,
+  deleteSharedMemoryMetadataForRoot,
+} from './shared-memory-cleanup.js';
+import {
   PublisherPlanner,
   coercePublisherAddress,
   type PublisherAddressResolution,
@@ -1321,7 +1326,7 @@ export class DKGPublisher implements Publisher {
       if (swmOwned.has(m.rootEntity)) {
         await this.store.deleteByPattern({ graph: swmGraph, subject: m.rootEntity });
         await this.store.deleteBySubjectPrefix(swmGraph, m.rootEntity + '/.well-known/genid/');
-        await this.deleteMetaForRoot(swmMetaGraph, m.rootEntity);
+        await deleteSharedMemoryMetadataForRoot(this.store, swmMetaGraph, m.rootEntity);
       }
     }
 
@@ -5006,31 +5011,6 @@ export class DKGPublisher implements Publisher {
     });
   }
 
-  private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
-    const result = await this.store.query(
-      `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { ?op ${ENTITY_PRED_ALT} <${rootEntity}> } }`,
-    );
-    if (result.type !== 'bindings') return;
-    for (const row of result.bindings) {
-      const op = row['op'];
-      if (!op) continue;
-
-      await this.store.delete([
-        { subject: op, predicate: DKG_ROOT_ENTITY_LEGACY, object: rootEntity, graph: metaGraph },
-        { subject: op, predicate: DKG_ENTITY, object: rootEntity, graph: metaGraph },
-      ]);
-
-      const remaining = await this.store.query(
-        `SELECT (COUNT(DISTINCT ?r) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> ${ENTITY_PRED_ALT} ?r } }`,
-      );
-      const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
-      const countVal = parseCountLiteral(rawCount);
-      if (countVal === 0) {
-        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
-      }
-    }
-  }
-
   /**
    * #1116 — read an assertion's member root entities from the lifecycle URN,
    * independent of any seal. `generateAssertionPromotedMetadata` stamps these
@@ -5473,17 +5453,32 @@ export class DKGPublisher implements Publisher {
     if (rootEntities.length === 0) return;
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const plan = await this.resolvePublishedSwmCleanupPlan(swmGraph, scope);
-    await this.deletePublishedSwmRootData(rootEntities, plan.dataGraphs);
+    await deletePublishedSwmRootData(this.store, rootEntities, plan.dataGraphs);
 
     const rootsToClearMetadata = plan.kind === 'complete-family'
       ? rootEntities
       : await this.namedLifecycleRootsWithoutRemainingShares(swmGraph, rootEntities);
-    await this.clearPublishedSwmRootMetadata(
-      contextGraphId,
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    const metadataCleanup = await clearPublishedSwmRootMetadata(
+      this.store,
+      swmMetaGraph,
       rootsToClearMetadata,
-      subGraphName,
-      ctx,
     );
+    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+    for (const root of metadataCleanup.roots) {
+      this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(root);
+    }
+    if (metadataCleanup.mode === 'batched-update') {
+      this.log.info(
+        ctx,
+        `Cleared published SWM state for ${metadataCleanup.roots.length} root(s) after confirmed publish`,
+      );
+    } else if (metadataCleanup.ownerDeletedTotal > 0) {
+      this.log.info(
+        ctx,
+        `Cleared ${metadataCleanup.ownerDeletedTotal} published SWM triple(s) after confirmed publish`,
+      );
+    }
   }
 
   private async resolvePublishedSwmCleanupPlan(
@@ -5494,21 +5489,6 @@ export class DKGPublisher implements Publisher {
     return scope.kind === 'complete-family'
       ? { kind: 'complete-family', dataGraphs }
       : { kind: 'named-lifecycle', dataGraphs };
-  }
-
-  private async deletePublishedSwmRootData(
-    rootEntities: string[],
-    swmGraphsForClear: string[],
-  ): Promise<void> {
-    for (const rootEntity of rootEntities) {
-      for (const g of swmGraphsForClear) {
-        await this.store.deleteByPattern({ graph: g, subject: rootEntity });
-        await this.store.deleteBySubjectPrefix(g, rootEntity + '/.well-known/genid/');
-        await this.store.deleteByPattern({
-          graph: g, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
-        });
-      }
-    }
   }
 
   /**
@@ -5538,27 +5518,6 @@ export class DKGPublisher implements Publisher {
       }
     }
     return rootEntities.filter((rootEntity) => !rootsWithRemainingShares.has(rootEntity));
-  }
-
-  private async clearPublishedSwmRootMetadata(
-    contextGraphId: string,
-    rootEntities: string[],
-    subGraphName: string | undefined,
-    ctx: OperationContext,
-  ): Promise<void> {
-    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-    let ownerDeletedTotal = 0;
-    for (const rootEntity of rootEntities) {
-      ownerDeletedTotal += await this.store.deleteByPattern({
-        graph: swmMetaGraph, subject: rootEntity, predicate: WORKSPACE_OWNER_PREDICATE,
-      });
-      await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
-      this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
-    }
-    if (ownerDeletedTotal > 0) {
-      this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);
-    }
   }
 
   async clearRemainingSharedMemory(
@@ -6317,7 +6276,7 @@ export class DKGPublisher implements Publisher {
       if (swmOwned.has(root)) {
         await this.store.deleteByPattern({ graph: swmGraphUri, subject: root });
         await this.store.deleteBySubjectPrefix(swmGraphUri, root + '/.well-known/genid/');
-        await this.deleteMetaForRoot(swmMetaGraph, root);
+        await deleteSharedMemoryMetadataForRoot(this.store, swmMetaGraph, root);
       }
     }
 

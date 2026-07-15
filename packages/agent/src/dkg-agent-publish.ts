@@ -100,7 +100,7 @@ import {
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, canonicalSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, canonicalSharedMemoryScopeWriteGraph, tryUpdateWithTouchedGraphs, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -437,6 +437,62 @@ function normalizeOptionalContextGraphId(value: string | null | undefined): stri
 function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): void {
   if (!quads || quads.length === 0) return;
   assertQuadLiteralsMutf8Safe(quads, { label });
+}
+
+/**
+ * Persist the finalization reconcile signal for every safe root in one
+ * server-side mutation. This remains part of the awaited publish commit: the
+ * batching removes per-root round-trips without weakening ordering or
+ * durability.
+ */
+export async function persistKeepRootCopySignals(
+  store: TripleStore,
+  graph: string,
+  rootEntities: string[],
+  keepRootCopyOnLabel: boolean,
+): Promise<void> {
+  assertSafeIri(graph);
+  const roots = [...new Set(rootEntities.filter(isSafeIri))];
+  if (roots.length === 0) return;
+
+  const rootValues = roots.map((root) => `<${root}>`).join(' ');
+  const updateApplied = await tryUpdateWithTouchedGraphs(
+    store,
+    `DELETE {
+      GRAPH <${graph}> { ?root <${KEEP_ROOT_COPY_PREDICATE}> ?previous }
+    }
+    INSERT {
+      GRAPH <${graph}> { ?root <${KEEP_ROOT_COPY_PREDICATE}> "${keepRootCopyOnLabel}" }
+    }
+    WHERE {
+      VALUES ?root { ${rootValues} }
+      OPTIONAL {
+        GRAPH <${graph}> { ?root <${KEEP_ROOT_COPY_PREDICATE}> ?previous }
+      }
+    }`,
+    [graph],
+    {
+      source: 'publish.persistKeepRootCopySignals',
+    },
+  );
+  if (updateApplied) return;
+
+  // Custom TripleStore implementations may not expose SPARQL UPDATE. Keep the
+  // pre-existing awaited behavior as a compatibility fallback.
+  const keepLiteral = `"${keepRootCopyOnLabel}"`;
+  for (const root of roots) {
+    await store.deleteByPattern({
+      subject: root,
+      predicate: KEEP_ROOT_COPY_PREDICATE,
+      graph,
+    });
+    await store.insert([{
+      subject: root,
+      predicate: KEEP_ROOT_COPY_PREDICATE,
+      object: keepLiteral,
+      graph,
+    }]);
+  }
 }
 
 export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri: string): Quad[] {
@@ -4294,20 +4350,12 @@ export class PublishMethods extends DKGAgentBase {
         const wsMetaGraph = request.subGraphName
           ? gm.sharedMemoryMetaUri(request.contextGraphId, request.subGraphName)
           : contextGraphWorkspaceMetaGraphUri(request.contextGraphId);
-        const keepLiteral = `"${keepRootCopyOnLabel}"`;
-        for (const root of rootEntities.filter(isSafeIri)) {
-          await this.store.deleteByPattern({
-            subject: root,
-            predicate: KEEP_ROOT_COPY_PREDICATE,
-            graph: wsMetaGraph,
-          });
-          await this.store.insert([{
-            subject: root,
-            predicate: KEEP_ROOT_COPY_PREDICATE,
-            object: keepLiteral,
-            graph: wsMetaGraph,
-          }]);
-        }
+        await persistKeepRootCopySignals(
+          this.store,
+          wsMetaGraph,
+          rootEntities,
+          keepRootCopyOnLabel,
+        );
       } catch (err) {
         this.log.warn(ctx, `Failed to persist keepRootCopyOnLabel signal for ${result.ual}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -5333,20 +5381,12 @@ export class PublishMethods extends DKGAgentBase {
         const wsMetaGraph = options?.subGraphName
           ? gm.sharedMemoryMetaUri(contextGraphId, options.subGraphName)
           : contextGraphWorkspaceMetaGraphUri(contextGraphId);
-        const keepLiteral = `"${keepRootCopyOnLabel}"`;
-        for (const root of rootEntities.filter(isSafeIri)) {
-          await this.store.deleteByPattern({
-            subject: root,
-            predicate: KEEP_ROOT_COPY_PREDICATE,
-            graph: wsMetaGraph,
-          });
-          await this.store.insert([{
-            subject: root,
-            predicate: KEEP_ROOT_COPY_PREDICATE,
-            object: keepLiteral,
-            graph: wsMetaGraph,
-          }]);
-        }
+        await persistKeepRootCopySignals(
+          this.store,
+          wsMetaGraph,
+          rootEntities,
+          keepRootCopyOnLabel,
+        );
       } catch (err) {
         this.log.warn(ctx, `Failed to persist keepRootCopyOnLabel signal for ${result.ual}: ${err instanceof Error ? err.message : String(err)}`);
       }
