@@ -26,6 +26,7 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   generateEd25519Keypair,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  LegacyKnowledgeAssetReadOnlyError,
   MAX_UINT72_DECIMAL,
 } from '@origintrail-official/dkg-core';
 import {
@@ -261,6 +262,21 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('LEGACY_KA_READ_ONLY');
     expect(String(res.body.error)).toContain('read-only');
     expect(finalizeCalls).toHaveLength(0);
+  });
+
+  it('wm/finalize maps a persisted legacy-scope engine rejection to structured 409', async () => {
+    await startWith({
+      finalize: async () => {
+        throw new LegacyKnowledgeAssetReadOnlyError();
+      },
+    });
+
+    const res = await post('wm/finalize', { contextGraphId: CG_ID, layer: 'wm' });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'LEGACY_KA_READ_ONLY',
+      error: 'Legacy root-scoped Knowledge Assets are read-only',
+    });
   });
 
   it('wm/finalize: uses the token-canonical storage lane and author when body author differs only by case', async () => {

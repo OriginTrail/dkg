@@ -957,16 +957,17 @@ describe("DkgNodePlugin", () => {
       expect(res.details?.error).toMatch(/skip_seal.*boolean/);
     });
 
-    it('dkg_knowledge_asset_share on a FULL share with publishReady:false emits the seal-it warning (#1116)', async () => {
+    it('dkg_knowledge_asset_share on a FULL share with publishReady:false directs recovery through WM (#1116)', async () => {
       const { byName } = setupPluginWithFetch({ swmShared: true, promotedCount: 2, sealed: false, publishReady: false });
       const res = await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         skip_seal: true,
       });
-      // A skip_seal FULL share IS sealable later → the "seal it with finalize" hint.
+      // Legacy SWM is read-only, so this must not recommend finalize(layer:swm).
       expect(res.details?.warning).toContain('NOT publish-ready (sealed:false)');
-      expect(res.details?.warning).toContain('layer:swm works after sharing');
+      expect(res.details?.warning).toContain('Legacy unsealed SWM content is read-only');
+      expect(res.details?.warning).toContain('atomic full share');
       expect(res.details?.warning).not.toContain('NOT sealable');
     });
 
@@ -977,7 +978,7 @@ describe("DkgNodePlugin", () => {
         name: 'notes',
         entities: ['urn:a'],
       });
-      // A subset is NOT sealable (finalize layer:swm rejects it) → the full-share /
+      // A subset is NOT sealable and SWM is read-only → the full-share /
       // new-asset recovery, NOT the dead-end "seal it" advice.
       expect(res.details?.warning).toContain('A subset is NOT sealable/publishable');
       expect(res.details?.warning).toContain('entities:"all"');
@@ -1005,7 +1006,7 @@ describe("DkgNodePlugin", () => {
       expect(res.details?.warning).toContain('not all roots reached SWM');
       expect(res.details?.warning).toContain('re-share the full asset');
       // Must NOT recommend the dead-end finalize layer:swm here (it would reject).
-      expect(res.details?.warning).not.toContain('layer:swm works after sharing');
+      expect(res.details?.warning).not.toContain('recovers + seals');
       expect(res.details?.warning).not.toContain('NOT sealable');
     });
 

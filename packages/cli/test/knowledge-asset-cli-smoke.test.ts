@@ -610,8 +610,9 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
     await runCli(['knowledge-asset', 'write', 'paper', '-c', 'research', '--subject', 'urn:company:acme', '--predicate', 'http://schema.org/description', '--object', 'Logistics'], env);
     await runCli(['ka', 'finalize', 'paper', '-c', 'research'], env);
+    await runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'wm'], env);
     await expect(runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'swm'], env))
-      .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--layer'") });
+      .rejects.toMatchObject({ stderr: expect.stringContaining('Legacy root-scoped Knowledge Assets are read-only') });
     await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--entity', 'urn:company:acme'], env))
       .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--entity'") });
     await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--skip-seal'], env))
@@ -627,6 +628,8 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/wm/write');
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/wm/finalize');
+    expect(calls.filter((call) => call.url === '/api/knowledge-assets/paper/wm/finalize'))
+      .toHaveLength(2);
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/swm/share');
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/vm/publish');
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/vm/publish-async');

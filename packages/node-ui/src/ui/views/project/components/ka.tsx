@@ -1,6 +1,6 @@
 import React, { useMemo, useState, Suspense } from 'react';
 import { api } from '../../../api-wrapper.js';
-import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublishWithSeal, SwmSubsetNotSealableError, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
+import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublishWithSeal, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
 import { useMemoryEntities, canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
@@ -176,7 +176,7 @@ export function VerifyOnDkgButton({
       } else {
         // Named-only publish (#1087): publish the entity's owning SWM assertion
         // as one Knowledge Asset via the canonical per-KA /vm/publish (with the
-        // §4.4 catch→seal→retry safety net). We do NOT pre-register the CG: the
+        // direct, already-sealed publish path). We do NOT pre-register the CG: the
         // daemon's /vm/publish checks the local preconditions first and only
         // auto-registers (with the stored publish policy) on its
         // `CG_NOT_REGISTERED` retry path, so a doomed publish never burns gas.
@@ -193,12 +193,10 @@ export function VerifyOnDkgButton({
     } catch (err: any) {
       // Issue #864 — `ASSERTION_NOT_PERSISTED` (HTTP 409) gets a
       // typed message that points the user at the re-import path
-      // instead of the raw backend error string. A subset-share that can't be
-      // sealed in place surfaces the "share the full asset first" hint.
+      // instead of the raw backend error string. Publish preconditions are
+      // surfaced directly.
       const typed = action.kind === 'promote' ? describePromoteError(assertionName, err) : null;
-      const message = err instanceof SwmSubsetNotSealableError
-        ? err.message
-        : (typed ? typed.message : (err?.message ?? 'Action failed'));
+      const message = typed ? typed.message : (err?.message ?? 'Action failed');
       setError(message);
     } finally {
       setBusy(false);
@@ -730,5 +728,4 @@ export function TrailEvent({
     </div>
   );
 }
-
 

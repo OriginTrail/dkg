@@ -50,24 +50,25 @@ const formatError = (e: unknown): string =>
 // `tests/fixtures/share-seal-warnings.json`. Update the fixture + all three
 // adapters together; the parity tests flag any mismatch.
 
-// publishReady:false after a FULL share that opted out of sealing (skipSeal:true)
-// — a later finalize(layer:swm) DOES seal it.
+// publishReady:false after a FULL share that opted out of sealing (skipSeal:true).
+// Legacy SWM content is read-only, so recovery must go through WM + atomic share.
 export const SHARE_NOT_PUBLISH_READY_WARNING =
-  'Shared to SWM but NOT publish-ready (sealed:false). Seal it with ' +
-  'dkg_knowledge_asset_finalize (layer:swm works after sharing), then publish.';
+  'Shared to SWM but NOT publish-ready (sealed:false). Legacy unsealed SWM ' +
+  'content is read-only; recreate or pull the asset into Working Memory, then ' +
+  'use an atomic full share before publishing.';
 
 // A SUBSET share is publishReady:false too, but unlike a skipSeal full share it is
-// NOT sealable — finalize(layer:swm) now REJECTS it with SWM_SUBSET_NOT_SEALABLE.
+// NOT sealable — legacy SWM finalize is read-only.
 // Surface the real recovery (full share / new asset) instead of "seal it".
 export const SHARE_SUBSET_NOT_PUBLISH_READY_WARNING =
   'Shared a SUBSET to SWM for peer visibility. A subset is NOT sealable/' +
-  'publishable (finalize layer:swm will reject it). To publish on-chain, share ' +
-  'the full asset (entities:"all"), or model this subset as its own knowledge asset.';
+  'publishable. Legacy SWM finalize is read-only. To publish on-chain, share ' +
+  'the full asset atomically (entities:"all"), or model this subset as its own knowledge asset.';
 
 // A FULL share can come back sealed:true but publishReady:false when NOT every
 // sealed root reached SWM (promotedAllRoots false — e.g. foreign-owned roots were
-// skipped). The engine did NOT set the swmShareComplete marker, so finalize(layer:
-// swm) would REJECT — do NOT recommend it here. Re-sharing the full asset recovers.
+// skipped). The engine did NOT set the swmShareComplete marker, and SWM is
+// read-only, so do NOT recommend finalizing it. Re-sharing the full asset recovers.
 export const SHARE_INCOMPLETE_PROMOTE_WARNING =
   'Sealed, but not all roots reached SWM (some roots may be owned by other ' +
   'agents) — not yet publishable; re-share the full asset so every sealed root ' +
@@ -77,9 +78,9 @@ export const SHARE_INCOMPLETE_PROMOTE_WARNING =
  * #1116: pick the not-publish-ready share warning from the share outcome. Returns
  * `undefined` when the share IS publish-ready (no warning). Branch precedence:
  *  1. sealed:true + publishReady:false → incomplete full promote (marker NOT set;
- *     finalize layer:swm would reject) → re-share the full asset.
+ *     SWM is read-only) → re-share the full asset.
  *  2. sealed:false + SUBSET (a non-empty specific entity list) → not sealable.
- *  3. sealed:false + FULL (skipSeal) → sealable later (finalize layer:swm works).
+ *  3. sealed:false + FULL (skipSeal) → recover through WM + atomic full share.
  * Duplicated byte-identical on OpenClaw (TS) + Hermes (Python).
  */
 export function classifyShareWarning(outcome: {
@@ -444,9 +445,9 @@ export function registerAssertionTools(
         'call this explicitly before sharing a SELECTIVE subset of entities, or ' +
         'to re-seal after editing a previously-sealed draft. Sealing works even ' +
         'if the context graph is NOT yet registered on-chain (registration ' +
-        'happens at publish). Pass `layer:"swm"` to seal an asset already shared ' +
-        'to SWM (e.g. shared with `skipSeal:true`) — it recovers and seals the ' +
-        'SWM content without a delete-and-recreate. (External-signer / ' +
+        'happens at publish). The deprecated `layer:"swm"` compatibility value ' +
+        'is read-only and returns `LEGACY_KA_READ_ONLY`; recover legacy content ' +
+        'through Working Memory and an atomic full share instead. (External-signer / ' +
         'pre-signed attestation is a tracked follow-up and is not exposed by this ' +
         'tool — author with authorAgentAddress.)',
       inputSchema: {
@@ -461,15 +462,13 @@ export function registerAssertionTools(
         // CONTRACT §C: scheme_version is a POSITIVE integer (daemon >= 1) — zod
         // rejects 0 / negative / non-integer at the boundary as a tool error.
         schemeVersion: z.number().int().positive().optional().describe('Optional attestation scheme version (positive integer)'),
-        // #1116: `layer` selects WHERE the content to seal lives. Default "wm"
-        // seals the open WM draft; "swm" seals an asset already shared to SWM.
+        // #1116: retained for wire compatibility. Only WM is writable.
         layer: z
           .enum(['wm', 'swm'])
           .optional()
           .describe(
-            'Which layer holds the content to seal. Default "wm" seals the open ' +
-            'Working Memory draft. Pass "swm" to seal an asset already shared to ' +
-            'SWM (recovers + seals the SWM content without delete-and-recreate).',
+            'Default "wm" seals the open Working Memory draft. Deprecated ' +
+            '"swm" is read-only and returns LEGACY_KA_READ_ONLY.',
           ),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
@@ -516,9 +515,9 @@ export function registerAssertionTools(
         'Shared Working Memory so teammates see it. A FULL share (omit ' +
         '`entities` or pass "all") SEALS BY DEFAULT and is then publish-ready — ' +
         'follow it with dkg_knowledge_asset_publish to mint the asset on-chain ' +
-        '(Verifiable Memory). Pass `skipSeal:true` to share WITHOUT sealing (an ' +
-        'unsealed SWM share — seal it later with dkg_knowledge_asset_finalize, ' +
-        'where `layer:"swm"` works after sharing). If a default (sealing) share ' +
+        '(Verifiable Memory). `skipSeal:true` is retained only for compatibility; ' +
+        'an unsealed SWM share cannot be finalized because legacy SWM writes are ' +
+        'read-only. If a default (sealing) share ' +
         'cannot seal it fails CLOSED (409, Working Memory preserved) and returns ' +
         'a recovery hint. For custom finalize/attestation options — ' +
         'authorAgentAddress / schemeVersion — call dkg_knowledge_asset_finalize ' +

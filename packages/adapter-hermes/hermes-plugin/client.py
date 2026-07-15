@@ -535,8 +535,9 @@ class DKGClient:
                           skip_seal: Optional[bool] = None) -> Dict[str, Any]:
         """POST /api/knowledge-assets/{name}/swm/share — promote assertion to SWM.
 
-        A full share SEALS BY DEFAULT (publish-ready). ``skip_seal=True`` opts
-        out into an unsealed SWM share (camelCase ``skipSeal`` on the wire).
+        A full share SEALS BY DEFAULT (publish-ready). ``skip_seal=True`` is a
+        deprecated compatibility option that produces read-only, unsealed SWM
+        content which current daemons cannot finalize.
         """
         payload: Dict[str, Any] = {
             "contextGraphId": _normalize_context_graph_id(context_graph_id),
@@ -562,9 +563,9 @@ class DKGClient:
         omit it to let the daemon default the author to the request token's
         agent. The pre-signed attestation path is intentionally NOT exposed —
         Hermes relies on node-side signing, exactly like OpenClaw/MCP (no
-        client-side EIP-712, no raw preSignedAuthorAttestation). ``layer``
-        selects WHERE the content to seal lives: "wm" (default) seals the open
-        WM draft; "swm" seals an asset already shared to SWM.
+        client-side EIP-712, no raw preSignedAuthorAttestation). ``layer`` is
+        retained for mixed-version compatibility: "wm" seals the open draft;
+        current daemons reject deprecated "swm" with LEGACY_KA_READ_ONLY.
         """
         payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
         if sub_graph_name:

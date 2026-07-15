@@ -453,8 +453,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         setResult(outcome.message);
       } else {
         // Publish THIS assertion as one Knowledge Asset (Design B, any entity
-        // count) via the shared knowledgeAssetPublishWithSeal wrapper — gets the
-        // seal-in-SWM retry + 207 partial-publish handling like the other CTAs.
+        // count) via the shared knowledgeAssetPublishWithSeal wrapper — requires
+        // an already-sealed atomic share and preserves 207 partial-publish handling.
         const res = await knowledgeAssetPublishWithSeal(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
         setResult(
           res.contextGraphError

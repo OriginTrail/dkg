@@ -4,6 +4,7 @@ import type {
   ContextGraphReconcileResult,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
+import { LegacyKnowledgeAssetReadOnlyError } from '@origintrail-official/dkg-core';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -714,16 +715,13 @@ export class ApiClient {
       schemeVersion?: number;
     },
   ): Promise<{ merkleRoot: string; eip712Digest: string }> {
+    if (options?.layer === 'swm') {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
     // Mirror the mcp-dkg / openclaw / node-ui clients: reject the
     // self-sign vs external-signer conflict client-side instead of relying on
     // the daemon, so every SDK surface enforces the same contract.
     assertExclusiveAuthorFields(options ?? {});
-    if (options?.layer === 'swm') {
-      throw Object.assign(
-        new Error('Legacy root-scoped Knowledge Assets are read-only'),
-        { code: 'LEGACY_KA_READ_ONLY' },
-      );
-    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...(options ?? {}) });
   }
 

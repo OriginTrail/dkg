@@ -897,31 +897,10 @@ export const knowledgeAssetPublish = (
 };
 
 /**
- * Thrown by `knowledgeAssetPublishWithSeal` when a SWM asset can't be sealed in
- * place because only a subset of it was shared (daemon `SWM_SUBSET_NOT_SEALABLE`).
- * The UI surfaces this as "share the full asset first" — it is NOT retried.
- */
-export class SwmSubsetNotSealableError extends Error {
-  constructor(message?: string) {
-    super(message ?? 'Share the full asset to Shared Memory before publishing.');
-    this.name = 'SwmSubsetNotSealableError';
-  }
-}
-
-/**
- * Publish a named SWM assertion to VM, sealing it in place first if the daemon
- * reports it isn't finalized (the #1116 / §4.4 catch→seal→retry contract).
- *
- * Normal path: by the time content reaches SWM it is sealed (seal-on-share is
- * the default), so the first `/vm/publish` succeeds. This is the robustness
- * safety net for the rare unsealed-in-SWM case:
- *   - `PUBLISH_NOT_FULL_SHARE` / `VM_PUBLISH_PRECONDITION` (409) → seal in place
- *     via `wm/finalize {layer:"swm"}`, then retry publish ONCE.
- *   - `SWM_SUBSET_NOT_SEALABLE` (409, on the seal) → throw
- *     `SwmSubsetNotSealableError` (caller tells the user to share the full
- *     asset); never loops.
- * `sealed` in the result tells the caller a seal step ran so it can surface
- * "sealing then publishing" instead of a silent skip.
+ * Publish a named, already-sealed SWM assertion to VM. Current graph-scoped
+ * KAs seal before atomic sharing; a publish precondition is surfaced directly
+ * so the UI never invokes the retired `finalize(layer:"swm")` write bridge or
+ * masks the original error with a second request.
  *
  * A daemon HTTP-207 partial publish (KA minted on-chain but the context-graph
  * binding failed) comes back as `res.ok`, so it is NOT thrown — the body
@@ -933,35 +912,7 @@ export async function knowledgeAssetPublishWithSeal(
   name: string,
   opts: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions = {},
 ): Promise<Record<string, unknown> & { sealed?: boolean; contextGraphError?: string }> {
-  try {
-    return await knowledgeAssetPublish(contextGraphId, name, opts);
-  } catch (err: unknown) {
-    const code =
-      err instanceof HttpError && err.status === 409
-        ? (err.body as { code?: string } | undefined)?.code
-        : undefined;
-    if (code !== 'PUBLISH_NOT_FULL_SHARE' && code !== 'VM_PUBLISH_PRECONDITION') throw err;
-    // Unsealed in SWM — seal in place, then retry the publish once.
-    try {
-      await knowledgeAssetFinalize(contextGraphId, name, {
-        layer: 'swm',
-        ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
-      });
-    } catch (sealErr: unknown) {
-      if (
-        sealErr instanceof HttpError &&
-        sealErr.status === 409 &&
-        (sealErr.body as { code?: string } | undefined)?.code === 'SWM_SUBSET_NOT_SEALABLE'
-      ) {
-        throw new SwmSubsetNotSealableError(
-          (sealErr.body as { error?: string } | undefined)?.error,
-        );
-      }
-      throw sealErr;
-    }
-    const result = await knowledgeAssetPublish(contextGraphId, name, opts);
-    return { ...result, sealed: true };
-  }
+  return knowledgeAssetPublish(contextGraphId, name, opts);
 }
 
 /**
@@ -1052,10 +1003,7 @@ export async function publishAssertionsToVm(
         }
       }
     } catch (err: unknown) {
-      const message =
-        err instanceof SwmSubsetNotSealableError
-          ? err.message
-          : (err as { message?: string })?.message ?? 'publish failed';
+      const message = (err as { message?: string })?.message ?? 'publish failed';
       failures.push({ name: a.name, ...(a.subGraph ? { subGraph: a.subGraph } : {}), error: message });
     }
   }

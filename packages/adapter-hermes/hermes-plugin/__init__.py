@@ -602,9 +602,9 @@ DKG_ASSERTION_FINALIZE_SCHEMA = {
         "(dkg_knowledge_asset_share with entities omitted or \"all\") auto-seals for you, so you "
         "only need to call this explicitly before sharing a SELECTIVE subset of entities, or to "
         "re-seal after editing a previously-sealed draft. Sealing works even if the context graph "
-        "is NOT yet registered on-chain (registration happens at publish). Pass layer=\"swm\" to "
-        "seal an asset already shared to SWM (e.g. shared with skip_seal) -- it recovers and seals "
-        "the SWM content without a delete-and-recreate. Author signing is node-side via "
+        "is NOT yet registered on-chain (registration happens at publish). The deprecated "
+        "layer=\"swm\" compatibility value is read-only and returns LEGACY_KA_READ_ONLY; recover "
+        "legacy content through Working Memory and an atomic full share instead. Author signing is node-side via "
         "author_agent_address; external-signer (pre-signed) attestation is a tracked follow-up, "
         "not exposed by the agent tools."
     ),
@@ -625,9 +625,8 @@ DKG_ASSERTION_FINALIZE_SCHEMA = {
                 "type": "string",
                 "enum": ["wm", "swm"],
                 "description": (
-                    "Which layer holds the content to seal. Default \"wm\" seals the open Working "
-                    "Memory draft. Pass \"swm\" to seal an asset already shared to SWM (recovers + "
-                    "seals the SWM content without delete-and-recreate)."
+                    "Default \"wm\" seals the open Working Memory draft. Deprecated \"swm\" is "
+                    "read-only and returns LEGACY_KA_READ_ONLY."
                 ),
             },
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write time)."},
@@ -673,9 +672,9 @@ DKG_ASSERTION_SHARE_SCHEMA = {
         "Share a knowledge asset (or selected root entities) from Working Memory into Shared "
         "Working Memory. A FULL share (omit `entities` or pass \"all\") SEALS BY DEFAULT and is "
         "then publish-ready -- follow with dkg_knowledge_asset_publish to mint it on-chain "
-        "(Verifiable Memory). Pass skip_seal=true to share WITHOUT sealing (an unsealed SWM share "
-        "-- seal it later with dkg_knowledge_asset_finalize, where layer=\"swm\" works after "
-        "sharing). If a default (sealing) share cannot seal it fails CLOSED (409, Working Memory "
+        "(Verifiable Memory). skip_seal=true is retained only for compatibility; an unsealed SWM "
+        "share cannot be finalized because legacy SWM writes are read-only. If a default "
+        "(sealing) share cannot seal it fails CLOSED (409, Working Memory "
         "preserved) and returns a recovery hint. For CUSTOM finalize options "
         "such as author_agent_address / scheme_version, call dkg_knowledge_asset_finalize "
         "EXPLICITLY first (the default seal cannot carry them). A SELECTIVE subset "
@@ -704,9 +703,9 @@ DKG_ASSERTION_SHARE_SCHEMA = {
             "skip_seal": {
                 "type": "boolean",
                 "description": (
-                    "Set true to share to SWM WITHOUT sealing (not publish-ready). Default (false) "
-                    "seals a full share so it is immediately publish-ready. Ignored for a subset "
-                    "share, which is never sealed."
+                    "Deprecated compatibility option. True shares to SWM without sealing, but "
+                    "legacy SWM is read-only and the result cannot be finalized. Default false "
+                    "atomically seals a full share."
                 ),
             },
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
@@ -2823,29 +2822,30 @@ def _validate_decimal_string_arg(value: Any, label: str) -> Tuple[Optional[str],
 
 
 # #1116: the publishReady:false warning surfaced after a FULL share that opted
-# out of sealing (skip_seal=true) — a later finalize(layer:swm) DOES seal it.
+# out of sealing (skip_seal=true). Legacy SWM content is read-only, so recovery
+# must go through WM + atomic share.
 # Kept byte-identical across the MCP, OpenClaw, and Hermes adapters
 # (cross-adapter parity invariant).
 SHARE_NOT_PUBLISH_READY_WARNING = (
-    "Shared to SWM but NOT publish-ready (sealed:false). Seal it with "
-    "dkg_knowledge_asset_finalize (layer:swm works after sharing), then publish."
+    "Shared to SWM but NOT publish-ready (sealed:false). Legacy unsealed SWM "
+    "content is read-only; recreate or pull the asset into Working Memory, then "
+    "use an atomic full share before publishing."
 )
 
 # #1116: a SUBSET share is publishReady:false too, but unlike a skip_seal full
-# share it is NOT sealable — finalize(layer:swm) now REJECTS it with
-# SWM_SUBSET_NOT_SEALABLE. Surface the real recovery (full share / new asset)
+# share it is NOT sealable — legacy SWM finalize is read-only. Surface the real recovery (full share / new asset)
 # instead of the dead-end "seal it" advice. Byte-identical across all three
 # adapters (cross-adapter parity invariant).
 SHARE_SUBSET_NOT_PUBLISH_READY_WARNING = (
     "Shared a SUBSET to SWM for peer visibility. A subset is NOT sealable/"
-    "publishable (finalize layer:swm will reject it). To publish on-chain, share "
-    "the full asset (entities:\"all\"), or model this subset as its own knowledge asset."
+    "publishable. Legacy SWM finalize is read-only. To publish on-chain, share "
+    "the full asset atomically (entities:\"all\"), or model this subset as its own knowledge asset."
 )
 
 # #1116: a FULL share can come back sealed:true but publishReady:false when NOT
 # every sealed root reached SWM (promotedAllRoots false — e.g. foreign-owned roots
-# were skipped). The engine did NOT set the swmShareComplete marker, so
-# finalize(layer:swm) would REJECT — do NOT recommend it here. Re-sharing the full
+# were skipped). The engine did NOT set the swmShareComplete marker, and SWM is
+# read-only, so do NOT recommend finalizing it. Re-sharing the full
 # asset is the recovery. Byte-identical across all three adapters (cross-adapter
 # parity invariant).
 SHARE_INCOMPLETE_PROMOTE_WARNING = (
@@ -2890,15 +2890,14 @@ def _annotate_share_seal(result: Any, entities: Any = None) -> Any:
     is false, add a parity warning that branches on the ACTUAL outcome (three
     cases):
 
-      1. ``sealed:false`` + SUBSET (a non-empty specific list) → NOT sealable
-         (``finalize layer:swm`` rejects it with ``SWM_SUBSET_NOT_SEALABLE``);
+      1. ``sealed:false`` + SUBSET (a non-empty specific list) → NOT sealable;
          recover via a full share or a new asset.
-      2. ``sealed:false`` + FULL ("all"/omitted ``skip_seal``) → sealable later
-         (``finalize layer:swm`` works — the marker is set).
+      2. ``sealed:false`` + FULL ("all"/omitted ``skip_seal``) → recover through
+         Working Memory and an atomic full share.
       3. ``sealed:true`` + ``publishReady:false`` → an incomplete full promote
          (not every sealed root reached SWM, e.g. foreign-owned roots skipped). The
-         ``swmShareComplete`` marker is NOT set, so ``finalize layer:swm`` would
-         REJECT — re-share the full asset instead.
+         ``swmShareComplete`` marker is NOT set and SWM is read-only — re-share
+         the full asset instead.
 
     A default share that CANNOT seal fails CLOSED: the daemon returns 409
     ``UNSEALED_SHARE_BLOCKED`` with a ``recovery`` hint and Working Memory

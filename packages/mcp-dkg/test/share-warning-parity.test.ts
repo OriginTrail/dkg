@@ -46,7 +46,7 @@ describe('#1116 share-warning parity (MCP vs canonical fixture)', () => {
     expect(classifyShareWarning({ sealed: false, publishReady: false, isSubset: true })).toBe(
       SHARE_SUBSET_NOT_PUBLISH_READY_WARNING,
     );
-    // sealed:false + full (skip_seal) → sealable later.
+    // sealed:false + full (skip_seal) → recover through WM + atomic full share.
     expect(classifyShareWarning({ sealed: false, publishReady: false, isSubset: false })).toBe(
       SHARE_NOT_PUBLISH_READY_WARNING,
     );

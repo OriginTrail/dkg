@@ -2183,6 +2183,15 @@ export class PublishMethods extends DKGAgentBase {
           (err instanceof Error ? err.message : String(err)),
       );
     }
+    // Legacy root-scoped seals are readable only. Gate immediately after the
+    // durable scope is known, before querying WM/private content, injecting
+    // catalog rows, canonicalizing, or invoking any write-side engine path.
+    if (
+      existingSeal
+      && existingSeal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+    ) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
     const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
 
     // 2. Pull the assertion's quads. Refuse to finalize an empty
@@ -2317,9 +2326,6 @@ export class PublishMethods extends DKGAgentBase {
     //    the assertion was mutated since the previous finalize —
     //    refuse to overwrite silently.
     if (existingSeal) {
-      if (existingSeal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-        throw new LegacyKnowledgeAssetReadOnlyError();
-      }
       if (
         !existingSeal.kaUal ||
         !existingSeal.assertionVersion ||

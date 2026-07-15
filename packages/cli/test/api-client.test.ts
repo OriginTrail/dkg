@@ -1046,6 +1046,20 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls).toHaveLength(0);
   });
 
+  it('gives the legacy SWM read-only gate precedence over authorship validation', async () => {
+    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
+    await expect(client.knowledgeAssetFinalize('cg', 'f', {
+      layer: 'swm',
+      authorAgentAddress: '0x1111111111111111111111111111111111111111',
+      preSignedAuthorAttestation: {
+        address: '0x2222222222222222222222222222222222222222',
+        reservedKaId: '1',
+        signature: { r: `0x${'22'.repeat(32)}`, vs: `0x${'33'.repeat(32)}` },
+      },
+    })).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetShareAsync and share job helpers use lifecycle routes', async () => {
     let calls = track({ jobId: 'share-job-1', state: 'queued' });
     await client.knowledgeAssetShareAsync('cg', 'f', {

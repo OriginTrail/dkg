@@ -664,7 +664,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   }, [allSelected, allKeys]);
 
   // Publish a set of named SWM assertions, each as its own KA via the canonical
-  // /vm/publish (with the §4.4 catch→seal→retry safety net). We do NOT pre-
+  // /vm/publish from an already-sealed atomic share. We do NOT pre-
   // register the CG on-chain: the daemon's /vm/publish runs the local
   // preconditions FIRST and only auto-registers (preserving the stored publish
   // policy) on the `CG_NOT_REGISTERED` retry path — so a doomed publish never

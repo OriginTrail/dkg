@@ -1212,9 +1212,8 @@ export class DkgClient {
     authorAgentAddress?: string;
     preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
     schemeVersion?: number;
-    // #1116: optional layer selects WHERE the content to seal lives. "wm"
-    // (default) seals the open WM draft; "swm" reconstructs a draft from an
-    // already-shared SWM asset and seals it (recover-without-recreate).
+    // #1116: retained for mixed-version wire compatibility. "wm" seals the open
+    // draft; current daemons reject deprecated "swm" with LEGACY_KA_READ_ONLY.
     layer?: 'wm' | 'swm';
   }): Promise<{ merkleRoot: string; eip712Digest: string }> {
     assertExclusiveAuthorFields(args);

@@ -103,9 +103,9 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
         'subset parameter). A FULL share (dkg_knowledge_asset_share with entities omitted or "all") ' +
         'auto-seals for you, so you only need to call this explicitly before sharing a SELECTIVE subset of ' +
         'entities, or to re-seal after editing a previously-sealed draft. Sealing works even if the context ' +
-        'graph is NOT yet registered on-chain (registration happens at publish). Pass layer:"swm" to seal an ' +
-        'asset already shared to SWM (e.g. shared with skip_seal) — it recovers and seals the SWM content ' +
-        'without a delete-and-recreate. (External-signer / pre-signed ' +
+        'graph is NOT yet registered on-chain (registration happens at publish). The deprecated layer:"swm" ' +
+        'compatibility value is read-only and returns LEGACY_KA_READ_ONLY; recover legacy content through ' +
+        'Working Memory and an atomic full share instead. (External-signer / pre-signed ' +
         'attestation is a tracked follow-up and is not exposed by this tool — author with author_agent_address.)',
       parameters: {
         type: 'object',
@@ -123,9 +123,8 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
             type: 'string',
             enum: ['wm', 'swm'],
             description:
-              'Which layer holds the content to seal. Default "wm" seals the open Working Memory draft. ' +
-              'Pass "swm" to seal an asset already shared to SWM (recovers + seals the SWM content without ' +
-              'delete-and-recreate).',
+              'Default "wm" seals the open Working Memory draft. Deprecated "swm" is read-only and ' +
+              'returns LEGACY_KA_READ_ONLY.',
           },
           sub_graph_name: { type: 'string', description: 'Must match the one used at write time.' },
         },
@@ -139,8 +138,8 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
         'Step 4 of the canonical flow. Share a knowledge asset (or selected root entities) from Working ' +
         'Memory into Shared Working Memory. A FULL share (omit `entities` or pass "all") SEALS BY DEFAULT ' +
         'and is then publish-ready — follow it with dkg_knowledge_asset_publish to mint the asset on-chain ' +
-        '(Verifiable Memory). Pass skip_seal:true to share WITHOUT sealing (an unsealed SWM share — seal it ' +
-        'later with dkg_knowledge_asset_finalize, where layer:"swm" works after sharing). If a default ' +
+        '(Verifiable Memory). skip_seal:true is retained only for compatibility; an unsealed SWM share ' +
+        'cannot be finalized because legacy SWM writes are read-only. If a default ' +
         '(sealing) share cannot seal it fails CLOSED (409, Working Memory preserved) and returns a recovery ' +
         'hint. For custom finalize/attestation options — ' +
         'author_agent_address / scheme_version — call dkg_knowledge_asset_finalize EXPLICITLY first (the ' +
@@ -167,8 +166,8 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
           skip_seal: {
             type: 'boolean',
             description:
-              'Set true to share to SWM WITHOUT sealing (not publish-ready). Default (false) seals a full ' +
-              'share so it is immediately publish-ready. Ignored for a subset share, which is never sealed.',
+              'Deprecated compatibility option. True shares to SWM without sealing, but legacy SWM is ' +
+              'read-only and the result cannot be finalized. Default false atomically seals a full share.',
           },
           sub_graph_name: { type: 'string', description: 'Must match the one used at write time.' },
         },

@@ -1225,8 +1225,8 @@ export class DkgDaemonClient {
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;
-      // #1116: "wm" (default) seals the open WM draft; "swm" seals an asset
-      // already shared to SWM (recover-without-recreate).
+      // #1116: retained for mixed-version wire compatibility. "wm" seals the
+      // draft; current daemons reject deprecated "swm" as read-only.
       layer?: 'wm' | 'swm';
     },
   ): Promise<{ merkleRoot: string; eip712Digest: string }> {

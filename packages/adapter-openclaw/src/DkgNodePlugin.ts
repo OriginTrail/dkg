@@ -111,24 +111,25 @@ import { buildMemoryTools } from './tools/memory-tools.js';
 // canonical fixture at `tests/fixtures/share-seal-warnings.json`. Update the
 // fixture + all three adapters together; the parity tests flag any mismatch.
 
-// publishReady:false after a FULL share that opted out of sealing (skip_seal:true)
-// — a later finalize(layer:swm) DOES seal it.
+// publishReady:false after a FULL share that opted out of sealing (skip_seal:true).
+// Legacy SWM content is read-only, so recovery must go through WM + atomic share.
 export const SHARE_NOT_PUBLISH_READY_WARNING =
-  'Shared to SWM but NOT publish-ready (sealed:false). Seal it with ' +
-  'dkg_knowledge_asset_finalize (layer:swm works after sharing), then publish.';
+  'Shared to SWM but NOT publish-ready (sealed:false). Legacy unsealed SWM ' +
+  'content is read-only; recreate or pull the asset into Working Memory, then ' +
+  'use an atomic full share before publishing.';
 
 // A SUBSET share is publishReady:false too, but unlike a skip_seal full share it
-// is NOT sealable — finalize(layer:swm) now REJECTS it with SWM_SUBSET_NOT_SEALABLE.
+// is NOT sealable — legacy SWM finalize is read-only.
 // Surface the real recovery (full share / new asset) instead of "seal it".
 export const SHARE_SUBSET_NOT_PUBLISH_READY_WARNING =
   'Shared a SUBSET to SWM for peer visibility. A subset is NOT sealable/' +
-  'publishable (finalize layer:swm will reject it). To publish on-chain, share ' +
-  'the full asset (entities:"all"), or model this subset as its own knowledge asset.';
+  'publishable. Legacy SWM finalize is read-only. To publish on-chain, share ' +
+  'the full asset atomically (entities:"all"), or model this subset as its own knowledge asset.';
 
 // A FULL share can come back sealed:true but publishReady:false when NOT every
 // sealed root reached SWM (promotedAllRoots false — e.g. foreign-owned roots were
-// skipped). The engine did NOT set the swmShareComplete marker, so finalize(layer:
-// swm) would REJECT — do NOT recommend it here. Re-sharing the full asset recovers.
+// skipped). The engine did NOT set the swmShareComplete marker, and SWM is
+// read-only, so do NOT recommend finalizing it. Re-sharing the full asset recovers.
 export const SHARE_INCOMPLETE_PROMOTE_WARNING =
   'Sealed, but not all roots reached SWM (some roots may be owned by other ' +
   'agents) — not yet publishable; re-share the full asset so every sealed root ' +
@@ -138,9 +139,9 @@ export const SHARE_INCOMPLETE_PROMOTE_WARNING =
  * #1116: pick the not-publish-ready share warning from the share outcome. Returns
  * `undefined` when the share IS publish-ready (no warning). Precedence:
  *  1. sealed:true + publishReady:false → incomplete full promote (marker NOT set;
- *     finalize layer:swm would reject) → re-share the full asset.
+ *     SWM is read-only) → re-share the full asset.
  *  2. sealed:false + SUBSET → not sealable.
- *  3. sealed:false + FULL (skip_seal) → sealable later (finalize layer:swm works).
+ *  3. sealed:false + FULL (skip_seal) → recover through WM + atomic full share.
  * Duplicated byte-identical on MCP (TS) + Hermes (Python).
  */
 export function classifyShareWarning(outcome: {

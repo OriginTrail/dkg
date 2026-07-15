@@ -141,21 +141,21 @@ def test_share_description_carries_subset_language(provider):
     assert "NOT publishable to Verifiable Memory" in share["description"]
 
 
-def test_share_description_softens_publish_ready_and_notes_finalize(provider):
+def test_share_description_marks_unsealed_swm_read_only(provider):
     # #1116 — a full share now SEALS BY DEFAULT (publish-ready). skip_seal=true
-    # opts out into an unsealed SWM share; a default share that cannot seal fails
-    # CLOSED (409, WM preserved) with a recovery hint. Finalize stays the explicit
-    # path for custom options and for sealing an already-shared asset (layer:swm).
+    # is retained only for compatibility and creates read-only SWM content; a
+    # default share that cannot seal fails CLOSED (409, WM preserved). Finalize
+    # stays the explicit WM path for custom options.
     share = next(s for s in provider.get_tool_schemas()
                  if s["name"] == "dkg_knowledge_asset_share")
     desc = share["description"]
     assert "SEALS BY DEFAULT" in desc
     assert "skip_seal=true" in desc
-    assert "WITHOUT sealing" in desc
+    assert "retained only for compatibility" in desc
+    assert "legacy SWM writes are read-only" in desc
     assert "fails CLOSED" in desc and "409" in desc
     assert "dkg_knowledge_asset_finalize EXPLICITLY first" in desc
-    # layer:swm note for sealing after sharing
-    assert "layer=\"swm\" works after" in desc
+    assert "layer=\"swm\" works after" not in desc
     # custom finalize options note is preserved
     assert "author_agent_address" in desc and "scheme_version" in desc
 
@@ -772,22 +772,22 @@ def test_create_name_description_aligns_to_validation(provider):
 
 # -- #1116 _annotate_share_seal helper (warning branch + recovery surfacing) ---
 
-def test_annotate_share_seal_full_skip_seal_warns_sealable(plugin_module):
-    # publishReady:false on a FULL share (entities None/"all") → the seal-it hint
-    # (finalize layer:swm DOES seal a skip_seal full share).
+def test_annotate_share_seal_full_skip_seal_warns_read_only(plugin_module):
+    # Legacy SWM is read-only, so direct recovery must not be recommended.
     f = plugin_module._annotate_share_seal
     out = f({"swmShared": True, "publishReady": False}, None)
     assert "NOT publish-ready (sealed:false)" in out["warning"]
-    assert "layer:swm works after sharing" in out["warning"]
+    assert "Legacy unsealed SWM content is read-only" in out["warning"]
+    assert "atomic full share" in out["warning"]
     assert "NOT sealable" not in out["warning"]
-    # "all" is also a full share → same sealable warning.
+    # "all" is also a full share → same read-only recovery warning.
     out_all = f({"swmShared": True, "publishReady": False}, "all")
-    assert "layer:swm works after sharing" in out_all["warning"]
+    assert "Legacy unsealed SWM content is read-only" in out_all["warning"]
 
 
 def test_annotate_share_seal_subset_warns_not_sealable(plugin_module):
     # publishReady:false on a SUBSET (non-empty list) → the not-sealable recovery
-    # (finalize layer:swm REJECTS a subset with SWM_SUBSET_NOT_SEALABLE).
+    # (legacy SWM finalize is read-only).
     f = plugin_module._annotate_share_seal
     out = f({"swmShared": True, "publishReady": False}, ["urn:a"])
     assert "A subset is NOT sealable/publishable" in out["warning"]
@@ -832,7 +832,7 @@ def test_annotate_share_seal_incomplete_full_promote_warns_no_finalize(plugin_mo
         assert "not all roots reached SWM" in out["warning"], ent
         assert "re-share the full asset" in out["warning"], ent
         # NOT the dead-end finalize layer:swm hint, NOT the subset hint.
-        assert "layer:swm works after sharing" not in out["warning"], ent
+        assert "recovers + seals" not in out["warning"], ent
         assert "NOT sealable" not in out["warning"], ent
 
 
@@ -928,9 +928,9 @@ def test_finalize_handler_forwards_layer_swm_to_client(provider):
 
 # -- #1116 share handler: publishReady:false warning end-to-end ------------
 
-def test_share_handler_full_skip_seal_warns_via_annotate(provider):
+def test_share_handler_full_skip_seal_warns_read_only_via_annotate(provider):
     # A FULL skip_seal share whose daemon reply is publishReady:false surfaces the
-    # sealable warning through the handler (parity with the helper test).
+    # read-only recovery warning through the handler (parity with the helper test).
     provider._client.promote_assertion = (  # type: ignore[assignment]
         lambda name, cg, entities, sub_graph_name=None, skip_seal=None: {
             "swmShared": True, "promotedCount": 2, "sealed": False, "publishReady": False,
@@ -939,7 +939,8 @@ def test_share_handler_full_skip_seal_warns_via_annotate(provider):
     out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_share", {
         "context_graph_id": "cg1", "name": "ka", "skip_seal": True,
     }))
-    assert "layer:swm works after sharing" in out["warning"]
+    assert "Legacy unsealed SWM content is read-only" in out["warning"]
+    assert "atomic full share" in out["warning"]
 
 
 def test_share_handler_subset_warns_not_sealable_via_annotate(provider):
@@ -967,4 +968,4 @@ def test_share_handler_incomplete_full_promote_warns_via_annotate(provider):
     }))
     assert "not all roots reached SWM" in out["warning"]
     assert "re-share the full asset" in out["warning"]
-    assert "layer:swm works after sharing" not in out["warning"]
+    assert "recovers + seals" not in out["warning"]

@@ -74,7 +74,11 @@ import {
 } from "./shared-assertion-helpers.js";
 import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import {
+  LegacyKnowledgeAssetReadOnlyError,
+  validateAssertionName,
+  contextGraphAssertionUri,
+} from "@origintrail-official/dkg-core";
 import {
   formatFinalizedPublishOptionError,
   parseHttpFinalizedPublishOptions,
@@ -149,6 +153,11 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
   "schemeVersion",
 ] as const;
 
+function respondLegacyKnowledgeAssetReadOnly(res: RequestContext["res"]): void {
+  const error = new LegacyKnowledgeAssetReadOnlyError();
+  jsonResponse(res, 409, { code: error.code, error: error.message });
+}
+
 /**
  * Translate engine/publisher errors on the WM/SWM mutation verbs into the same
  * HTTP status mapping the legacy `/api/assertion/*` routes use, so callers see
@@ -159,6 +168,13 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
  * publish path, which never down-classified them).
  */
 function respondAssertionError(res: RequestContext["res"], e: any): void {
+  if (
+    e instanceof LegacyKnowledgeAssetReadOnlyError
+    || e?.code === "LEGACY_KA_READ_ONLY"
+  ) {
+    respondLegacyKnowledgeAssetReadOnly(res);
+    return;
+  }
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
     jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
     return;
@@ -320,10 +336,7 @@ export function resolveFinalizeOptions(
   // stable response for older clients that still send `layer:"swm"`, but never
   // invoke the legacy root-closure reconstruction/migration path.
   if (layer === "swm") {
-    jsonResponse(res, 409, {
-      code: "LEGACY_KA_READ_ONLY",
-      error: "Legacy root-scoped Knowledge Assets are read-only",
-    });
+    respondLegacyKnowledgeAssetReadOnly(res);
     return null;
   }
   if (layer != null && layer !== "wm") {

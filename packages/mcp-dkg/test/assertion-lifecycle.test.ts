@@ -768,18 +768,19 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(captured.skipSeal).toBe(true);
   });
 
-  it('share with publishReady:false on a FULL share emits the seal-it warning (#1116)', async () => {
+  it('share with publishReady:false on a FULL share directs recovery through WM (#1116)', async () => {
     const localClient = new FakeClient({
       knowledgeAssetShare: async () => ({ swmShared: true, promotedCount: 2, sealed: false, publishReady: false }),
     });
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
-    // A skipSeal FULL share IS sealable later → the "seal it with finalize" hint.
+    // Legacy SWM is read-only, so this must not recommend finalize(layer:swm).
     const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc', skipSeal: true });
     expect(res.isError).toBeFalsy();
     expect(res.content[0].text).toContain('NOT publish-ready (sealed:false)');
-    expect(res.content[0].text).toContain('layer:swm works after sharing');
+    expect(res.content[0].text).toContain('Legacy unsealed SWM content is read-only');
+    expect(res.content[0].text).toContain('atomic full share');
     expect(res.content[0].text).not.toContain('NOT sealable');
   });
 
@@ -790,7 +791,7 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
-    // A subset is NOT sealable (finalize layer:swm rejects it) → full-share / new-asset recovery.
+    // A subset is NOT sealable and SWM is read-only → full-share / new-asset recovery.
     const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc', entities: ['urn:a'] });
     expect(res.isError).toBeFalsy();
     expect(res.content[0].text).toContain('A subset is NOT sealable/publishable');
@@ -812,7 +813,7 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(res.content[0].text).toContain('not all roots reached SWM');
     expect(res.content[0].text).toContain('re-share the full asset');
     // Must NOT recommend the dead-end finalize layer:swm here (it would reject).
-    expect(res.content[0].text).not.toContain('layer:swm works after sharing');
+    expect(res.content[0].text).not.toContain('recovers + seals');
     expect(res.content[0].text).not.toContain('NOT sealable');
   });
 
