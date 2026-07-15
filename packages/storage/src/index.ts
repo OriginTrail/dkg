@@ -29,6 +29,7 @@ export {
 } from './atomic-graph-replace.js';
 export {
   UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {

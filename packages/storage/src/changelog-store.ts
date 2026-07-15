@@ -8,7 +8,10 @@ import type {
   UpdateOptions,
   StorePressureSnapshot,
 } from './triple-store.js';
-import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import {
+  UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphCapabilityRefusal,
+} from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
 /**
@@ -337,6 +340,11 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       try {
         await this.inner.replaceGraph!(graphUri, quads, options);
       } catch (err) {
+        if (isReplaceGraphCapabilityRefusal(err)) {
+          // A capability refusal is a clean preflight result: no mutation was
+          // started, so there is no gap to reconcile.
+          throw err;
+        }
         // The replaceGraph contract allows a rejected call to have left either
         // the complete old graph or the complete new graph (e.g. a response
         // lost after the backend committed). A committed overwrite with no
