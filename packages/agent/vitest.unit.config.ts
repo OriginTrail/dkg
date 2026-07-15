@@ -31,6 +31,7 @@ export default defineConfig({
       "test/ensure-registered-for-publish.test.ts",
       "test/sync-verify-collapsed.test.ts",
       "test/sync-verify-rootless.test.ts",
+      "test/sync-control-metadata-admission.test.ts",
       "test/sync-durable-worker-wire.test.ts",
       "test/changelog-requester.test.ts",
       "test/durable-sync-since-threading.test.ts",
