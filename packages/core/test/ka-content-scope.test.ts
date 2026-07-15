@@ -36,7 +36,7 @@ describe('KA content scope', () => {
     const ual = `did:dkg:base:8453/0x70997970c51812dc3a010C7d01b50e0d17dc79C8/${tooLarge}`;
 
     expect(() => parseDeterministicKnowledgeAssetUal(ual))
-      .toThrow(/uint96 on-chain identity field/);
+      .toThrow(/packed uint96 identity domain/);
   });
 
   it('derives one stable per-KA graph while assertion version remains explicit', () => {
