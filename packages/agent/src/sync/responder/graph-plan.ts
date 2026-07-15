@@ -1,5 +1,6 @@
 import {
   DKG_ONTOLOGY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   assertSafeIri,
   sparqlString,
@@ -31,6 +32,10 @@ const DKG_SUB_GRAPH = `${DKG}SubGraph`;
 const DKG_WORKSPACE_OPERATION = `${DKG}WorkspaceOperation`;
 const DKG_PUBLISHED_AT = `${DKG}publishedAt`;
 const DKG_ROOT_ENTITY = `${DKG}rootEntity`;
+const DKG_CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
+const DKG_KA_UAL = `${DKG}kaUal`;
+const DKG_ASSERTION_VERSION = `${DKG}assertionVersion`;
+const DKG_SHARE_OPERATION_ID = `${DKG}shareOperationId`;
 const DKG_ASSERTION_GRAPH = `${DKG}assertionGraph`;
 const DKG_ASSERTION_NAME = `${DKG}assertionName`;
 const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
@@ -397,8 +402,9 @@ const DEFAULT_CHANGELOG_PAGE_BYTES = 4 * 1024 * 1024;
 
 /**
  * The per-CG admission boundary shared by the durable-data phase and the
- * changelog delta lane: the candidate-graph exclusions (wrong CG / top `_meta` /
- * `/_shared_memory*` / `/_private`) and the RFC-49 `isAdmitted` gate
+ * changelog delta lane: the candidate-graph exclusions (wrong CG / top or
+ * first-level subgraph `_meta` / `/_shared_memory*` / `/_private`) and the
+ * RFC-49 `isAdmitted` gate
  * (assertion-graph membership + child-CG descendant rejection). `assertionGraphs`
  * is memoised per invocation, matching the original inline closure.
  */
@@ -422,6 +428,15 @@ function createAdmissionContext(
   const isCandidateGraph = (graph: string): boolean => {
     if (graph !== cgPrefix && !graph.startsWith(`${cgPrefix}/`)) return false;
     if (!opts.includeTopMeta && graph === topMetaGraph) return false;
+    // `<cg>/<subGraph>/_meta` is protocol control metadata for the subgraph
+    // itself (for example local migration markers).  It is not KA payload and
+    // must not enter the durable-data integrity verifier.  Keep deeper
+    // `.../_meta` graphs admitted: assertion and partition metadata are
+    // integrity-bearing durable material served alongside their data graph.
+    const relative = graph.startsWith(`${cgPrefix}/`)
+      ? graph.slice(cgPrefix.length + 1)
+      : '';
+    if (relative.split('/').length === 2 && relative.endsWith('/_meta')) return false;
     // SWM graphs are the dedicated SWM phase's exclusive domain; `/_private` is
     // never durable-served (see readDurableDataPage's original inline note).
     if (graph.includes('/_shared_memory')) return false;
@@ -1134,7 +1149,24 @@ async function readSwmMetaRowsPage(
           ?s ?p ?o .
           ${cutoffIso
             ? `
-          ?s <${DKG_PUBLISHED_AT}> ?ts .
+          {
+            ?s <${DKG_PUBLISHED_AT}> ?ts .
+          } UNION {
+            # Graph-scoped SWM heads are current-state pointers and therefore
+            # intentionally have no independent publishedAt row. Bind them to
+            # the timestamped WorkspaceOperation they select so TTL recovery
+            # receives the head plus its immutable commitment atomically.
+            ?s <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
+               <${DKG_KA_UAL}> ?headUal ;
+               <${DKG_ASSERTION_VERSION}> ?headVersion ;
+               <${DKG_SHARE_OPERATION_ID}> ?shareId .
+            ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+               <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
+               <${DKG_KA_UAL}> ?headUal ;
+               <${DKG_ASSERTION_VERSION}> ?headVersion ;
+               <${DKG_SHARE_OPERATION_ID}> ?shareId ;
+               <${DKG_PUBLISHED_AT}> ?ts .
+          }
           FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`
             : ''}
         }

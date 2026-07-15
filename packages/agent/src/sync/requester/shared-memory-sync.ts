@@ -345,13 +345,13 @@ export function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGr
   return `${contextGraphId}\0${subGraphName}`;
 }
 
-interface PublicSnapshotMetadata {
+export interface PublicSnapshotMetadata {
   ref: string;
   digest: string;
   count: number;
 }
 
-async function syncPublicSnapshotsForMeta(params: {
+export async function syncPublicSnapshotsForMeta(params: {
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
@@ -450,7 +450,7 @@ async function syncPublicSnapshotsForMeta(params: {
   };
 }
 
-function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
+export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
   const bySubject = new Map<string, { ref?: string; digest?: string; count?: number; hasSnapshotGraph?: boolean }>();
   for (const quad of metaQuads) {
     if (

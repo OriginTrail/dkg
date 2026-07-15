@@ -233,6 +233,7 @@ describe('sync-on-connect churn gates', () => {
     const recovery = await (agent as any).recoverContextGraphSwmFromPeer(PEER_A, 'cg-a');
     expect(recovery).toEqual({
       replacedRoots: 0,
+      replacedGraphs: 0,
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,

@@ -173,6 +173,27 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.advanceTo).toBe(7);
   });
 
+  it('classifies lifecycle scope fields as non-integrity metadata', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const lifecycle = 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7/assertion/1';
+    const classification = classifyDurableMetaGraph([
+      {
+        subject: lifecycle,
+        predicate: 'http://dkg.io/ontology/contentScopeVersion',
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: topMeta,
+      },
+      {
+        subject: lifecycle,
+        predicate: 'http://dkg.io/ontology/assertionGraph',
+        object: 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/7',
+        graph: topMeta,
+      },
+    ]);
+
+    expect(classification).toEqual({ hasMerkleRoot: false, hasIntegrityEnvelope: false });
+  });
+
   it('accepts a rootless exact graph bound by verified top-level V2 metadata', () => {
     const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/7';
     const topMeta = 'did:dkg:context-graph:cg/_meta';
