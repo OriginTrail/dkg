@@ -2400,13 +2400,21 @@ export class DKGAgent extends DKGAgentBase {
         const queryAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionQueryPrivate(contextGraphId, name, queryAgentAddress, opts?.subGraphName);
       },
-      /** OT-RFC-43 §10.5.3 — seed a fresh WM draft from this file's SWM/VM state. */
+      /** Re-open a sealed rootless KA from its exact SWM/VM graph. */
       async pullFrom(
         contextGraphId: string,
         name: string,
         sourceLayer: 'swm' | 'vm',
         opts?: { subGraphName?: string; agentAddress?: string; onConflict?: 'reject' | 'replace' },
-      ): Promise<{ seeded: number; fromLayer: 'swm' | 'vm'; entities: number }> {
+      ): Promise<{
+        seeded: number;
+        seededPublic: number;
+        seededPrivate: number;
+        fromLayer: 'swm' | 'vm';
+        contentScopeVersion: number;
+        kaUal: string;
+        assertionVersion: string;
+      }> {
         const pullAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionPullFrom(contextGraphId, name, pullAgentAddress, sourceLayer, {
           ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
@@ -2415,6 +2423,14 @@ export class DKGAgent extends DKGAgentBase {
       },
       async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
+        if (opts?.skipSeal) {
+          throw Object.assign(
+            new Error(
+              'Graph-scoped Knowledge Assets must be finalized before sharing; unsealed SWM mutation is read-only legacy behavior.',
+            ),
+            { code: 'UNSEALED_SHARE_BLOCKED' },
+          );
+        }
         // Seal-before-share: the on-chain publish path
         // (`publishFromFinalizedAssertion`) requires a FINALIZED assertion, and
         // the seal must be computed over the Working-Memory content BEFORE
@@ -2435,33 +2451,46 @@ export class DKGAgent extends DKGAgentBase {
         // route) so the seal attests the intended author rather than silently
         // falling back to the daemon signer.
         //
-        // Only auto-finalize a FULL promote: the seal covers ALL roots, but a
-        // selective promote (`opts.entities` subset) ships only some — sealing
-        // all then promoting a subset makes `publishFromFinalizedAssertion`
-        // recompute a different merkleRoot. A selective promote must be finalized
-        // explicitly with a matching scope.
-        // #1116: a FULL share SEALS BY DEFAULT. `skipSeal:true` is the explicit
-        // opt-out into an unsealed SWM share (e.g. a deliberately local-only
-        // collaboration). A subset share never auto-seals (see above).
+        // A graph-scoped KA is atomic. Full sharing finalizes first; selective
+        // requests are rejected at the publisher boundary and skipSeal is rejected
+        // above. Keeping the full-selection check here avoids doing signing work
+        // before returning the stable KA_ATOMIC_SHARE_REQUIRED error.
         const promotingAllEntities = !opts?.entities || opts.entities === 'all';
         let sealed = false;
-        if (promotingAllEntities && !opts?.skipSeal) {
+        if (promotingAllEntities) {
+          const [publicDraft, privateDraft] = await Promise.all([
+            agent.publisher.assertionQuery(
+              contextGraphId,
+              name,
+              promoteAgentAddress,
+              opts?.subGraphName,
+            ),
+            agent.publisher.assertionQueryPrivate(
+              contextGraphId,
+              name,
+              promoteAgentAddress,
+              opts?.subGraphName,
+            ),
+          ]);
+          const hasOpenDraft = publicDraft.length > 0 || privateDraft.length > 0;
           try {
-            await agent.assertionFinalize(contextGraphId, name, promoteAgentAddress, {
-              subGraphName: opts?.subGraphName,
-              authorAgentAddress: opts?.authorAgentAddress,
-              preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-            });
+            if (hasOpenDraft) {
+              await agent.assertionFinalize(contextGraphId, name, promoteAgentAddress, {
+                subGraphName: opts?.subGraphName,
+                authorAgentAddress: opts?.authorAgentAddress,
+                preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+              });
+            }
+            // With no mutable draft, the publisher is the recovery authority:
+            // it verifies a sealed exact SWM/VM graph and either repairs the
+            // interrupted commit tail or returns the already-published no-op.
+            // Treat the call as sealed only after that downstream validation;
+            // any missing/corrupt seal still throws before a result is returned.
             sealed = true;
           } catch (err: any) {
             const msg = err?.message ?? String(err);
-            // #1116 (round 11, reviewer 🟡) — CLASSIFY the finalize failure. Only a
-            // genuine signing/chain CAPABILITY GAP is recoverable by skipSeal — a
-            // VALIDATION/INTEGRITY error (empty draft, reserved-only/unsafe content,
-            // preSigned mismatch, author change, stale/corrupt seal) is a real input
-            // problem: telling the caller to skipSeal would push invalid content into
-            // SWM. So translate ONLY capability gaps to UNSEALED_SHARE_BLOCKED and
-            // RETHROW everything else with its ORIGINAL message/code.
+            // Classify finalize failures so capability gaps retain a stable API
+            // code while validation/integrity errors keep their original detail.
             //
             // Capability gaps carry the stable SEAL_CAPABILITY_GAP code (tagged at the
             // assertionFinalize throw sites). The message regex is a back-compat
@@ -2477,10 +2506,7 @@ export class DKGAgent extends DKGAgentBase {
               // preserved because we throw BEFORE assertionPromote.
               throw err;
             }
-            // #1116 D1 — FAIL-CLOSED on a capability gap. Do NOT silently promote
-            // unsealed and empty WM (the original #1116 trap). Throw BEFORE
-            // assertionPromote so WM is preserved; the caller resolves the gap or
-            // passes skipSeal:true to deliberately share unsealed.
+            // Fail closed before assertionPromote so WM remains intact.
             throw Object.assign(
               new Error(
                 `Cannot seal "${name}" for sharing to Shared Memory — the asset would be left ` +
@@ -2489,29 +2515,11 @@ export class DKGAgent extends DKGAgentBase {
               {
                 code: 'UNSEALED_SHARE_BLOCKED',
                 recovery:
-                  'Resolve the signing capability (a local agent key + a V10 chain adapter), then retry; ' +
-                  'or pass skipSeal:true to share without sealing (you can seal it later with ' +
-                  'finalize layer=swm, then publish).',
+                  'Resolve the signing capability (a local agent key + a V10 chain adapter), then retry.',
               },
             );
           }
         }
-        // #1116 (round 9 → round 11, reviewer 🔴 #1) — a NON-SEALING share (a
-        // `skipSeal` full share OR any subset share — the inverse of the finalize
-        // block above) must leave NO full-share seal. Otherwise a prior FULL seal
-        // survives (it lives on the name-keyed assertion URI, outside the
-        // lifecycle-URN clean-slates) and could be published via the
-        // merkle-still-matches path under the KA name, even though the current share
-        // is a subset / explicitly-unsealed. The subsequent finalize(layer:"swm")
-        // re-stamps a fresh seal, so a legit skipSeal→seal-in-SWM flow is unaffected.
-        //
-        // Round 11: the seal-clear is now TRANSACTIONAL with the share — it runs
-        // AFTER assertionPromote SUCCEEDS (below), not before. If assertionPromote
-        // throws (gossip-signer resolution, curator confirmation, payload-size
-        // validation, …) the prior seal survives: the old content is still in SWM,
-        // so the old seal is still valid — a FAILED non-sealing share no longer
-        // strands a previously-publishable asset with no seal.
-        const isNonSealingShare = !(promotingAllEntities && !opts?.skipSeal);
         // Resolve the gossip signer up-front (mirrors `share()` /
         // `conditionalShare()` patterns) so the publisher can wrap the
         // promoted SWM gossip in the Sender Key encrypted envelope.
@@ -2547,15 +2555,6 @@ export class DKGAgent extends DKGAgentBase {
             confirmBeforeCommit,
           },
         );
-        // #1116 (round 11, reviewer 🔴 #1) — clear the prior full-share seal NOW
-        // that assertionPromote has COMMITTED the (non-sealing) share to SWM. Doing
-        // it here (not before the promote) keeps the seal-clear transactional with
-        // the share: a promote that threw (curator-unconfirmed, payload-too-large,
-        // …) left the prior SWM content + seal intact, so the asset stays publishable
-        // under the old seal until a share actually succeeds.
-        if (isNonSealingShare) {
-          await agent.publisher.clearAssertionSeal(contextGraphId, name, promoteAgentAddress, opts?.subGraphName);
-        }
         if (gossipMessage) {
           try {
             await agent.publishWorkspaceGossip(contextGraphId, gossipMessage, createOperationContext('share'), gossipSigner);
@@ -2572,19 +2571,10 @@ export class DKGAgent extends DKGAgentBase {
         // same isFullCompletePromote), so it stays in lockstep with the rows for
         // EVERY caller of the public assertionPromote — not just this wrapper. The
         // `promotedAllRoots` result is still used below for `publishReady`.
-        // #1116: `sealed` reflects THIS share — a subset share or a skipSeal
-        // share is `sealed:false` BY DESIGN, not a failure. `publishReady` means
-        // a subsequent /vm/publish won't 409 on "not finalized"; it is true only
-        // for a sealed FULL share. Kept distinct from `sealed` for forward-compat.
-        //
-        // #1116 FIX 1 — the seal covers ALL roots, but assertionPromote's advisory
-        // ownership skip can promote only a SUBSET (foreign-owned roots are left in
-        // the owner's SWM copy). When that happens the SWM slice is missing part of
-        // the sealed set, so publishFromFinalizedAssertion would recompute a
-        // different merkleRoot and fail the seal guard. The seal still EXISTS
-        // (`sealed:true`), but the asset is NOT publish-ready. The single-author
-        // happy path skips no roots ⇒ promotedAllRoots:true ⇒ publishReady:true.
-        const publishReady = promotingAllEntities && sealed && promotedAllRoots && promotedCount > 0 && !!shareOperationId;
+        // A repaired/replayed share has promotedCount=0 but retains its durable
+        // shareOperationId. It is just as publish-ready as the first response;
+        // a VM no-op has no share operation id and remains false here.
+        const publishReady = promotingAllEntities && sealed && promotedAllRoots && !!shareOperationId;
         return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<void> {

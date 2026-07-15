@@ -937,6 +937,32 @@ export class FinalizationHandler {
       this.log.warn(ctx, `Chain-reconcile: invalid private commitment for graph-scoped KA ${ual}`);
       return 'no-swm';
     }
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      scope,
+      subGraphName,
+    );
+    const vmResult = await this.store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(vmGraph)}> { ?s ?p ?o } }`,
+    );
+    const vmQuads = vmResult.type === 'quads'
+      ? vmResult.quads.map((quad) => ({ ...quad, graph: '' }))
+      : [];
+    if (vmQuads.length === head.publicTripleCount) {
+      const computedVmMerkleRoot = computeFlatKCRoot(
+        vmQuads,
+        privateMerkleRoot ? [privateMerkleRoot] : [],
+      );
+      if (equalBytes(computedVmMerkleRoot, merkleRoot)) {
+        // A confirmed publish may have committed the exact VM graph and drained
+        // SWM before the named lifecycle/receipt write survived a crash. Chain
+        // binding plus the exact graph's seal root is sufficient immutable proof;
+        // recovery may repair metadata without requiring the consumed SWM copy.
+        this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repairing metadata only`);
+        return 'already-confirmed';
+      }
+    }
     const swmGraph = knowledgeAssetLayerGraphUri(
       contextGraphId,
       MemoryLayer.SharedWorkingMemory,

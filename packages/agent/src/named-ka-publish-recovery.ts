@@ -97,7 +97,12 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   }
   if (!ual) throw inconsistent('chain recovery did not return the published UAL');
   const ualMatch = ual.match(/^did:dkg:(.+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)$/);
-  if (!ualMatch || BigInt(ualMatch[3]) !== reservedKaId) {
+  const reservedKaNumber = reservedKaId & ((1n << 96n) - 1n);
+  if (
+    !ualMatch
+    || ethers.getAddress(ualMatch[2]).toLowerCase() !== sealedAuthor.toLowerCase()
+    || BigInt(ualMatch[3]) !== reservedKaNumber
+  ) {
     throw inconsistent(`published UAL ${ual} does not identify reserved KA id ${reservedKaId.toString()}`);
   }
   if (ualMatch[1] !== chain.chainId) {

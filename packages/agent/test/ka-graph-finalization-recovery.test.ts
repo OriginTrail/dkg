@@ -176,25 +176,31 @@ describe('graph-scoped assertion finalization recovery', () => {
     expect(lifecycleVersion.bindings).toHaveLength(1);
 
     // Failure during cleanup: canonical content and seal survive; retry removes
-    // the encoded original-named-graph source without duplicating the payload.
+    // an encoded descendant containing only filtered WM bookkeeping. New KAs
+    // reject user RDF named graphs, but recovery must still clean protocol-only
+    // graph artifacts without duplicating the default-graph payload.
     const duringCleanup = 'during-cleanup';
-    const originalNamedGraph = 'urn:input:named-graph';
     await agent.assertion.create(contextGraphId, duringCleanup);
     await agent.assertion.write(contextGraphId, duringCleanup, [
       {
         subject: 'urn:during:cleanup',
         predicate: 'urn:predicate:value',
         object: '"cleanup"',
-        graph: originalNamedGraph,
       },
     ]);
     const cleanupWm = await agent.publisher.wmGraphUri(contextGraphId, author, duringCleanup);
-    const scopedNamedGraph = assertionScopedGraphUri(cleanupWm, originalNamedGraph);
-    expect(await agent.store.hasGraph(scopedNamedGraph)).toBe(true);
+    const bookkeepingDraftDescendant = assertionScopedGraphUri(cleanupWm, 'urn:obsolete:bookkeeping-draft-graph');
+    await agent.store.insert([{
+      subject: 'urn:dkg:file:stale-cleanup-marker',
+      predicate: 'urn:predicate:value',
+      object: '"filtered"',
+      graph: bookkeepingDraftDescendant,
+    }]);
+    expect(await agent.store.hasGraph(bookkeepingDraftDescendant)).toBe(true);
     const realDropGraph = agent.store.dropGraph.bind(agent.store);
     let stoppedDuringCleanup = false;
     agent.store.dropGraph = async (graphUri, options) => {
-      if (!stoppedDuringCleanup && graphUri === scopedNamedGraph) {
+      if (!stoppedDuringCleanup && graphUri === bookkeepingDraftDescendant) {
         stoppedDuringCleanup = true;
         throw new Error('injected cleanup failure');
       }
@@ -204,13 +210,13 @@ describe('graph-scoped assertion finalization recovery', () => {
       'injected cleanup failure',
     );
     expect(await hasSeal(agent, contextGraphId, duringCleanup)).toBe(true);
-    expect(await agent.store.hasGraph(scopedNamedGraph)).toBe(true);
+    expect(await agent.store.hasGraph(bookkeepingDraftDescendant)).toBe(true);
     agent.store.dropGraph = realDropGraph;
     const cleanupRecovered = await agent.assertion.finalize(contextGraphId, duringCleanup) as never as {
       kaUal: string; assertionVersion: string; publicTripleCount: number;
     };
     await assertCanonicalFinalizedGraph(agent, contextGraphId, cleanupRecovered);
-    expect(await agent.store.hasGraph(scopedNamedGraph)).toBe(false);
+    expect(await agent.store.hasGraph(bookkeepingDraftDescendant)).toBe(false);
 
     // WM->SWM uses the same atomic exact-graph primitive. A failed swap leaves
     // both canonical WM and the prior complete SWM graph untouched; retry then
@@ -381,6 +387,47 @@ describe('graph-scoped assertion finalization recovery', () => {
         publishFromSharedMemory: typeof originalPublishFromSharedMemory;
       }).publishFromSharedMemory = originalPublishFromSharedMemory;
     }
+  }, 60_000);
+
+  it('rejects public and private RDF named graphs before their identity can be flattened', async () => {
+    const agent = await createAgent();
+    const contextGraphId = `rootless-named-graph-rejection-${Date.now()}`;
+    await agent.createContextGraph({ id: contextGraphId, name: 'Rootless named-graph rejection' });
+    const author = agent.defaultAgentAddress ?? agent.peerId;
+    const name = 'named-graph-payload';
+    const publicNamedGraph = 'urn:input:public-named-graph';
+    const privateNamedGraph = 'urn:input:private-named-graph';
+
+    await agent.assertion.create(contextGraphId, name);
+    await agent.assertion.write(contextGraphId, name, [
+      {
+        subject: 'urn:named:public',
+        predicate: 'urn:predicate:value',
+        object: '"public"',
+        graph: publicNamedGraph,
+      },
+    ]);
+    await expect(agent.publisher.assertionWritePrivate(contextGraphId, name, author, [
+      {
+        subject: 'urn:named:private',
+        predicate: 'urn:predicate:value',
+        object: '"private"',
+        graph: privateNamedGraph,
+      },
+    ])).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: [privateNamedGraph],
+    });
+
+    await expect(agent.assertion.finalize(contextGraphId, name)).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: [publicNamedGraph],
+    });
+    expect(await hasSeal(agent, contextGraphId, name)).toBe(false);
+    expect(await agent.assertion.query(contextGraphId, name)).toEqual([
+      expect.objectContaining({ graph: publicNamedGraph }),
+    ]);
+    expect(await agent.assertion.queryPrivate(contextGraphId, name)).toEqual([]);
   }, 60_000);
 
   it('commits, promotes, and republishes a fully private KA without a synthetic public root', async () => {

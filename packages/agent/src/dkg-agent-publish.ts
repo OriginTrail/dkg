@@ -119,6 +119,7 @@ import {
   skolemizeByEntity,
   skolemizeKnowledgeAsset,
   skolemizeKnowledgeAssetParts,
+  assertNoKnowledgeAssetPayloadNamedGraphs,
   isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
@@ -419,10 +420,9 @@ import type { DKGAgent } from './dkg-agent.js';
  * adapter, KA-number reconcile read failure, no KaNumberAllocator) as opposed to
  * VALIDATION/INTEGRITY errors (empty draft, reserved-only/unsafe content, preSigned
  * mismatch, author-change, stale/corrupt seal). The seal-by-default `promote()`
- * classifies on this code: a capability gap is wrapped as UNSEALED_SHARE_BLOCKED
- * (with a "retry, or skipSeal:true" recovery hint); a validation error is rethrown
- * with its original message so the caller sees the real input problem and bad
- * content is NEVER pushed into SWM via skipSeal.
+ * classifies on this code: a capability gap is wrapped as UNSEALED_SHARE_BLOCKED;
+ * a validation error is rethrown with its original message so the caller sees the
+ * real input problem. New graph-scoped KAs never enter SWM without a seal.
  */
 export const SEAL_CAPABILITY_GAP_CODE = 'SEAL_CAPABILITY_GAP';
 
@@ -2244,6 +2244,14 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    // Finalization is the first irreversible boundary: canonicalization below
+    // intentionally reduces the submitted RDF dataset to its atomic triple set.
+    // Reject payload-level named graphs before that reduction, otherwise equal
+    // SPOs in different graphs could collapse and the later promote guard would
+    // only see the already-flattened canonical WM graph. Check both partitions;
+    // private draft quads preserve their graph terms too.
+    assertNoKnowledgeAssetPayloadNamedGraphs(userQuads, userPrivateQuads);
+
     // B6 — inject the public DCAT catalog entry for a PRIVATE CG ONLY AFTER the
     // "≥1 real user-authored quad" contract has been validated against
     // `userQuads` above, so a catalog-only assertion can never finalize.
@@ -2442,8 +2450,8 @@ export class PublishMethods extends DKGAgentBase {
       typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function'
     ) {
       // #1116 (round 11) — CAPABILITY GAP (non-V10 chain adapter). Tagged with a
-      // stable code so the seal-by-default promote() can distinguish a recoverable
-      // capability gap (→ UNSEALED_SHARE_BLOCKED + skipSeal hint) from a validation
+      // stable code so seal-before-share can distinguish a recoverable capability
+      // gap (→ UNSEALED_SHARE_BLOCKED) from a validation
       // error (which must propagate). See SEAL_CAPABILITY_GAP_CODE.
       throw Object.assign(
         new Error(
