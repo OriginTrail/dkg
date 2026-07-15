@@ -56,7 +56,12 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  isRootlessUpdateError,
+  loadOpWallets,
+  type RootlessUpdateErrorCode,
+} from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -69,6 +74,13 @@ import {
   LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
+
+const ROOTLESS_UPDATE_HTTP_STATUS = {
+  ROOTLESS_UPDATE_INVALID_KA_ID: 422,
+  ROOTLESS_KA_NOT_MATERIALIZED: 422,
+  ROOTLESS_UPDATE_TARGET_CORRUPT: 422,
+  ROOTLESS_UPDATE_TARGET_NOT_CONFIRMED: 422,
+} as const satisfies Record<RootlessUpdateErrorCode, number>;
 import {
   loadConfig,
   saveConfig,
@@ -953,11 +965,19 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/update  { kaId, contextGraphId, quads, privateQuads?, precomputedUpdateAttestation? }
+  // POST /api/update  { kaId, contextGraphId, quads?, privateQuads?, precomputedUpdateAttestation? }
   if (req.method === "POST" && path === "/api/update") {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
-    const { kaId, quads, privateQuads } = parsed;
+    const { kaId } = parsed;
+    if (parsed.quads !== undefined && !Array.isArray(parsed.quads)) {
+      return jsonResponse(res, 400, { error: '"quads" must be an array when provided' });
+    }
+    if (parsed.privateQuads !== undefined && !Array.isArray(parsed.privateQuads)) {
+      return jsonResponse(res, 400, { error: '"privateQuads" must be an array when provided' });
+    }
+    const quads = Array.isArray(parsed.quads) ? parsed.quads : [];
+    const privateQuads = Array.isArray(parsed.privateQuads) ? parsed.privateQuads : [];
     const contextGraphId = parsed.contextGraphId;
     const precomputedUpdateAttestation = parsePrecomputedUpdateAttestation(
       parsed.precomputedUpdateAttestation,
@@ -975,9 +995,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     )) {
       return;
     }
-    if (!kaId || !contextGraphId || !quads?.length) {
+    if (!kaId || !contextGraphId || (quads.length === 0 && privateQuads.length === 0)) {
       return jsonResponse(res, 400, {
-        error: 'Missing "kaId", "contextGraphId", or "quads"',
+        error: 'Missing "kaId", "contextGraphId", or update content in "quads"/"privateQuads"',
       });
     }
     let kcIdBigInt: bigint;
@@ -1058,8 +1078,26 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       // those to 422 (Unprocessable Entity) so the API surfaces a proper 4xx
       // instead of letting it bubble to the generic 500 handler.
       const message = err instanceof Error ? err.message : String(err);
-      if ((err as any)?.code === "OVERSIZED_RDF_LITERAL") {
+      const errorCode = typeof err === 'object' && err !== null
+        ? Reflect.get(err, 'code')
+        : undefined;
+      if (errorCode === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
+      }
+      if (errorCode === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
+        return jsonResponse(res, 400, { error: message });
+      }
+      if (errorCode === "KA_UPDATE_AUTHOR_NOT_OWNER") {
+        return jsonResponse(res, 403, { error: message, code: "KA_UPDATE_AUTHOR_NOT_OWNER" });
+      }
+      if (errorCode === "LEGACY_KA_READ_ONLY") {
+        return jsonResponse(res, 409, { error: message, code: "LEGACY_KA_READ_ONLY" });
+      }
+      if (isRootlessUpdateError(err)) {
+        return jsonResponse(res, ROOTLESS_UPDATE_HTTP_STATUS[err.code], {
+          error: message,
+          code: err.code,
+        });
       }
       if (message.includes('precomputedUpdateAttestation')) {
         return jsonResponse(res, 422, { error: message });

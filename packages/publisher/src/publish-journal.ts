@@ -15,6 +15,10 @@ export interface JournalEntry {
   expectedChainId: string;
   /** Root entity IRIs from the KA manifest, used for cleanup on expiry */
   rootEntities?: string[];
+  /** Complete V2 graph scope for rootless tentative cleanup after restart. */
+  contentScopeVersion?: number;
+  assertionVersion?: string;
+  subGraphName?: string;
   createdAt: number;
 }
 

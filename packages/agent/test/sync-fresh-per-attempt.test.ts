@@ -185,6 +185,55 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(didSyncPeerRespond(transportError)).toBe(false);
   });
 
+  it('backs a preferred 256-row page down to the 64-row frame-safe floor across retries', async () => {
+    const limits: number[] = [];
+    let attempts = 0;
+    const promise = fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 3,
+      syncPageSize: 256,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore: {
+        get: () => undefined,
+        set: () => {},
+        delete: () => {},
+      },
+      buildSyncRequest: async (
+        _contextGraphId,
+        _offset,
+        limit,
+      ) => {
+        limits.push(limit);
+        return new TextEncoder().encode(`request-${limit}`);
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error('stream reset');
+        return new Uint8Array();
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await expect(runFetchWithFakeTimers(promise)).resolves.toMatchObject({
+      completed: true,
+      nextOffset: 0,
+    });
+    expect(limits).toEqual([256, 128, 64]);
+  });
+
   it('tags parser failures after response bytes as peer responses', async () => {
     const parseError = new Error('bad N-Quads');
     const promise = fetchSyncPages({

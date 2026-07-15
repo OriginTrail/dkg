@@ -159,6 +159,15 @@ export const PROTOCOL_STORAGE_ACK_V2 = '/dkg/10.0.2/storage-ack';
 export const PROTOCOL_STORAGE_UPDATE_ACK = '/dkg/10.0.1/storage-update-ack';
 
 /**
+ * Graph-scoped UPDATE StorageACK protocol. V1 update responders interpret
+ * `subGraphName` using the legacy entity-root layout and do not validate the
+ * graph-scoped content envelope. Keep V2 on a distinct capability so a
+ * rootless update can never be acknowledged by a peer that silently ignores
+ * its scope/version fields.
+ */
+export const PROTOCOL_STORAGE_UPDATE_ACK_V2 = '/dkg/10.0.2/storage-update-ack';
+
+/**
  * OT-RFC-38 LU-11 / OT-RFC-39 — point-to-point sync verb for one
  * curated-CG ciphertext chunk identified by (cgId, batchId,
  * chunkIndex). Used by late-joining hosting cores (and any
@@ -510,6 +519,28 @@ export function validateContextGraphId(id: string): { valid: boolean; reason?: s
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
   if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
+  return { valid: true };
+}
+
+/**
+ * Validate a newly-created context graph ID against the storage namespace.
+ *
+ * Existing stores may contain IDs that predate the reserved-partition rule,
+ * so read/sync paths intentionally keep using {@link validateContextGraphId}.
+ * New roots must not claim a path segment used by a structural graph such as
+ * `_meta`, otherwise their payload graph can alias another root's control
+ * plane.
+ */
+export function validateNewContextGraphId(id: string): { valid: boolean; reason?: string } {
+  const validation = validateContextGraphId(id);
+  if (!validation.valid) return validation;
+  const reservedSegment = id.split('/').find((segment) => segment.startsWith('_'));
+  if (reservedSegment) {
+    return {
+      valid: false,
+      reason: `Context graph ID contains reserved storage partition segment "${reservedSegment}"`,
+    };
+  }
   return { valid: true };
 }
 

@@ -1,5 +1,10 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  LegacyKnowledgeAssetReadOnlyError,
+  createGraphKnowledgeAssetScope,
+} from '@origintrail-official/dkg-core';
 import type { PhaseCallback, PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
@@ -19,7 +24,6 @@ import {
   type KnowledgeAssetVmPublishRequest,
   type LiftPublishRequestMetadata,
   type LiftPublishSnapshotRequest,
-  type RawLiftRequest,
 } from './lift-job.js';
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
@@ -35,7 +39,7 @@ import {
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
 import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
-import { canonicalRootIri, validateLiftPublishPayload } from './async-lift-validation.js';
+import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
@@ -53,7 +57,6 @@ import {
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
-  createRawLiftJobRequest,
   createJobSlug,
   expectBindings,
   getRecoveryTxHash,
@@ -79,6 +82,56 @@ type AsyncLiftJobHandler = {
   readonly canRetryFailedRecovery: (job: PersistedFailedJob) => boolean;
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
 };
+
+function assertGraphScopedLiftSnapshot(request: LiftPublishSnapshotRequest): void {
+  if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new LegacyKnowledgeAssetReadOnlyError();
+  }
+  if (request.roots.length !== 0) {
+    throw new Error('Graph-scoped async publish must not contain root entities');
+  }
+  if (request.entityProofs === true) {
+    throw new Error('Graph-scoped async publish does not support entityProofs');
+  }
+  if (
+    request.kaUal === undefined
+    || request.assertionVersion === undefined
+    || request.publicTripleCount === undefined
+    || request.privateTripleCount === undefined
+  ) {
+    throw new Error('Graph-scoped async publish requires a complete KA content envelope');
+  }
+  createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+  if (
+    !Number.isSafeInteger(request.publicTripleCount)
+    || request.publicTripleCount < 0
+    || !Number.isSafeInteger(request.privateTripleCount)
+    || request.privateTripleCount < 0
+    || (request.publicTripleCount === 0 && request.privateTripleCount === 0)
+  ) {
+    throw new Error('Graph-scoped async publish has invalid public/private triple counts');
+  }
+  if (
+    request.privateTripleCount > 0
+    && !/^0x[0-9a-f]{64}$/i.test(request.privateMerkleRoot ?? '')
+  ) {
+    throw new Error('Graph-scoped async publish with private content requires one 32-byte privateMerkleRoot');
+  }
+  if (request.privateTripleCount === 0 && request.privateMerkleRoot !== undefined) {
+    throw new Error('Graph-scoped async publish privateMerkleRoot requires private content');
+  }
+  const accessPolicy = request.accessPolicy
+    ?? (request.privateTripleCount > 0 ? 'ownerOnly' : 'public');
+  const allowedPeers = [...new Set(
+    (request.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+  )];
+  if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+    throw new Error('Graph-scoped async publish allowList policy requires allowedPeers');
+  }
+  if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
+    throw new Error('Graph-scoped async publish allowedPeers requires allowList policy');
+  }
+}
 
 function resolveKnowledgeAssetVmPublishHandler(
   config: AsyncLiftPublisherConfig,
@@ -170,36 +223,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.graphManager = new GraphManager(store);
   }
 
-  async lift(request: RawLiftRequest): Promise<string> {
-    await this.ensureGraph();
-
-    const now = this.now();
-    const jobId = this.idGenerator();
-    const jobRequest = createRawLiftJobRequest(request);
-    const job: LiftJobAccepted = {
-      jobId,
-      jobSlug: createJobSlug(jobRequest),
-      request: jobRequest,
-      status: 'accepted',
-      timestamps: { acceptedAt: now, updatedAt: now },
-      retries: { retryCount: 0, maxRetries: this.maxRetries },
-      controlPlane: { jobRef: jobSubject(jobId) },
-    };
-
-    await this.writeJob(job);
-    await this.stampCanonicalAnchorsInWorkspace(request);
-    return jobId;
-  }
-
   async enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string> {
     return this.withClaimLock(async () => {
       await this.ensureGraph();
       if (!request.shareOperationId.trim()) {
         throw new Error('Knowledge asset VM publish requires a shareOperationId');
       }
-      if (request.roots.length === 0) {
-        throw new Error('Knowledge asset VM publish requires at least one shared root');
-      }
+      assertGraphScopedLiftSnapshot(request);
       const existing = await this.findActiveKnowledgeAssetVmPublishJob(request);
       if (existing?.compatible) {
         if (isFailedJob(existing.job)) {
@@ -231,42 +261,6 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     });
   }
 
-  // Adapt the lift's canonicalization to the SWM partition: for every
-  // request root that already has private staging from the share, insert
-  // a `<canonical> dkg:privateDataAnchor "true"` triple into
-  // `<cg>/_shared_memory`. The canonical IRI is the same one the
-  // validator will produce later (`dkg:<cg>:<ns>:<scope>/<name>-<hash>`)
-  // when it canonicalizes the chain payload, so EPCIS partition-aware
-  // queries can JOIN the public anchor in SWM with the canonical payload
-  // that lands in `<cg>/_private` after `processNext` completes. The
-  // source-IRI anchor stamped by `agent.publishAsync` stays in place for
-  // legacy joins; this is purely additive.
-  private async stampCanonicalAnchorsInWorkspace(request: RawLiftRequest): Promise<void> {
-    if (!request.roots || request.roots.length === 0) return;
-    const privateStore = new PrivateContentStore(this.store, this.graphManager);
-    const swmGraph = this.graphManager.sharedMemoryUri(request.contextGraphId, request.subGraphName);
-    const anchors: Quad[] = [];
-    for (const sourceRoot of request.roots) {
-      const staged = await privateStore.getPrivateTriplesForOperation(
-        request.contextGraphId,
-        request.shareOperationId,
-        sourceRoot,
-        request.subGraphName,
-      );
-      if (staged.length === 0) continue;
-      const canonical = canonicalRootIri(request, sourceRoot);
-      if (canonical === sourceRoot) continue;
-      anchors.push({
-        subject: canonical,
-        predicate: 'http://dkg.io/ontology/privateDataAnchor',
-        object: '"true"',
-        graph: swmGraph,
-      });
-    }
-    if (anchors.length > 0) {
-      await this.store.insert(anchors);
-    }
-  }
 
   async claimNext(walletId: string): Promise<LiftJob | null> {
     return this.withClaimLock(async () => {

@@ -20,6 +20,14 @@ export interface ContextGraphSubGraphMeta {
   description?: string;
 }
 
+export interface ContextGraphDelegationMeta {
+  uri: string;
+  agents: string[];
+  allowedPeers: string[];
+  allowedKeys: string[];
+  expiresAtValues: string[];
+}
+
 export interface ContextGraphMetaRecord {
   id: string;
   uri: string;
@@ -38,6 +46,7 @@ export interface ContextGraphMetaRecord {
   participantAgents: string[];
   participantIdentityIds: string[];
   revokedAgents: string[];
+  delegations: ContextGraphDelegationMeta[];
   onChainId?: string;
   subGraphs: ContextGraphSubGraphMeta[];
   hasAgentGate: boolean;
@@ -98,6 +107,13 @@ const SUB_GRAPH_META_PREDICATES = new Set([
   `${LEGACY_DKG_NS}createdAt`,
   `${DKG_NS}authorizedWriter`,
   `${LEGACY_DKG_NS}authorizedWriter`,
+]);
+
+const DELEGATION_META_PREDICATES = new Set<string>([
+  DKG_ONTOLOGY.DKG_DELEGATION_AGENT,
+  DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
+  DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY,
+  DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT,
 ]);
 
 // OT-RFC-49 §5.9: the public `_catalog` graph is a CG's discoverable face and may
@@ -310,6 +326,7 @@ export class ContextGraphMetaProjection {
       participantAgents: [],
       participantIdentityIds: [],
       revokedAgents: [],
+      delegations: [],
       subGraphs: [],
       hasAgentGate: false,
       hasPeerGate: false,
@@ -324,12 +341,69 @@ export class ContextGraphMetaProjection {
     await this.loadContextGraphFacts(agentsGraph, uri, record, options);
     await this.loadContextGraphFacts(catalogGraph, uri, record, options, CATALOG_META_PREDICATES);
     await this.loadContextGraphFacts(ontologyGraph, uri, record, options);
+    record.delegations = await this.loadDelegations(contextGraphId, options);
     record.subGraphs = await this.loadSubGraphs(contextGraphId, options);
 
     record.hasAgentGate = record.allowedAgents.length > 0 || record.participantAgents.length > 0;
     record.hasPeerGate = record.allowedPeers.length > 0;
     record.hasLegacyParticipantGate = record.participantIdentityIds.length > 0;
     return record;
+  }
+
+  private async loadDelegations(
+    contextGraphId: string,
+    options: QueryOptions,
+  ): Promise<ContextGraphDelegationMeta[]> {
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?delegation ?predicate ?object WHERE {
+        GRAPH <${metaGraph}> {
+          ?delegation <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?delegatedAgent .
+          ?delegation ?predicate ?object .
+          VALUES ?predicate {
+            <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}>
+            <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}>
+            <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}>
+            <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}>
+          }
+        }
+      }`,
+      options,
+    );
+    if (result.type !== 'bindings') return [];
+
+    const byUri = new Map<string, ContextGraphDelegationMeta>();
+    for (const row of result.bindings) {
+      const delegation = typeof row['delegation'] === 'string' ? stripTerm(row['delegation']) : '';
+      const predicate = typeof row['predicate'] === 'string' ? strip(row['predicate']) : '';
+      const object = typeof row['object'] === 'string' ? stripTerm(row['object']) : '';
+      if (!delegation || !predicate || !object) continue;
+      const current = byUri.get(delegation) ?? {
+        uri: delegation,
+        agents: [],
+        allowedPeers: [],
+        allowedKeys: [],
+        expiresAtValues: [],
+      };
+      switch (predicate) {
+        case DKG_ONTOLOGY.DKG_DELEGATION_AGENT:
+          pushUniqueCaseInsensitive(current.agents, object);
+          break;
+        case DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER:
+          pushUnique(current.allowedPeers, object);
+          break;
+        case DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY:
+          pushUniqueCaseInsensitive(current.allowedKeys, object);
+          break;
+        case DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT:
+          pushUnique(current.expiresAtValues, object);
+          break;
+        default:
+          break;
+      }
+      byUri.set(delegation, current);
+    }
+    return [...byUri.values()];
   }
 
   private async loadContextGraphFacts(
@@ -495,6 +569,13 @@ export class ContextGraphMetaProjection {
         return metaContextGraphId;
       }
 
+      if (
+        subject.startsWith(`did:dkg:agent-delegation:${metaContextGraphId}:`) &&
+        DELEGATION_META_PREDICATES.has(predicate)
+      ) {
+        return metaContextGraphId;
+      }
+
       if (!subject.startsWith(`${contextGraphUri}/`)) return null;
       if (!SUB_GRAPH_META_PREDICATES.has(predicate)) return null;
       if (predicate === DKG_ONTOLOGY.RDF_TYPE && !SUB_GRAPH_TYPE_URIS.has(object)) return null;
@@ -587,6 +668,13 @@ function cloneMetaRecord(record: ContextGraphMetaRecord): ContextGraphMetaRecord
     participantAgents: [...record.participantAgents],
     participantIdentityIds: [...record.participantIdentityIds],
     revokedAgents: [...record.revokedAgents],
+    delegations: record.delegations.map((delegation) => ({
+      ...delegation,
+      agents: [...delegation.agents],
+      allowedPeers: [...delegation.allowedPeers],
+      allowedKeys: [...delegation.allowedKeys],
+      expiresAtValues: [...delegation.expiresAtValues],
+    })),
     subGraphs: record.subGraphs.map((subGraph) => ({ ...subGraph })),
   };
 }

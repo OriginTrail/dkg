@@ -16,12 +16,20 @@ export {
   registerTripleStoreAdapter,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
+  tryReplaceGraphAtomically,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
 } from './triple-store.js';
 export {
+  ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  buildAtomicGraphReplaceUpdate,
+  isAtomicGraphReplaceStagingGraph,
+  type AtomicGraphReplaceUpdate,
+} from './atomic-graph-replace.js';
+export {
   UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {
@@ -69,6 +77,20 @@ export {
   asGraphWriteGenSource,
   type GraphWriteGenSource,
 } from './graph-write-gen.js';
+export {
+  ExactGraphReadError,
+  quadToNQuad,
+  quadsToNQuads,
+  readExactGraphPaged,
+  type ExactGraphReadErrorCode,
+  type ExactGraphReadErrorKind,
+  type ReadExactGraphPagedOptions,
+} from './bounded-rdf.js';
+export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  resolveGraphScopedOrLegacyMetadata,
+  type GraphScopedOrLegacyMetadata,
+} from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
@@ -88,7 +110,6 @@ export {
   GraphManager,
   loadSelectedSharedMemoryQuads,
   loadSharedMemoryQuadsForScope,
-  migrateSharedMemoryRootClosureToNamedLifecycle,
   loadSharedMemorySliceWithKaBoundFallback,
   canonicalSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeGraphs,
@@ -97,8 +118,8 @@ export {
   resolveSharedMemoryReadGraphs,
   resolveVerifiableMemoryReadGraphs,
   type LoadSelectedSharedMemoryQuadsOptions,
-  type MigrateNamedLifecycleSharedMemoryOptions,
-  type NamedLifecycleSharedMemoryMigrationResult,
+  type SharedMemoryResultBudget,
+  SharedMemoryResultBudgetError,
   type LoadSelectedVerifiableMemoryQuadsOptions,
   type NonEmptyGraphList,
   type NamedKnowledgeAssetGraphIdentity,
@@ -108,7 +129,10 @@ export {
   type SwmSliceSourceTags,
   type LoadSharedMemorySliceWithKaBoundFallbackOptions,
 } from './graph-manager.js';
-export { PrivateContentStore } from './private-store.js';
+export {
+  PrivateContentStore,
+  type KnowledgeAssetPrivateReadOptions,
+} from './private-store.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';

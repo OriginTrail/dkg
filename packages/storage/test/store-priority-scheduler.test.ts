@@ -8,13 +8,14 @@ import type { StoreWorkPriority } from '../src/triple-store.js';
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('StorePriorityScheduler', () => {
-  for (const priority of ['ack', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
+  for (const priority of ['ack', 'health', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
     it(`bounds the ${priority} queue and returns a typed retryable rejection`, async () => {
       const scheduler = new StorePriorityScheduler({
         maxConcurrent: 1,
         ackReservedSlots: 0,
+        healthReservedSlots: 0,
         backgroundReservedSlots: 0,
-        queueLimits: { ack: 1, normal: 1, background: 1 },
+        queueLimits: { ack: 1, health: 1, normal: 1, background: 1 },
         queueWaitTimeoutMs: 1_000,
       });
       let release!: () => void;
@@ -50,6 +51,7 @@ describe('StorePriorityScheduler', () => {
       const scheduler = new StorePriorityScheduler({
         maxConcurrent: 1,
         ackReservedSlots: 0,
+        healthReservedSlots: 0,
         backgroundReservedSlots: 0,
         queueLimits: 2,
         queueWaitTimeoutMs: 20,
@@ -86,6 +88,7 @@ describe('StorePriorityScheduler', () => {
       const scheduler = new StorePriorityScheduler({
         maxConcurrent: 1,
         ackReservedSlots: 0,
+        healthReservedSlots: 0,
         backgroundReservedSlots: 0,
         queueLimits: 1,
         queueWaitTimeoutMs: 100,
@@ -184,6 +187,7 @@ describe('StorePriorityScheduler', () => {
         1,
         { ack: 3, normal: 2, background: 1 },
         25,
+        0,
       );
       expect(scheduler.snapshot).toMatchObject({
         maxConcurrent: 2,
@@ -311,6 +315,7 @@ describe('StorePriorityScheduler', () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 3,
       ackReservedSlots: 1,
+      healthReservedSlots: 0,
       normalReservedSlots: 1,
       backgroundReservedSlots: 1,
       queueLimits: 64,
@@ -359,6 +364,7 @@ describe('StorePriorityScheduler', () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 4,
       ackReservedSlots: 1,
+      healthReservedSlots: 0,
       normalReservedSlots: 2,
       backgroundReservedSlots: 2,
     });
@@ -408,6 +414,7 @@ describe('StorePriorityScheduler', () => {
       const scheduler = new StorePriorityScheduler({
         maxConcurrent: 4,
         ackReservedSlots: 1,
+        healthReservedSlots: 0,
         backgroundReservedSlots: 1,
       });
       const firstBackground = scheduler.run('background', 'env.background.1', async () => {
@@ -455,7 +462,11 @@ describe('StorePriorityScheduler', () => {
   });
 
   it('reserves a non-ACK slot for queued background work behind normal traffic', async () => {
-    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 0 });
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+    });
     const events: string[] = [];
     let releaseNormal1!: () => void;
     let releaseNormal2!: () => void;
@@ -513,6 +524,66 @@ describe('StorePriorityScheduler', () => {
       'background',
       'normal-3',
     ]);
+  });
+
+  it('keeps health and ACK lanes available while background work is saturated', async () => {
+    const scheduler = new StorePriorityScheduler(3, 1, undefined, 0, undefined, 1_000, 1);
+    let release!: () => void;
+    const background1 = scheduler.run('background', 'scan.1', async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    const background2 = scheduler.run('background', 'scan.2', async () => undefined);
+    await tick();
+
+    expect(scheduler.snapshot).toMatchObject({
+      backgroundInflight: 1,
+      backgroundQueued: 1,
+      healthReservedSlots: 1,
+      ackReservedSlots: 1,
+    });
+    await expect(scheduler.run('health', 'status.count', async () => 'healthy')).resolves.toBe('healthy');
+    await expect(scheduler.run('ack', 'ack.verify', async () => 'ack')).resolves.toBe('ack');
+
+    release();
+    await Promise.all([background1, background2]);
+  });
+
+  it('caps aggregate background producers while preserving normal-query capacity', async () => {
+    const scheduler = new StorePriorityScheduler(4, 1, undefined, 0, undefined, 1_000, 1);
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let maxActive = 0;
+    const producers = [
+      'finalization.scan',
+      'reconcile.scan',
+      'sync.inbound',
+      'sync.outbound',
+      'promotion.read',
+    ].map((source) => scheduler.run('background', source, async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => { releases.push(resolve); });
+      active -= 1;
+    }));
+    await tick();
+
+    expect(maxActive).toBe(1);
+    expect(scheduler.snapshot).toMatchObject({
+      backgroundInflight: 1,
+      backgroundQueued: 4,
+      ackReservedSlots: 1,
+      healthReservedSlots: 1,
+      normalReservedSlots: 1,
+    });
+    while (producers.some(() => scheduler.snapshot.backgroundInflight > 0 || scheduler.snapshot.backgroundQueued > 0)) {
+      const release = releases.shift();
+      if (!release) break;
+      release();
+      await tick();
+    }
+    for (const release of releases.splice(0)) release();
+    await Promise.all(producers);
+    expect(maxActive).toBe(1);
   });
 
   it('does not reserve the only non-ACK slot for background work', async () => {

@@ -3,8 +3,19 @@ import {
   encodePublishRequest,
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  createOperationContext,
+  knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '@origintrail-official/dkg-publisher';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
 import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from '../src/index.js';
 
@@ -36,6 +47,7 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
   getContextGraphOwner: (id: string) => Promise<string | null>;
   setContextGraphSubscription: (id: string, next: ContextGraphSub) => void;
   recordDiscoveredContextGraph: (id: string, metadata: ContextGraphDiscoveryMetadata) => void;
+  getContextGraphOnChainId: (id: string) => Promise<string | null>;
 }>) {
   const s = store ?? new OxigraphStore();
   const subscriptions = new Map<string, ContextGraphSub>();
@@ -58,12 +70,270 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
             metaSynced: false,
           });
         }),
+        ...(callbacks?.getContextGraphOnChainId
+          ? { getContextGraphOnChainId: callbacks.getContextGraphOnChainId }
+          : {}),
       },
     ),
   };
 }
 
 describe('GossipPublishHandler', () => {
+  it('materializes a graph-scoped KA into one exact VM graph without root metadata', async () => {
+    const { store, handler } = createHandler();
+    const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+    const kaNumber = 41n;
+    const packedKaId = (BigInt(author) << 96n) | kaNumber;
+    const ual = `did:dkg:base:8453/${author}/${kaNumber}`;
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const publicQuads: Quad[] = [{
+      subject: 'urn:rootless:subject',
+      predicate: 'urn:rootless:predicate',
+      object: '"value"',
+      graph: '',
+    }];
+    const graphManager = new GraphManager(store);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'gossip-head',
+      kaUal: ual,
+      assertionVersion: '1',
+      quads: publicQuads,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWPublisher',
+      accessPolicy: 'public',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'gossip-head',
+      kaUal: ual,
+      assertionVersion: '1',
+    });
+    const data = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(
+        `<urn:rootless:subject> <urn:rootless:predicate> "value" <${vmGraph}> .`,
+      ),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: author,
+      startKAId: packedKaId,
+      endKAId: packedKaId,
+      chainId: 'base:8453',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWPublisher');
+
+    expect(await store.countQuads(vmGraph)).toBe(1);
+    const rootGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    expect(await store.countQuads(rootGraph)).toBe(0);
+    const metaGraph = `${rootGraph}/_meta`;
+    const metadata = await store.query(
+      `CONSTRUCT { <${ual}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${ual}> ?p ?o } }`,
+    );
+    expect(metadata.type).toBe('quads');
+    if (metadata.type !== 'quads') throw new Error('expected graph-scoped metadata');
+    expect(metadata.quads.some((quad) => quad.predicate.endsWith('rootEntity'))).toBe(false);
+    expect(metadata.quads.some((quad) => quad.predicate.endsWith('tokenId'))).toBe(false);
+    expect(metadata.quads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/assertionGraph',
+        object: vmGraph,
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/contentScopeVersion',
+      }),
+    ]));
+
+    await store.deleteByPattern({
+      graph: metaGraph,
+      subject: ual,
+      predicate: 'http://dkg.io/ontology/status',
+    });
+    await store.insert([{
+      subject: ual,
+      predicate: 'http://dkg.io/ontology/status',
+      object: '"confirmed"',
+      graph: metaGraph,
+    }]);
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWPublisher');
+    const statusAfterReplay = await store.query(
+      `SELECT ?status WHERE { GRAPH <${metaGraph}> { ` +
+        `<${ual}> <http://dkg.io/ontology/status> ?status } }`,
+    );
+    expect(statusAfterReplay.type).toBe('bindings');
+    expect(statusAfterReplay.type === 'bindings'
+      ? statusAfterReplay.bindings[0]?.status
+      : undefined).toBe('"confirmed"');
+  });
+
+  it('uses durable owner and allow-list metadata instead of relay-supplied values', async () => {
+    const { store, handler } = createHandler();
+    const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+    const kaNumber = 43n;
+    const packedKaId = (BigInt(author) << 96n) | kaNumber;
+    const ual = `did:dkg:base:8453/${author}/${kaNumber}`;
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const publicQuads: Quad[] = [{
+      subject: 'urn:rootless:trusted',
+      predicate: 'urn:rootless:predicate',
+      object: '"value"',
+      graph: '',
+    }];
+    const graphManager = new GraphManager(store);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'trusted-access-head',
+      kaUal: ual,
+      assertionVersion: '1',
+      quads: publicQuads,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWDurableOwner',
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWTrustedReader'],
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'trusted-access-head',
+      kaUal: ual,
+      assertionVersion: '1',
+    });
+    const data = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(
+        `<urn:rootless:trusted> <urn:rootless:predicate> "value" <${vmGraph}> .`,
+      ),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: author,
+      startKAId: packedKaId,
+      endKAId: packedKaId,
+      chainId: 'base:8453',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWAttacker'],
+    });
+
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWRelay');
+
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const durable = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${ual}> ` +
+        `<http://dkg.io/ontology/publisherPeerId> "12D3KooWDurableOwner" ; ` +
+        `<http://dkg.io/ontology/accessPolicy> "allowList" ; ` +
+        `<http://dkg.io/ontology/allowedPeer> "12D3KooWTrustedReader" . } }`,
+    );
+    expect(durable).toMatchObject({ type: 'boolean', value: true });
+    const attacker = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${ual}> ` +
+        `<http://dkg.io/ontology/allowedPeer> "12D3KooWAttacker" } }`,
+    );
+    expect(attacker).toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('fails on-chain verification when the KA belongs to another Context Graph', async () => {
+    const chain = {
+      chainId: 'base:8453',
+      getKAContextGraphId: async () => 8n,
+      async *listenForEvents() {
+        throw new Error('event scan must not run after a binding mismatch');
+      },
+    } as unknown as ChainAdapter;
+    const handler = new GossipPublishHandler(
+      new OxigraphStore(),
+      chain,
+      new Map(),
+      {
+        contextGraphExists: async () => true,
+        getContextGraphOwner: async () => null,
+        getContextGraphOnChainId: async () => '7',
+      },
+    );
+    const verified = await (handler as unknown as {
+      verifyGossipOnChain: (...args: unknown[]) => Promise<boolean>;
+    }).verifyGossipOnChain(
+      `0x${'11'.repeat(32)}`,
+      10,
+      new Uint8Array(32),
+      '0x1111111111111111111111111111111111111111',
+      1n,
+      1n,
+      createOperationContext('test'),
+      CONTEXT_GRAPH,
+    );
+    expect(verified).toBe(false);
+  });
+
+  it('rejects a graph-scoped KA whose payload targets a non-derived graph', async () => {
+    const { store, handler } = createHandler();
+    const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+    const packedKaId = (BigInt(author) << 96n) | 42n;
+    const ual = `did:dkg:base:8453/${author}/42`;
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const data = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(
+        '<urn:rootless:subject> <urn:rootless:predicate> "value" <urn:forged:graph> .',
+      ),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: author,
+      startKAId: packedKaId,
+      endKAId: packedKaId,
+      chainId: 'base:8453',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+    });
+
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWPublisher');
+
+    expect(await store.countQuads(vmGraph)).toBe(0);
+  });
+
   it('processes a valid publish message and inserts quads into store', async () => {
     const { store, handler } = createHandler();
 

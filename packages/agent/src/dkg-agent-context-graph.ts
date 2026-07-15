@@ -114,8 +114,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -346,9 +345,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -434,6 +430,8 @@ export class ContextGraphMethods extends DKGAgentBase {
     callerAgentAddress?: string;
   }): Promise<void> {
     const ctx = createOperationContext('system');
+    const gm = new GraphManager(this.store);
+    gm.assertNewContextGraphId(opts.id);
     // OT-RFC-56 §4.6: name/description land as raw literals in a
     // network-replicated graph — enforce the protocol limit before ANY
     // side effect (see ensureContextGraphLocal for the incident context).
@@ -445,7 +443,6 @@ export class ContextGraphMethods extends DKGAgentBase {
         label: 'contextGraph.description', subject: opts.id, predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
       });
     }
-    const gm = new GraphManager(this.store);
     const contextGraphUri = `did:dkg:context-graph:${opts.id}`;
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
@@ -683,7 +680,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     await this.store.insert(quads);
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
-    await gm.ensureContextGraph(opts.id);
+    await gm.ensureNewContextGraph(opts.id);
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
     // Without this, a daemon crash within 50ms of the insert would lose the
@@ -880,6 +877,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     strictEoaCuratorMatch?: boolean;
   }): Promise<{ onChainId: string; txHash?: string }> {
     const ctx = createOperationContext('system');
+    new GraphManager(this.store).assertNewContextGraphId(id);
 
     if (opts?.revealOnChain === true) {
       this.log.warn(
@@ -1427,7 +1425,12 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);
 
-    // Update _meta with registered status and on-chain ID
+    // Update _meta with registered status and the member-syncable on-chain
+    // binding.  The ontology copy remains for system-graph discovery, while
+    // the authenticated CG-local copy lets a late member learn the immutable
+    // slot from the curator's private `_meta` snapshot.  A private joiner may
+    // have missed the one-shot ontology gossip emitted below and must not be
+    // left unable to start chain-driven VM reconciliation as a result.
     await this.store.deleteByPattern({
       graph: cgMetaGraph,
       subject: contextGraphUri,
@@ -1441,9 +1444,15 @@ export class ContextGraphMethods extends DKGAgentBase {
       subject: contextGraphUri,
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
     });
+    await this.store.deleteByPattern({
+      graph: cgMetaGraph,
+      subject: contextGraphUri,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+    });
     await this.store.insert([
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
       { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
+      { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: cgMetaGraph },
       // Persist the wire-id commitment in the cg's _meta graph so a
       // restart can resume host-mode subscription on the correct
       // topic without re-reading the chain event.

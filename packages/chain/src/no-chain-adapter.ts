@@ -42,6 +42,7 @@ export class NoChainAdapter implements ChainAdapter {
   async isOperationalWalletRegistered(_identityId: bigint, _address: string): Promise<boolean> { return false; }
   async getKnowledgeAssetsLifecycleAddress(): Promise<string> { noChain(); }
   async getEvmChainId(): Promise<bigint> { noChain(); }
+  async getKnowledgeAssetOwner(_kaId: bigint): Promise<string> { noChain(); }
   async getPublishingConvictionAccountOwner(_accountId: bigint): Promise<string> { noChain(); }
   // The 7 #519 PCA write+read methods are OMITTED on purpose: they are
   // optional on ChainAdapter, so the DKGAgent facade's `typeof guard`

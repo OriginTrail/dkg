@@ -15,7 +15,10 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
-import { META_REFRESH_COOLDOWN_MS } from './dkg-agent-constants.js';
+import {
+  META_REFRESH_COOLDOWN_MS,
+  SYNC_TOTAL_TIMEOUT_MS,
+} from './dkg-agent-constants.js';
 import {
   hasAuthoritativePrivateMetaDefinition,
   type AuthoritativePrivateMetaMemberProof,
@@ -24,6 +27,7 @@ import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoin
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
 import type { SyncPageResult } from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
+import { stripLiteral } from './dkg-agent-utils.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -41,6 +45,11 @@ export interface CuratorMetaRefreshOptions {
 
 interface CuratorConnection {
   remotePeer: { toString(): string };
+}
+
+interface CuratorBoundSubscription {
+  onChainId?: string;
+  onChainHash?: string;
 }
 
 interface CuratorMetaRefreshAgent {
@@ -66,6 +75,7 @@ interface CuratorMetaRefreshAgent {
   readonly contextGraphMetaProjection: {
     markDirty(contextGraphId: string): void;
   };
+  readonly subscribedContextGraphs?: Map<string, CuratorBoundSubscription>;
   readonly log: {
     warn(ctx: OperationContext, message: string): void;
     info(ctx: OperationContext, message: string): void;
@@ -89,6 +99,13 @@ interface CuratorMetaRefreshAgent {
     recovery?: boolean,
     forceFreshSession?: boolean,
   ): Promise<SyncPageResult>;
+  bindSubscriptionOnChainId?(
+    localCgId: string,
+    sub: CuratorBoundSubscription,
+    newOnChainId: string,
+  ): void;
+  recordCgWireId?(localCgId: string, wireId: string | null): void;
+  persistContextGraphSubscription?(contextGraphId: string): void;
 }
 
 interface CuratorMetaRefreshState {
@@ -103,6 +120,67 @@ interface CuratorMetaRefreshState {
 interface AuthoritativeMetaSnapshot {
   checkpointKey: string;
   quads: Quad[];
+}
+
+/**
+ * Apply the chain slot and wire-id carried by an authenticated curator
+ * snapshot to the late member's durable subscription row.
+ *
+ * These facts deliberately come from the already-validated private `_meta`
+ * snapshot.  Reading only the system ontology graph is insufficient for a
+ * late member: the registration announcement on that public topic is a
+ * one-shot event and may have happened before the member joined.
+ */
+function applyCuratorRegistrationBinding(
+  agent: CuratorMetaRefreshAgent,
+  contextGraphId: string,
+  snapshot: readonly Quad[],
+): void {
+  const sub = agent.subscribedContextGraphs?.get(contextGraphId);
+  if (!sub) return;
+
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+  const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
+  let onChainId: string | undefined;
+  let onChainHash: string | undefined;
+
+  for (const quad of snapshot) {
+    if (quad.graph !== metaGraph || quad.subject !== contextGraphUri) continue;
+    const value = stripLiteral(quad.object);
+    if (quad.predicate === onChainIdPredicate && /^\d+$/.test(value)) {
+      try {
+        if (BigInt(value) > 0n) onChainId = value;
+      } catch {
+        // Ignore malformed or out-of-domain curator metadata fail-closed.
+      }
+    } else if (
+      quad.predicate === onChainHashPredicate
+      && /^0x[0-9a-fA-F]{64}$/.test(value)
+    ) {
+      onChainHash = value.toLowerCase();
+    }
+  }
+
+  let changed = false;
+  if (onChainId && sub.onChainId !== onChainId) {
+    if (agent.bindSubscriptionOnChainId) {
+      agent.bindSubscriptionOnChainId(contextGraphId, sub, onChainId);
+    } else {
+      sub.onChainId = onChainId;
+    }
+    changed = true;
+  }
+  if (onChainHash && sub.onChainHash?.toLowerCase() !== onChainHash) {
+    if (agent.recordCgWireId) {
+      agent.recordCgWireId(contextGraphId, onChainHash);
+    } else {
+      sub.onChainHash = onChainHash;
+    }
+    changed = true;
+  }
+  if (changed) agent.persistContextGraphSubscription?.(contextGraphId);
 }
 
 const inFlightCuratorMetaRefreshesByAgent = new WeakMap<
@@ -250,7 +328,11 @@ async function fetchAuthoritativeMetaSnapshot(
     false,
     'meta',
     metaGraph,
-    Date.now() + 10_000,
+    // A curator projection shares the root `_meta` graph with KA lifecycle
+    // metadata, so even the small control-plane subset can sit behind many
+    // pages. Use the normal bounded sync budget instead of a special 10-second
+    // cap that made sufficiently populated private CGs impossible to join.
+    Date.now() + SYNC_TOTAL_TIMEOUT_MS,
     undefined,
     undefined,
     options.signal,
@@ -415,6 +497,7 @@ async function executeCuratorMetaRefresh(
     );
     if (!snapshot) return false;
     await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot.quads, ctx);
+    applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
     agent.syncCheckpoints.delete(snapshot.checkpointKey);
     agent.log.info(
       ctx,

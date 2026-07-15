@@ -116,8 +116,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -350,9 +349,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -382,8 +378,45 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
+
+function delegationIsCurrentlyActive(expiresAtValues: readonly string[], nowMs: number): boolean {
+  if (expiresAtValues.length === 0) return true;
+  return expiresAtValues.some((value) => {
+    const expiresAt = Number(value);
+    return !Number.isFinite(expiresAt) || expiresAt <= 0 || expiresAt >= nowMs;
+  });
+}
+
+function collectProjectedDelegatees(
+  meta: ContextGraphMetaRecord,
+  field: 'allowedPeers' | 'allowedKeys',
+  normalizeValue: (value: string) => string,
+): Map<string, string[]> {
+  const members = new Set(
+    [...meta.allowedAgents, ...meta.participantAgents].map((agent) => agent.toLowerCase()),
+  );
+  const revoked = new Set(meta.revokedAgents.map((agent) => agent.toLowerCase()));
+  const out = new Map<string, string[]>();
+  const nowMs = Date.now();
+
+  for (const delegation of meta.delegations) {
+    if (!delegationIsCurrentlyActive(delegation.expiresAtValues, nowMs)) continue;
+    for (const rawAgent of delegation.agents) {
+      const agent = rawAgent.toLowerCase();
+      if (!agent || !members.has(agent) || revoked.has(agent)) continue;
+      const values = out.get(agent) ?? [];
+      for (const rawValue of delegation[field]) {
+        const value = normalizeValue(rawValue);
+        if (value && !values.includes(value)) values.push(value);
+      }
+      if (values.length > 0) out.set(agent, values);
+    }
+  }
+  return out;
+}
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
@@ -530,53 +563,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<Map<string, string[]>> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const cgEntity = contextGraphDataGraphUri(contextGraphId);
-    // SELECT also returns `expiresAtMs` so we can filter expired rows in
-    // JS — pushing the FILTER into SPARQL would force a string→long
-    // cast that not every store backend handles uniformly.
-    // PR #448 review (round 4): without this, an approved delegation
-    // remained authorised forever even after `expiresAtMs` had passed.
-    // `approveJoinRequest()` re-validates expiry only at approval time;
-    // sync auth never checked it again, turning `expiresAtMs` into a
-    // one-time admission gate instead of an ongoing constraint.
-    const result = await this.store.query(
-      `SELECT ?agent ?peer ?expiresAt WHERE {
-        GRAPH <${cgMetaGraph}> {
-          ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
-             <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer .
-          <${cgEntity}> (<${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>|<${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>) ?memberAgent .
-          FILTER(LCASE(STR(?agent)) = LCASE(STR(?memberAgent)))
-          FILTER NOT EXISTS {
-            <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
-            FILTER(LCASE(STR(?agent)) = LCASE(STR(?revokedAgent)))
-          }
-          OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
-        }
-      }`,
-      { signal: options.signal },
-    );
-    const out = new Map<string, string[]>();
-    if (result.type !== 'bindings') return out;
-    const strip = (raw: unknown): string => {
-      if (typeof raw !== 'string') return '';
-      return raw.replace(/^"/, '').replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, '');
-    };
-    const nowMs = Date.now();
-    for (const row of result.bindings) {
-      const agent = strip(row['agent']).toLowerCase();
-      const peer = strip(row['peer']);
-      if (!agent || !peer) continue;
-      const expiresStr = strip(row['expiresAt']);
-      if (expiresStr) {
-        const expiresAt = Number(expiresStr);
-        if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < nowMs) continue;
-      }
-      const list = out.get(agent) ?? [];
-      if (!list.includes(peer)) list.push(peer);
-      out.set(agent, list);
-    }
-    return out;
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
+    return collectProjectedDelegatees(meta, 'allowedPeers', (value) => value);
   }
 
   /**
@@ -592,45 +580,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<Map<string, string[]>> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const cgEntity = contextGraphDataGraphUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?agent ?key ?expiresAt WHERE {
-        GRAPH <${cgMetaGraph}> {
-          ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
-             <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?key .
-          <${cgEntity}> (<${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>|<${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>) ?memberAgent .
-          FILTER(LCASE(STR(?agent)) = LCASE(STR(?memberAgent)))
-          FILTER NOT EXISTS {
-            <${cgEntity}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revokedAgent .
-            FILTER(LCASE(STR(?agent)) = LCASE(STR(?revokedAgent)))
-          }
-          OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
-        }
-      }`,
-      { signal: options.signal },
-    );
-    const out = new Map<string, string[]>();
-    if (result.type !== 'bindings') return out;
-    const strip = (raw: unknown): string => {
-      if (typeof raw !== 'string') return '';
-      return raw.replace(/^"/, '').replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, '');
-    };
-    const nowMs = Date.now();
-    for (const row of result.bindings) {
-      const agent = strip(row['agent']).toLowerCase();
-      const key = strip(row['key']).toLowerCase();
-      if (!agent || !key) continue;
-      const expiresStr = strip(row['expiresAt']);
-      if (expiresStr) {
-        const expiresAt = Number(expiresStr);
-        if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < nowMs) continue;
-      }
-      const list = out.get(agent) ?? [];
-      if (!list.includes(key)) list.push(key);
-      out.set(agent, list);
-    }
-    return out;
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
+    return collectProjectedDelegatees(meta, 'allowedKeys', (value) => value.toLowerCase());
   }
 
   hasLocalAgentInGate(this: DKGAgent, agentGateAddresses: readonly string[]): boolean {

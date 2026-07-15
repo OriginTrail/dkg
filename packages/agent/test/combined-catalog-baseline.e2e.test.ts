@@ -1,14 +1,14 @@
 /**
- * combined-model BASELINE (pre-catalog-injection) — curated e2e.
+ * detached-catalog rootless baseline — curated e2e.
  *
  * The first end-to-end curated/private-CG VM publish on the devnet, via the
  * PRODUCT path (write -> promote -> publishFromFinalizedAssertion). Uses the
  * pre-staked genesis core nodes for the ACK quorum (lowered to 1), so the
  * curated `nodeExists` signer check passes.
  *
- * Baseline invariant: a private CG publishing N data entities yields a manifest
- * with exactly N data roots. The public DCAT catalog floor is still committed in
- * the KC Merkle root and served from `_catalog`, but it is not a user KA root.
+ * Baseline invariant: a private CG publishing N submitted triples yields one
+ * exact graph-scoped KA with N VM triples and an empty legacy root manifest.
+ * The public DCAT floor is committed independently and served from `_catalog`.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -16,6 +16,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { DKGAgent } from '../src/index.js';
+import {
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
 import {
   spawnHardhatEnv, killHardhat, setMinimumRequiredSignatures, HARDHAT_KEYS, type HardhatContext,
 } from '../../chain/test/hardhat-harness.js';
@@ -31,7 +36,7 @@ function chainConfig(opKey: string, adminKey: string) {
 // store the curated ciphertext chunks and declines the ACK (MISSING_CIPHERTEXT_CHUNKS).
 const mkDataDir = (name: string) => mkdtempSync(join(tmpdir(), `rfc49-${name}-`));
 
-describe('baseline — curated CG product-path publish (pre-catalog)', () => {
+describe('baseline — curated CG rootless publish with detached catalog', () => {
   let publisher: DKGAgent;
   let curator: string;
 
@@ -63,7 +68,7 @@ describe('baseline — curated CG product-path publish (pre-catalog)', () => {
     killHardhat(ctx);
   });
 
-  it('a private CG publishes via the product path and yields exactly N data KAs', async () => {
+  it('a private CG publishes exact KAs while retaining a public catalog commitment', async () => {
     const CG = 'rfc49-baseline-private';
     await publisher.createContextGraph({ id: CG, name: 'RFC49 Baseline Private', accessPolicy: 1, callerAgentAddress: curator });
     await publisher.registerContextGraph(CG, { callerAgentAddress: curator });
@@ -73,22 +78,23 @@ describe('baseline — curated CG product-path publish (pre-catalog)', () => {
     await publisher.assertion.write(CG, name, [
       { subject: 'urn:acme:shipment/SH-42', predicate: 'urn:acme:product', object: '"P-9"' },
     ]);
-    // Explicit finalize = the daemon product path (POST /vm/publish does
-    // assertion.finalize then publishFromFinalizedAssertion). The catalog
-    // injection lives in assertionFinalize and is re-injected as generated
-    // catalog material at publish time, without becoming a manifest root.
-    await publisher.assertion.finalize(CG, name);
-    await publisher.assertion.promote(CG, name);
+    const finalized: any = await publisher.assertion.finalize(CG, name);
+    expect(finalized.publicTripleCount).toBe(1);
+    const promoted = await publisher.assertion.promote(CG, name);
+    expect(promoted.promotedCount).toBe(1);
 
     const pub: any = await publisher.publishFromFinalizedAssertion(CG, name);
 
     expect(pub.status).toBe('confirmed');
-    // combined model: the private publish carries only data roots in the KA
-    // manifest. The generated catalog floor is committed in the CG's Merkle root
-    // and public _catalog graph, but not sealed as a Rule-4-colliding root.
-    expect(pub.kaManifest.length).toBe(1);
-    const roots = pub.kaManifest.map((m: any) => String(m.rootEntity ?? m.entity ?? m.subject ?? ''));
-    expect(roots).toEqual(['urn:acme:shipment/SH-42']);
+    expect(pub.kaManifest).toEqual([]);
+    expect(pub.publicQuads).toHaveLength(1);
+    expect(pub.publicQuads[0]).toMatchObject({ subject: 'urn:acme:shipment/SH-42' });
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(pub.ual, pub.assertionVersion ?? '1'),
+    );
+    expect(await (publisher as any).store.countQuads(vmGraph)).toBe(1);
 
     // The catalog entry persists PLAINTEXT in the public _catalog graph — a
     // queryable, standards-compliant DCAT dataset record (NOT encrypted, unlike
@@ -111,15 +117,22 @@ describe('baseline — curated CG product-path publish (pre-catalog)', () => {
     await publisher.assertion.write(CG, secondName, [
       { subject: 'urn:acme:shipment/SH-43', predicate: 'urn:acme:product', object: '"P-10"' },
     ]);
-    await publisher.assertion.finalize(CG, secondName);
-    await publisher.assertion.promote(CG, secondName);
+    const secondFinalized: any = await publisher.assertion.finalize(CG, secondName);
+    expect(secondFinalized.publicTripleCount).toBe(1);
+    const secondPromoted = await publisher.assertion.promote(CG, secondName);
+    expect(secondPromoted.promotedCount).toBe(1);
 
     const secondPub: any = await publisher.publishFromFinalizedAssertion(CG, secondName);
     expect(secondPub.status).toBe('confirmed');
-    expect(secondPub.kaManifest.length).toBe(1);
-    const secondRoots = secondPub.kaManifest.map((m: any) => String(m.rootEntity ?? m.entity ?? m.subject ?? ''));
-    expect(secondRoots).toEqual(['urn:acme:shipment/SH-43']);
-    expect(secondRoots).not.toContain(cgUal);
+    expect(secondPub.kaManifest).toEqual([]);
+    expect(secondPub.publicQuads).toHaveLength(1);
+    expect(secondPub.publicQuads[0]).toMatchObject({ subject: 'urn:acme:shipment/SH-43' });
+    const secondVmGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(secondPub.ual, secondPub.assertionVersion ?? '1'),
+    );
+    expect(await (publisher as any).store.countQuads(secondVmGraph)).toBe(1);
 
     const postSecondCatalog: any = await (publisher as any).store.query(
       `SELECT ?p ?o WHERE { GRAPH <${catalogGraph}> { <${cgUal}> ?p ?o } }`,

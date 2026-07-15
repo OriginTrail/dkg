@@ -7,6 +7,11 @@ import {
   encodeChangelogResponse, decodeChangelogRequest, decodeChangelogResponse,
   type ChangelogDeltaRecord, type ChangelogSyncRequest, type ChangelogSyncResponse,
 } from '../src/sync/changelog/wire.js';
+import {
+  DURABLE_INTEGRITY_META_PREDICATES,
+  classifyDurableMetaGraph,
+} from '../src/sync/durable-integrity.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: 'p', object: `o${n}`, graph });
 
@@ -17,7 +22,15 @@ const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: '
  * parsed quads of which `verified` survived; a meta graph is added to metaGraphsWithRoot
  * unless `noRoot` (a rootless meta cannot bind data).
  */
-function buildPage(specs: Array<{ seq: number; graph: string; op?: 'upsert' | 'drop'; count?: number; verified?: number; noRoot?: boolean }>) {
+function buildPage(specs: Array<{
+  seq: number;
+  graph: string;
+  op?: 'upsert' | 'drop';
+  count?: number;
+  verified?: number;
+  noRoot?: boolean;
+  parsedQuads?: Quad[];
+}>) {
   const records: ChangelogDeltaRecord[] = [];
   const verifiedByGraph = new Map<string, Quad[]>();
   const recordQuadCountByGraph = new Map<string, number>();
@@ -25,17 +38,35 @@ function buildPage(specs: Array<{ seq: number; graph: string; op?: 'upsert' | 'd
   for (const s of specs) {
     const op = s.op ?? 'upsert';
     if (op === 'drop') { records.push({ seq: s.seq, graph: s.graph, op }); continue; }
-    const count = s.count ?? 1;
+    const count = s.count ?? s.parsedQuads?.length ?? 1;
     const verified = s.verified ?? count;
     records.push({ seq: s.seq, graph: s.graph, op, quads: `nq:${s.graph}` });
     recordQuadCountByGraph.set(s.graph, count);
-    verifiedByGraph.set(s.graph, Array.from({ length: verified }, (_, i) => qd(s.graph, i)));
-    if (s.graph.endsWith('/_meta') && !s.noRoot) metaGraphsWithRoot.add(s.graph);
+    const recordQuads = s.parsedQuads ?? Array.from({ length: count }, (_, i) => qd(s.graph, i));
+    verifiedByGraph.set(s.graph, recordQuads.slice(0, verified));
+    if (s.graph.endsWith('/_meta')) {
+      if (s.parsedQuads) {
+        if (classifyDurableMetaGraph(s.parsedQuads).hasMerkleRoot) metaGraphsWithRoot.add(s.graph);
+      } else if (!s.noRoot) {
+        metaGraphsWithRoot.add(s.graph);
+      }
+    }
   }
-  return { records, verifiedByGraph, recordQuadCountByGraph, metaGraphsWithRoot };
+  return {
+    records,
+    verifiedByGraph,
+    recordQuadCountByGraph,
+    metaGraphsWithRoot,
+  };
 }
 
-const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; priorSeq?: number; isForeign?: (g: string) => boolean; batchClean?: boolean }) =>
+const plan = (page: ReturnType<typeof buildPage>, extra: {
+  nextSeq: number;
+  priorSeq?: number;
+  isForeign?: (g: string) => boolean;
+  batchClean?: boolean;
+  verifiedGraphScopedDataGraphs?: Set<string>;
+}) =>
   planPageApply({
     records: page.records,
     nextSeq: extra.nextSeq,
@@ -44,6 +75,7 @@ const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; prio
     verifiedByGraph: page.verifiedByGraph,
     recordQuadCountByGraph: page.recordQuadCountByGraph,
     metaGraphsWithRoot: page.metaGraphsWithRoot,
+    verifiedGraphScopedDataGraphs: extra.verifiedGraphScopedDataGraphs ?? new Set(),
     batchVerifiedCleanly: extra.batchClean ?? true,
   });
 
@@ -51,17 +83,14 @@ const DATA = 'did:dkg:context-graph:cg/context/1';
 const META = `${DATA}/_meta`;
 
 describe('planPageApply — verified-apply planner', () => {
-  it('applies a paired data+meta page and advances to nextSeq', () => {
+  it('defers a paired data+meta page instead of whole-replacing shared metadata', () => {
     const page = buildPage([
       { seq: 2, graph: DATA, count: 3 },
       { seq: 3, graph: META, count: 1 },
     ]);
     const p = plan(page, { nextSeq: 3 });
-    expect(p.deferred).toBe(false);
-    expect(p.advanceTo).toBe(3);
-    expect(p.applied).toBe(2);
-    expect(p.ops.map((o) => o.graph)).toEqual([DATA, META]);
-    expect(p.ops[0].quads).toHaveLength(3);
+    expect(p).toMatchObject({ deferred: true, advanceTo: 1, applied: 0 });
+    expect(p.ops).toEqual([]);
   });
 
   it('DEFERS orphan data (no sibling meta in page)', () => {
@@ -80,11 +109,125 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.advanceTo).toBe(1);
   });
 
+  it('does not replace a merkle-bearing meta graph with a rejected partial subset', () => {
+    const page = buildPage([
+      { seq: 2, graph: META, count: 4, verified: 3 },
+      { seq: 3, graph: DATA, count: 3 },
+    ]);
+    const p = plan(page, { nextSeq: 3, priorSeq: 1, batchClean: false });
+    expect(p.deferred).toBe(true);
+    expect(p.ops).toEqual([]);
+    expect(p.advanceTo).toBe(1);
+  });
+
+  it('defers a fully verified metadata subset because omitted live KAs are not provable', () => {
+    const page = buildPage([{ seq: 8, graph: META, count: 4, verified: 4 }]);
+
+    const p = plan(page, { nextSeq: 8, priorSeq: 7, batchClean: true });
+
+    expect(p).toMatchObject({ deferred: true, advanceTo: 7, applied: 0 });
+    expect(p.ops).toEqual([]);
+  });
+
+  it.each(DURABLE_INTEGRITY_META_PREDICATES.filter(
+    (predicate) => predicate !== 'http://dkg.io/ontology/merkleRoot',
+  ))('does not acknowledge rejected V2 metadata containing %s without a merkle root', (predicate) => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const subject = 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7';
+    const page = buildPage([
+      {
+        seq: 7,
+        graph: topMeta,
+        verified: 0,
+        parsedQuads: [{
+          subject,
+          predicate,
+          object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: topMeta,
+        }],
+      },
+    ]);
+    const p = plan(page, { nextSeq: 7, priorSeq: 6, batchClean: false });
+    expect(p.deferred).toBe(true);
+    expect(p.ops).toEqual([]);
+    expect(p.advanceTo).toBe(6);
+  });
+
+  it('defers duplicate graph records before an empty tail can hide non-empty metadata', () => {
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/8';
+    const page = buildPage([
+      { seq: 1, graph, count: 1 },
+      { seq: 2, graph: META, count: 2, verified: 2 },
+      { seq: 3, graph: META, count: 0, verified: 0 },
+    ]);
+
+    const p = plan(page, {
+      nextSeq: 3,
+      verifiedGraphScopedDataGraphs: new Set([graph]),
+    });
+
+    expect(p).toMatchObject({ deferred: true, advanceTo: 0, applied: 0 });
+    expect(p.ops).toEqual([]);
+  });
+
+  it.each(DURABLE_INTEGRITY_META_PREDICATES)(
+    'classifies %s as part of the durable integrity envelope',
+    (predicate) => {
+      expect(classifyDurableMetaGraph([{
+        subject: 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7',
+        predicate,
+        object: '"value"',
+        graph: 'urn:meta',
+      }]).hasIntegrityEnvelope).toBe(true);
+    },
+  );
+
+  it('classifies ordinary CG metadata as non-integrity configuration', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    expect(classifyDurableMetaGraph([{
+      subject: 'did:dkg:context-graph:cg',
+      predicate: 'http://schema.org/name',
+      object: '"Context graph"',
+      graph: topMeta,
+    }])).toEqual({ hasMerkleRoot: false, hasIntegrityEnvelope: false });
+  });
+
+  it('defers rootless data paired with a whole shared metadata snapshot', () => {
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/7';
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const page = buildPage([
+      { seq: 2, graph, count: 3 },
+      { seq: 3, graph: topMeta, count: 9 },
+    ]);
+    const p = plan(page, {
+      nextSeq: 3,
+      verifiedGraphScopedDataGraphs: new Set([graph]),
+    });
+    expect(p).toMatchObject({ deferred: true, advanceTo: 1, applied: 0 });
+    expect(p.ops).toEqual([]);
+  });
+
   it('DEFERS when the sibling meta carries no merkle root (rootless meta cannot bind data)', () => {
     const page = buildPage([{ seq: 2, graph: DATA, count: 3 }, { seq: 3, graph: META, count: 1, noRoot: true }]);
     const p = plan(page, { nextSeq: 3 });
     expect(p.deferred).toBe(true);
     expect(p.ops).toHaveLength(0);
+  });
+
+  it('does not acknowledge rejected V2 metadata whose Merkle root is missing', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const page = buildPage([{
+      seq: 8,
+      graph: topMeta,
+      count: 8,
+      verified: 0,
+      noRoot: true,
+    }]);
+
+    const p = plan(page, { nextSeq: 8, priorSeq: 7, batchClean: false });
+
+    expect(p).toMatchObject({ deferred: true, advanceTo: 7, applied: 0 });
+    expect(p.ops).toEqual([]);
   });
 
   it('DEFERS a partially-rejected data graph (not all quads survived)', () => {
@@ -105,46 +248,59 @@ describe('planPageApply — verified-apply planner', () => {
 
   it('stops at the FIRST unresolved record (contiguous prefix)', () => {
     const G2 = 'did:dkg:context-graph:cg/context/2';
+    const FIRST_DATA = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/1';
     const page = buildPage([
-      { seq: 1, graph: 'did:dkg:context-graph:cg/x', op: 'drop' },
+      { seq: 1, graph: FIRST_DATA, count: 1 },
       { seq: 4, graph: G2, count: 1 },          // orphan (no meta) ⇒ defer here
-      { seq: 6, graph: DATA, count: 1 }, { seq: 7, graph: META, count: 1 },
+      { seq: 6, graph: DATA, count: 1 },
     ]);
-    const p = plan(page, { nextSeq: 7 });
+    const p = plan(page, {
+      nextSeq: 7,
+      verifiedGraphScopedDataGraphs: new Set([FIRST_DATA]),
+    });
     expect(p.deferred).toBe(true);
-    expect(p.ops.map((o) => o.graph)).toEqual(['did:dkg:context-graph:cg/x']);
+    expect(p.ops.map((o) => o.graph)).toEqual([FIRST_DATA]);
     expect(p.advanceTo).toBe(3);
   });
 
   it('skips a leaked foreign graph but consumes its seq', () => {
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/2';
     const page = buildPage([
       { seq: 1, graph: 'urn:dkg:changelog', count: 1 },
-      { seq: 2, graph: DATA, count: 1 }, { seq: 3, graph: META, count: 1 },
+      { seq: 2, graph, count: 1 },
     ]);
-    const p = plan(page, { nextSeq: 3, isForeign: (g) => g.startsWith('urn:dkg:changelog') });
+    const p = plan(page, {
+      nextSeq: 2,
+      isForeign: (g) => g.startsWith('urn:dkg:changelog'),
+      verifiedGraphScopedDataGraphs: new Set([graph]),
+    });
     expect(p.deferred).toBe(false);
-    expect(p.ops.map((o) => o.graph)).toEqual([DATA, META]);
-    expect(p.advanceTo).toBe(3);
+    expect(p.ops.map((o) => o.graph)).toEqual([graph]);
+    expect(p.advanceTo).toBe(2);
   });
 
-  it('applies drops without pairing', () => {
-    const page = buildPage([{ seq: 9, graph: DATA, op: 'drop' }]);
-    const p = plan(page, { nextSeq: 9 });
-    expect(p.ops).toEqual([{ seq: 9, graph: DATA, op: 'drop', quads: [] }]);
-    expect(p.advanceTo).toBe(9);
+  it.each([
+    ['live V2 assertion graph', DATA],
+    ['top-level metadata graph', 'did:dkg:context-graph:cg/_meta'],
+  ])('DEFERS an unauthenticated drop of a %s', (_label, graph) => {
+    const page = buildPage([{ seq: 9, graph, op: 'drop' }]);
+    const p = plan(page, { nextSeq: 9, priorSeq: 8 });
+
+    expect(p.ops).toEqual([]);
+    expect(p.deferred).toBe(true);
+    expect(p.advanceTo).toBe(8);
   });
 
-  it('applies a META-only page as a trusted anchor (top-level metadata convergence, no data sibling)', () => {
-    // Top-level `_meta` (CG config) with no merkle root and no data sibling in-page —
-    // legacy trusts served meta, so the changelog lane must apply it, not defer forever.
+  it('DEFERS markerless metadata so it cannot erase live KA descriptors by replacement', () => {
+    // A non-empty markerless snapshot can look like harmless CG config while
+    // omitting every live KA descriptor. Replacing the shared graph would be
+    // an unauthenticated bulk delete.
     const TOP_META = 'did:dkg:context-graph:cg/_meta';
     const page = buildPage([{ seq: 7, graph: TOP_META, count: 2, noRoot: true }]);
-    const p = plan(page, { nextSeq: 7 });
-    expect(p.deferred).toBe(false);
-    expect(p.ops.map((o) => o.graph)).toEqual([TOP_META]);
-    expect(p.ops[0].op).toBe('upsert');
-    expect(p.ops[0].quads).toHaveLength(2);
-    expect(p.advanceTo).toBe(7);
+    const p = plan(page, { nextSeq: 7, priorSeq: 6 });
+
+    expect(p).toMatchObject({ deferred: true, advanceTo: 6, applied: 0 });
+    expect(p.ops).toEqual([]);
   });
 });
 
@@ -153,7 +309,7 @@ describe('planPageApply — verified-apply planner', () => {
 function loopHarness(
   responses: ChangelogSyncResponse[],
   applyPage: ChangelogSyncDeps['applyPage'],
-  resync: () => Promise<ResyncOutcome> = async () => ({ complete: true, insertedTriples: 0 }),
+  resync: (dropCandidates: readonly string[]) => Promise<ResyncOutcome> = async () => ({ complete: true, insertedTriples: 0 }),
 ) {
   let cursor: { era: string; seq: number } | undefined;
   const requests: ChangelogSyncRequest[] = [];
@@ -169,7 +325,7 @@ function loopHarness(
       return encodeChangelogResponse(r);
     },
     applyPage,
-    runResync: async () => { resyncs += 1; return resync(); },
+    runResync: async (dropCandidates) => { resyncs += 1; return resync(dropCandidates); },
     logWarn: () => {},
   };
   return { deps, requests, resyncs: () => resyncs, cursor: () => cursor };
@@ -201,7 +357,7 @@ describe('runChangelogSync — driver loop', () => {
       async () => ({ complete: true, insertedTriples: 42 }),
     );
     const out = await runChangelogSync(h.deps);
-    expect(out).toEqual({ kind: 'resync', applied: 42 });
+    expect(out).toEqual({ kind: 'resync', applied: 42, complete: true });
     expect(h.resyncs()).toBe(1);
     expect(h.cursor()).toEqual({ era: 'e2', seq: 9 });
   });
@@ -213,7 +369,7 @@ describe('runChangelogSync — driver loop', () => {
       async () => ({ complete: false, insertedTriples: 5 }),
     );
     const out = await runChangelogSync(h.deps);
-    expect(out).toEqual({ kind: 'resync', applied: 5 });
+    expect(out).toEqual({ kind: 'resync', applied: 5, complete: false });
     expect(h.cursor()).toBeUndefined(); // cursor left untouched — next cycle retries the resync
   });
 
@@ -251,6 +407,159 @@ describe('runChangelogSync — driver loop', () => {
   });
 });
 
+describe('changelog drop resync reconciliation', () => {
+  it('removes only graphs absent from the complete verified snapshot before advancing the cursor', async () => {
+    const presentGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/8';
+    const staleGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/9';
+    const response = encodeChangelogResponse(delta(9, 9, [
+      { seq: 8, graph: presentGraph, op: 'drop' },
+      { seq: 9, graph: staleGraph, op: 'drop' },
+    ]));
+    let cursor: { era: string; seq: number } | undefined;
+    const dropped: string[] = [];
+    const forceFreshSessionFlags: boolean[] = [];
+    const agent = {
+      config: { syncAgentsMeta: true },
+      changelogCursors: {
+        get: () => cursor,
+        set: (_peer: string, _cg: string, era: string, seq: number) => { cursor = { era, seq }; },
+      },
+      messenger: { sendToPeer: async () => response },
+      node: { stopSignal: null },
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: string,
+        _graphUri: string,
+        _deadline: number,
+        _snapshotRef?: string,
+        _sinceBatchId?: string,
+        _signal?: AbortSignal,
+        _recovery?: boolean,
+        forceFreshSession?: boolean,
+      ) => {
+        forceFreshSessionFlags.push(forceFreshSession === true);
+        return {
+          quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0,
+          checkpointKey: `${contextGraphId}:${phase}`, completed: true, timedOut: false,
+        };
+      },
+      syncCheckpoints: new Map(),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      getOrCreateSyncVerifyWorker: () => ({
+        parseAndFilter: async () => ({ quads: [] }),
+      }),
+      processDurableBatchInWorker: async (
+        _data: Quad[], _meta: Quad[], _ctx: unknown, _accept: boolean,
+        mode: { kind: string },
+      ) => mode.kind === 'fullSnapshot'
+        ? {
+            verifiedData: [qd(presentGraph, 1)], verifiedMeta: [],
+            verifiedGraphScopedDataGraphs: [], totalFetchedDataQuads: 1,
+            totalFetchedMetaQuads: 0, rejectedKcs: 0, emptyResponses: 0,
+            metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+          }
+        : {
+            verifiedData: [], verifiedMeta: [], verifiedGraphScopedDataGraphs: [],
+            totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+            emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+          },
+      runLegacyDurableSyncForContextGraph:
+        LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph,
+      resolveCuratorPeerIdsForCg: async () => ({
+        peerIds: ['peer'], curatorIsLocal: false, legacyTripleResolved: false,
+      }),
+      store: { dropGraph: async (graph: string) => { dropped.push(graph); } },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await (LifecycleSyncMethods.prototype.runChangelogSyncForCg as any).call(
+      agent,
+      { kind: 'system', id: 'test', startedAt: 0 },
+      'peer',
+      'cg',
+    );
+
+    expect(dropped).toEqual([staleGraph]);
+    expect(forceFreshSessionFlags).toEqual([true, true]);
+    expect(cursor).toEqual({ era: 'e1', seq: 9 });
+  });
+
+  it('keeps the graph and cursor pending when the responder is not the unique structural curator', async () => {
+    const staleGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/9';
+    const response = encodeChangelogResponse(delta(9, 9, [
+      { seq: 9, graph: staleGraph, op: 'drop' },
+    ]));
+    let cursor: { era: string; seq: number } | undefined;
+    const dropped: string[] = [];
+    const forceFreshSessionFlags: boolean[] = [];
+    const agent = {
+      config: { syncAgentsMeta: true },
+      changelogCursors: {
+        get: () => cursor,
+        set: (_peer: string, _cg: string, era: string, seq: number) => { cursor = { era, seq }; },
+      },
+      messenger: { sendToPeer: async () => response },
+      node: { stopSignal: null },
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: string,
+        _graphUri: string,
+        _deadline: number,
+        _snapshotRef?: string,
+        _sinceBatchId?: string,
+        _signal?: AbortSignal,
+        _recovery?: boolean,
+        forceFreshSession?: boolean,
+      ) => {
+        forceFreshSessionFlags.push(forceFreshSession === true);
+        return {
+          quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 1,
+          checkpointKey: `${contextGraphId}:${phase}`, completed: true, timedOut: false,
+        };
+      },
+      syncCheckpoints: new Map(),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      getOrCreateSyncVerifyWorker: () => ({ parseAndFilter: async () => ({ quads: [] }) }),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [qd('did:dkg:context-graph:cg/_verifiable_memory/0xabc/8', 1)],
+        verifiedMeta: [], verifiedGraphScopedDataGraphs: [],
+        totalFetchedDataQuads: 1, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+        emptyResponses: 0, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      runLegacyDurableSyncForContextGraph:
+        LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph,
+      resolveCuratorPeerIdsForCg: async () => ({
+        peerIds: ['different-peer'], curatorIsLocal: false, legacyTripleResolved: false,
+      }),
+      store: { dropGraph: async (graph: string) => { dropped.push(graph); } },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    const result = await (LifecycleSyncMethods.prototype.runChangelogSyncForCg as any).call(
+      agent,
+      { kind: 'system', id: 'test', startedAt: 0 },
+      'peer',
+      'cg',
+    );
+
+    expect(dropped).toEqual([]);
+    expect(forceFreshSessionFlags).toEqual([false, false]);
+    expect(cursor).toEqual({ era: 'e1', seq: 8 });
+    expect(result.insertedDataTriples).toBe(1);
+    expect(result.completedPhases).toBe(0);
+  });
+});
 // ── decodeChangelogResponse cursor invariants (wire hardening) ──────────────
 
 describe('decodeChangelogResponse cursor invariants', () => {

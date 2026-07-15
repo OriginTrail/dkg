@@ -56,6 +56,8 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     const activeDelegation = `did:dkg:agent-delegation:${cgId}:0xactive`;
     const orphanedDelegation = `did:dkg:agent-delegation:${cgId}:0xorphaned`;
     const revokedDelegation = `did:dkg:agent-delegation:${cgId}:0xrevoked`;
+    const confirmedV2 = 'did:dkg:base:8453/0x00000000000000000000000000000000000000ab/7';
+    const tentativeV2 = 'did:dkg:base:8453/0x00000000000000000000000000000000000000ab/8';
 
     const quads: Quad[] = [
       // A: the CG entity subject
@@ -92,6 +94,14 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
       { graph: meta, subject: 'urn:event:used', predicate: 'http://www.w3.org/ns/prov#used', object: 'urn:lc:vm' },
       // H: an /assertion/ subject ending with a non-working lifecycle's assertion name
       { graph: meta, subject: `${cgEntity}/assertion/0xabc/myassert`, predicate: `${DKG_NS}label`, object: '"assertion-name-hit"' },
+      // I: rootless descriptors do not carry legacy memoryLayer. Confirmed V2
+      // metadata is durable; tentative V2 metadata remains workspace-local.
+      { graph: meta, subject: confirmedV2, predicate: `${DKG_NS}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      { graph: meta, subject: confirmedV2, predicate: `${DKG_NS}status`, object: '"confirmed"' },
+      { graph: meta, subject: confirmedV2, predicate: `${DKG_NS}label`, object: '"confirmed-v2-row"' },
+      { graph: meta, subject: tentativeV2, predicate: `${DKG_NS}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      { graph: meta, subject: tentativeV2, predicate: `${DKG_NS}status`, object: '"tentative"' },
+      { graph: meta, subject: tentativeV2, predicate: `${DKG_NS}label`, object: '"tentative-v2-row"' },
 
       // ---- negatives that MUST be excluded by both paths ----
       // working-only lifecycle, matches no other branch
@@ -153,6 +163,8 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(has('urn:event:gen')).toBe(true); // G generated
     expect(has('urn:event:used')).toBe(true); // G used
     expect(has(`${cgEntity}/assertion/0xabc/myassert`)).toBe(true); // H
+    expect(has(confirmedV2)).toBe(true); // I confirmed V2
+    expect(has(tentativeV2)).toBe(false);
     // negatives
     expect([...canonical].join('\n')).not.toContain('noise-should-be-excluded');
     expect([...canonical].join('\n')).not.toContain('working-name-should-be-excluded');
@@ -320,19 +332,20 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
   });
 });
 
-/** Assert the durable-data fallback issued a bounded ORDER BY/OFFSET/LIMIT page query. */
+/** Assert the durable-data fallback addressed one exact graph per bounded page query. */
 function watchBoundedDataPageQuery(store: OxigraphStore, graph: string) {
   const originalQuery = store.query.bind(store);
   let observed = 0;
   store.query = (async (sparql: string) => {
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     if (
-      /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`<${graph}>`) &&
-      normalized.includes('ORDER BY ?g ?s ?p ?o') &&
+      /^SELECT \?s \?p \?o WHERE \{/.test(normalized) &&
+      normalized.includes(`GRAPH <${graph}>`) &&
+      normalized.includes('ORDER BY ?s ?p ?o') &&
       /OFFSET \d+/.test(normalized) &&
       /LIMIT \d+/.test(normalized)
     ) {
+      expect(normalized).not.toContain('VALUES ?g');
       observed += 1;
     }
     return originalQuery(sparql);
@@ -360,16 +373,17 @@ function watchBoundedMetaPageQuery(store: OxigraphStore, metaGraph: string) {
   return { assertObserved: () => expect(observed).toBeGreaterThan(0) };
 }
 
-/** Assert the SWM-data fallback issued a bounded, EXISTS-filtered paged query. */
+/** Assert the SWM-data fallback issued a concrete-graph, mapped-root paged query. */
 function watchBoundedSwmDataPageQuery(store: OxigraphStore) {
   const originalQuery = store.query.bind(store);
   let observed = 0;
   store.query = (async (sparql: string) => {
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     if (
-      /^SELECT DISTINCT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes('FILTER EXISTS') &&
-      normalized.includes('ORDER BY ?g ?s ?p ?o') &&
+      /^SELECT DISTINCT \?s \?p \?o WHERE \{/.test(normalized) &&
+      normalized.includes('VALUES ?root') &&
+      normalized.includes('GRAPH <') &&
+      normalized.includes('ORDER BY ?s ?p ?o') &&
       /OFFSET \d+/.test(normalized) &&
       /LIMIT \d+/.test(normalized)
     ) {

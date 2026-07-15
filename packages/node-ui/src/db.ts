@@ -17,7 +17,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 28;
+const SCHEMA_VERSION = 29;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -1151,6 +1151,24 @@ export class DashboardDB {
     // idempotent and keeps the audit bound fail-closed on every open.
     ensureJoinPolicyAuditCapTrigger();
 
+    if (version < 29) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS vm_reconcile_negative_cache (
+          cache_key TEXT PRIMARY KEY,
+          context_graph_id TEXT NOT NULL,
+          failures INTEGER NOT NULL,
+          next_retry_at INTEGER NOT NULL,
+          swm_gen TEXT NOT NULL,
+          candidate_namespaces TEXT NOT NULL,
+          peer_topology_key TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_cg
+          ON vm_reconcile_negative_cache(context_graph_id);
+        CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_retry
+          ON vm_reconcile_negative_cache(next_retry_at);
+      `);
+    }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -1198,6 +1216,10 @@ export class DashboardDB {
         AND (committed_at IS NULL OR committed_at < ?)
     `).run(cutoff, cutoff);
     this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(Date.now());
+    // Reconcile negatives are accelerators, never historical records. Once the
+    // retry window elapses they must not survive indefinitely or accumulate one
+    // row per previously-seen KA across restarts.
+    this.db.prepare(`DELETE FROM vm_reconcile_negative_cache WHERE next_retry_at < ?`).run(Date.now());
     // Universal Messenger idempotency table. Shorter TTL than the
     // operator retention: no realistic dedup window extends beyond
     // a day. The protocol_outbox table is intentionally not pruned
@@ -1840,6 +1862,47 @@ export class DashboardDB {
 
   private contextGraphJoinPolicyKey(contextGraphId: string): string {
     return `contextGraphJoinPolicy:${contextGraphId}`;
+  }
+
+  upsertVmReconcileNegative(record: VmReconcileNegativeRow): void {
+    this.stmt('upsertVmReconcileNegative', `
+      INSERT INTO vm_reconcile_negative_cache (
+        cache_key, context_graph_id, failures, next_retry_at, swm_gen,
+        candidate_namespaces, peer_topology_key, updated_at
+      ) VALUES (
+        @cache_key, @context_graph_id, @failures, @next_retry_at, @swm_gen,
+        @candidate_namespaces, @peer_topology_key, @updated_at
+      )
+      ON CONFLICT(cache_key) DO UPDATE SET
+        context_graph_id = excluded.context_graph_id,
+        failures = excluded.failures,
+        next_retry_at = excluded.next_retry_at,
+        swm_gen = excluded.swm_gen,
+        candidate_namespaces = excluded.candidate_namespaces,
+        peer_topology_key = excluded.peer_topology_key,
+        updated_at = excluded.updated_at
+    `).run(record);
+  }
+
+  getVmReconcileNegative(cacheKey: string): VmReconcileNegativeRow | undefined {
+    return this.stmt(
+      'getVmReconcileNegative',
+      'SELECT * FROM vm_reconcile_negative_cache WHERE cache_key = ?',
+    ).get(cacheKey) as VmReconcileNegativeRow | undefined;
+  }
+
+  deleteVmReconcileNegative(cacheKey: string): void {
+    this.stmt(
+      'deleteVmReconcileNegative',
+      'DELETE FROM vm_reconcile_negative_cache WHERE cache_key = ?',
+    ).run(cacheKey);
+  }
+
+  deleteVmReconcileNegativesForContextGraph(contextGraphId: string): void {
+    this.stmt(
+      'deleteVmReconcileNegativesForContextGraph',
+      'DELETE FROM vm_reconcile_negative_cache WHERE context_graph_id = ?',
+    ).run(contextGraphId);
   }
 
   // --- Phase F: chain-driven VM reconciliation telemetry ---
@@ -3981,6 +4044,17 @@ export interface ContextGraphReadinessProvenance {
   durableVerified: boolean;
   sharedMemoryVerified: boolean;
   updatedAt: number;
+}
+
+export interface VmReconcileNegativeRow {
+  cache_key: string;
+  context_graph_id: string;
+  failures: number;
+  next_retry_at: number;
+  swm_gen: string;
+  candidate_namespaces: string;
+  peer_topology_key: string;
+  updated_at: number;
 }
 
 // --- Phase F: chain-driven VM reconciliation telemetry rows ---

@@ -1,6 +1,18 @@
 import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origintrail-official/dkg-storage';
-import { GraphManager } from '@origintrail-official/dkg-storage';
-import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
+import {
+  ExactGraphReadError,
+  GraphManager,
+  readExactGraphPaged,
+  resolveGraphScopedOrLegacyMetadata,
+} from '@origintrail-official/dkg-storage';
+import type {
+  QueryResult,
+  QueryOptions,
+  GraphAwareQueryEngine,
+  ResolvedGraphKnowledgeAsset,
+  ResolvedKnowledgeAsset,
+  ResolvedLegacyKnowledgeAsset,
+} from './query-engine.js';
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
   contextGraphLayerUriCandidates, contextGraphLayerPrefixCandidates,
@@ -13,6 +25,9 @@ import {
   REMOVED_VIEWS,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  buildLegacyKnowledgeAssetMetadataQuery,
+  type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
 import {
   validateReadOnlySparql,
@@ -240,7 +255,7 @@ export function resolveViewGraphs(
  * Isolation). All data must arrive via protocol messages (publish, access,
  * sync) before it can be queried here.
  */
-export class DKGQueryEngine implements QueryEngine {
+export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
   // Collapse the dashboard's parallel WM/SWM/VM count scans without retaining
@@ -931,35 +946,76 @@ export class DKGQueryEngine implements QueryEngine {
     return { bindings: [] };
   }
 
-  async resolveKA(ual: string): Promise<{
-    rootEntity: string;
-    rootEntities: string[];
-    contextGraphId: string;
-    quads: Quad[];
-  }> {
-    // Look up KA metadata across all meta graphs, including subGraphName if recorded.
-    // Design B (OT-RFC-44): one KA can hold MULTIPLE rootEntities, so collect
-    // every `?ka <rootEntity>` binding (not just bindings[0]) — PR #968 salvage.
-    // Read-both (RFC ka-metadata-trim P3.1): the collapsed shape carries
-    // `dkg:rootEntity` directly on the UAL subject (no `<ual>/<n>` token rows,
-    // no `dkg:partOf`); legacy-shape rows synced from older nodes still use
-    // the token-row + partOf form, so both branches are queried.
+  async resolveKA(ual: string): Promise<ResolvedLegacyKnowledgeAsset> {
+    const resolved = await this.resolveKnowledgeAsset(ual);
+    if (resolved.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      throw new Error(
+        'Graph-scoped Knowledge Assets do not have root entities; use resolveKnowledgeAsset()',
+      );
+    }
+    return resolved;
+  }
+
+  async resolveKnowledgeAsset(ual: string): Promise<ResolvedKnowledgeAsset> {
+    const safeUal = assertSafeIri(ual);
+    const resolved = await resolveGraphScopedOrLegacyMetadata(
+      this.store,
+      safeUal,
+      () => this.resolveLegacyRootScopedKA(safeUal),
+      { source: 'query.resolveKnowledgeAsset.metadata' },
+    );
+    if (resolved.kind === 'graph') {
+      return this.resolveGraphScopedKA(safeUal, resolved.metadata);
+    }
+    if (resolved.kind === 'legacy') return resolved.metadata;
+    throw new Error(`KA not found for UAL: ${safeUal}`);
+  }
+
+  private async resolveGraphScopedKA(
+    ual: string,
+    metadata: ParsedGraphKnowledgeAssetMetadata,
+  ): Promise<ResolvedGraphKnowledgeAsset> {
+    const expectedGraph = metadata.assertionGraph;
+
+    let quads: Quad[];
+    try {
+      quads = await readExactGraphPaged(this.store, expectedGraph, {
+        expectedQuadCount: metadata.publicTripleCount,
+        queryOptions: { source: 'query.resolveKnowledgeAsset' },
+      });
+    } catch (error) {
+      if (error instanceof ExactGraphReadError && error.code === 'QUAD_COUNT_MISMATCH') {
+        throw new Error(
+          `Graph-scoped KA ${ual} graph integrity mismatch: metadata declares ` +
+            `${metadata.publicTripleCount} public triples, found ${error.actual ?? 'an unknown count'}`,
+        );
+      }
+      throw error;
+    }
+    if (quads.length !== metadata.publicTripleCount) {
+      throw new Error(
+        `Graph-scoped KA ${ual} graph integrity mismatch: metadata declares ${metadata.publicTripleCount} public triples, found ${quads.length}`,
+      );
+    }
+
+    return {
+      ual: metadata.scope.ual,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: metadata.scope.assertionVersion,
+      assertionGraph: expectedGraph,
+      rootEntities: [],
+      contextGraphId: metadata.contextGraphId,
+      quads,
+    };
+  }
+
+  private async resolveLegacyRootScopedKA(
+    ual: string,
+  ): Promise<ResolvedLegacyKnowledgeAsset> {
+    // Existing V10 metadata can use either token-row + partOf membership or
+    // the collapsed UAL-subject rootEntity form. This path is read-only.
     const metaResult = await this.store.query(
-      `SELECT ?ka ?rootEntity ?ctxGraph ?sgName WHERE {
-        GRAPH ?g {
-          {
-            ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
-            ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
-          }
-          UNION
-          {
-            <${assertSafeIri(ual)}> <http://dkg.io/ontology/rootEntity> ?rootEntity .
-            BIND(<${assertSafeIri(ual)}> AS ?ka)
-          }
-          <${assertSafeIri(ual)}> <http://dkg.io/ontology/contextGraph> ?ctxGraph .
-          OPTIONAL { <${assertSafeIri(ual)}> <http://dkg.io/ontology/subGraphName> ?sgName }
-        }
-      } ORDER BY ?ka`,
+      buildLegacyKnowledgeAssetMetadataQuery(ual),
     );
 
     if (metaResult.type !== 'bindings' || metaResult.bindings.length === 0) {
@@ -976,10 +1032,24 @@ export class DKGQueryEngine implements QueryEngine {
     if (rootEntities.length === 0) {
       throw new Error(`KA not found for UAL: ${ual}`);
     }
-    const rootEntity = rootEntities[0];
-    const contextGraphUri = metaResult.bindings[0]['ctxGraph'];
-    const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
-    const sgNameRaw = metaResult.bindings[0]['sgName'];
+    const rootEntity = rootEntities[0] as string;
+    const contextGraphUris = [
+      ...new Set(
+        metaResult.bindings
+          .map((row) => row['ctxGraph'])
+          .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      ),
+    ];
+    if (contextGraphUris.length !== 1) {
+      throw new Error(`Legacy KA ${ual} has ambiguous contextGraph metadata`);
+    }
+    const contextGraphPrefix = 'did:dkg:context-graph:';
+    const contextGraphUri = contextGraphUris[0] as string;
+    if (!contextGraphUri.startsWith(contextGraphPrefix)) {
+      throw new Error(`Legacy KA ${ual} has invalid contextGraph metadata`);
+    }
+    const contextGraphId = contextGraphUri.slice(contextGraphPrefix.length);
+    const sgNameRaw = metaResult.bindings[0]?.['sgName'];
     const subGraphName = sgNameRaw ? sgNameRaw.replace(/^"(.*)".*$/, '$1') : undefined;
 
     const dataGraph = subGraphName
@@ -993,7 +1063,6 @@ export class DKGQueryEngine implements QueryEngine {
       )
       .join(' || ');
 
-    // Fetch all triples for every KA member root from the correct data graph.
     const dataResult = await this.store.query(
       `SELECT ?s ?p ?o WHERE {
         GRAPH <${assertSafeIri(dataGraph)}> {
@@ -1013,9 +1082,15 @@ export class DKGQueryEngine implements QueryEngine {
           }))
         : [];
 
-    return { rootEntity, rootEntities, contextGraphId, quads };
+    return {
+      ual,
+      contentScopeVersion: 1,
+      rootEntity,
+      rootEntities,
+      contextGraphId,
+      quads,
+    };
   }
-
   /**
    * Execute a query across all locally-stored context graphs.
    */

@@ -10,7 +10,6 @@ import type {
   LiftJobValidationMetadata,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
-  RawLiftRequest,
 } from './lift-job.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
@@ -31,7 +30,6 @@ export class AsyncLiftJobConflictError extends Error {
 }
 
 export interface AsyncLiftPublisher {
-  lift(request: RawLiftRequest): Promise<string>;
   enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;

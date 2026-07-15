@@ -38,21 +38,17 @@ import {
 import {
   computeCatalogRoot,
   contextGraphCatalogUri,
-  contextGraphDataUri,
-  partitionCatalogQuads,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
   buildUpdateAuthorAttestationTypedData,
   AUTHOR_SCHEME_VERSION_V1,
   type PrecomputedUpdateAttestation,
 } from '@origintrail-official/dkg-core';
-// The curated-UPDATE leg signs its precomputedUpdateAttestation over the SAME
-// floor-injected quads the producer's update() recomputes from, so it imports
-// the exact floor builder the feature uses (deterministic from the CG DID) plus
-// the matching V10 merkle/partition helpers.
-import { buildPublicProjection } from '../src/context-graph-public-projection.js';
 import {
-  autoPartition,
   computeFlatKCRootV10,
-  computePrivateRootV10,
+  skolemizeKnowledgeAsset,
   TripleStoreAsyncLiftPublisher,
 } from '../../publisher/src/index.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -87,37 +83,18 @@ function numericCgIdFromCatalogGraph(graphUri: string): bigint | null {
 /**
  * Build a `precomputedUpdateAttestation` for a curated UPDATE.
  *
- * A V10 update requires a caller-supplied attestation over the NEW merkle root
- * (the agent's `update()` never auto-mints one). For a CURATED CG the producer's
- * `update()` RE-INJECTS the deterministic public `_catalog` floor into the
- * payload BEFORE computing the on-chain merkle (dkg-agent-publish.ts: the
- * `isCuratedUpdate` branch — `partitionCatalogQuads` + `buildPublicProjection`
- * → `[...nonCatalog, ...floor]`), then hard-checks
- * `precomputedUpdateAttestation.expectedNewMerkleRoot === kcMerkleRoot`. So this
- * seal MUST commit to the merkle over the POST-floor-injection quads — we mirror
- * the producer's injection here with the SAME builder (deterministic floor) so
- * the two roots agree by construction. Graph term and order are irrelevant: the
- * V10 triple hash excludes the graph and the tree sorts+dedupes its leaves.
+ * A V10 update requires a caller-supplied attestation over the NEW atomic KA
+ * Merkle root. The curated catalog floor is committed independently and is not
+ * part of this author seal or the exact per-KA graph.
  */
 async function buildCuratedUpdateSeal(opts: {
   kaId: bigint;
-  contextGraphId: string;
   newQuads: Quad[];
   author: Wallet;
   provider: ethers.JsonRpcProvider;
   kav10Address: string;
 }): Promise<PrecomputedUpdateAttestation> {
-  const cgDid = contextGraphDataUri(opts.contextGraphId);
-  // Mirror dkg-agent-publish.ts update()'s curated floor injection EXACTLY.
-  const { otherQuads: nonCatalogQuads } = partitionCatalogQuads(opts.newQuads, cgDid);
-  const catalogFloor = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: cgDid });
-  const injected: Quad[] = [...nonCatalogQuads, ...catalogFloor];
-
-  // Mirror publisher.update()'s merkle recompute (skolemize === autoPartition,
-  // computeFlatKCRootV10 over the flattened public quads + per-entity private
-  // roots). The UPDATE leg below ships no private quads, so privateRoots is [].
-  const kaMap = autoPartition(injected);
-  const allPublic = [...kaMap.values()].flat();
+  const allPublic = await skolemizeKnowledgeAsset(opts.newQuads);
   const newMerkleRoot = computeFlatKCRootV10(allPublic, []);
 
   const chainId = await opts.provider.getNetwork().then((n) => n.chainId);
@@ -179,14 +156,33 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
     await publisher.assertion.write(CG, name, [
       { subject: 'urn:acme:shipment/SH-42', predicate: 'urn:acme:product', object: '"P-9"' },
     ]);
-    await publisher.assertion.finalize(CG, name);
-    await publisher.assertion.promote(CG, name);
+    const finalized: any = await publisher.assertion.finalize(CG, name);
+    expect(finalized.publicTripleCount).toBe(1);
+    const promoted = await publisher.assertion.promote(CG, name);
+    expect(promoted.promotedCount).toBe(1);
 
     const pub: any = await publisher.publishFromFinalizedAssertion(CG, name);
 
     // A confirmed publish, with the ACK supplied by the REMOTE ackCore, is free
     // proof that producer/collector/handler agree on the catalog ACK digest.
     expect(pub.status).toBe('confirmed');
+    expect(pub.kaManifest).toEqual([]);
+    expect(pub.publicQuads).toHaveLength(1);
+    expect(pub.publicQuads[0]).toMatchObject({
+      subject: 'urn:acme:shipment/SH-42',
+      predicate: 'urn:acme:product',
+      object: '"P-9"',
+    });
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(pub.ual, pub.assertionVersion ?? '1'),
+    );
+    expect(await (publisher as any).store.countQuads(vmGraph)).toBe(1);
+    const leakedCatalog = await (publisher as any).store.query(
+      `ASK { GRAPH <${vmGraph}> { <did:dkg:context-graph:${CG}> ?p ?o } }`,
+    );
+    expect(leakedCatalog).toMatchObject({ type: 'boolean', value: false });
     const kaId: bigint = pub.kaId;
     expect(typeof kaId).toBe('bigint');
 
@@ -364,17 +360,47 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
     ];
     const precomputedUpdateAttestation = await buildCuratedUpdateSeal({
       kaId,
-      contextGraphId: CG,
       newQuads,
       author,
       provider: ctx.provider,
       kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
     });
 
-    const upd: any = await publisher.update(kaId, CG, newQuads, [], { precomputedUpdateAttestation });
+    // V2 updates consume one immutable version-scoped SWM graph; callers do
+    // not get to substitute an arbitrary inline bag after the author seal is
+    // created. Stage the exact assertionVersion=2 payload at that boundary.
+    const updateScope = createGraphKnowledgeAssetScope(pub.ual, '2');
+    const updateSwmGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.SharedWorkingMemory,
+      updateScope,
+    );
+    await (publisher as any).store.insert(
+      newQuads.map((quad) => ({ ...quad, graph: updateSwmGraph })),
+    );
+
+    const upd: any = await publisher.update(kaId, CG, newQuads, [], {
+      precomputedUpdateAttestation,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: pub.ual,
+      assertionVersion: '2',
+      publicTripleCount: newQuads.length,
+      privateTripleCount: 0,
+    });
     expect(upd.status, 'curated update must CONFIRM (no CuratedCGRequiresCatalogCommitment revert)').toBe('confirmed');
     // The update targets — and re-confirms — the SAME on-chain KA as the publish.
     expect(upd.kaId).toBe(kaId);
+    expect(upd.publicQuads).toHaveLength(newQuads.length);
+    const updateVmGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.VerifiableMemory,
+      updateScope,
+    );
+    expect(await (publisher as any).store.countQuads(updateVmGraph)).toBe(newQuads.length);
+    const updateCatalogLeak = await (publisher as any).store.query(
+      `ASK { GRAPH <${updateVmGraph}> { <did:dkg:context-graph:${CG}> ?p ?o } }`,
+    );
+    expect(updateCatalogLeak).toMatchObject({ type: 'boolean', value: false });
 
     // ── on-chain: catalog still committed, non-zero, EQUALS the publish baseline. ──
     // The catalog is the stable public floor — a curated update RE-COMMITS the

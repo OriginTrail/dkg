@@ -41,7 +41,10 @@ describe('sync responder page diagnostics', () => {
     ];
     const publicSnapshotStore: WorkspacePublicSnapshotStore = {
       putSnapshot: async () => ({ ref: 'snapshot-ref', byteLength: 0 }),
-      getSnapshot: async () => snapshotQuads,
+      getSnapshot: async () => {
+        throw new Error('paged responder must not materialize the complete snapshot');
+      },
+      getSnapshotPage: async (_ref, offset, limit) => snapshotQuads.slice(offset, offset + limit),
     };
     const debugMessages: string[] = [];
     const handler = registerTestSyncHandler(store, {

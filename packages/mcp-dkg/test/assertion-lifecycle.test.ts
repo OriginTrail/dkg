@@ -156,12 +156,9 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     // Object stored verbatim — language-tagged literal is preserved in WM.
     expect(cellBeforeShare!.quads[0].object).toBe(langTagged);
 
-    const shared = await server.call('dkg_knowledge_asset_share', {
-      name: 'session-2026',
-      entities: ['urn:x:1'],
-    });
+    const shared = await server.call('dkg_knowledge_asset_share', { name: 'session-2026' });
     expect(shared.isError).toBeFalsy();
-    expect(shared.content[0].text).toMatch(/Shared 1 entity/);
+    expect(shared.content[0].text).toMatch(/Shared complete knowledge asset/);
 
     // After sharing `urn:x:1`, BOTH quads (both have subject `urn:x:1`) move
     // WM → SWM and are deleted from the WM draft — so a post-share WM query
@@ -329,21 +326,18 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     ).rejects.toThrow();
   });
 
-  it('share rejects an empty entities array (must be omitted or non-empty)', async () => {
+  it('share rejects the retired entities field', async () => {
     await server.call('dkg_knowledge_asset_create', { name: 'rollback' });
     await server.call('dkg_knowledge_asset_write', {
       name: 'rollback',
       quads: [{ subject: 'urn:r', predicate: 'urn:p', object: '"v"' }],
     });
-    const result = await server.call('dkg_knowledge_asset_share', {
-      name: 'rollback',
-      entities: [],
-    });
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/non-empty array/);
+    await expect(server.call('dkg_knowledge_asset_share', {
+      name: 'rollback', entities: [],
+    })).rejects.toThrow();
   });
 
-  it('share accepts the "all" sentinel and passes it through unchanged (CONTRACT §B)', async () => {
+  it('share accepts safe legacy defaults but omits them from the client call', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
       knowledgeAssetShare: async (args) => {
@@ -354,13 +348,16 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
-    const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc', entities: 'all' });
-    expect(res.isError).toBeFalsy();
-    // CONTRACT §B: "all" is forwarded verbatim (NOT coerced to [] or omitted).
-    expect(captured.entities).toBe('all');
+    const result = await localServer.call('dkg_knowledge_asset_share', {
+      name: 'doc', entities: 'all', skipSeal: false,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(captured).toMatchObject({ contextGraphId: 'test-cg', name: 'doc' });
+    expect(captured).not.toHaveProperty('entities');
+    expect(captured).not.toHaveProperty('skipSeal');
   });
 
-  it('share trims whitespace from each entity URI before forwarding (FIX K)', async () => {
+  it('share rejects root-selection arrays before invoking the client', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
       knowledgeAssetShare: async (args) => {
@@ -371,13 +368,11 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
-    const res = await localServer.call('dkg_knowledge_asset_share', {
+    await expect(localServer.call('dkg_knowledge_asset_share', {
       name: 'doc',
       entities: [' urn:root-1 ', '\turn:root-2\n'],
-    });
-    expect(res.isError).toBeFalsy();
-    // A whitespace-padded entity must reach the daemon trimmed (else wrong root).
-    expect(captured.entities).toEqual(['urn:root-1', 'urn:root-2']);
+    })).rejects.toThrow();
+    expect(captured).toEqual({});
   });
 
   it('discard marks the assertion discarded; subsequent writes fail', async () => {
@@ -706,10 +701,7 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(res.content[0].text).toContain('WM_DRAFT_CONFLICT');
   });
 
-  // The crux of CONTRACT §5 (H2): a SUBSET share is NOT auto-sealed, so
-  // publish 409s; a FULL share (or an explicit finalize) seals and publish
-  // succeeds. This models the seal-before-publish invariant.
-  it('subset share → publish FAILS (not finalized); full share → publish SUCCEEDS', async () => {
+  it('atomic share seals the complete KA and makes it publishable', async () => {
     await server.call('dkg_knowledge_asset_create', { name: 'multi' });
     await server.call('dkg_knowledge_asset_write', {
       name: 'multi',
@@ -718,16 +710,6 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
         { subject: 'urn:b', predicate: 'urn:p', object: '"b"' },
       ],
     });
-    // SUBSET share — SWM-only, NOT auto-sealed.
-    const subset = await server.call('dkg_knowledge_asset_share', { name: 'multi', entities: ['urn:a'] });
-    expect(subset.isError).toBeFalsy();
-    expect(client.assertions.get('test-cg::multi')!.finalized).toBe(false);
-
-    const failed = await server.call('dkg_knowledge_asset_publish', { name: 'multi' });
-    expect(failed.isError).toBe(true);
-    expect(failed.content[0].text).toContain('VM_PUBLISH_PRECONDITION');
-
-    // FULL share auto-seals → publish now succeeds and returns the UAL.
     const full = await server.call('dkg_knowledge_asset_share', { name: 'multi' });
     expect(full.isError).toBeFalsy();
     expect(client.assertions.get('test-cg::multi')!.finalized).toBe(true);
@@ -737,22 +719,22 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(ok.content[0].text).toContain('"ual"');
   });
 
-  it('explicit finalize before a subset share also makes publish succeed', async () => {
+  it('explicit finalize before atomic share also makes publish succeed', async () => {
     await server.call('dkg_knowledge_asset_create', { name: 'sealed' });
     await server.call('dkg_knowledge_asset_write', {
       name: 'sealed',
       quads: [{ subject: 'urn:a', predicate: 'urn:p', object: '"a"' }],
     });
     await server.call('dkg_knowledge_asset_finalize', { name: 'sealed' });
-    await server.call('dkg_knowledge_asset_share', { name: 'sealed', entities: ['urn:a'] });
+    await server.call('dkg_knowledge_asset_share', { name: 'sealed' });
     const res = await server.call('dkg_knowledge_asset_publish', { name: 'sealed' });
     expect(res.isError).toBeFalsy();
     expect(res.content[0].text).toContain('"ual"');
   });
 
-  // ── #1116 share seal: skipSeal forwarding + publishReady warning branch ──
+  // ── Atomic-share boundary + defensive mixed-version warnings ──
 
-  it('share forwards skipSeal:true to the client (#1116)', async () => {
+  it('share rejects skipSeal before invoking the client', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
       knowledgeAssetShare: async (args) => {
@@ -763,44 +745,26 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
-    const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc', skipSeal: true });
-    expect(res.isError).toBeFalsy();
-    expect(captured.skipSeal).toBe(true);
+    await expect(
+      localServer.call('dkg_knowledge_asset_share', { name: 'doc', skipSeal: true }),
+    ).rejects.toThrow();
+    expect(captured).toEqual({});
   });
 
-  it('share with publishReady:false on a FULL share emits the seal-it warning (#1116)', async () => {
+  it('share with publishReady:false emits an atomic retry warning', async () => {
     const localClient = new FakeClient({
       knowledgeAssetShare: async () => ({ swmShared: true, promotedCount: 2, sealed: false, publishReady: false }),
     });
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
-    // A skipSeal FULL share IS sealable later → the "seal it with finalize" hint.
-    const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc', skipSeal: true });
+    const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc' });
     expect(res.isError).toBeFalsy();
-    expect(res.content[0].text).toContain('NOT publish-ready (sealed:false)');
-    expect(res.content[0].text).toContain('layer:swm works after sharing');
-    expect(res.content[0].text).not.toContain('NOT sealable');
+    expect(res.content[0].text).toContain('did not become publish-ready (sealed:false)');
+    expect(res.content[0].text).toContain('retry the complete Knowledge Asset share');
   });
 
-  it('share with publishReady:false on a SUBSET emits the not-sealable warning (#1116)', async () => {
-    const localClient = new FakeClient({
-      knowledgeAssetShare: async () => ({ swmShared: true, promotedCount: 1, sealed: false, publishReady: false }),
-    });
-    const localServer = new FakeServer();
-    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
-
-    // A subset is NOT sealable (finalize layer:swm rejects it) → full-share / new-asset recovery.
-    const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc', entities: ['urn:a'] });
-    expect(res.isError).toBeFalsy();
-    expect(res.content[0].text).toContain('A subset is NOT sealable/publishable');
-    expect(res.content[0].text).toContain('entities:"all"');
-    expect(res.content[0].text).not.toContain('Seal it with');
-  });
-
-  it('share with sealed:true + publishReady:false (incomplete full promote) warns NOT to finalize layer:swm (#1116)', async () => {
-    // A FULL share that sealed but did NOT promote every root (foreign-owned roots
-    // skipped) → swmShareComplete marker NOT set → finalize layer:swm would REJECT.
+  it('share with sealed:true + publishReady:false emits the incomplete atomic warning', async () => {
     const localClient = new FakeClient({
       knowledgeAssetShare: async () => ({ swmShared: true, promotedCount: 1, sealed: true, publishReady: false }),
     });
@@ -809,11 +773,8 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
 
     const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc' });
     expect(res.isError).toBeFalsy();
-    expect(res.content[0].text).toContain('not all roots reached SWM');
-    expect(res.content[0].text).toContain('re-share the full asset');
-    // Must NOT recommend the dead-end finalize layer:swm here (it would reject).
-    expect(res.content[0].text).not.toContain('layer:swm works after sharing');
-    expect(res.content[0].text).not.toContain('NOT sealable');
+    expect(res.content[0].text).toContain('complete sealed Knowledge Asset did not reach SWM');
+    expect(res.content[0].text).toContain('retry the atomic share');
   });
 
   it('share with publishReady:true emits NO warning, reports sealed + publish-ready (#1116)', async () => {
@@ -829,7 +790,7 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(res.content[0].text).not.toContain('NOT publish-ready');
   });
 
-  it('share surfaces a 409 UNSEALED_SHARE_BLOCKED recovery verbatim (#1116)', async () => {
+  it('share replaces obsolete UNSEALED_SHARE_BLOCKED recovery with atomic guidance (#1116)', async () => {
     const recovery = 'No local signing key; pass skipSeal:true to share unsealed.';
     const localClient = new FakeClient({
       knowledgeAssetShare: async () => {
@@ -841,8 +802,9 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
 
     const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc' });
     expect(res.isError).toBe(true);
-    // The handler surfaces the daemon's recovery hint verbatim as the tool error.
-    expect(res.content[0].text).toBe(recovery);
+    expect(res.content[0].text).toContain('Resolve the local signing capability');
+    expect(res.content[0].text).toContain('atomic Knowledge Asset share');
+    expect(res.content[0].text).not.toContain('skipSeal');
   });
 
   it('share falls back to the generic error for a non-matching 409 (#1116)', async () => {
@@ -859,7 +821,7 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(res.content[0].text).toMatch(/Failed to share knowledge asset/);
   });
 
-  it('finalize forwards layer:"swm" to the client (#1116)', async () => {
+  it('finalize accepts the harmless legacy WM layer and omits it from the client call', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
       knowledgeAssetFinalize: async (args) => {
@@ -870,9 +832,47 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
-    const res = await localServer.call('dkg_knowledge_asset_finalize', { name: 'doc', layer: 'swm' });
-    expect(res.isError).toBeFalsy();
-    expect(captured.layer).toBe('swm');
+    const result = await localServer.call('dkg_knowledge_asset_finalize', {
+      name: 'doc',
+      layer: 'wm',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(captured).toMatchObject({ name: 'doc', contextGraphId: 'test-cg' });
+    expect(captured).not.toHaveProperty('layer');
+  });
+
+  it('finalize rejects the retired SWM layer before invoking the client', async () => {
+    const captured: Record<string, unknown> = {};
+    const localClient = new FakeClient({
+      knowledgeAssetFinalize: async (args) => {
+        Object.assign(captured, args);
+        return { merkleRoot: '0xroot', eip712Digest: '0xdig', authorAddress: '0xtoken' };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    await expect(
+      localServer.call('dkg_knowledge_asset_finalize', { name: 'doc', layer: 'swm' }),
+    ).rejects.toThrow();
+    expect(captured).toEqual({});
+  });
+
+  it('finalize accepts legacy layer:wm but omits it from the client call', async () => {
+    const captured: Record<string, unknown> = {};
+    const localClient = new FakeClient({
+      knowledgeAssetFinalize: async (args) => {
+        Object.assign(captured, args);
+        return { merkleRoot: '0xroot', eip712Digest: '0xdig', authorAddress: '0xtoken' };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_knowledge_asset_finalize', { name: 'doc', layer: 'wm' });
+    expect(result.isError).toBeFalsy();
+    expect(captured).toMatchObject({ contextGraphId: 'test-cg', name: 'doc' });
+    expect(captured).not.toHaveProperty('layer');
   });
 
   it('finalize rejects an invalid layer at the schema boundary (wm|swm enum) (#1116)', async () => {

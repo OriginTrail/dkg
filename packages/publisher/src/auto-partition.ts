@@ -1,6 +1,19 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { skolemize, isSkolemizedUri, rootEntityFromSkolemized, isBlankNode } from './skolemize.js';
 
+// The graph-scoped (rootless) KA canonicalization lives in its own module —
+// it is a protocol-level boundary, not a variant of the legacy root-entity
+// partitioning below. Re-exported here for callers that predate the split.
+export {
+  KNOWLEDGE_ASSET_SKOLEM_PREFIX,
+  KNOWLEDGE_ASSET_PRIVATE_SKOLEM_PREFIX,
+  assertNoUserAuthoredKnowledgeAssetSkolemTerms,
+  skolemizeKnowledgeAsset,
+  skolemizeKnowledgeAssetParts,
+  type SkolemizeKnowledgeAssetOptions,
+  type SkolemizedKnowledgeAssetParts,
+} from './ka-skolemization.js';
+
 /**
  * Skolemizes blank nodes under their parent entity and INDEXES the result by
  * entity. It does NOT partition into Knowledge Assets — the name `autoPartition`

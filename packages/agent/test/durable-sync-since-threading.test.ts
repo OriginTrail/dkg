@@ -3,6 +3,7 @@ import { createOperationContext, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-offi
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
 
 interface FetchCall {
   contextGraphId: string;
@@ -24,7 +25,12 @@ function makeContext(options: {
   };
 } = {}) {
   const calls: FetchCall[] = [];
-  const processCalls: Array<{ dataCount: number; metaCount: number; acceptUnverified: boolean }> = [];
+  const processCalls: Array<{
+    dataCount: number;
+    metaCount: number;
+    acceptUnverified: boolean;
+    mode: DurableBatchVerificationMode;
+  }> = [];
   const insertedBatches: Quad[][] = [];
   const deletedCheckpoints: string[] = [];
   const page = (phase: 'data' | 'meta'): SyncPageResult => ({
@@ -64,8 +70,14 @@ function makeContext(options: {
         return page(phase);
       },
       sinceBatchIdFor: options.sinceBatchIdFor,
-      processDurableBatchInWorker: async (dataQuads: Quad[], metaQuads: Quad[], _ctx: unknown, acceptUnverified: boolean) => {
-        processCalls.push({ dataCount: dataQuads.length, metaCount: metaQuads.length, acceptUnverified });
+      processDurableBatchInWorker: async (
+        dataQuads: Quad[],
+        metaQuads: Quad[],
+        _ctx: unknown,
+        acceptUnverified: boolean,
+        mode: DurableBatchVerificationMode,
+      ) => {
+        processCalls.push({ dataCount: dataQuads.length, metaCount: metaQuads.length, acceptUnverified, mode });
         return {
           verifiedData,
           verifiedMeta,
@@ -89,14 +101,16 @@ function makeContext(options: {
 
 describe('runDurableSync sinceBatchId threading', () => {
   it('passes sinceBatchIdFor() to the DATA fetch only, not the META fetch', async () => {
-    const { calls, context } = makeContext({ sinceBatchIdFor: () => '7' });
-    await runDurableSync(context);
+    const { calls, context, processCalls } = makeContext({ sinceBatchIdFor: () => '7' });
+    const summary = await runDurableSync(context);
 
     const meta = calls.find((c) => c.phase === 'meta')!;
     const data = calls.find((c) => c.phase === 'data')!;
     expect(meta.sinceBatchId).toBeUndefined();
     expect(data.sinceBatchId).toBe('7');
     expect(data.snapshotRef).toBeUndefined();
+    expect(processCalls[0]?.mode).toEqual({ kind: 'sinceBatchId', sinceBatchId: '7' });
+    expect(summary.checkpointAdvances).toBe(2);
   });
 
   it('passes undefined when no high-water mark resolver is wired', async () => {
@@ -134,7 +148,12 @@ describe('runDurableSync agents meta routing', () => {
       phase: 'data',
     });
     expect(calls[0].graphUri).toBe('did:dkg:context-graph:agents');
-    expect(processCalls).toEqual([{ dataCount: 1, metaCount: 0, acceptUnverified: true }]);
+    expect(processCalls).toEqual([{
+      dataCount: 1,
+      metaCount: 0,
+      acceptUnverified: true,
+      mode: { kind: 'fullSnapshot' },
+    }]);
     expect(insertedBatches).toEqual([[{ id: 'verified-data' }]]);
     expect(deletedCheckpoints).toContain(`peerR|${SYSTEM_CONTEXT_GRAPHS.AGENTS}|durable|meta`);
   });
@@ -152,7 +171,12 @@ describe('runDurableSync agents meta routing', () => {
       phase: 'meta',
       graphUri: 'did:dkg:context-graph:agents/_meta',
     });
-    expect(processCalls).toEqual([{ dataCount: 1, metaCount: 1, acceptUnverified: true }]);
+    expect(processCalls).toEqual([{
+      dataCount: 1,
+      metaCount: 1,
+      acceptUnverified: true,
+      mode: { kind: 'fullSnapshot' },
+    }]);
   });
 
   it('still fetches metadata for normal context graphs when agents meta sync is disabled', async () => {
@@ -169,7 +193,12 @@ describe('runDurableSync agents meta routing', () => {
       phase: 'meta',
       graphUri: 'did:dkg:context-graph:normal-cg/_meta',
     });
-    expect(processCalls).toEqual([{ dataCount: 1, metaCount: 1, acceptUnverified: false }]);
+    expect(processCalls).toEqual([{
+      dataCount: 1,
+      metaCount: 1,
+      acceptUnverified: false,
+      mode: { kind: 'fullSnapshot' },
+    }]);
   });
 
   it('still fetches ontology metadata when agents meta sync is disabled', async () => {
@@ -186,6 +215,11 @@ describe('runDurableSync agents meta routing', () => {
       phase: 'meta',
       graphUri: 'did:dkg:context-graph:ontology/_meta',
     });
-    expect(processCalls).toEqual([{ dataCount: 1, metaCount: 1, acceptUnverified: true }]);
+    expect(processCalls).toEqual([{
+      dataCount: 1,
+      metaCount: 1,
+      acceptUnverified: true,
+      mode: { kind: 'fullSnapshot' },
+    }]);
   });
 });
