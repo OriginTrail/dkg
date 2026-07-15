@@ -8,9 +8,11 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
+  computeFlatKCRootV10,
   replaceLocallyTrustedKnowledgeAssetControls,
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
+import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
@@ -19,10 +21,12 @@ import {
 } from '../src/sync/requester/graph-scoped-materialization.js';
 
 const DKG = 'http://dkg.io/ontology/';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const contextGraphId = 'graph-scoped-sync-materialization';
 const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
 const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/0x1111111111111111111111111111111111111111/1`;
 const ual = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1';
+const packedKaId = '7719472615821079694904732333912527190217998977704089058462887978021305712641';
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
 
 function dataQuad(version: number): Quad {
@@ -34,20 +38,24 @@ function dataQuad(version: number): Quad {
   };
 }
 
-function metadata(version: number): Quad[] {
+function metadata(version: number, merkleRoot = String(version).padStart(64, '0')): Quad[] {
   return [
     ['contentScopeVersion', '"2"'],
     ['kaUal', ual],
     ['assertionVersion', `"${version}"`],
     ['assertionGraph', assertionGraph],
     ['contextGraph', `did:dkg:context-graph:${contextGraphId}`],
-    ['merkleRoot', `"${String(version).padStart(64, '0')}"`],
+    ['merkleRoot', `"${merkleRoot}"`],
   ].map(([predicate, object]) => ({
     subject: ual,
     predicate: `${DKG}${predicate}`,
     object,
     graph: metaGraph,
   }));
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function page(phase: 'data' | 'meta', quads: Quad[]): SyncPageResult {
@@ -83,17 +91,50 @@ async function values(store: OxigraphStore, predicate: string): Promise<string[]
   return result.bindings.map((row) => row.value).sort();
 }
 
+async function graphQuads(store: OxigraphStore, graph: string): Promise<Quad[]> {
+  const result = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+  if (result.type !== 'bindings') return [];
+  return result.bindings.map((row) => ({
+    subject: row.s!,
+    predicate: row.p!,
+    object: row.o!,
+    graph,
+  }));
+}
+
 describe('durable graph-scoped KA materialization', () => {
   it('replaces a poisoned v1 union with the verified v2 assertion and metadata', async () => {
     const store = new OxigraphStore();
     const v1Data = dataQuad(1);
     const v2Data = dataQuad(2);
     const v1Meta = metadata(1);
-    const v2Meta = metadata(2);
+    const v2Root = computeFlatKCRootV10([v2Data], []);
+    const v2RootHex = toHex(v2Root);
+    const v2Meta = metadata(2, v2RootHex);
+    v2Meta.push(
+      {
+        subject: ual,
+        predicate: `${DKG}publicTripleCount`,
+        object: `"1"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}privateTripleCount`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+    );
     const peerControlMarker: Quad = {
       subject: ual,
       predicate: `${DKG}materializedVersion`,
       object: '"999999999:0"',
+      graph: metaGraph,
+    };
+    const peerBatchId: Quad = {
+      subject: ual,
+      predicate: `${DKG}batchId`,
+      object: `"999"^^<${XSD_INTEGER}>`,
       graph: metaGraph,
     };
     const unrelatedPeerControls: Quad[] = [
@@ -125,7 +166,7 @@ describe('durable graph-scoped KA materialization', () => {
       ['accessPolicy', '"allowList"'],
       ['allowedPeer', '"attacker-peer"'],
       ['publisherPeerId', '"attacker-peer"'],
-      ['status', '"confirmed"'],
+      ['status', '"tentative"'],
     ].map(([predicate, object]) => ({
       subject: ual,
       predicate: `${DKG}${predicate}`,
@@ -143,11 +184,20 @@ describe('durable graph-scoped KA materialization', () => {
       ...peerAclInjection,
     ]);
 
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => v2Root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 1n,
+    } as ChainAdapter;
     const storeHooks = {
       storeInsert: (quads: Quad[]) => store.insert(quads),
-      storeGraphScopedAsset: (asset: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset']) => (
-        materializeVerifiedGraphScopedAsset({ store, asset })
-      ),
+      storeGraphScopedAsset: async (
+        asset: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset'],
+      ) => materializeVerifiedGraphScopedAsset({
+        store,
+        asset: await authenticateVerifiedGraphScopedAsset(chain, asset, async () => '1'),
+      }),
     };
 
     await runDurableSync({
@@ -160,6 +210,7 @@ describe('durable graph-scoped KA materialization', () => {
           ? page(phase, [v2Data])
           : page(phase, [
               ...v2Meta,
+              peerBatchId,
               peerControlMarker,
               ...unrelatedPeerControls,
               ...peerAclInjection,
@@ -169,6 +220,7 @@ describe('durable graph-scoped KA materialization', () => {
         verifiedData: [v2Data],
         verifiedMeta: [
           ...v2Meta,
+          peerBatchId,
           peerControlMarker,
           ...unrelatedPeerControls,
           ...peerAclInjection,
@@ -176,7 +228,7 @@ describe('durable graph-scoped KA materialization', () => {
         verifiedGraphScopedDataGraphs: [assertionGraph],
         totalFetchedDataQuads: 1,
         totalFetchedMetaQuads:
-          v2Meta.length + 1 + unrelatedPeerControls.length + peerAclInjection.length,
+          v2Meta.length + 2 + unrelatedPeerControls.length + peerAclInjection.length,
         rejectedKcs: 0,
         emptyResponses: 0,
         metaOnlyResponses: 0,
@@ -195,7 +247,11 @@ describe('durable graph-scoped KA materialization', () => {
     expect(data.type).toBe('bindings');
     expect(data.type === 'bindings' ? data.bindings.map((row) => row.s) : []).toEqual([v2Data.subject]);
     expect(await values(store, 'assertionVersion')).toEqual(['"2"']);
-    expect(await values(store, 'merkleRoot')).toEqual([`"${String(2).padStart(64, '0')}"`]);
+    expect(await values(store, 'merkleRoot')).toEqual([`"${v2RootHex}"`]);
+    expect(await values(store, 'batchId')).toEqual([
+      `"${packedKaId}"^^<${XSD_INTEGER}>`,
+    ]);
+    expect(await values(store, 'status')).toEqual(['"confirmed"']);
     expect(await values(store, 'materializedVersion')).toEqual([]);
     const unrelatedControls = await store.query(`
       ASK { GRAPH <${metaGraph}> {
@@ -210,11 +266,29 @@ describe('durable graph-scoped KA materialization', () => {
           <${DKG}accessPolicy>
           <${DKG}allowedPeer>
           <${DKG}publisherPeerId>
-          <${DKG}status>
         }
       } }
     `);
     expect(aclControls).toEqual({ type: 'boolean', value: false });
+    const storedData = await graphQuads(store, assertionGraph);
+    const storedMeta = await graphQuads(store, metaGraph);
+    const secondHop = processDurableBatchForWire(
+      storedData,
+      storedMeta,
+      false,
+      { kind: 'sinceBatchId', sinceBatchId: (BigInt(packedKaId) - 1n).toString() },
+    );
+    expect(secondHop.rejectedKcs, JSON.stringify(secondHop.logs)).toBe(0);
+    expect(secondHop.verifiedGraphScopedDataGraphs).toEqual([assertionGraph]);
+    const alreadyCurrent = processDurableBatchForWire(
+      [],
+      storedMeta,
+      false,
+      { kind: 'sinceBatchId', sinceBatchId: packedKaId },
+    );
+    expect(alreadyCurrent.rejectedKcs).toBe(0);
+    expect(alreadyCurrent.verifiedDataIndexes).toEqual([]);
+    expect(alreadyCurrent.verifiedMetaIndexes).toEqual([]);
     await expect(shouldApplyMaterialization(
       store,
       metaGraph,

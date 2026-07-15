@@ -1,9 +1,13 @@
-import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import {
+  parseDeterministicKnowledgeAssetUal,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
+import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -16,7 +20,9 @@ const DKG_NS = 'http://dkg.io/ontology/';
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
+const BATCH_ID = `${DKG_NS}batchId`;
 const MATERIALIZED_VERSION = `${DKG_NS}materializedVersion`;
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
   MATERIALIZED_VERSION,
   `${DKG_NS}accessPolicy`,
@@ -571,6 +577,14 @@ function partitionVerifiedGraphScopedAssets(
         `Verified graph-scoped KA ${ual} is not bound to requested context graph ${contextGraphId}`,
       );
     }
+    const identity = parseDeterministicKnowledgeAssetUal(ual);
+    const batchId = packKnowledgeAssetIdFromIdentity(identity);
+    metadataQuads.push({
+      subject: ual,
+      predicate: BATCH_ID,
+      object: `"${batchId}"^^<${XSD_INTEGER}>`,
+      graph: metaGraph,
+    });
     assets.push({
       contextGraphId,
       ual,
