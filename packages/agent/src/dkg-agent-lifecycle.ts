@@ -4081,6 +4081,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     // `did:dkg:*` public triples anchor a `dkg:merkleRoot` literal in their meta graph.
     const MERKLE_ROOT_PREDICATE = 'http://dkg.io/ontology/merkleRoot';
+    const INTEGRITY_META_PREDICATES = new Set([
+      MERKLE_ROOT_PREDICATE,
+      'http://dkg.io/ontology/contentScopeVersion',
+      'http://dkg.io/ontology/kaUal',
+      'http://dkg.io/ontology/assertionVersion',
+      'http://dkg.io/ontology/assertionGraph',
+      'http://dkg.io/ontology/publicTripleCount',
+      'http://dkg.io/ontology/privateTripleCount',
+      'http://dkg.io/ontology/privateMerkleRoot',
+    ]);
     let insertedDataTriples = 0;
     let insertedMetaTriples = 0;
     let result = emptyDurableSyncResult(); // folds every resync's legacy DurableSyncResult
@@ -4133,6 +4143,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const metaRecs = page.records.filter((r) => r.op === 'upsert' && r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
         const recordQuadCountByGraph = new Map<string, number>();
         const metaGraphsWithRoot = new Set<string>();
+        const integrityMetaGraphs = new Set<string>();
         const dataQuads: Quad[] = [];
         const metaQuads: Quad[] = [];
         for (const rec of dataRecs) {
@@ -4146,6 +4157,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           recordQuadCountByGraph.set(rec.graph, quads.length);
           // A meta graph can bind data only if it actually carries a merkle root.
           if (quads.some((q) => q.predicate === MERKLE_ROOT_PREDICATE)) metaGraphsWithRoot.add(rec.graph);
+          // Any V2 integrity field makes the whole metadata record fail-closed.
+          // In particular, contentScopeVersion without merkleRoot is malformed,
+          // not harmless configuration that the cursor may acknowledge.
+          if (quads.some((q) => INTEGRITY_META_PREDICATES.has(q.predicate))) {
+            integrityMetaGraphs.add(rec.graph);
+          }
         }
         // Merkle-verify data against meta (same worker path legacy sync uses).
         const processed = await this.processDurableBatchInWorker(dataQuads, metaQuads, ctx, acceptUnverified);
@@ -4180,6 +4197,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           verifiedByGraph,
           recordQuadCountByGraph,
           metaGraphsWithRoot,
+          integrityMetaGraphs,
           merkleBoundDataGraphs,
           batchVerifiedCleanly: processed.rejectedKcs === 0 && processed.dataRejectedMissingMeta === 0,
         });

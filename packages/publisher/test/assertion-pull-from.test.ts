@@ -9,6 +9,7 @@ import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  contextGraphPrivateUri,
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
@@ -353,7 +354,24 @@ describe('rootless assertionPullFrom', () => {
     expect(draft.some((quad) => quad.subject.includes('decoy'))).toBe(false);
   });
 
-  it('clears the old seal, retains UAL identity, and permits a new assertion version', async () => {
+  it('retains a durable SWM recovery seal across pull and draft discard', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store);
+
+    await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
+    await publisher.assertionDiscard(CG, NAME, AGENT);
+    const reopened = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
+
+    expect(reopened).toMatchObject({
+      kaUal: finalized.kaUal,
+      assertionVersion: finalized.assertionVersion,
+      seededPublic: finalized.publicQuads.length,
+    });
+    expect(new Set((await publisher.assertionQuery(CG, NAME, AGENT)).map(key)))
+      .toEqual(new Set(finalized.publicQuads.map(key)));
+  });
+
+  it('archives the source seal while leaving the active draft unlocked for re-finalization', async () => {
     const { publisher, store } = await makePublisher();
     const first = await seedShared(publisher, store);
 
@@ -366,6 +384,19 @@ describe('rootless assertionPullFrom', () => {
       } }`,
     );
     expect(sealed.type === 'boolean' && sealed.value).toBe(false);
+    const recoverySubject = `${sealSubject}/_recovery_seal`;
+    const recoverySeal = await store.query(
+      `ASK { GRAPH <${contextGraphPrivateUri(CG)}> {
+        <${recoverySubject}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root
+      } }`,
+    );
+    expect(recoverySeal).toMatchObject({ type: 'boolean', value: true });
+    const leakedRecoverySeal = await store.query(
+      `ASK { GRAPH <${meta}> {
+        <${recoverySubject}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root
+      } }`,
+    );
+    expect(leakedRecoverySeal).toMatchObject({ type: 'boolean', value: false });
     await publisher.assertionWrite(CG, NAME, AGENT, [
       q('urn:e:new-version', SCHEMA, '"Version two"'),
     ]);

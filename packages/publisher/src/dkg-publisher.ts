@@ -3,7 +3,7 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
@@ -61,6 +61,7 @@ import {
   type OnChainProvenance,
 } from './metadata.js';
 import {
+  resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
   storeWorkspaceOperationPublicQuads,
@@ -5708,16 +5709,14 @@ export class DKGPublisher implements Publisher {
    * lives on a DIFFERENT subject than the lifecycle URN, so the create/discard
    * clean-slates that key on the lifecycle URN don't reach it.
    *
-   * Callers: `assertionDiscard` (drops the seal when a non-published draft is
-   * discarded) and `assertionPullFrom` (re-opens a draft for editing, so the
-   * stale seal must go — it is rebuilt at the next finalize with the same
-   * reservedKaId via assertionCreate's A2 carry-over).
+   * Caller: `assertionDiscard`, when neither durable VM state nor an exact
+   * graph-scoped SWM head still needs a recovery commitment.
    *
    * NOTE (#1116 round 8+): finalize(layer="swm") does NOT pre-clear the seal.
    * The SWM pull resolves scope from the marker-gated promoted member rows —
-   * never `seal.rootEntities` — and `assertionPullFrom` does its own seal
-   * teardown only AFTER validating a non-empty source, which keeps the operation
-   * atomic-on-failure (a failed pull no longer strands a previously-valid seal).
+   * never `seal.rootEntities`. Pull-from archives the last finalized seal under
+   * a recovery-only subject before clearing the active draft seal, so editing is
+   * still enabled without letting a crash or discard strand durable SWM/VM data.
    */
   async clearAssertionSeal(
     contextGraphId: string,
@@ -5725,14 +5724,160 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     subGraphName?: string,
   ): Promise<void> {
-    const metaGraph = contextGraphMetaUri(contextGraphId);
+    await this.clearActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
+    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = this.assertionRecoverySealSubject(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+    );
+    for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
+      await this.store.deleteByPattern({ graph: recoveryGraph, subject: recoverySubject, predicate });
+    }
+  }
+
+  private assertionRecoverySealGraph(
+    contextGraphId: string,
+    subGraphName?: string,
+  ): string {
+    return subGraphName
+      ? contextGraphSubGraphPrivateUri(contextGraphId, subGraphName)
+      : contextGraphPrivateUri(contextGraphId);
+  }
+
+  private assertionRecoverySealSubject(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): string {
+    return `${contextGraphAssertionUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    )}/_recovery_seal`;
+  }
+
+  private async activeAssertionSealSubjects(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): Promise<string[]> {
     const nameKeyed = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    const wmGraph = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
-    for (const sealSubj of new Set([nameKeyed, wmGraph])) {
-      for (const pred of Object.values(ASSERTION_SEAL_PREDICATES)) {
-        await this.store.deleteByPattern({ graph: metaGraph, subject: sealSubj, predicate: pred });
+    const currentWmGraph = await this.wmGraphUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
+    return [...new Set([nameKeyed, currentWmGraph])];
+  }
+
+  private async clearActiveAssertionSeal(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): Promise<void> {
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    for (const subject of await this.activeAssertionSealSubjects(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+    )) {
+      for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
+        await this.store.deleteByPattern({ graph: metaGraph, subject, predicate });
       }
     }
+  }
+
+  private async loadAssertionSeals(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): Promise<Array<{ seal: AssertionSeal; subject: string; quads: Quad[] }>> {
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = this.assertionRecoverySealSubject(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+    );
+    const candidates: Array<{ subject: string; graph: string }> = [
+      ...(await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName))
+        .map((subject) => ({ subject, graph: metaGraph })),
+      { subject: recoverySubject, graph: recoveryGraph },
+    ];
+    const loaded: Array<{ seal: AssertionSeal; subject: string; quads: Quad[] }> = [];
+    const seen = new Set<string>();
+    for (const { subject, graph } of candidates) {
+      const key = `${graph}\0${subject}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const result = await this.store.query(
+        `CONSTRUCT { <${subject}> ?p ?o } WHERE {
+          GRAPH <${graph}> { <${subject}> ?p ?o }
+        }`,
+      );
+      const quads = result.type === 'quads' ? result.quads : [];
+      try {
+        const seal = parseAssertionSealQuads(quads, subject);
+        if (seal) loaded.push({ seal, subject, quads });
+      } catch {
+        // A complete recovery archive may coexist with a torn active-seal
+        // deletion after a crash. Ignore only the unusable candidate; the
+        // source payload is still verified against whichever complete seal wins.
+      }
+    }
+    return loaded;
+  }
+
+  private async loadAssertionSeal(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): Promise<{ seal: AssertionSeal; subject: string; quads: Quad[] } | undefined> {
+    return (await this.loadAssertionSeals(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+    ))[0];
+  }
+
+  /** Copy a verified active seal to a recovery-only subject before unlocking WM. */
+  private async archiveAssertionSeal(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    loaded: { seal: AssertionSeal; subject: string; quads: Quad[] },
+    subGraphName?: string,
+  ): Promise<Quad[]> {
+    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = this.assertionRecoverySealSubject(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+    );
+    const sealPredicates = new Set<string>(Object.values(ASSERTION_SEAL_PREDICATES));
+    const recoveryQuads = loaded.quads
+      .filter((quad) => sealPredicates.has(quad.predicate))
+      .map((quad) => ({ ...quad, subject: recoverySubject, graph: recoveryGraph }));
+    if (loaded.subject !== recoverySubject) {
+      for (const predicate of sealPredicates) {
+        await this.store.deleteByPattern({ graph: recoveryGraph, subject: recoverySubject, predicate });
+      }
+      await this.store.insert(recoveryQuads);
+    }
+    return recoveryQuads;
   }
 
   // ── Working Memory Assertion Operations (spec §6) ───────────────────
@@ -6523,30 +6668,14 @@ export class DKGPublisher implements Publisher {
   }> {
     const subGraphName = opts?.subGraphName;
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
-    const metaGraph = contextGraphMetaUri(contextGraphId);
     const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    const currentWmGraph = await this.wmGraphUri(
+    const loadedSeal = await this.loadAssertionSeal(
       contextGraphId,
-      agentAddress,
       name,
+      agentAddress,
       subGraphName,
     );
-    const candidateSealSubjects = currentWmGraph === sealSubject
-      ? [sealSubject]
-      : [sealSubject, currentWmGraph];
-    let seal: AssertionSeal | undefined;
-    for (const candidate of candidateSealSubjects) {
-      const sealResult = await this.store.query(
-        `CONSTRUCT { <${candidate}> ?p ?o } WHERE {
-          GRAPH <${metaGraph}> { <${candidate}> ?p ?o }
-        }`,
-      );
-      seal = parseAssertionSealQuads(
-        sealResult.type === 'quads' ? sealResult.quads : [],
-        candidate,
-      );
-      if (seal) break;
-    }
+    const seal = loadedSeal?.seal;
     if (!seal) {
       throw Object.assign(
         new Error(
@@ -6621,6 +6750,20 @@ export class DKGPublisher implements Publisher {
       `${sourceLayer}-memory`,
     );
 
+    // Archive the verified recovery commitment before unlocking the active
+    // draft seal. Finalization must see no active seal so a sanctioned edit can
+    // create the next assertion version, while pull/discard recovery can still
+    // verify the last durable SWM/VM copy after a crash.
+    if (!loadedSeal) throw new Error('Assertion seal disappeared during pull-from');
+    await this.archiveAssertionSeal(
+      contextGraphId,
+      name,
+      agentAddress,
+      loadedSeal,
+      subGraphName,
+    );
+    await this.clearActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
+
     // The complete source has been validated. Only now is replace allowed to
     // remove a dirty public or private draft.
     if (hasDraft) {
@@ -6633,7 +6776,6 @@ export class DKGPublisher implements Publisher {
       );
     }
     await this.assertionCreate(contextGraphId, name, agentAddress, subGraphName);
-    await this.clearAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
     // The source was already canonicalized and seal-verified. Re-materialize it
     // through the internal exact-graph primitive: public assertionWrite rightly
     // rejects protocol-owned c14n skolem IRIs as user input.
@@ -7255,6 +7397,42 @@ export class DKGPublisher implements Publisher {
       `ASK { GRAPH <${cgMetaGraphForDiscard}> { <${lifecycleSubject}> <${VM_CURRENT_ASSERTION_PRED}> ?vm } }`,
     );
     const hasVmVersion = vmPointerRes.type === 'boolean' && vmPointerRes.value === true;
+    let preserveSwmRecoverySeal = false;
+    if (!hasVmVersion) {
+      const loadedSeals = await this.loadAssertionSeals(
+        contextGraphId,
+        name,
+        agentAddress,
+        subGraphName,
+      );
+      for (const loadedSeal of loadedSeals) {
+        const seal = loadedSeal.seal;
+        if (
+          seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+          || !seal.kaUal
+          || !seal.assertionVersion
+        ) continue;
+        const head = await resolveKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          kaUal: seal.kaUal,
+          subGraphName,
+        });
+        preserveSwmRecoverySeal = head?.kaUal === seal.kaUal
+          && head.assertionVersion === seal.assertionVersion;
+        if (preserveSwmRecoverySeal) {
+          await this.archiveAssertionSeal(
+            contextGraphId,
+            name,
+            agentAddress,
+            loadedSeal,
+            subGraphName,
+          );
+          break;
+        }
+      }
+    }
     if (hasVmVersion) {
       const DKG_STATE_PRED = 'http://dkg.io/ontology/state';
       const PROV_INVALIDATED = 'http://www.w3.org/ns/prov#wasInvalidatedBy';
@@ -7301,16 +7479,16 @@ export class DKGPublisher implements Publisher {
     if (!hasVmVersion) {
       await this.store.deleteByPattern({ graph: metaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
       await this.store.deleteByPattern({ graph: metaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
-      // #1116 (round 7) — CLEAR the assertion SEAL too, via the single
-      // `clearAssertionSeal` helper (one source of truth for the seal
-      // subject/predicate set — a critical lifecycle invariant). The seal is keyed
-      // by the name-keyed assertion URI / numbered WM URI, a DIFFERENT subject than
-      // the lifecycle URN the `_meta` cleanup above deletes — so a seal from a prior
-      // FULL share would SURVIVE discard and, since pull-from reads
-      // `seal.rootEntities` first, drive a discard → recreate → re-share →
-      // seal-in-SWM reconstruction from the STALE roots. A discarded
-      // (non-published) asset must leave NO seal.
-      await this.clearAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
+    }
+    // A never-shared draft has no durable source and must lose its seal. An
+    // exact graph-scoped SWM head, however, is immutable recovery state just
+    // like VM: retain its matching v2 seal so a later pull can reopen it.
+    if (!hasVmVersion) {
+      if (preserveSwmRecoverySeal) {
+        await this.clearActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
+      } else {
+        await this.clearAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
+      }
     }
     await this.dropAssertionScopedGraphs(graphUri);
     await this.privateStore.deleteKnowledgeAssetPrivateDraft(

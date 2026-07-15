@@ -450,7 +450,7 @@ export function registerAssertionTools(
         // CONTRACT §C: scheme_version is a POSITIVE integer (daemon >= 1) — zod
         // rejects 0 / negative / non-integer at the boundary as a tool error.
         schemeVersion: z.number().int().positive().optional().describe('Optional attestation scheme version (positive integer)'),
-        layer: z.never().optional().describe('Retired: only Working Memory finalization is supported.'),
+        layer: z.literal('wm').optional().describe('Deprecated compatibility alias; only Working Memory finalization is supported.'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
       },
@@ -502,8 +502,8 @@ export function registerAssertionTools(
         'EXPLICITLY first (the default seal cannot carry them).',
       inputSchema: {
         name: z.string().describe('Existing knowledge asset name'),
-        entities: z.never().optional().describe('Retired: Knowledge Assets are shared atomically.'),
-        skipSeal: z.never().optional().describe('Retired: Knowledge Assets are always sealed before sharing.'),
+        entities: z.literal('all').optional().describe('Deprecated compatibility sentinel; the complete Knowledge Asset is always shared.'),
+        skipSeal: z.literal(false).optional().describe('Deprecated compatibility sentinel; Knowledge Assets are always sealed before sharing.'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
       },

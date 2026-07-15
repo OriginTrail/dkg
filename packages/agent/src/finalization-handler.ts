@@ -958,8 +958,28 @@ export class FinalizationHandler {
         // A confirmed publish may have committed the exact VM graph and drained
         // SWM before the named lifecycle/receipt write survived a crash. Chain
         // binding plus the exact graph's seal root is sufficient immutable proof;
-        // recovery may repair metadata without requiring the consumed SWM copy.
-        this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repairing metadata only`);
+        // repair the metadata through the same idempotent materialization path.
+        // Passing the verified VM payload back through the atomic replace is safe
+        // and avoids a second, subtly different metadata writer.
+        const outcome = await this.applyVerifiedGraphScopedFinalization({
+          contextGraphId,
+          scope,
+          swmQuads: vmQuads,
+          head,
+          privateMerkleRoot,
+          computedMerkleRoot: computedVmMerkleRoot,
+          publisherAddress,
+          txHash: '',
+          blockNumber: versionBlock,
+          batchId: kaId,
+          authorAddress,
+          materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+          subGraphName,
+          source: 'chain-reconcile',
+          ctx,
+        });
+        if (outcome === 'stale') return 'stale-target';
+        this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repaired metadata`);
         return 'already-confirmed';
       }
     }

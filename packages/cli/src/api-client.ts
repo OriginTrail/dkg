@@ -724,7 +724,9 @@ export class ApiClient {
         { code: 'LEGACY_KA_READ_ONLY' },
       );
     }
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...(options ?? {}) });
+    const wireOptions = { ...(options ?? {}) };
+    delete wireOptions.layer;
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...wireOptions });
   }
 
   /** Discard the WM draft. */

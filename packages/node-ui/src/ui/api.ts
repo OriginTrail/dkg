@@ -1396,7 +1396,7 @@ export async function listAssertions(
 export const promoteAssertion = (
   contextGraphId: string,
   assertionName: string,
-  optionsOrLegacyEntities: { subGraphName?: string } | string | string[] = {},
+  optionsOrLegacyEntities: { subGraphName?: string } | string | string[] | undefined = {},
   legacySubGraphName?: string,
 ) => {
   if (Array.isArray(optionsOrLegacyEntities)) {
@@ -1412,7 +1412,7 @@ export const promoteAssertion = (
   const subGraphName =
     typeof optionsOrLegacyEntities === 'string'
       ? legacySubGraphName
-      : optionsOrLegacyEntities.subGraphName;
+      : optionsOrLegacyEntities?.subGraphName ?? legacySubGraphName;
   return post<{ promotedCount: number; sealed: boolean; publishReady: boolean }>(
     `/api/knowledge-assets/${encodeURIComponent(assertionName)}/swm/share`,
     {

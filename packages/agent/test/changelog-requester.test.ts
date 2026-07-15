@@ -15,13 +15,15 @@ const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: '
 /**
  * Build records + the verify maps planPageApply consumes. Each spec is a graph with `count`
  * parsed quads of which `verified` survived; a meta graph is added to metaGraphsWithRoot
- * unless `noRoot` (a rootless meta cannot bind data).
+ * unless `noRoot` (a rootless meta cannot bind data), and to integrityMetaGraphs unless
+ * explicitly marked as plain configuration.
  */
-function buildPage(specs: Array<{ seq: number; graph: string; op?: 'upsert' | 'drop'; count?: number; verified?: number; noRoot?: boolean }>) {
+function buildPage(specs: Array<{ seq: number; graph: string; op?: 'upsert' | 'drop'; count?: number; verified?: number; noRoot?: boolean; noIntegrity?: boolean }>) {
   const records: ChangelogDeltaRecord[] = [];
   const verifiedByGraph = new Map<string, Quad[]>();
   const recordQuadCountByGraph = new Map<string, number>();
   const metaGraphsWithRoot = new Set<string>();
+  const integrityMetaGraphs = new Set<string>();
   for (const s of specs) {
     const op = s.op ?? 'upsert';
     if (op === 'drop') { records.push({ seq: s.seq, graph: s.graph, op }); continue; }
@@ -31,8 +33,9 @@ function buildPage(specs: Array<{ seq: number; graph: string; op?: 'upsert' | 'd
     recordQuadCountByGraph.set(s.graph, count);
     verifiedByGraph.set(s.graph, Array.from({ length: verified }, (_, i) => qd(s.graph, i)));
     if (s.graph.endsWith('/_meta') && !s.noRoot) metaGraphsWithRoot.add(s.graph);
+    if (s.graph.endsWith('/_meta') && !s.noIntegrity) integrityMetaGraphs.add(s.graph);
   }
-  return { records, verifiedByGraph, recordQuadCountByGraph, metaGraphsWithRoot };
+  return { records, verifiedByGraph, recordQuadCountByGraph, metaGraphsWithRoot, integrityMetaGraphs };
 }
 
 const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; priorSeq?: number; isForeign?: (g: string) => boolean; batchClean?: boolean; merkleBoundDataGraphs?: Set<string> }) =>
@@ -44,6 +47,7 @@ const plan = (page: ReturnType<typeof buildPage>, extra: { nextSeq: number; prio
     verifiedByGraph: page.verifiedByGraph,
     recordQuadCountByGraph: page.recordQuadCountByGraph,
     metaGraphsWithRoot: page.metaGraphsWithRoot,
+    integrityMetaGraphs: page.integrityMetaGraphs,
     merkleBoundDataGraphs: extra.merkleBoundDataGraphs ?? new Set(),
     batchVerifiedCleanly: extra.batchClean ?? true,
   });
@@ -90,6 +94,17 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.deferred).toBe(true);
     expect(p.ops).toEqual([]);
     expect(p.advanceTo).toBe(1);
+  });
+
+  it('does not acknowledge rejected V2 metadata when its merkle root is missing', () => {
+    const topMeta = 'did:dkg:context-graph:cg/_meta';
+    const page = buildPage([
+      { seq: 7, graph: topMeta, count: 4, verified: 1, noRoot: true },
+    ]);
+    const p = plan(page, { nextSeq: 7, priorSeq: 6, batchClean: false });
+    expect(p.deferred).toBe(true);
+    expect(p.ops).toEqual([]);
+    expect(p.advanceTo).toBe(6);
   });
 
   it('accepts a rootless exact graph bound by verified top-level V2 metadata', () => {

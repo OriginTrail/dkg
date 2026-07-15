@@ -47,6 +47,8 @@ export function planPageApply(params: {
   recordQuadCountByGraph: Map<string, number>;
   /** Legacy sibling meta-graph URIs present in-page that carry a `dkg:merkleRoot`. */
   metaGraphsWithRoot: Set<string>;
+  /** Meta graphs containing V2 integrity fields that must never be partially acknowledged. */
+  integrityMetaGraphs: Set<string>;
   /** Exact V2 assertion graphs bound by verified graph-scoped metadata in THIS page. */
   merkleBoundDataGraphs: Set<string>;
   /** processDurableBatch rejected nothing this page (rejectedKcs===0 && dataRejectedMissingMeta===0). */
@@ -87,12 +89,15 @@ export function planPageApply(params: {
     if (rec.graph.endsWith('/_meta')) {
       const parsedCount = params.recordQuadCountByGraph.get(rec.graph) ?? 0;
       const verifiedCount = params.verifiedByGraph.get(rec.graph)?.length ?? 0;
-      // A merkle-bearing metadata snapshot is shared by every KA in the CG.
+      // An integrity-bearing metadata snapshot is shared by every KA in the CG.
       // Never REPLACE it with the verifier's partial subset: that would erase
-      // rejected KA metadata and then advance beyond it. Plain CG config
-      // metadata (no merkle roots) retains the established trusted-anchor path.
+      // rejected KA metadata and then advance beyond it. This includes malformed
+      // V2 rows whose contentScopeVersion/identity envelope survived parsing but
+      // whose merkleRoot is absent: the verifier rejects those rows, so keying
+      // this guard only on merkleRoot would silently acknowledge the rejection.
+      // Plain CG config metadata retains the established trusted-anchor path.
       if (
-        params.metaGraphsWithRoot.has(rec.graph)
+        params.integrityMetaGraphs.has(rec.graph)
         && (!params.batchVerifiedCleanly || verifiedCount !== parsedCount)
       ) {
         deferred = true;

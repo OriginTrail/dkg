@@ -606,6 +606,13 @@ describe('UI API tests', () => {
       });
 
       requestLog.length = 0;
+      await promoteAssertion('cg-1', 'legacy-undefined', undefined, 'sg-placeholder');
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg-placeholder',
+      });
+
+      requestLog.length = 0;
       expect(() => promoteAssertion('cg-1', 'asset', ['urn:root'])).toThrow(
         'root-entity selection is not supported',
       );

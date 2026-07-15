@@ -312,6 +312,53 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(0);
   });
 
+  it('repairs rootless metadata after VM content committed but metadata did not', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const swmResult = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    );
+    if (swmResult.type !== 'quads') throw new Error('expected staged SWM quads');
+    await store.dropGraph(vmGraph);
+    await store.insert(swmResult.quads.map((quad) => ({ ...quad, graph: vmGraph })));
+    await store.dropGraph(swmGraph);
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await store.deleteByPattern({ graph: metaGraph, subject: UAL });
+
+    const internals = handler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for VM metadata recovery');
+    };
+
+    const outcome = await handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'));
+
+    expect(outcome).toBe('already-confirmed');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    const repaired = await store.query(
+      `ASK { GRAPH <${metaGraph}> {
+        <${UAL}> <http://dkg.io/ontology/contentScopeVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+          <http://dkg.io/ontology/assertionVersion> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+          <http://dkg.io/ontology/assertionGraph> <${vmGraph}> ;
+          <http://dkg.io/ontology/status> "confirmed" ;
+          <http://dkg.io/ontology/materializedVersion> "123:0" .
+      } }`,
+    );
+    expect(repaired).toMatchObject({ type: 'boolean', value: true });
+  });
+
   it('does not let an older confirmed assertion mask reconciliation of a newer chain root', async () => {
     const first = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(first.message), CG);

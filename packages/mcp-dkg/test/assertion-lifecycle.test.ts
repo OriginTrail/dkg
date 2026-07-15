@@ -337,7 +337,7 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     })).rejects.toThrow();
   });
 
-  it('share rejects the retired "all" sentinel instead of widening scope silently', async () => {
+  it('share accepts harmless legacy defaults and omits them from the client call', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
       knowledgeAssetShare: async (args) => {
@@ -348,10 +348,15 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
 
-    await expect(
-      localServer.call('dkg_knowledge_asset_share', { name: 'doc', entities: 'all' }),
-    ).rejects.toThrow();
-    expect(captured).toEqual({});
+    const result = await localServer.call('dkg_knowledge_asset_share', {
+      name: 'doc',
+      entities: 'all',
+      skipSeal: false,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(captured).toMatchObject({ name: 'doc', contextGraphId: 'test-cg' });
+    expect(captured).not.toHaveProperty('entities');
+    expect(captured).not.toHaveProperty('skipSeal');
   });
 
   it('share rejects root-selection arrays before invoking the client', async () => {
@@ -817,7 +822,27 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(res.content[0].text).toMatch(/Failed to share knowledge asset/);
   });
 
-  it('finalize rejects the retired layer field before invoking the client', async () => {
+  it('finalize accepts the harmless legacy WM layer and omits it from the client call', async () => {
+    const captured: Record<string, unknown> = {};
+    const localClient = new FakeClient({
+      knowledgeAssetFinalize: async (args) => {
+        Object.assign(captured, args);
+        return { merkleRoot: '0xroot', eip712Digest: '0xdig', authorAddress: '0xtoken' };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_knowledge_asset_finalize', {
+      name: 'doc',
+      layer: 'wm',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(captured).toMatchObject({ name: 'doc', contextGraphId: 'test-cg' });
+    expect(captured).not.toHaveProperty('layer');
+  });
+
+  it('finalize rejects the retired SWM layer before invoking the client', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
       knowledgeAssetFinalize: async (args) => {
