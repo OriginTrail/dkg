@@ -171,6 +171,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     return new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++now,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
       chainRecoveryResolver:
         options.recoveryResult === undefined ? undefined : async () => options.recoveryResult ?? null,
       ...options.config,
@@ -235,6 +236,18 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     expect(job?.retries.maxRetries).toBe(10);
+  });
+
+  it('rejects new raw-root lift jobs unless an explicit migration capability is supplied', async () => {
+    const runtimePublisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => ++now,
+      idGenerator: () => `runtime-job-${++ids}`,
+    });
+
+    await expect(runtimePublisher.lift(request())).rejects.toMatchObject({
+      code: 'LEGACY_KA_READ_ONLY',
+    });
+    await expect(runtimePublisher.list()).resolves.toEqual([]);
   });
 
   it('normalizes and processes legacy persisted raw lift job payloads', async () => {
@@ -1709,6 +1722,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++now,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
       chainRecoveryResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
     });
@@ -1754,6 +1768,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++now,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
       chainRecoveryResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
     });

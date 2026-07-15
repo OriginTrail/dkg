@@ -10,7 +10,6 @@ import type {
   LiftJobValidationMetadata,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
-  RawLiftRequest,
 } from './lift-job.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
@@ -31,7 +30,6 @@ export class AsyncLiftJobConflictError extends Error {
 }
 
 export interface AsyncLiftPublisher {
-  lift(request: RawLiftRequest): Promise<string>;
   enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
@@ -151,4 +149,12 @@ export interface AsyncLiftPublisherConfig {
   ) => Promise<void>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /**
+   * Explicit escape hatch for offline migration tooling and legacy-queue tests.
+   * Runtime nodes must leave this unset: legacy root-scoped KAs are read-only,
+   * and every new async write must use enqueueKnowledgeAssetVmPublish().
+   *
+   * @internal
+   */
+  legacyRawLiftWriteCapability?: 'migration-only';
 }

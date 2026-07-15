@@ -170,6 +170,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
+  private readonly legacyRawLiftWriteEnabled: boolean;
   private readonly graphManager: GraphManager;
   private paused = false;
   private graphEnsured = false;
@@ -219,10 +220,21 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.legacyRawLiftWriteEnabled = config.legacyRawLiftWriteCapability === 'migration-only';
     this.graphManager = new GraphManager(store);
   }
 
+  /**
+   * Restore a legacy raw-root queue item for an offline migration or a
+   * compatibility test. Normal runtime instances reject this operation.
+   * New Knowledge Assets must use enqueueKnowledgeAssetVmPublish().
+   *
+   * @deprecated Legacy root-scoped Knowledge Assets are read-only.
+   */
   async lift(request: RawLiftRequest): Promise<string> {
+    if (!this.legacyRawLiftWriteEnabled) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
     await this.ensureGraph();
 
     const now = this.now();

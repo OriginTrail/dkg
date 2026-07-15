@@ -140,8 +140,8 @@ import {
   // OT-RFC-43 A2 — per-layer pointer + KA-id predicates and stamp helpers.
   KA_ID_PRED, RESERVED_UAL_PRED,
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest,
+  type CollectedACK,
+  type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
   type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type WorkspaceAgentRecipient,
@@ -382,7 +382,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  signWithPrivateKey,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -1251,177 +1250,6 @@ export class PublishMethods extends DKGAgentBase {
     });
     const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     return { captureID };
-  }
-
-  /** Build the EIP-712 author seal for the lift request. Runs the same
-   *  canonicalization + subtraction pipeline as the publisher so the
-   *  merkle matches at processNext-time. Returns undefined on non-V10 chains. */
-  async buildAsyncLiftSeal(this: DKGAgent,
-    request: {
-      readonly contextGraphId: string;
-      readonly subGraphName?: string;
-      readonly shareOperationId: string;
-      readonly roots: readonly string[];
-      readonly namespace: string;
-      readonly scope: string;
-      readonly transitionType: LiftTransitionType;
-      readonly authority: LiftAuthorityProof;
-      readonly priorVersion?: string;
-      readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-      readonly allowedPeers?: readonly string[];
-      readonly swmId: string;
-    },
-    authorAgentAddress?: string,
-    authorSignTypedData?: (typedData: AuthorAttestationTypedData) => Promise<{ r: Uint8Array; vs: Uint8Array }>,
-  ): Promise<LiftRequestAuthorSeal | undefined> {
-    // OT-RFC-43 §F2 — build the EIP-712 AuthorAttestation seal for an async lift,
-    // ALLOCATING the packed reservedKaId before signing so the digest binds the
-    // exact id the on-chain mint will `_safeMint` (the publisher reuses it via
-    // `precomputedAttestation.reservedKaId`, never re-allocating). Returns
-    // `undefined` — leaving the lift sealless (WM/SWM only, no on-chain VM
-    // anchor) — whenever a valid Option-1 id can't be produced: a non-V10 chain,
-    // a context graph that isn't on-chain yet, a full-overlap noop, no resolvable
-    // author/signer, or no configured allocator. EPCIS/Kafka and other direct
-    // async-capture writers go through here; the graceful-sealless fallback keeps
-    // them publishing on non-V10 / off-chain deployments exactly as before.
-    if (this.chain.isV10Ready?.() !== true) return undefined;
-    if (typeof this.chain.getEvmChainId !== 'function') return undefined;
-    if (typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
-
-    const onChainId = await this.getContextGraphOnChainId(request.contextGraphId);
-    if (onChainId == null) return undefined; // CG not on-chain — publisher goes tentative
-
-
-    const chainId = await this.chain.getEvmChainId();
-    const kav10Address = await this.chain.getKnowledgeAssetsLifecycleAddress();
-    if (chainId === undefined || kav10Address === undefined) return undefined;
-
-    const graphManager = new GraphManager(this.store);
-    const resolved = await resolveLiftWorkspaceSlice({
-      request,
-      store: this.store,
-      graphManager,
-      publicSnapshotStore: this.publicSnapshotStore,
-    });
-
-    // Rewrite raw root URIs (urn:uuid:…) → canonical (dkg:cg:ns:scope/…-hash).
-    const validated = validateLiftPublishPayload({
-      request: { ...request, authority: request.authority } as LiftRequest,
-      resolved,
-    });
-
-    // Strip already-finalized quads (no-op for non-CREATE). Matches publisher.
-    // KNOWN EDGE (OT-RFC-43 §F2 follow-up): the merkle below is computed over this
-    // subtracted slice and frozen into the seal, but the publisher RE-subtracts
-    // against live confirmed state at processNext. If an overlapping public quad
-    // under the same root is *confirmed* in the enqueue→process gap (only possible
-    // for a pure-public CREATE re-capture of a caller-stable root), the merkles
-    // diverge and the publisher's seal-integrity preflight fails the lift terminally
-    // (confirmation_mismatch) BEFORE any chain submit — no consensus impact, WM/SWM
-    // data persists, the capture just loses its on-chain anchor and leaks one
-    // (gap-tolerated) reservedKaId. Fresh-IRI captures never overlap, and private
-    // captures take the tentative path without reaching the preflight, so this is a
-    // rare corner; a re-seal-at-processNext robustness pass is a tracked follow-up.
-    const subtracted = await subtractFinalizedExactQuads({
-      store: this.store,
-      graphManager,
-      request: { ...request, authority: request.authority } as LiftRequest,
-      validation: validated.validation,
-      resolved: validated.resolved,
-    });
-
-    // Full overlap → publisher returns noop without checking the seal.
-    if (
-      subtracted.resolved.quads.length === 0 &&
-      (subtracted.resolved.privateQuads?.length ?? 0) === 0
-    ) {
-      return undefined;
-    }
-
-    const canonical = canonicalPublishPayload(
-      subtracted.resolved.quads,
-      subtracted.resolved.privateQuads ?? [],
-      (await this.isPrivateContextGraph(request.contextGraphId))
-        ? { trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(request.contextGraphId) }
-        : undefined,
-    );
-
-    // Resolve author: callback → custodial keystore → publisher fallback. User-input pre-validated in publishAsync entry.
-    let authorAddress: string;
-    let signerPrivateKey: string | undefined;
-    if (authorSignTypedData !== undefined) {
-      authorAddress = authorAgentAddress as string;
-    } else if (authorAgentAddress != null) {
-      signerPrivateKey = this.getCustodialAgentPrivateKey(authorAgentAddress);
-      if (!signerPrivateKey) return undefined;
-      authorAddress = authorAgentAddress;
-    } else {
-      const fallback = await this.publisher.publisherFallbackAuthorAddress();
-      if (!fallback) return undefined;
-      authorAddress = fallback;
-    }
-
-    // OT-RFC-43 §F2 — ALLOCATE-BEFORE-SIGN. The AuthorAttestation digest binds the
-    // packed reservedKaId, so resolve it before buildAuthorAttestationTypedData.
-    // Async captures are FRESH KAs (no lifecycle name, no stable slot to reuse), so
-    // this is always a fresh allocation in the resolved author's namespace, via the
-    // SAME reconcile-once-then-allocate helper as create/finalize — keeping the
-    // off-chain number sequence single-sourced (the agent is the sole allocation
-    // point; the publisher reuses this id verbatim). Allocation happens AFTER the
-    // full-overlap noop short-circuit above, so a noop lift never burns a number.
-    // No allocator (mock / non-Option-1 daemon) ⇒ sealless fallback rather than a
-    // 0n placeholder the mint would reject. A reconcile/allocate failure (e.g. a
-    // flaky chain oracle) also falls back to sealless + a warning: the capture
-    // still lands in WM/SWM and the on-chain anchor is simply not minted, instead
-    // of rejecting the whole publishAsync and orphaning the staged write.
-    if (!this.kaNumberAllocator) return undefined;
-    let reservedKaId: bigint;
-    try {
-      const { number } = await reconcileAndAllocateKaNumber(
-        this.kaNumberAllocator,
-        this.chain,
-        this.reconciledKaAuthors,
-        authorAddress,
-      );
-      reservedKaId = (BigInt(ethers.getAddress(authorAddress)) << 96n) | number;
-    } catch (err) {
-      this.log.warn(
-        createOperationContext('publish'),
-        `Async-lift seal allocation failed for author ${authorAddress}; lift stays sealless ` +
-          `(WM/SWM committed, on-chain VM anchor deferred): ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-      return undefined;
-    }
-
-    const typedData = buildAuthorAttestationTypedData({
-      chainId,
-      kav10Address,
-      merkleRoot: canonical.kcMerkleRoot,
-      authorAddress,
-      reservedKaId,
-      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
-    });
-
-    const { r, vs } = await (
-      authorSignTypedData !== undefined
-        ? authorSignTypedData(typedData)
-        : signerPrivateKey
-          ? signWithPrivateKey(signerPrivateKey, typedData)
-          : this.publisher.signAuthorAttestationAsPublisher(typedData)
-    );
-
-    return {
-      merkleRoot: ethers.hexlify(canonical.kcMerkleRoot) as `0x${string}`,
-      authorAddress: authorAddress as `0x${string}`,
-      signature: {
-        r: ethers.hexlify(r) as `0x${string}`,
-        vs: ethers.hexlify(vs) as `0x${string}`,
-      },
-      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
-      // Persist the signed packed id so the deferred-broadcast mint reuses it.
-      reservedKaId: `${reservedKaId}` as `${bigint}`,
-    };
   }
 
   async _publish(this: DKGAgent,

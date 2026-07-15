@@ -25,6 +25,7 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
+  TripleStoreAsyncLiftPublisher,
   isFailClosedInlineEncrypt,
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
@@ -90,7 +91,9 @@ describe('publisher runner — private (non-public) inline-encryption callback h
         }),
       });
 
-      const jobId = await runtime.publisher.lift({
+      const jobId = await new TripleStoreAsyncLiftPublisher(store, {
+        legacyRawLiftWriteCapability: 'migration-only',
+      }).lift({
         swmId: 'swm-main',
         shareOperationId: write.shareOperationId,
         roots: ['urn:local:/rihana'],

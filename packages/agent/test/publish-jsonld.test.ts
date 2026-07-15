@@ -393,7 +393,7 @@ describe('publishJsonLd', () => {
     )).toBe(true);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  // OT-RFC-43 §F2 — the async-lift seal now allocates + binds the per-author
+  // The graph-scoped async queue seal allocates + binds the per-author
   // reservedKaId, so the on-chain mint accepts it (no KaIdNamespaceMismatch) and
   // KC.author resolves to the custodial agent rather than the publisher EOA.
   it('E2E: async publish with custodial authorAgentAddress lands on-chain with KC.author == that agent', async () => {
@@ -451,7 +451,7 @@ describe('publishJsonLd', () => {
     expect(onChainAuthor.toLowerCase()).not.toBe(publisherAddress.toLowerCase());
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  // OT-RFC-43 §F2 — the async-lift seal binds a per-author reservedKaId; recovery
+  // The graph-scoped async queue seal binds a per-author reservedKaId; recovery
   // rebuilds the digest with that 5th field (read off the persisted seal).
   it('async publish with authorAgentAddress binds the seal to that agent (NOT the publisher\'s wallet)', async () => {
     // Architectural payoff: KC.author is the registered agent, not the publisher's EOA. No private key in the API call.
@@ -568,9 +568,9 @@ describe('publishJsonLd', () => {
     ).rejects.toThrow(/self-sovereign/);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  // OT-RFC-43 §F2 — the async-lift seal is built at enqueue (agent canonicalizes +
+  // The graph-scoped queue seal is built at enqueue (agent canonicalizes +
   // signs over the resolved slice's merkle + the allocated reservedKaId).
-  it('async publish attaches a seal to the LiftRequest with merkleRoot == canonicalPublishPayload(resolved slice)', async () => {
+  it('async publish attaches the canonical merkle root to the queued KA snapshot', async () => {
     // Agent canonicalizes + signs at enqueue → publisher verifies + consumes verbatim. Real provenance, not "publisher said so".
     const { agent, store } = await createAgent('AsyncSealParityBot');
     await agent.createContextGraph({ id: 'async-seal-parity', name: 'AsyncSealParity', description: '' });
@@ -1096,7 +1096,7 @@ describe('publishJsonLd', () => {
     expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish threads opts.entityProofs into LiftRequest.entityProofs', async () => {
+  it('async publish threads opts.entityProofs into the queued KA snapshot', async () => {
     // V10 selective-disclosure flag persists through enqueue.
     const { agent, store } = await createAgent('AsyncEntityProofsBot');
     await agent.createContextGraph({ id: 'async-entity-proofs', name: 'AsyncEntityProofs', description: '' });
@@ -1123,7 +1123,7 @@ describe('publishJsonLd', () => {
     expect(expectQueuedKaRequest(job).entityProofs).toBe(true);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish threads opts.publisherNodeIdentityIdOverride (bigint) into LiftRequest (stringified)', async () => {
+  it('async publish snapshots publisherNodeIdentityIdOverride as a bigint string', async () => {
     // RFC-001 §4 attribution override. BigInt → string for JSON persistence; mapper parses back.
     const { agent, store } = await createAgent('AsyncNodeIdOverrideBot');
     await agent.createContextGraph({ id: 'async-node-id-override', name: 'AsyncNodeIdOverride', description: '' });
@@ -1209,7 +1209,7 @@ describe('publishJsonLd', () => {
     }
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  // OT-RFC-43 §F2 — the async-lift seal's publisher-fallback signer path mirrors
+  // The graph-scoped queue seal's publisher-fallback signer path mirrors
   // sync `assertionFinalize`: both fallback + sign are called WITHOUT a cgId.
   it('async publish does NOT pass cgId to publisher fallback methods (matches sync assertionFinalize behavior)', async () => {
     // Pins sync `assertionFinalize` parity. Threading cgId surfaces a publisher-side

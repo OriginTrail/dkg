@@ -17,6 +17,7 @@ import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg
 import {
   ACKCollector,
   DKGPublisher,
+  TripleStoreAsyncLiftPublisher,
   type ACKCollectorDeps,
   type ACKCollectorParams,
   type ACKTransport,
@@ -149,7 +150,9 @@ describe('publisher runner ACK transport handoff', () => {
         ackTransportFactory,
       });
 
-      const jobId = await runtime.publisher.lift({
+      const jobId = await new TripleStoreAsyncLiftPublisher(store, {
+        legacyRawLiftWriteCapability: 'migration-only',
+      }).lift({
         swmId: 'swm-main',
         shareOperationId: write.shareOperationId,
         roots: ['urn:local:/ack-transport'],

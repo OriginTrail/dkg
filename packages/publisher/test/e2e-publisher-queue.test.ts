@@ -56,6 +56,7 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
     return new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++time,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
       chainRecoveryResolver: opts.recoveryResult === undefined
         ? undefined
         : async () => opts.recoveryResult ?? null,
@@ -213,6 +214,7 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
     const pub = new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++time,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
       publishExecutor: async () => ({
         status: 'confirmed' as const,
         merkleRoot: new Uint8Array(32),
@@ -265,6 +267,7 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
     const pub = new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++time,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
     });
 
     const jobId = await pub.lift(makeLiftRequest());
@@ -282,6 +285,7 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
     const pub = new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++time,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
     });
 
     const jobId = await pub.lift(makeLiftRequest());
@@ -333,6 +337,7 @@ describe('Async Lift Publisher Queue — Recovery', () => {
     return new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++time,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
       chainRecoveryResolver: opts.recoveryResult === undefined
         ? undefined
         : async () => opts.recoveryResult ?? null,

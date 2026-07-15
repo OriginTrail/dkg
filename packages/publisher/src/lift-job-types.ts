@@ -117,10 +117,17 @@ export interface LiftRequestBase extends LiftPublishSnapshotRequest, LiftPublish
   readonly namespace: string;
 }
 
+/**
+ * Persisted V10 root-lift request. Kept only so existing queue records can be
+ * inspected and recovered; runtime enqueue is disabled by default.
+ *
+ * @deprecated Legacy root-scoped Knowledge Assets are read-only.
+ */
 export interface RawLiftRequest extends LiftRequestBase {
   readonly jobType?: 'lift';
 }
 
+/** @deprecated Use KnowledgeAssetVmPublishRequest for all new queue writes. */
 export type LiftRequest = RawLiftRequest;
 
 export interface RawLiftJobRequest {

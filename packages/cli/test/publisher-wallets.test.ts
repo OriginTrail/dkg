@@ -10,7 +10,12 @@ import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
-import { DKGPublisher, type PublishOptions } from '@origintrail-official/dkg-publisher';
+import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
+import {
+  DKGPublisher,
+  TripleStoreAsyncLiftPublisher,
+  type PublishOptions,
+} from '@origintrail-official/dkg-publisher';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, createPublisherWalletChain, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
@@ -255,7 +260,9 @@ describe('publisher wallets', () => {
       },
     });
 
-    const jobId = await runtime.publisher.lift({
+    const jobId = await new TripleStoreAsyncLiftPublisher(store, {
+      legacyRawLiftWriteCapability: 'migration-only',
+    }).lift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],
@@ -317,20 +324,7 @@ describe('publisher wallets', () => {
     await addPublisherWallet(dataDir, wallet.privateKey);
     await expect(createEVMAdapter(wallet.privateKey).getIdentityId()).resolves.toBe(0n);
 
-    const writer = new DKGPublisher({
-      store,
-      chain: new NoChainAdapter(),
-      eventBus: new TypedEventBus(),
-      keypair,
-      publisherPrivateKey: wallet.privateKey,
-    });
-    const share = await writer.share('music-social', [
-      { subject: 'urn:local:/identityless-runtime', predicate: 'http://schema.org/name', object: '"Identityless Runtime"', graph: '' },
-    ], { publisherPeerId: 'peer-identityless' });
-
     const agentChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const sealChainId = await agentChain.getEvmChainId();
-    const sealKav10Address = await agentChain.getKnowledgeAssetsLifecycleAddress();
     agent = await DKGAgent.create({
       name: 'IdentitylessQueuedPublishAgent',
       listenHost: '127.0.0.1',
@@ -338,7 +332,24 @@ describe('publisher wallets', () => {
       bootstrapPeers: [],
       store,
       chainAdapter: agentChain,
+      kaNumberAllocator: makeTestKaNumberAllocator(),
     });
+    await agent.start();
+    await agent.createContextGraph({
+      id: 'music-social',
+      name: 'Identityless queued publish',
+    });
+    await agent.registerContextGraph('music-social');
+    await agent.assertion.create('music-social', 'identityless-runtime');
+    await agent.assertion.write('music-social', 'identityless-runtime', [
+      {
+        subject: 'urn:local:/identityless-runtime',
+        predicate: 'http://schema.org/name',
+        object: '"Identityless Runtime"',
+      },
+    ]);
+    const share = await agent.assertion.promote('music-social', 'identityless-runtime');
+    expect(share.publishReady).toBe(true);
 
     try {
       const publishCalls: PublishOptions[] = [];
@@ -388,29 +399,14 @@ describe('publisher wallets', () => {
 
       expect(runtime.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
 
-      const intent = {
-        contextGraphId: 'music-social',
-        name: 'identityless-runtime',
-        agentAddress: '0x00000000000000000000000000000000000000b2',
-        shareOperationId: share.shareOperationId,
-        roots: ['urn:local:/identityless-runtime'],
-        seal: {
-          merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
-          authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
-          signature: {
-            r: `0x${'34'.repeat(32)}` as `0x${string}`,
-            vs: `0x${'56'.repeat(32)}` as `0x${string}`,
-          },
-          schemeVersion: 1,
-          reservedKaId: '0',
-        },
-        sealChainId: sealChainId.toString() as `${bigint}`,
-        sealKav10Address: sealKav10Address as `0x${string}`,
-        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-        sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
-        publisherNodeIdentityIdOverride: '0',
-        intentKey: `sha256:${'cd'.repeat(32)}`,
-      };
+      const intent = await agent.resolveFinalizedAssertionVmPublishIntent(
+        'music-social',
+        'identityless-runtime',
+        { publisherNodeIdentityIdOverride: 0n },
+      );
+      expect(intent.roots).toEqual([]);
+      expect(intent.contentScopeVersion).toBe(2);
+      expect(intent.shareOperationId).toBe(share.shareOperationId);
 
       const jobId = await runtime.publisher.enqueueKnowledgeAssetVmPublish(intent);
       const processed = await runtime.publisher.processNext(wallet.address);
@@ -423,7 +419,10 @@ describe('publisher wallets', () => {
         publisherPeerId: 'peer-identityless-runtime',
         skipContextGraphEnsure: true,
       });
-      expect(publishCalls[0]?.precomputedAttestation?.reservedKaId).toBe(0n);
+      expect(publishCalls[0]?.publisherNodeIdentityIdOverride).toBe(0n);
+      const reservedKaId = publishCalls[0]?.precomputedAttestation?.reservedKaId;
+      expect(reservedKaId).toBeDefined();
+      expect(reservedKaId! >> 96n).toBe(BigInt(intent.seal.authorAddress));
       expect(publishCalls[0]?.quads).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -621,7 +620,9 @@ describe('publisher wallets', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await inspector.publisher.lift({
+    await new TripleStoreAsyncLiftPublisher(store, {
+      legacyRawLiftWriteCapability: 'migration-only',
+    }).lift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],

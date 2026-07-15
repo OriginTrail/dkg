@@ -33,6 +33,7 @@ describe('TripleStoreAsyncLiftPublisher integration', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: () => ++now,
       idGenerator: () => `job-${++ids}`,
+      legacyRawLiftWriteCapability: 'migration-only',
     });
 
     const acceptedId = await publisher.lift(request('op-1'));
