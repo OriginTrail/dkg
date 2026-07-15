@@ -92,6 +92,9 @@ function assertGraphScopedLiftSnapshot(request: LiftPublishSnapshotRequest): voi
   if (request.roots.length !== 0) {
     throw new Error('Graph-scoped async publish must not contain root entities');
   }
+  if (request.entityProofs === true) {
+    throw new Error('Graph-scoped async publish does not support entityProofs');
+  }
   if (
     request.kaUal === undefined
     || request.assertionVersion === undefined
