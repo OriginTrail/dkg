@@ -63,7 +63,7 @@ import { join } from 'node:path';
 import process from 'node:process';
 import ts from 'typescript';
 
-const SCANNED_EXTENSIONS = /\.(ts|mts|cts|js|mjs|cjs)$/;
+const SCANNED_EXTENSIONS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const EXCLUDED_PATH = /(^|\/)(node_modules|dist|coverage|bench|e2e)\/|(^|\/)test(s)?\/|\.(test|spec|bench)\.[a-z]+$|^docs\/|^scripts\/sparql-scale-lint\.mjs$/;
 
 const RULES = {
@@ -125,12 +125,20 @@ const UNBOUNDED_GRAPH_LITERAL = /(\/_shared_memory|\/_shared_memory_meta|\/_meta
  * own nodes, so SPARQL built inside SPARQL is analyzed too.
  */
 export function extractTemplateLiterals(source, fileName = 'source.ts') {
+  // ScriptKind must match the dialect: parsing .ts as TSX misreads generic
+  // arrows as JSX, and parsing .tsx as TS misreads JSX as comparisons — both
+  // can silently drop template literals from the AST.
+  const scriptKind = /\.(tsx)$/.test(fileName)
+    ? ts.ScriptKind.TSX
+    : /\.(jsx)$/.test(fileName)
+      ? ts.ScriptKind.JSX
+      : ts.ScriptKind.TS;
   const sourceFile = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ true,
-    ts.ScriptKind.TS,
+    scriptKind,
   );
   const literals = [];
   const startLineOf = (node) =>
@@ -360,7 +368,7 @@ function normalizeForFingerprint(text) {
 
 export function scanSource(filePath, source) {
   const findings = [];
-  for (const literal of extractTemplateLiterals(source)) {
+  for (const literal of extractTemplateLiterals(source, filePath)) {
     if (!looksLikeSparql(literal.text)) continue;
     const raw = analyzeQuery(literal.text, literal.exprs);
     if (raw.length === 0) continue;
@@ -388,7 +396,14 @@ export function scanSource(filePath, source) {
 // ---------------------------------------------------------------------------
 
 function git(args, cwd = process.cwd()) {
-  return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, cwd });
+  // Capture stderr: fileAt() probes base versions of ADDED files, and git's
+  // expected "exists on disk, but not in <sha>" must not pollute CI logs.
+  return execFileSync('git', args, {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 function listTrackedSourceFiles() {
@@ -644,6 +659,11 @@ const FIXTURES = [
     expect: [],
   },
   {
+    name: 'generic arrow in .ts parses as TS and the scan still sees the query',
+    source: 'const id = <T>(v: T): T => v;\nconst q = `SELECT ?s WHERE { ?s ?p ?o }`;',
+    expect: ['R1'],
+  },
+  {
     name: 'non-SPARQL template untouched',
     source: 'const msg = `hello ${name}, WHERE were you?`;',
     expect: [],
@@ -713,6 +733,40 @@ function diffGateSelfTest() {
       console.error(`DIFF-GATE FAIL: new shape → ${JSON.stringify(fresh.map((f) => f.verdict))} (want one new)`);
       return false;
     }
+
+    // 4. TSX is scanned too: a React component whose JSX parses only under
+    // ScriptKind.TSX, carrying an R2 shape, must block as a new finding.
+    writeFileSync(
+      join(dir, 'src/View.tsx'),
+      'export function View({ items }: { items: string[] }) {\n' +
+      '  const q = `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }`;\n' +
+      '  return <ul>{items.map((i) => <li key={i}>{i}</li>)}</ul>;\n' +
+      '}\n',
+    );
+    g('add', '-A');
+    g('commit', '-qm', 'tsx-shape');
+    const tsxHead = g('rev-parse', 'HEAD').trim();
+    const tsx = computeDiffFindings(newHead, tsxHead, dir).results
+      .filter((f) => f.file.endsWith('.tsx'));
+    if (tsx.filter((f) => f.verdict === 'new' && f.rule === 'R2').length !== 1) {
+      console.error(`DIFF-GATE FAIL: tsx → ${JSON.stringify(tsx)} (want one new R2)`);
+      return false;
+    }
+
+    // 5. Audit modes validate the scanner before scanning: spawn the real CLI
+    // in --files mode and require the self-test banner ahead of the finding.
+    // (Env guard stops the child's own self-test from re-spawning forever.)
+    if (!process.env.SPARQL_LINT_NO_SPAWN_CHECK) {
+      const out = execFileSync(
+        process.execPath,
+        [process.argv[1], '--files', join(dir, 'src/a.ts')],
+        { encoding: 'utf8', env: { ...process.env, SPARQL_LINT_NO_SPAWN_CHECK: '1' } },
+      );
+      if (!/self-test: .*pass/.test(out) || !out.includes('sparql-scale-lint R1')) {
+        console.error(`DIFF-GATE FAIL: --files did not self-test before scanning:\n${out}`);
+        return false;
+      }
+    }
     return true;
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -763,9 +817,11 @@ if (argv[0] === '--self-test') {
     exitCode = selfTest() || runDiff(baseSha, headSha);
   }
 } else if (argv[0] === '--all') {
-  exitCode = runAll(listTrackedSourceFiles());
+  // Audit findings never fail the run, but a broken SCANNER must: without
+  // this, a bad edit could make manual audits report garbage with exit 0.
+  exitCode = selfTest() || runAll(listTrackedSourceFiles());
 } else if (argv[0] === '--files') {
-  exitCode = runAll(argv.slice(1));
+  exitCode = selfTest() || runAll(argv.slice(1));
 } else {
   console.error('usage: sparql-scale-lint.mjs --diff <base> <head> | --all | --files <paths…> | --self-test');
   exitCode = 2;

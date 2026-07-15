@@ -31,6 +31,9 @@ What deliberately does **not** trigger:
 - `CONSTRUCT`/`INSERT`/`DELETE` **templates** (output, not scan patterns);
 - test/e2e/bench files.
 
+Scanned extensions: `.ts .tsx .mts .cts .js .jsx .mjs .cjs` — UI components
+build SPARQL too (a live example existed in `node-ui` when the gate landed).
+
 ## When the check fails
 
 Restructure the query — exact graph scope, bind at least one term, keyset
@@ -59,9 +62,10 @@ deliberately a diffable code change: allowing a scan is a reviewed decision.
   does not re-flag it, while editing the query re-evaluates it. The baseline
   is a **multiset**: duplicating a grandfathered query adds one more scan and
   blocks as a new finding, even though the copy's text is identical.
-- The scanner self-tests against 27 fixtures (including the exact #1597
+- The scanner self-tests against 28 fixtures (including the exact #1597
   bad/fixed pair) plus a diff-gate integration test on a throwaway git repo
-  (duplicate-copy blocking, reindent grandfathering, new-shape blocking)
+  (duplicate-copy blocking, reindent grandfathering, new-shape blocking, TSX
+  scanning, and a spawned-CLI proof that audit modes self-test first)
   before every CI scan; a broken scanner fails loudly instead of passing
   silently.
 - Source extraction uses the TypeScript compiler API (already a root
@@ -104,8 +108,8 @@ everything.
 
 ## Current debt baseline
 
-At the time this gate landed, the full-tree audit reported ~52 grandfathered
-findings (18 R1, 9 R2, 12 R3, 13 R4) — including the sync responder's
+At the time this gate landed, the full-tree audit reported ~53 grandfathered
+findings (18 R1, 10 R2, 12 R3, 13 R4 — the extra R2 is a `.tsx` UI query) — including the sync responder's
 documented OFFSET fallback and several adapter-level store primitives. They
 stay visible as notices on any PR that touches those files; burn them down
 opportunistically (each either restructures or earns a pragma).
