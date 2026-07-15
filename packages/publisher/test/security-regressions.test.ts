@@ -724,8 +724,10 @@ describe('publisher.update() atomicity', () => {
       quads: [q('urn:atomic', 'http://schema.org/name', '"Original"')],
     });
 
-    // Attempt to update a non-existent batch — V10 catches KnowledgeAssetExpired
-    // as a definitive error and returns status: 'failed' (no throw, no store mutation)
+    // Attempt to update a non-existent batch. The pre-staging owner check
+    // (getKnowledgeAssetOwner -> ownerOf) reverts ERC721NonexistentToken, which
+    // update() maps to status: 'failed' (no throw, no store mutation). Expiry is
+    // a separate submit-time revert — see ka-update-submit-failure.test.ts.
     const failedUpdate = await publisher.update(999n, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:atomic', 'http://schema.org/name', '"Should not appear"')],
