@@ -159,6 +159,15 @@ export const PROTOCOL_STORAGE_ACK_V2 = '/dkg/10.0.2/storage-ack';
 export const PROTOCOL_STORAGE_UPDATE_ACK = '/dkg/10.0.1/storage-update-ack';
 
 /**
+ * Graph-scoped UPDATE StorageACK protocol. V1 update responders interpret
+ * `subGraphName` using the legacy entity-root layout and do not validate the
+ * graph-scoped content envelope. Keep V2 on a distinct capability so a
+ * rootless update can never be acknowledged by a peer that silently ignores
+ * its scope/version fields.
+ */
+export const PROTOCOL_STORAGE_UPDATE_ACK_V2 = '/dkg/10.0.2/storage-update-ack';
+
+/**
  * OT-RFC-38 LU-11 / OT-RFC-39 — point-to-point sync verb for one
  * curated-CG ciphertext chunk identified by (cgId, batchId,
  * chunkIndex). Used by late-joining hosting cores (and any

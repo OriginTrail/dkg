@@ -53,6 +53,7 @@ import { replaceCatalogQuads } from './catalog-persistence.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { validateKnowledgeAssetPublishRequest } from './validation.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -164,8 +165,7 @@ function resolveGraphScopedUpdateIntent(
     || Boolean(intent.assertionVersion)
     || (intent.publicTripleCount ?? 0) > 0
     || privateMerkleRoot !== undefined
-    || (intent.privateTripleCount ?? 0) > 0
-    || Boolean(intent.subGraphName);
+    || (intent.privateTripleCount ?? 0) > 0;
   if (!hasGraphField) return undefined;
   if (intent.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
     throw new Error(
@@ -1990,6 +1990,20 @@ export class StorageACKHandler {
             `intent=${graphUpdate.publicTripleCount}, local=${publicQuads.length}`,
         );
       }
+      const validation = validateKnowledgeAssetPublishRequest(
+        inlineByteLength === undefined
+          ? publicQuads.map((quad) => ({ ...quad, graph: swmGraphUri }))
+          : publicQuads,
+        swmGraphUri,
+        graphUpdate.publicTripleCount,
+      );
+      if (!validation.valid) {
+        return this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
+          `UpdateStorageACK: invalid graph-scoped RDF: ${validation.errors.join('; ')}`,
+        );
+      }
       const privateRoots = graphUpdate.privateMerkleRoot
         ? [graphUpdate.privateMerkleRoot]
         : [];
@@ -2002,6 +2016,18 @@ export class StorageACKHandler {
             `publisher=${ethers.hexlify(newMerkleRoot).slice(0, 18)}..., ` +
             `computed=${ethers.hexlify(recomputedRoot).slice(0, 18)}... ` +
             `(${publicQuads.length} public triples)`,
+        );
+      }
+      const recomputedLeafCount = computeFlatKCMerkleLeafCountV10(publicQuads, privateRoots);
+      const claimedLeafCount = intent.newMerkleLeafCount == null
+        ? 0
+        : Number(intent.newMerkleLeafCount);
+      if (claimedLeafCount !== recomputedLeafCount) {
+        return this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
+          `UpdateStorageACK: graph-scoped newMerkleLeafCount mismatch: ` +
+            `intent=${claimedLeafCount}, computed=${recomputedLeafCount}`,
         );
       }
       if (inlineByteLength !== undefined) {

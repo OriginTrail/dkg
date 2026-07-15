@@ -4,6 +4,7 @@ import {
   computeCatalogRoot,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  PROTOCOL_STORAGE_UPDATE_ACK_V2,
   STORAGE_ACK_DECLINE_CODES,
   TypedEventBus,
   createGraphKnowledgeAssetScope,
@@ -61,6 +62,12 @@ function byteSizeFloor(quads: readonly Quad[]): number {
       + Buffer.byteLength(quad.object, 'utf8'),
     0,
   );
+}
+
+function wireNquads(quads: readonly Quad[]): Uint8Array {
+  return new TextEncoder().encode(quads.map((quad) =>
+    `<${quad.subject}> <${quad.predicate}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} <${quad.graph}> .`,
+  ).join('\n'));
 }
 
 function intent(
@@ -147,10 +154,17 @@ describe('StorageACKHandler graph-scoped updates', () => {
       ).join('\n'),
     );
     const root = computeFlatKCRootV10([], [PRIVATE_ROOT]);
+    const selectedProtocols: string[] = [];
     const deps: ACKCollectorDeps = {
       gossipPublish: async () => {},
-      sendP2P: async (_peerId, _protocol, data) => handler.updateHandler(data, PEER),
-      getConnectedCorePeers: () => ['core-1'],
+      sendP2P: async (_peerId, protocol, data) => {
+        selectedProtocols.push(protocol);
+        return handler.updateHandler(data, PEER);
+      },
+      getConnectedCorePeers: (protocol) => {
+        selectedProtocols.push(protocol ?? '');
+        return ['core-1'];
+      },
       verifyIdentity: async () => true,
       log: () => {},
     };
@@ -185,6 +199,10 @@ describe('StorageACKHandler graph-scoped updates', () => {
 
     expect(result.acks).toHaveLength(1);
     expect(ethers.hexlify(result.merkleRoot)).toBe(ethers.hexlify(root));
+    expect(selectedProtocols).toEqual([
+      PROTOCOL_STORAGE_UPDATE_ACK_V2,
+      PROTOCOL_STORAGE_UPDATE_ACK_V2,
+    ]);
   });
 
   it('does not discover graph-scoped update data from the legacy shared bucket', async () => {
@@ -231,5 +249,80 @@ describe('StorageACKHandler graph-scoped updates', () => {
     await expect(handler.updateHandler(intent([], 1, {
       subGraphName: 'nested/graph',
     }), PEER)).rejects.toThrow('invalid graph-scoped subGraphName');
+  });
+
+  it('declines a graph update whose signed leaf count was not recomputed', async () => {
+    const store = new OxigraphStore();
+    const quads: Quad[] = [{
+      subject: 'urn:entity:a', predicate: 'urn:p:value', object: '"a"', graph: EXACT_SWM_GRAPH,
+    }];
+    await store.insert(quads);
+    const handler = new StorageACKHandler(
+      store,
+      config(ethers.Wallet.createRandom()),
+      new TypedEventBus(),
+    );
+
+    const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 0, {
+      newMerkleLeafCount: 999,
+    }), PEER));
+
+    expect(isStorageACKDecline(ack)).toBe(true);
+    expect(ack.declineMessage).toContain('newMerkleLeafCount mismatch');
+  });
+
+  it('keeps a legacy sub-graph update on the legacy handler', async () => {
+    const quad: Quad = {
+      subject: 'urn:legacy:entity',
+      predicate: 'urn:p:value',
+      object: '"legacy"',
+      graph: `did:dkg:context-graph:${SOURCE_CG_ID}/sub/_shared_memory`,
+    };
+    const stagingQuads = wireNquads([quad]);
+    const handler = new StorageACKHandler(
+      new OxigraphStore(),
+      config(ethers.Wallet.createRandom()),
+      new TypedEventBus(),
+    );
+    const encoded = encodeUpdateIntent({
+      kaId: KA_ID.toString(),
+      contextGraphId: TARGET_CG_ID,
+      swmGraphId: SOURCE_CG_ID,
+      subGraphName: 'sub',
+      preUpdateMerkleRootCount: 1,
+      newMerkleRoot: computeFlatKCRootV10([quad], []),
+      newByteSize: stagingQuads.length,
+      newTokenAmount: '1000',
+      mintAmount: 0,
+      burnTokenIds: [],
+      newMerkleLeafCount: computeFlatKCMerkleLeafCountV10([quad], []),
+      publisherPeerId: 'publisher-peer',
+      stagingQuads,
+    });
+
+    const ack = decodeStorageACK(await handler.updateHandler(encoded, PEER));
+    expect(isStorageACKDecline(ack)).toBe(false);
+  });
+
+  it('declines reserved skolem terms received over the graph-scoped ACK protocol', async () => {
+    const malicious: Quad[] = [{
+      subject: 'urn:dkg:ka-skolem:c14n0',
+      predicate: 'urn:p:value',
+      object: '"attacker-authored"',
+      graph: EXACT_SWM_GRAPH,
+    }];
+    const handler = new StorageACKHandler(
+      new OxigraphStore(),
+      config(ethers.Wallet.createRandom()),
+      new TypedEventBus(),
+    );
+
+    const ack = decodeStorageACK(await handler.updateHandler(intent(malicious, 0, {
+      stagingQuads: wireNquads(malicious),
+      newByteSize: wireNquads(malicious).length,
+    }), PEER));
+
+    expect(isStorageACKDecline(ack)).toBe(true);
+    expect(ack.declineMessage).toContain('reserved KA skolem namespace');
   });
 });
