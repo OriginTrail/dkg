@@ -22,6 +22,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
+import { skolemizeKnowledgeAsset } from '../src/auto-partition.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import {
   StorageACKHandler,
@@ -269,6 +270,60 @@ describe('StorageACKHandler graph-scoped updates', () => {
     );
   });
 
+  it('preserves a nested sub-graph through the collector wire path and exact SWM lookup', async () => {
+    const nestedSwmGraph = knowledgeAssetLayerGraphUri(
+      SOURCE_CG_ID,
+      MemoryLayer.SharedWorkingMemory,
+      SCOPE,
+      'nested',
+    );
+    const quads: Quad[] = [{
+      subject: 'urn:entity:nested',
+      predicate: 'urn:p:value',
+      object: '"nested"',
+      graph: nestedSwmGraph,
+    }];
+    const store = new OxigraphStore();
+    await store.insert(quads);
+    const handler = new StorageACKHandler(
+      store,
+      config(ethers.Wallet.createRandom()),
+      new TypedEventBus(),
+    );
+    const collector = new ACKCollector({
+      gossipPublish: async () => {},
+      sendP2P: async (_peerId, _protocol, data) => handler.updateHandler(data, PEER),
+      getConnectedCorePeers: () => ['core-1'],
+      verifyIdentity: async () => true,
+      log: () => {},
+    });
+
+    const result = await collector.collectUpdate({
+      kaId: KA_ID,
+      contextGraphId: BigInt(TARGET_CG_ID),
+      preUpdateMerkleRootCount: 1n,
+      newMerkleRoot: computeFlatKCRootV10(quads, []),
+      newByteSize: BigInt(byteSizeFloor(quads)),
+      newTokenAmount: 1000n,
+      mintAmount: 0n,
+      burnTokenIds: [],
+      newMerkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      chainId: 31337n,
+      kav10Address: '0x000000000000000000000000000000000000c10a',
+      publisherPeerId: 'publisher-peer',
+      requiredACKs: 1,
+      swmGraphId: SOURCE_CG_ID,
+      subGraphName: 'nested',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '2',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+    });
+
+    expect(result.acks).toHaveLength(1);
+  });
+
   it('collects an ACK for a fully private curated update without a public placeholder', async () => {
     const store = new OxigraphStore();
     // The legacy bucket must not become an accidental public placeholder.
@@ -445,18 +500,31 @@ describe('StorageACKHandler graph-scoped updates', () => {
     expect(isStorageACKDecline(ack)).toBe(false);
   });
 
-  it('declines reserved skolem terms received over the graph-scoped ACK protocol', async () => {
-    const malicious: Quad[] = [{
-      subject: 'urn:dkg:ka-skolem:c14n0',
+  it('accepts canonical blank-node skolems but declines non-canonical reserved terms', async () => {
+    const canonical = (await skolemizeKnowledgeAsset([{
+      subject: '_:blank',
       predicate: 'urn:p:value',
-      object: '"attacker-authored"',
-      graph: EXACT_SWM_GRAPH,
-    }];
+      object: '"canonical"',
+      graph: '',
+    }])).map((quad) => ({ ...quad, graph: EXACT_VM_GRAPH }));
+    expect(canonical[0]?.subject).toBe('urn:dkg:ka-skolem:c14n0');
     const handler = new StorageACKHandler(
       new OxigraphStore(),
       config(ethers.Wallet.createRandom()),
       new TypedEventBus(),
     );
+    const accepted = decodeStorageACK(await handler.updateHandler(intent(canonical, 0, {
+      stagingQuads: wireNquads(canonical),
+      newByteSize: wireNquads(canonical).length,
+    }), PEER));
+    expect(isStorageACKDecline(accepted)).toBe(false);
+
+    const malicious: Quad[] = [{
+      subject: 'urn:dkg:ka-skolem:attacker',
+      predicate: 'urn:p:value',
+      object: '"attacker-authored"',
+      graph: EXACT_SWM_GRAPH,
+    }];
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(malicious, 0, {
       stagingQuads: wireNquads(malicious),

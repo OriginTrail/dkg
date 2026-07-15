@@ -6688,8 +6688,29 @@ export class DKGPublisher implements Publisher {
     // the seal is rebuilt at the next finalize anyway (and torn down below). VM
     // pulls still use the seal (VM content is keyed by the published roots, which
     // only the seal records).
+    let graphScope: ReturnType<typeof createGraphKnowledgeAssetScope> | undefined;
+    if (seal?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      if (!seal.kaUal || !seal.assertionVersion) {
+        throw new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
+      }
+      graphScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+    }
+
     let entities: string[];
-    if (sourceLayer === 'swm') {
+    if (graphScope && sourceLayer === 'swm') {
+      // A graph-scoped KA is atomic and intentionally carries no legacy root
+      // rows. The full-share marker is still the durable proof that the exact
+      // per-KA SWM graph is a complete reconstruction source.
+      if (!(await this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName))) {
+        throw Object.assign(
+          new Error(
+            `"${name}" in context graph "${contextGraphId}" has no complete graph-scoped SWM share to pull from.`,
+          ),
+          { code: 'SWM_SUBSET_NOT_SEALABLE' },
+        );
+      }
+      entities = [];
+    } else if (sourceLayer === 'swm') {
       const promotedRoots = await this.readPromotedRootEntities(contextGraphId, agentAddress, name, subGraphName);
       if (promotedRoots.length > 0) {
         const fullyShared = await this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName);
@@ -6708,7 +6729,7 @@ export class DKGPublisher implements Publisher {
     } else {
       entities = seal?.rootEntities ?? [];
     }
-    if (entities.length === 0) {
+    if (entities.length === 0 && !graphScope) {
       throw new Error(
         `No member entities for "${name}" in context graph "${contextGraphId}" — pull-from `
         + `requires either a finalized assertion (its seal records the members) or a prior `
@@ -6736,9 +6757,19 @@ export class DKGPublisher implements Publisher {
       `|| STRSTARTS(STR(?g), "${vmBase}/_verifiable_memory/") ` +
       `|| STRSTARTS(STR(?g), "did:dkg:context-graph:${contextGraphId}/context/"))`;
     // Per-KA SWM: when pulling from SWM the source spans the per-KA prefix, not one bucket.
-    const sourcePattern = sourceLayer === 'swm'
-      ? `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } ${sharedMemoryReadBothFilter(sourceGraph)}`
-      : `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } ${vmGraphFilter}`;
+    const graphScopedSource = graphScope
+      ? knowledgeAssetLayerGraphUri(
+          contextGraphId,
+          sourceLayer === 'swm' ? MemoryLayer.SharedWorkingMemory : MemoryLayer.VerifiableMemory,
+          graphScope,
+          subGraphName,
+        )
+      : undefined;
+    const sourcePattern = graphScopedSource
+      ? `GRAPH <${graphScopedSource}> { ?s ?p ?o }`
+      : sourceLayer === 'swm'
+        ? `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } ${sharedMemoryReadBothFilter(sourceGraph)}`
+        : `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } ${vmGraphFilter}`;
     const gather = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { ${sourcePattern} }`,
     );
@@ -6753,7 +6784,9 @@ export class DKGPublisher implements Publisher {
       throw Object.assign(
         new Error(
           `No ${sourceLayer.toUpperCase()} quads found for "${name}" in context graph "${contextGraphId}" `
-          + `using the assertion seal's ${entities.length} root entit${entities.length === 1 ? 'y' : 'ies'}; `
+          + (graphScopedSource
+            ? `in exact graph <${graphScopedSource}>; `
+            : `using the assertion seal's ${entities.length} root entit${entities.length === 1 ? 'y' : 'ies'}; `)
           + `WM draft was not modified.`,
         ),
         { code: 'PULL_FROM_EMPTY_SOURCE' },

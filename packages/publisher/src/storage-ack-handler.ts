@@ -1747,6 +1747,10 @@ export class StorageACKHandler {
         // unrelated graph.
         inlineByteLength === undefined ? swmGraphUri : inlineVmGraphUri!,
         graphUpdate.publicTripleCount,
+        // The producer has already canonicalized blank nodes into the exact
+        // RDFC `urn:dkg:ka-skolem:c14nN` namespace before computing the root.
+        // Keep rejecting every other reserved-namespace term.
+        { allowCanonicalSkolemTerms: true },
       );
       if (!validation.valid) {
         return this.encodeDecline(

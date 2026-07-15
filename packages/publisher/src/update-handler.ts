@@ -620,6 +620,10 @@ export class UpdateHandler {
       parsed,
       vmGraph,
       graphUpdate.publicTripleCount,
+      // Graph-scoped update wire data is the producer's canonical payload.
+      // `validateKnowledgeAssetPublishRequest` still rejects non-canonical
+      // terms in the protocol-reserved namespace.
+      { allowCanonicalSkolemTerms: true },
     );
     if (!validation.valid) {
       this.log.warn(

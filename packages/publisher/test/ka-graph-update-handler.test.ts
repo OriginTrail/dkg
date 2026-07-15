@@ -13,6 +13,7 @@ import {
   UpdateHandler,
   computeFlatKCRootV10,
   computePrivateRootV10,
+  skolemizeKnowledgeAsset,
 } from '../src/index.js';
 
 const CG = 'rootless-update';
@@ -175,6 +176,49 @@ describe('UpdateHandler graph-scoped updates', () => {
       } }`,
     );
     expect(state).toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('materializes canonical blank-node skolems and rejects other reserved terms', async () => {
+    await seedPriorMetadata();
+    const canonical = await skolemizeKnowledgeAsset([{
+      subject: '_:blank',
+      predicate: 'urn:p:value',
+      object: '"canonical"',
+      graph: '',
+    }]);
+    expect(canonical[0]?.subject).toBe('urn:dkg:ka-skolem:c14n0');
+
+    await handler.handle(message(canonical), 'forwarding-peer');
+    expect(await store.query(
+      `ASK { GRAPH <${vmGraph}> { <urn:dkg:ka-skolem:c14n0> <urn:p:value> "canonical" } }`,
+    )).toMatchObject({ type: 'boolean', value: true });
+
+    store = new OxigraphStore();
+    const chain = {
+      chainId: 'otp:20430',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: chainRoot,
+        blockNumber: 20,
+        txIndex: 3,
+        merkleRootCount: 2n,
+      }),
+      getKAContextGraphId: async () => 42n,
+    } as unknown as ChainAdapter;
+    handler = new UpdateHandler(store, chain, events, {
+      knownBatchContextGraphs: new Map([[KA_ID.toString(), CG]]),
+      resolveOnChainCgId: async () => '42',
+    });
+    await seedPriorMetadata();
+    const malicious: Quad[] = [{
+      subject: 'urn:dkg:ka-skolem:attacker',
+      predicate: 'urn:p:value',
+      object: '"not-canonical"',
+      graph: '',
+    }];
+
+    await handler.handle(message(malicious), 'forwarding-peer');
+    expect(await store.countQuads(vmGraph)).toBe(0);
   });
 
   it('preserves owner-only access without minting a public policy row', async () => {

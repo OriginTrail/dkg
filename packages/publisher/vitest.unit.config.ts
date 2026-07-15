@@ -25,6 +25,7 @@ export default defineConfig({
       'test/ka-graph-publish-storage.test.ts',
       'test/ka-graph-update-ack.test.ts',
       'test/ka-graph-update-handler.test.ts',
+      'test/ka-graph-pull-from.test.ts',
       'test/agents-meta-bound.test.ts',
       'test/ack-collector.test.ts',
       'test/publish-lifecycle-logger.test.ts',
