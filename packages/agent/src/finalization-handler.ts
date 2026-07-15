@@ -38,10 +38,14 @@ import {
   generateSubGraphRegistration,
   splitTrustedGeneratedCatalogRootMap,
   shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock,
+  listKnowledgeAssetOperationCandidates,
+  resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  type KnowledgeAssetOperationCandidate,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
+  type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
 
@@ -144,6 +148,49 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 /**
+ * Canonical bare-hex form for a stored/derived Merkle-root literal. The
+ * graph-scoped metadata writers persist bare lowercase hex (`toHex`) while the
+ * wire/chain side is usually `0x`-prefixed (`ethers.hexlify`); comparisons of
+ * the two MUST normalize or an exact confirmed assertion reads as `different`.
+ */
+function bareRootHex(value: string | Uint8Array | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const hex = typeof value === 'string' ? value : ethers.hexlify(value);
+  const bare = hex.toLowerCase().replace(/^0x/, '');
+  return /^[0-9a-f]{64}$/.test(bare) ? bare : undefined;
+}
+
+const KA_ID_NUMBER_MASK = (1n << 96n) - 1n;
+
+/**
+ * Derive the canonical V2 (graph-scoped) UAL from chain truth. The packed
+ * on-chain kaId is `(author << 96) | perAuthorNumber`, and the V2 UAL is
+ * `did:dkg:<chain>/<author>/<number>`. Callers of the chain-reconcile sweep
+ * historically build a legacy-shaped `did:dkg:<chain>/<storage-contract>/<packed-id>`
+ * UAL, which parses but can never name a V2 workspace head — so the graph-scoped
+ * recovery path derives its own identity from `kaId` instead of trusting the
+ * caller's UAL shape. Returns undefined when `kaId` is not a V2 packed id
+ * (author bits are zero), which routes the caller to the legacy recovery path.
+ */
+function deriveGraphScopedUalFromChainIdentity(ual: string, kaId: bigint): string | undefined {
+  if (kaId <= 0n) return undefined;
+  const author = kaId >> 96n;
+  if (author === 0n) return undefined;
+  const chainPart = /^did:dkg:([^/]+)\//.exec(String(ual ?? '').trim())?.[1];
+  if (!chainPart) return undefined;
+  const authorAddress = `0x${author.toString(16).padStart(40, '0')}`;
+  const kaNumber = (kaId & KA_ID_NUMBER_MASK).toString();
+  try {
+    return createGraphKnowledgeAssetScope(
+      `did:dkg:${chainPart}/${authorAddress}/${kaNumber}`,
+      1,
+    ).ual;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Ops kill-switch for the #1549 bounded SWM read. Set `DKG_DISABLE_SWM_KA_BOUND=1`
  * to fall back to the unbounded read with no redeploy. Read here at the
  * orchestration boundary so `deriveSwmKaGraphBound` (in `swm-ka-bound.ts`) stays a
@@ -206,6 +253,11 @@ export class FinalizationHandler {
   // a restart clears it (fail-open).
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
 
+  // Optional store-backed immutable operation snapshots (RFC ka-metadata-trim
+  // Phase 2). When absent, snapshot resolution still works for graph-backed
+  // snapshots; store-backed refs simply fail closed to the live-head path.
+  private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
@@ -213,6 +265,7 @@ export class FinalizationHandler {
     resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
     markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
     lifecycleLogOptions?: FinalizationLifecycleLogOptions,
+    publicSnapshotStore?: WorkspacePublicSnapshotStore,
   ) {
     this.store = store;
     this.graphWriteGen = asGraphWriteGenSource(store);
@@ -221,6 +274,7 @@ export class FinalizationHandler {
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = markContextGraphMetaDirtyFromQuads;
     this.lifecycle = new FinalizationLifecycleLogger(this.log, lifecycleLogOptions);
+    this.publicSnapshotStore = publicSnapshotStore;
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
@@ -672,10 +726,15 @@ export class FinalizationHandler {
       this.log.warn(ctx, `Finalization: invalid on-chain identifiers for graph-scoped KA ${scope.ual}`);
       return 'deferred';
     }
-    if (startKAId !== packedKaId || endKAId !== packedKaId) {
+    if (startKAId !== packedKaId || endKAId !== packedKaId || batchId !== packedKaId) {
+      // V10 identity invariant: one graph-scoped publish mints exactly one KA,
+      // so batchId === kaId === startKAId === endKAId. `batchId` is written to
+      // provenance/lookup metadata as authoritative, so an unverified wire
+      // value must not survive past this gate.
       this.log.warn(
         ctx,
-        `Finalization: UAL-derived kaId ${packedKaId} does not match wire range ${startKAId}..${endKAId}`,
+        `Finalization: UAL-derived kaId ${packedKaId} does not match wire identity `
+          + `batch=${batchId} range=${startKAId}..${endKAId}`,
       );
       return 'deferred';
     }
@@ -695,57 +754,36 @@ export class FinalizationHandler {
         scope.ual,
         msg.kcMerkleRoot,
         subGraphName,
+        scope.assertionVersion,
       ) === 'matching'
     ) {
       // A prior attempt may have crashed after VM+metadata but before SWM
-      // cleanup. Complete that final idempotent step here.
-      await this.store.dropGraph(swmGraph);
+      // cleanup. Complete that final idempotent step here — but only while
+      // the per-KA SWM graph still belongs to THIS assertion: a newer
+      // accepted assertion shares the same physical graph and must not be
+      // erased by an older duplicate finalization.
+      await this.dropSwmGraphIfStillCurrent(
+        contextGraphId, scope, swmGraph, subGraphName, ctx,
+      );
       this.log.info(ctx, `Finalization: graph-scoped KA ${scope.ual} is already confirmed`);
       return 'already-confirmed';
     }
 
-    let head;
-    try {
-      head = await resolveKnowledgeAssetWorkspaceHead({
-        store: this.store,
-        graphManager,
-        contextGraphId,
-        kaUal: scope.ual,
-        subGraphName,
-      });
-    } catch (err) {
-      this.log.warn(
-        ctx,
-        `Finalization: corrupt graph-scoped SWM head for ${scope.ual}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    const resolved = await this.resolveGraphScopedAssertionContent({
+      contextGraphId,
+      scope,
+      swmGraph,
+      publicTripleCount,
+      privateTripleCount,
+      privateMerkleRoot,
+      subGraphName,
+      ctx,
+    });
+    if (!resolved) {
+      this.log.warn(ctx, `Finalization: no matching graph-scoped SWM assertion for ${scope.ual}`);
       return 'deferred';
     }
-    if (
-      !head
-      || head.assertionVersion !== scope.assertionVersion
-      || head.publicTripleCount !== publicTripleCount
-      || head.privateTripleCount !== privateTripleCount
-      || (head.privateMerkleRoot?.toLowerCase() ?? undefined)
-        !== (privateMerkleRoot ? ethers.hexlify(privateMerkleRoot).toLowerCase() : undefined)
-    ) {
-      this.log.warn(ctx, `Finalization: no matching graph-scoped SWM head for ${scope.ual}`);
-      return 'deferred';
-    }
-
-    const swmResult = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(swmGraph)}> { ?s ?p ?o } }`,
-    );
-    const swmQuads = swmResult.type === 'quads'
-      ? swmResult.quads.map((quad) => ({ ...quad, graph: '' }))
-      : [];
-    if (swmQuads.length !== publicTripleCount) {
-      this.log.warn(
-        ctx,
-        `Finalization: graph-scoped SWM count mismatch for ${scope.ual}: `
-          + `wire=${publicTripleCount}, store=${swmQuads.length}`,
-      );
-      return 'deferred';
-    }
+    const { swmQuads, fromLiveHead, publisherPeerId } = resolved;
     const computedMerkleRoot = computeFlatKCRoot(
       swmQuads,
       privateMerkleRoot ? [privateMerkleRoot] : [],
@@ -775,7 +813,9 @@ export class FinalizationHandler {
       contextGraphId,
       scope,
       swmQuads,
-      head,
+      publicTripleCount,
+      privateTripleCount,
+      publisherPeerId,
       privateMerkleRoot,
       computedMerkleRoot,
       publisherAddress: msg.publisherAddress,
@@ -789,6 +829,10 @@ export class FinalizationHandler {
       },
       subGraphName,
       source: 'finalization',
+      // Only the live-head path may clean the shared per-KA SWM graph: the
+      // snapshot-recovery path materializes an assertion that no longer owns
+      // that graph (a newer accepted assertion does).
+      dropSwmGraph: fromLiveHead,
       ctx,
     });
     if (outcome === 'stale') {
@@ -801,6 +845,186 @@ export class FinalizationHandler {
       `Finalization: promoted graph-scoped KA ${scope.ual} (${publicTripleCount} public, ${privateTripleCount} private)`,
     );
     return 'applied';
+  }
+
+  /**
+   * Drop the shared per-KA SWM graph only while the durable head still points
+   * at the given assertion version (or no head exists at all). The physical
+   * graph is version-agnostic: a NEWER accepted assertion stages into the same
+   * graph, so an older/duplicate finalizer must never delete it — an exact
+   * resend of the newer finalization would be treated as a duplicate and the
+   * staged content never restored.
+   */
+  private async dropSwmGraphIfStillCurrent(
+    contextGraphId: string,
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>,
+    swmGraph: string,
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+  ): Promise<void> {
+    let head: KnowledgeAssetWorkspaceHead | undefined;
+    try {
+      head = await resolveKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager: new GraphManager(this.store),
+        contextGraphId,
+        kaUal: scope.ual,
+        subGraphName,
+      });
+    } catch {
+      // Corrupt head: fail closed — keep the staged content for inspection.
+      this.log.warn(ctx, `Finalization: skipping SWM cleanup for ${scope.ual}: corrupt workspace head`);
+      return;
+    }
+    if (!head || head.assertionVersion === scope.assertionVersion) {
+      await this.store.dropGraph(swmGraph);
+    }
+  }
+
+  /**
+   * Resolve the exact public quads for one (UAL, assertionVersion) assertion.
+   * Prefers the live per-KA SWM graph while the durable head still points at
+   * this assertion; otherwise falls back to the immutable graph-scoped
+   * operation snapshot recorded at share time. The fallback keeps a
+   * chain-confirmed assertion recoverable after a NEWER assertion has replaced
+   * the shared physical SWM graph (out-of-order finalization delivery).
+   */
+  private async resolveGraphScopedAssertionContent(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    swmGraph: string;
+    publicTripleCount: number;
+    privateTripleCount: number;
+    privateMerkleRoot?: Uint8Array;
+    subGraphName?: string;
+    ctx: OperationContext;
+  }): Promise<{ swmQuads: Quad[]; fromLiveHead: boolean; publisherPeerId: string } | undefined> {
+    const {
+      contextGraphId, scope, swmGraph, publicTripleCount, privateTripleCount,
+      privateMerkleRoot, subGraphName, ctx,
+    } = input;
+    const graphManager = new GraphManager(this.store);
+    const wirePrivateRoot = bareRootHex(privateMerkleRoot);
+    let head: KnowledgeAssetWorkspaceHead | undefined;
+    try {
+      head = await resolveKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager,
+        contextGraphId,
+        kaUal: scope.ual,
+        subGraphName,
+      });
+    } catch (err) {
+      // A corrupt head must not make a chain-confirmed assertion terminally
+      // unrecoverable — the immutable operation snapshot below still can.
+      this.log.warn(
+        ctx,
+        `Finalization: corrupt graph-scoped SWM head for ${scope.ual}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      head = undefined;
+    }
+    if (
+      head
+      && head.assertionVersion === scope.assertionVersion
+      && head.publicTripleCount === publicTripleCount
+      && head.privateTripleCount === privateTripleCount
+      && bareRootHex(head.privateMerkleRoot) === wirePrivateRoot
+    ) {
+      const swmResult = await this.store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(swmGraph)}> { ?s ?p ?o } }`,
+      );
+      const swmQuads = swmResult.type === 'quads'
+        ? swmResult.quads.map((quad) => ({ ...quad, graph: '' }))
+        : [];
+      if (swmQuads.length === publicTripleCount) {
+        return { swmQuads, fromLiveHead: true, publisherPeerId: head.publisherPeerId };
+      }
+      this.log.warn(
+        ctx,
+        `Finalization: graph-scoped SWM count mismatch for ${scope.ual}: `
+          + `wire=${publicTripleCount}, store=${swmQuads.length}`,
+      );
+    }
+
+    const snapshot = await this.resolveGraphScopedOperationSnapshot({
+      contextGraphId,
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      expectedPublicCount: publicTripleCount,
+      expectedPrivateTripleCount: privateTripleCount,
+      expectedPrivateRoot: wirePrivateRoot,
+      subGraphName,
+      ctx,
+    });
+    if (!snapshot) return undefined;
+    return { swmQuads: snapshot.quads, fromLiveHead: false, publisherPeerId: snapshot.publisherPeerId };
+  }
+
+  /**
+   * Resolve one integrity-checked immutable operation snapshot for a KA. When
+   * `assertionVersion` is set only that assertion qualifies; expected counts /
+   * private commitment (bare hex) must match the candidate's metadata exactly.
+   */
+  private async resolveGraphScopedOperationSnapshot(input: {
+    contextGraphId: string;
+    kaUal: string;
+    assertionVersion?: string;
+    expectedPublicCount?: number;
+    expectedPrivateTripleCount?: number;
+    expectedPrivateRoot?: string;
+    subGraphName?: string;
+    ctx: OperationContext;
+  }): Promise<{
+    quads: Quad[];
+    publisherPeerId: string;
+    candidate: KnowledgeAssetOperationCandidate;
+  } | undefined> {
+    const graphManager = new GraphManager(this.store);
+    let candidates: KnowledgeAssetOperationCandidate[];
+    try {
+      candidates = await listKnowledgeAssetOperationCandidates({
+        store: this.store,
+        graphManager,
+        contextGraphId: input.contextGraphId,
+        kaUal: input.kaUal,
+        assertionVersion: input.assertionVersion,
+        subGraphName: input.subGraphName,
+      });
+    } catch {
+      return undefined;
+    }
+    for (const candidate of candidates) {
+      if (input.expectedPublicCount !== undefined && candidate.publicTripleCount !== input.expectedPublicCount) continue;
+      if (input.expectedPrivateTripleCount !== undefined && candidate.privateTripleCount !== input.expectedPrivateTripleCount) continue;
+      if (input.expectedPrivateRoot !== undefined || candidate.privateMerkleRoot !== undefined) {
+        if (bareRootHex(candidate.privateMerkleRoot) !== input.expectedPrivateRoot) continue;
+      }
+      try {
+        const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+          store: this.store,
+          graphManager,
+          contextGraphId: input.contextGraphId,
+          shareOperationId: candidate.shareOperationId,
+          kaUal: input.kaUal,
+          assertionVersion: candidate.assertionVersion,
+          subGraphName: input.subGraphName,
+          publicSnapshotStore: this.publicSnapshotStore,
+        });
+        return {
+          quads: snapshot.quads,
+          publisherPeerId: snapshot.publisherPeerId ?? candidate.publisherPeerId ?? 'unknown',
+          candidate,
+        };
+      } catch (err) {
+        this.log.info(
+          input.ctx,
+          `Finalization: graph-scoped snapshot for ${input.kaUal} v${candidate.assertionVersion} unavailable: `
+            + (err instanceof Error ? err.message : String(err)),
+        );
+        continue;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -830,18 +1054,17 @@ export class FinalizationHandler {
       authorAddress,
       subGraphName,
     } = input;
-    // Historical UAL shapes can be valid inputs to the legacy root-scoped
-    // recovery code but cannot name a V2 per-KA graph. Do not let the strict
-    // V2 parser turn those into a terminal "corrupt head" result.
-    try {
-      createGraphKnowledgeAssetScope(ual, 1);
-    } catch {
-      return undefined;
-    }
+    // Chain-sweep callers historically construct a legacy-shaped
+    // `did:dkg:<chain>/<storage-contract>/<packed-id>` UAL. That shape parses,
+    // but can never name a V2 per-KA graph or workspace head — so the V2
+    // identity is derived from the packed on-chain kaId instead of trusting
+    // the caller's UAL shape. A non-V2 kaId routes to the legacy recovery path.
+    const canonicalUal = deriveGraphScopedUalFromChainIdentity(ual, kaId);
+    if (!canonicalUal) return undefined;
     if (
       await this.graphScopedConfirmationState(
         contextGraphId,
-        ual,
+        canonicalUal,
         merkleRoot,
         subGraphName,
       ) === 'matching'
@@ -850,54 +1073,159 @@ export class FinalizationHandler {
     }
     const graphManager = new GraphManager(this.store);
     let head: KnowledgeAssetWorkspaceHead | undefined;
+    let headCorrupt = false;
     try {
       head = await resolveKnowledgeAssetWorkspaceHead({
         store: this.store,
         graphManager,
         contextGraphId,
-        kaUal: ual,
+        kaUal: canonicalUal,
         subGraphName,
       });
     } catch (err) {
       this.log.warn(
         ctx,
-        `Chain-reconcile: corrupt graph-scoped SWM head for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
+        `Chain-reconcile: corrupt graph-scoped SWM head for ${canonicalUal}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return 'no-swm';
+      head = undefined;
+      headCorrupt = true;
     }
-    if (!head) return undefined;
 
+    // Fast path: the durable head names the exact assertion the chain
+    // confirmed — promote straight from the live per-KA SWM graph.
+    if (
+      head
+      && (head.publicTripleCount > 0 || head.privateTripleCount > 0)
+    ) {
+      const liveOutcome = await this.reconcileGraphScopedFromLiveHead({
+        contextGraphId, canonicalUal, head, merkleRoot, publisherAddress,
+        kaId, versionBlock, authorAddress, subGraphName, ctx,
+      });
+      if (liveOutcome !== undefined) return liveOutcome;
+    }
+
+    // Recovery path: the head is missing, corrupt, or points at a NEWER
+    // assertion than the chain root being reconciled (out-of-order publish /
+    // failed newer publish). The immutable per-operation snapshots keep every
+    // accepted assertion addressable, so scan them (bounded by the number of
+    // versions of THIS one KA) for the one whose recomputed flat-KC root
+    // matches the chain root.
+    let candidates: KnowledgeAssetOperationCandidate[] = [];
+    try {
+      candidates = await listKnowledgeAssetOperationCandidates({
+        store: this.store,
+        graphManager,
+        contextGraphId,
+        kaUal: canonicalUal,
+        subGraphName,
+      });
+    } catch {
+      candidates = [];
+    }
+    for (const candidate of candidates) {
+      let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+      let privateMerkleRoot: Uint8Array | undefined;
+      let quads: Quad[];
+      let publisherPeerId: string;
+      try {
+        scope = createGraphKnowledgeAssetScope(canonicalUal, candidate.assertionVersion);
+        privateMerkleRoot = candidate.privateMerkleRoot
+          ? ethers.getBytes(candidate.privateMerkleRoot)
+          : undefined;
+        const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+          store: this.store,
+          graphManager,
+          contextGraphId,
+          shareOperationId: candidate.shareOperationId,
+          kaUal: canonicalUal,
+          assertionVersion: candidate.assertionVersion,
+          subGraphName,
+          publicSnapshotStore: this.publicSnapshotStore,
+        });
+        quads = snapshot.quads;
+        publisherPeerId = snapshot.publisherPeerId ?? candidate.publisherPeerId ?? 'unknown';
+      } catch {
+        continue;
+      }
+      const computedMerkleRoot = computeFlatKCRoot(
+        quads,
+        privateMerkleRoot ? [privateMerkleRoot] : [],
+      );
+      if (!equalBytes(computedMerkleRoot, merkleRoot)) continue;
+
+      const outcome = await this.applyVerifiedGraphScopedFinalization({
+        contextGraphId,
+        scope,
+        swmQuads: quads,
+        publicTripleCount: candidate.publicTripleCount,
+        privateTripleCount: candidate.privateTripleCount,
+        publisherPeerId,
+        privateMerkleRoot,
+        computedMerkleRoot,
+        publisherAddress,
+        txHash: '',
+        blockNumber: versionBlock,
+        batchId: kaId,
+        authorAddress,
+        materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+        subGraphName,
+        source: 'chain-reconcile',
+        // The snapshot path only owns the live SWM graph when the head still
+        // points at this same assertion; the guarded drop checks that.
+        dropSwmGraph: head?.shareOperationId === candidate.shareOperationId,
+        ctx,
+      });
+      if (outcome === 'stale') return 'stale-target';
+      this.log.info(
+        ctx,
+        `Chain-reconcile: promoted exact graph-scoped assertion v${candidate.assertionVersion} to VM for ${canonicalUal} (ka=${kaId})`,
+      );
+      return 'promoted';
+    }
+
+    if (!head && !headCorrupt && candidates.length === 0) return undefined;
+    this.log.info(
+      ctx,
+      `Chain-reconcile: no graph-scoped SWM assertion matches the chain root for ${canonicalUal}`,
+    );
+    return 'no-swm';
+  }
+
+  /**
+   * Promote from the live per-KA SWM graph when the durable head names the
+   * exact chain-confirmed assertion. `undefined` defers to the immutable
+   * snapshot scan in `reconcileGraphScopedKC`.
+   */
+  private async reconcileGraphScopedFromLiveHead(input: {
+    contextGraphId: string;
+    canonicalUal: string;
+    head: KnowledgeAssetWorkspaceHead;
+    merkleRoot: Uint8Array;
+    publisherAddress: string;
+    kaId: bigint;
+    versionBlock: number;
+    authorAddress?: string;
+    subGraphName?: string;
+    ctx: OperationContext;
+  }): Promise<'promoted' | 'stale-target' | undefined> {
+    const {
+      contextGraphId, canonicalUal, head, merkleRoot, publisherAddress,
+      kaId, versionBlock, authorAddress, subGraphName, ctx,
+    } = input;
     let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     try {
-      scope = createGraphKnowledgeAssetScope(ual, head.assertionVersion);
-    } catch (err) {
-      this.log.warn(
-        ctx,
-        `Chain-reconcile: invalid graph-scoped identity for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return 'no-swm';
+      scope = createGraphKnowledgeAssetScope(canonicalUal, head.assertionVersion);
+    } catch {
+      return undefined;
     }
-    const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    if (scope.ual !== ual || packedKaId !== kaId) {
-      this.log.warn(
-        ctx,
-        `Chain-reconcile: UAL-derived kaId ${packedKaId} does not match chain kaId ${kaId} for ${ual}`,
-      );
-      return 'no-swm';
-    }
-    if (head.publicTripleCount === 0 && head.privateTripleCount === 0) {
-      this.log.warn(ctx, `Chain-reconcile: empty graph-scoped content envelope for ${ual}`);
-      return 'no-swm';
-    }
-
     let privateMerkleRoot: Uint8Array | undefined;
     try {
       privateMerkleRoot = head.privateMerkleRoot
         ? ethers.getBytes(head.privateMerkleRoot)
         : undefined;
     } catch {
-      this.log.warn(ctx, `Chain-reconcile: invalid private commitment for graph-scoped KA ${ual}`);
-      return 'no-swm';
+      this.log.warn(ctx, `Chain-reconcile: invalid private commitment for graph-scoped KA ${canonicalUal}`);
+      return undefined;
     }
     const swmGraph = knowledgeAssetLayerGraphUri(
       contextGraphId,
@@ -914,9 +1242,9 @@ export class FinalizationHandler {
     if (swmQuads.length !== head.publicTripleCount) {
       this.log.info(
         ctx,
-        `Chain-reconcile: graph-scoped SWM count mismatch for ${ual}: head=${head.publicTripleCount}, store=${swmQuads.length}`,
+        `Chain-reconcile: graph-scoped SWM count mismatch for ${canonicalUal}: head=${head.publicTripleCount}, store=${swmQuads.length}`,
       );
-      return 'no-swm';
+      return undefined;
     }
     const computedMerkleRoot = computeFlatKCRoot(
       swmQuads,
@@ -925,16 +1253,18 @@ export class FinalizationHandler {
     if (!equalBytes(computedMerkleRoot, merkleRoot)) {
       this.log.info(
         ctx,
-        `Chain-reconcile: exact graph-scoped SWM assertion does not match the chain root for ${ual}`,
+        `Chain-reconcile: current graph-scoped SWM assertion does not match the chain root for ${canonicalUal}`,
       );
-      return 'no-swm';
+      return undefined;
     }
 
     const outcome = await this.applyVerifiedGraphScopedFinalization({
       contextGraphId,
       scope,
       swmQuads,
-      head,
+      publicTripleCount: head.publicTripleCount,
+      privateTripleCount: head.privateTripleCount,
+      publisherPeerId: head.publisherPeerId,
       privateMerkleRoot,
       computedMerkleRoot,
       publisherAddress,
@@ -945,12 +1275,13 @@ export class FinalizationHandler {
       materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
       subGraphName,
       source: 'chain-reconcile',
+      dropSwmGraph: true,
       ctx,
     });
     if (outcome === 'stale') return 'stale-target';
     this.log.info(
       ctx,
-      `Chain-reconcile: promoted exact graph-scoped SWM assertion to VM for ${ual} (ka=${kaId})`,
+      `Chain-reconcile: promoted exact graph-scoped SWM assertion to VM for ${canonicalUal} (ka=${kaId})`,
     );
     return 'promoted';
   }
@@ -965,7 +1296,9 @@ export class FinalizationHandler {
     contextGraphId: string;
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     swmQuads: Quad[];
-    head: KnowledgeAssetWorkspaceHead;
+    publicTripleCount: number;
+    privateTripleCount: number;
+    publisherPeerId: string;
     privateMerkleRoot?: Uint8Array;
     computedMerkleRoot: Uint8Array;
     publisherAddress: string;
@@ -976,13 +1309,22 @@ export class FinalizationHandler {
     materializedVersion: MaterializedVersion;
     subGraphName?: string;
     source: 'finalization' | 'chain-reconcile';
+    /**
+     * Whether this materialization may clean the shared per-KA SWM graph.
+     * Only content resolved from the LIVE head owns that graph; even then the
+     * drop re-checks the head inside the materialization lock so a newer
+     * assertion accepted mid-verification is never erased.
+     */
+    dropSwmGraph: boolean;
     ctx: OperationContext;
   }): Promise<'applied' | 'stale'> {
     const {
       contextGraphId,
       scope,
       swmQuads,
-      head,
+      publicTripleCount,
+      privateTripleCount,
+      publisherPeerId,
       privateMerkleRoot,
       computedMerkleRoot,
       publisherAddress,
@@ -993,10 +1335,9 @@ export class FinalizationHandler {
       materializedVersion,
       subGraphName,
       source,
+      dropSwmGraph,
       ctx,
     } = input;
-    const publicTripleCount = head.publicTripleCount;
-    const privateTripleCount = head.privateTripleCount;
     const swmGraph = knowledgeAssetLayerGraphUri(
       contextGraphId,
       MemoryLayer.SharedWorkingMemory,
@@ -1055,7 +1396,7 @@ export class FinalizationHandler {
           ual: scope.ual,
           contextGraphId,
           merkleRoot: computedMerkleRoot,
-          publisherPeerId: head.publisherPeerId,
+          publisherPeerId,
           accessPolicy: privateTripleCount > 0 ? 'ownerOnly' : 'public',
           timestamp: new Date(),
           subGraphName,
@@ -1077,7 +1418,11 @@ export class FinalizationHandler {
         scope.ual,
         materializedVersion,
       );
-      await this.store.dropGraph(swmGraph);
+      if (dropSwmGraph) {
+        await this.dropSwmGraphIfStillCurrent(
+          contextGraphId, scope, swmGraph, subGraphName, ctx,
+        );
+      }
       return 'applied' as const;
     });
     if (outcome === 'stale') return outcome;
@@ -1112,6 +1457,14 @@ export class FinalizationHandler {
     ual: string,
     merkleRoot: Uint8Array,
     subGraphName?: string,
+    /**
+     * When set (gossip finalization carries the exact assertion version), the
+     * stored metadata must ALSO be for this version: graph-scoped storage
+     * derives physical graphs from the version, so a later assertion whose
+     * content root happens to equal an older confirmed one must not be
+     * mistaken for it (its own graph would never materialize).
+     */
+    expectedAssertionVersion?: string,
   ): Promise<'matching' | 'different' | 'absent'> {
     let metaGraph: string;
     let safeUal: string;
@@ -1148,14 +1501,20 @@ export class FinalizationHandler {
         subGraphName,
       );
       const publicTripleCount = Number(stripOptionalLiteral(row['publicCount']));
-      const storedRoot = stripOptionalLiteral(row['root'])?.toLowerCase();
+      // Writer (`generateGraphKnowledgeAssetMetadata`) persists bare lowercase
+      // hex; the wire/chain side is `0x`-prefixed. Compare in one canonical
+      // form or an exactly-confirmed assertion reads as `different` forever.
+      const storedRoot = bareRootHex(stripOptionalLiteral(row['root']));
       const status = stripOptionalLiteral(row['status']);
       if (
         row['assertionGraph'] !== expectedGraph
         || !Number.isSafeInteger(publicTripleCount)
         || publicTripleCount < 0
-        || storedRoot !== ethers.hexlify(merkleRoot).toLowerCase()
+        || storedRoot === undefined
+        || storedRoot !== bareRootHex(merkleRoot)
         || status !== 'confirmed'
+        || (expectedAssertionVersion !== undefined
+          && scope.assertionVersion !== createGraphKnowledgeAssetScope(ual, expectedAssertionVersion).assertionVersion)
       ) {
         return 'different';
       }
@@ -1628,10 +1987,13 @@ export class FinalizationHandler {
     // V2 idempotency is assertion-specific. A bare confirmed status may refer
     // to an older assertion of the same UAL and must not hide the latest chain
     // root. Legacy metadata has no content-scope marker, so it keeps the prior
-    // read-both status behavior unchanged.
+    // read-both status behavior unchanged. V2 metadata lives under the
+    // canonical `did:dkg:<chain>/<author>/<number>` subject, which chain-sweep
+    // callers do not construct — derive it from the packed kaId instead.
+    const canonicalV2Ual = deriveGraphScopedUalFromChainIdentity(ual, kaId);
     const graphConfirmation = await this.graphScopedConfirmationState(
       contextGraphId,
-      ual,
+      canonicalV2Ual ?? ual,
       merkleRoot,
       subGraphName,
     );

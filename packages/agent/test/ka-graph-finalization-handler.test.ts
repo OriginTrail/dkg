@@ -378,4 +378,279 @@ describe('graph-scoped finalization handler', () => {
     );
     expect(version).toMatchObject({ type: 'boolean', value: true });
   });
+
+  it('does not finalize graph-scoped gossip that fails on-chain verification', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    (handler as unknown as {
+      verifyOnChain: () => Promise<{ verified: boolean }>;
+    }).verifyOnChain = async () => ({ verified: false });
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    // Unverified gossip must not replace VM, confirm metadata, or consume SWM.
+    expect(await store.countQuads(vmGraph)).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    const confirmed = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> <http://dkg.io/ontology/status> "confirmed" } }`,
+    );
+    expect(confirmed).toMatchObject({ type: 'boolean', value: false });
+
+    // The message stays retryable: restoring the verifier finalizes it.
+    (handler as unknown as {
+      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+    }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
+  it('rejects a graph-scoped envelope whose batchId does not match the UAL-derived kaId', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(
+      encodeFinalizationMessage({ ...message, batchId: PACKED_KA_ID + 1n }),
+      CG,
+    );
+    expect(await store.countQuads(vmGraph)).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+  });
+
+  it('recognizes an already-confirmed assertion across restart and chain reconciliation', async () => {
+    const { message } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    // Fresh handler: the in-memory gossip dedupe is gone, exactly like a
+    // restart. Stored metadata roots are bare hex while the chain root is
+    // bytes — the comparison must normalize or this loops as `no-swm` forever.
+    const restarted = new FinalizationHandler(store, undefined);
+    (restarted as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    }).verifyChainCgBinding = async () => true;
+    const outcome = await restarted.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+    }, createOperationContext('system'));
+    expect(outcome).toBe('already-confirmed');
+
+    // Duplicate gossip after restart is acknowledged, not deferred.
+    (restarted as unknown as {
+      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+    }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+    const confirmed = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> <http://dkg.io/ontology/status> "confirmed" } }`,
+    );
+    expect(confirmed).toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('treats a newer assertion with an identical Merkle root as new work, not a duplicate', async () => {
+    const first = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(first.message), CG);
+
+    // Version 2 has byte-identical content, therefore the same flat-KC root.
+    const nextScope = createGraphKnowledgeAssetScope(UAL, '2');
+    const swmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, nextScope);
+    const vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, nextScope);
+    const publicQuads: Quad[] = [
+      { subject: 'urn:asset:one', predicate: 'urn:predicate:value', object: '"one"', graph: swmGraph },
+      { subject: 'urn:asset:two', predicate: 'urn:predicate:value', object: '"two"', graph: swmGraph },
+    ];
+    const privateQuads: Quad[] = [
+      { subject: 'urn:asset:secret', predicate: 'urn:predicate:value', object: '"hidden"', graph: '' },
+    ];
+    const privateMerkleRoot = computePrivateRootV10(privateQuads);
+    if (!privateMerkleRoot) throw new Error('expected private commitment');
+    await store.insert(publicQuads);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'same-root-update',
+      kaUal: UAL,
+      assertionVersion: nextScope.assertionVersion,
+      quads: publicQuads,
+      privateMerkleRoot,
+      privateTripleCount: privateQuads.length,
+      publisherPeerId: '12D3KooWPublisher',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'same-root-update',
+      kaUal: UAL,
+      assertionVersion: nextScope.assertionVersion,
+    });
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ...first.message,
+      txHash: `0x${'ef'.repeat(32)}`,
+      blockNumber: 124,
+      assertionVersion: nextScope.assertionVersion,
+      operationId: 'same-root-update-op',
+    }), CG);
+
+    // The v2 assertion must be materialized as v2 — not skipped as an
+    // already-confirmed duplicate of v1 (which would also delete its SWM).
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    const version = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> {
+        <${UAL}> <http://dkg.io/ontology/assertionVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+          <http://dkg.io/ontology/status> "confirmed" .
+      } }`,
+    );
+    expect(version).toMatchObject({ type: 'boolean', value: true });
+    expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
+  it('finalizes a chain-confirmed older assertion after a newer SWM write, without erasing it', async () => {
+    // Stage v1 but do NOT finalize it yet.
+    const first = await stageGraph();
+
+    // A v2 update is accepted into SWM before v1's finalization arrives:
+    // the shared per-KA graph now holds v2 content and the head moved on.
+    const nextScope = createGraphKnowledgeAssetScope(UAL, '2');
+    const sharedSwmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, nextScope);
+    const nextQuads: Quad[] = [{
+      subject: 'urn:asset:next',
+      predicate: 'urn:predicate:value',
+      object: '"v2"',
+      graph: sharedSwmGraph,
+    }];
+    await store.dropGraph(sharedSwmGraph);
+    await store.insert(nextQuads);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'out-of-order-update',
+      kaUal: UAL,
+      assertionVersion: nextScope.assertionVersion,
+      quads: nextQuads,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWPublisher',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'out-of-order-update',
+      kaUal: UAL,
+      assertionVersion: nextScope.assertionVersion,
+    });
+
+    // Deliver the verified v1 finalization AFTER the v2 SWM write.
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(first.message), CG);
+
+    // v1 (the chain-confirmed state) is materialized from its immutable
+    // operation snapshot...
+    const vmGraph = first.vmGraph;
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    const confirmed = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> {
+        <${UAL}> <http://dkg.io/ontology/assertionVersion> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+          <http://dkg.io/ontology/status> "confirmed" .
+      } }`,
+    );
+    expect(confirmed).toMatchObject({ type: 'boolean', value: true });
+    // ...and the newer staged v2 content is NOT erased by the older finalizer.
+    expect(await store.countQuads(sharedSwmGraph)).toBe(1);
+
+    // The chain sweep for the v1 root now converges instead of looping no-swm.
+    const internals = handler as unknown as { verifyChainCgBinding: () => Promise<boolean> };
+    internals.verifyChainCgBinding = async () => true;
+    const outcome = await handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: first.message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+    }, createOperationContext('system'));
+    expect(outcome).toBe('already-confirmed');
+  });
+
+  it('late-join sweep locates the V2 head even when the caller passes a legacy-shaped UAL', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const internals = handler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for graph-scoped SWM');
+    };
+
+    // Production `reconcileChainOrdinal` builds
+    // did:dkg:<chain>/<storage-contract>/<packed-id> — the V2 identity must be
+    // recovered from the packed kaId, not from the caller's UAL shape.
+    const legacyShapedUal = `did:dkg:otp:20430/0x9999999999999999999999999999999999999999/${PACKED_KA_ID}`;
+    const outcome = await handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: legacyShapedUal,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'));
+
+    expect(outcome).toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    const confirmed = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> <http://dkg.io/ontology/status> "confirmed" } }`,
+    );
+    expect(confirmed).toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('does not let a duplicate older finalization drop a newer staged assertion after restart', async () => {
+    const first = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(first.message), CG);
+
+    // v2 staged after v1 confirmed: same physical SWM graph, head at v2.
+    const nextScope = createGraphKnowledgeAssetScope(UAL, '2');
+    const sharedSwmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, nextScope);
+    const nextQuads: Quad[] = [{
+      subject: 'urn:asset:next',
+      predicate: 'urn:predicate:value',
+      object: '"v2"',
+      graph: sharedSwmGraph,
+    }];
+    await store.insert(nextQuads);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'post-confirm-update',
+      kaUal: UAL,
+      assertionVersion: nextScope.assertionVersion,
+      quads: nextQuads,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWPublisher',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'post-confirm-update',
+      kaUal: UAL,
+      assertionVersion: nextScope.assertionVersion,
+    });
+
+    // Restarted node re-receives the v1 finalization (no in-memory dedupe).
+    const restarted = new FinalizationHandler(store, undefined);
+    (restarted as unknown as {
+      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+    }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+    await restarted.handleFinalizationMessage(encodeFinalizationMessage(first.message), CG);
+
+    // Already-confirmed cleanup must not delete v2's staged content.
+    expect(await store.countQuads(sharedSwmGraph)).toBe(1);
+  });
 });

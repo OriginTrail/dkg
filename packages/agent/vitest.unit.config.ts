@@ -62,6 +62,7 @@ export default defineConfig({
       "test/chain-reconciler.test.ts",
       "test/finalization-lifecycle-logger.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
+      "test/ka-graph-finalization-envelope.test.ts",
       "test/swm-slice-ka-bound.test.ts",
       "test/ka-lifecycle-asset-ual-timeout.test.ts",
       "test/storage-ack-lifecycle-identity.test.ts",

@@ -23,6 +23,7 @@ export default defineConfig({
       'test/ka-graph-workspace-receiver.test.ts',
       'test/ka-graph-finalization-storage.test.ts',
       'test/ka-graph-publish-storage.test.ts',
+      'test/ka-graph-promote-head.test.ts',
       'test/agents-meta-bound.test.ts',
       'test/ack-collector.test.ts',
       'test/publish-lifecycle-logger.test.ts',

@@ -423,6 +423,100 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
   await params.store.insert(metadata);
 }
 
+/**
+ * One immutable graph-scoped operation snapshot recorded for a KA. The head
+ * points at the latest accepted assertion only; recovery paths that must
+ * materialize an EARLIER chain-confirmed assertion (out-of-order finalization,
+ * late-join reconciliation after a newer SWM write) enumerate these instead.
+ */
+export interface KnowledgeAssetOperationCandidate {
+  readonly shareOperationId: string;
+  readonly assertionVersion: string;
+  readonly publicTripleCount: number;
+  readonly privateTripleCount: number;
+  /** `0x`-prefixed lowercase hex, present iff privateTripleCount > 0. */
+  readonly privateMerkleRoot?: string;
+  readonly publisherPeerId?: string;
+}
+
+/**
+ * List every graph-scoped operation snapshot stored for one KA, newest
+ * assertion version first. Malformed rows are skipped (fail closed per row)
+ * so one corrupt operation cannot poison recovery of the others.
+ */
+export async function listKnowledgeAssetOperationCandidates(params: {
+  store: TripleStore;
+  graphManager: GraphManager;
+  contextGraphId: string;
+  kaUal: string;
+  assertionVersion?: string | number | bigint;
+  subGraphName?: string;
+}): Promise<KnowledgeAssetOperationCandidate[]> {
+  const scope = createGraphKnowledgeAssetScope(params.kaUal, 1);
+  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
+  const metaGraph = params.graphManager.sharedMemoryMetaUri(
+    params.contextGraphId,
+    subGraphName,
+  );
+  const result = await params.store.query(
+    `SELECT ?operation ?scopeVersion ?shareOperationId ?version ?publicCount ?privateCount ?privateRoot ?publisherPeerId WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        ?operation <${DKG}contentScopeVersion> ?scopeVersion ;
+          <${DKG}kaUal> <${assertSafeIri(scope.ual)}> ;
+          <${DKG}shareOperationId> ?shareOperationId ;
+          <${DKG}assertionVersion> ?version ;
+          <${DKG}publicQuadsCount> ?publicCount ;
+          <${DKG}privateTripleCount> ?privateCount .
+        OPTIONAL { ?operation <${DKG}privateMerkleRoot> ?privateRoot }
+        OPTIONAL { ?operation <${DKG}publisherPeerId> ?publisherPeerId }
+      }
+    }`,
+  );
+  if (result.type !== 'bindings') return [];
+
+  const requestedVersion = params.assertionVersion !== undefined
+    ? createGraphKnowledgeAssetScope(scope.ual, params.assertionVersion).assertionVersion
+    : undefined;
+  const byOperation = new Map<string, KnowledgeAssetOperationCandidate>();
+  for (const row of result.bindings) {
+    try {
+      if (parseIntegerLiteral(row?.['scopeVersion']) !== GRAPH_KA_CONTENT_SCOPE_VERSION) continue;
+      const shareOperationId = stripLiteral(row?.['shareOperationId'])?.trim() ?? '';
+      if (!shareOperationId) continue;
+      // Only accept rows under the canonical operation subject so spoofed
+      // rows in the meta graph cannot masquerade as an operation snapshot.
+      if (row?.['operation'] !== workspaceOperationSubject(params.contextGraphId, shareOperationId)) continue;
+      const assertionVersion = parsePositiveBigIntLiteral(row?.['version']).toString();
+      if (requestedVersion !== undefined && assertionVersion !== requestedVersion) continue;
+      const publicTripleCount = parseIntegerLiteral(row?.['publicCount']);
+      const privateTripleCount = parseIntegerLiteral(row?.['privateCount']);
+      const privateMerkleRoot = stripLiteral(row?.['privateRoot'])?.trim();
+      if (
+        !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
+        !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
+        (publicTripleCount === 0 && privateTripleCount === 0) ||
+        (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? '')) ||
+        (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+      ) continue;
+      byOperation.set(shareOperationId, {
+        shareOperationId,
+        assertionVersion,
+        publicTripleCount,
+        privateTripleCount,
+        privateMerkleRoot,
+        publisherPeerId: stripLiteral(row?.['publisherPeerId'])?.trim() || undefined,
+      });
+    } catch {
+      continue;
+    }
+  }
+  return [...byOperation.values()].sort((a, b) => {
+    const left = BigInt(a.assertionVersion);
+    const right = BigInt(b.assertionVersion);
+    return left === right ? 0 : (left > right ? -1 : 1);
+  });
+}
+
 /** Resolve and integrity-check a complete graph-scoped KA operation snapshot. */
 export async function resolveKnowledgeAssetOperationPublicQuads(params: {
   store: TripleStore;

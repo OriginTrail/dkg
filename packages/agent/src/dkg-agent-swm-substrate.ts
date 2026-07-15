@@ -1651,6 +1651,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           localPeerId: this.peerId,
           localNodeIdentityId: this.identityId.toString(),
         },
+        // Graph-scoped recovery resolves immutable operation snapshots; when
+        // the node stores them in the file-backed snapshot store the handler
+        // needs the same store to read them back.
+        this.publicSnapshotStore,
       );
     }
     return this.finalizationHandler;

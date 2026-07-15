@@ -40,11 +40,13 @@ export {
   type PreparedGeneratedPrivateCatalogFloor,
 } from './catalog-trust.js';
 export {
+  listKnowledgeAssetOperationCandidates,
   resolveKnowledgeAssetWorkspaceHead,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveLiftWorkspaceSlice,
   storeKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
+  type KnowledgeAssetOperationCandidate,
   type KnowledgeAssetWorkspaceHead,
   type KnowledgeAssetOperationPublicSnapshot,
 } from './workspace-resolution.js';
