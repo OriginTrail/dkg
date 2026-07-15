@@ -108,24 +108,6 @@ export interface LoadSelectedVerifiableMemoryQuadsOptions {
   queryOptions?: QueryOptions;
 }
 
-export interface MigrateNamedLifecycleSharedMemoryOptions {
-  graphResolution?: QueryOptions;
-  namedSource?: QueryOptions;
-  legacyBucketSource?: QueryOptions;
-}
-
-export type NamedLifecycleSharedMemoryMigrationResult =
-  | {
-      sourceEmpty: true;
-      migratedLegacyQuadCount: 0;
-      targetGraph: string;
-    }
-  | {
-      sourceEmpty: false;
-      migratedLegacyQuadCount: number;
-      targetGraph: string;
-    };
-
 function mergeQueryOptions(
   options?: QueryOptions,
   source?: QueryOptions['source'],
@@ -539,105 +521,6 @@ function sharedMemorySelectionGraphPattern(
             ?s = ?root
             || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
           )`;
-}
-
-/**
- * Load one selected SWM root closure from explicit source graphs while
- * preserving the source graph on every returned quad. The selection pattern is
- * shared with the normal scoped loader, so migration cannot drift from publish
- * semantics. One CONSTRUCT is issued per graph because CONSTRUCT results are a
- * default-graph dataset and otherwise lose their source graph identity.
- */
-async function loadGraphQualifiedSharedMemoryQuads(
-  store: TripleStore,
-  graphs: readonly string[],
-  selection: SharedMemoryReadSelection,
-  options: LoadSelectedSharedMemoryQuadsOptions = {},
-): Promise<Quad[]> {
-  const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
-  const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const quads: Quad[] = [];
-  for (const graph of new Set(graphs)) {
-    assertSafeIri(graph);
-    const result = await store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH <${graph}> { ${innerGraphPattern} }
-      }`,
-      queryOptions,
-    );
-    if (result.type === 'quads') {
-      quads.push(...result.quads.map((quad) => ({ ...quad, graph })));
-    }
-  }
-  return options.quadFilter ? quads.filter(options.quadFilter) : quads;
-}
-
-/**
- * Converge a selected legacy-bucket / checksum-alias root closure into the
- * canonical named lifecycle graph. Storage owns graph discovery and
- * graph-qualified loading; lifecycle metadata repair remains the publisher's
- * responsibility.
- *
- * Checksum aliases are safe to delete after canonical insertion because they
- * identify this exact lifecycle. The bare legacy bucket is different: it
- * predates KA-number scoping and one root closure may be the only SWM copy for
- * multiple not-yet-finalized lifecycles. Keep that compatibility copy until a
- * higher-level owner can prove no sibling lifecycle references it. Exact named
- * reads exclude the bucket, so retaining it cannot contaminate the migrated KA.
- */
-export async function migrateSharedMemoryRootClosureToNamedLifecycle(
-  store: TripleStore,
-  bucketGraph: string,
-  selection: SharedMemoryReadSelection,
-  identity: NamedKnowledgeAssetGraphIdentity,
-  options: MigrateNamedLifecycleSharedMemoryOptions = {},
-): Promise<NamedLifecycleSharedMemoryMigrationResult> {
-  const scope = { kind: 'named-lifecycle', identity } as const;
-  const targetGraph = canonicalSharedMemoryScopeWriteGraph(bucketGraph, scope);
-  const namedGraphs = await resolveSharedMemoryScopeGraphs(
-    store,
-    bucketGraph,
-    scope,
-    options.graphResolution,
-  );
-  const namedQuads = await loadGraphQualifiedSharedMemoryQuads(
-    store,
-    namedGraphs,
-    selection,
-    { queryOptions: options.namedSource },
-  );
-  const legacyBucketQuads = await loadGraphQualifiedSharedMemoryQuads(
-    store,
-    [bucketGraph],
-    selection,
-    { queryOptions: options.legacyBucketSource },
-  );
-  if (namedQuads.length === 0 && legacyBucketQuads.length === 0) {
-    return {
-      sourceEmpty: true,
-      migratedLegacyQuadCount: 0,
-      targetGraph,
-    };
-  }
-
-  const canonicalQuadsByTriple = new Map<string, Quad>();
-  for (const quad of [...namedQuads, ...legacyBucketQuads]) {
-    const canonicalQuad = { ...quad, graph: targetGraph };
-    canonicalQuadsByTriple.set(
-      JSON.stringify([quad.subject, quad.predicate, quad.object]),
-      canonicalQuad,
-    );
-  }
-  await store.insert([...canonicalQuadsByTriple.values()]);
-
-  const legacyAliasQuads = namedQuads.filter((quad) => quad.graph !== targetGraph);
-  if (legacyAliasQuads.length > 0) await store.delete(legacyAliasQuads);
-
-  return {
-    sourceEmpty: false,
-    migratedLegacyQuadCount: legacyBucketQuads.length,
-    targetGraph,
-  };
 }
 
 async function loadSharedMemoryQuadsInternal(

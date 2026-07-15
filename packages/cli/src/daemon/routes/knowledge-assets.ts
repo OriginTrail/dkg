@@ -317,8 +317,8 @@ export function resolveFinalizeOptions(
     layer,
   } = raw;
   // Rootless KAs are sealed in WM and shared atomically. Retain a deliberate,
-  // stable response for older clients that still send `layer:"swm"`, but never
-  // invoke the legacy root-closure reconstruction/migration path.
+  // stable response for older clients that still send `layer:"swm"`, while
+  // rejecting the request before any legacy SWM read or mutation.
   if (layer === "swm") {
     jsonResponse(res, 409, {
       code: "LEGACY_KA_READ_ONLY",

@@ -18,9 +18,8 @@ import {
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   namedSharedMemoryScopeForFinalizedLifecycle,
-  placeFinalizedLifecycleSwm,
   sharedMemoryScopeForFinalizedLifecycle,
-} from '../src/finalized-lifecycle-swm.js';
+} from '../src/finalized-lifecycle-scope.js';
 
 const CG = 'publish-agent-lane';
 const NAME = 'asset';
@@ -89,28 +88,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     });
     expect(() => sharedMemoryScopeForFinalizedLifecycle(DEFAULT_AGENT, RESERVED_KA_ID))
       .toThrow(/not in author .* namespace/);
-  });
-
-  it('owns the strict finalize source-empty contract inside the lifecycle boundary', async () => {
-    const error = await placeFinalizedLifecycleSwm({
-      publisher: {
-        ensureFinalizedLifecycleSwmPlacement: async () => ({
-          sourceEmpty: true,
-          migratedLegacyQuadCount: 0,
-          targetGraph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
-        }),
-      } as any,
-      operationContext: createOperationContext('test'),
-      authorAddress: AGENT_B,
-      packedKaId: RESERVED_KA_ID,
-      contextGraphId: CG,
-      assertionName: NAME,
-      assertionLifecycleAgentAddress: AGENT_B,
-      rootEntities: [ROOT],
-    }).catch((caught) => caught);
-
-    expect(error).toMatchObject({ code: 'SWM_MIGRATION_SOURCE_EMPTY' });
-    expect(error.message).toMatch(/No shared-memory quads remain/);
   });
 
   it('injects the curated catalog floor into the exact named lifecycle graph', async () => {
@@ -266,7 +243,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       thrown = error;
     }
     expect(thrown?.message).toMatch(/No quads in shared memory/);
-    expect(thrown?.code).not.toBe('SWM_MIGRATION_SOURCE_EMPTY');
   });
 
   it('keeps an older finalized legacy-bucket share read-only', async () => {
@@ -297,7 +273,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       legacyQuad,
     ]);
 
-    let migrationCalls = 0;
     let publishCalls = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -307,10 +282,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.log = makeLog();
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      ensureFinalizedLifecycleSwmPlacement: async () => {
-        migrationCalls += 1;
-        throw new Error('legacy migration must not run');
-      },
     };
     agent.publishFromSharedMemory = async () => {
       publishCalls += 1;
@@ -320,7 +291,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     await expect(
       agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B }),
     ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
-    expect(migrationCalls).toBe(0);
     expect(publishCalls).toBe(0);
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     expect(legacy).toMatchObject({ type: 'boolean', value: true });
