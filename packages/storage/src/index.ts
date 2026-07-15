@@ -85,6 +85,7 @@ export {
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,
 } from './bounded-rdf.js';
+export { StoreResponseTooLargeError } from './http-response-limit.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';

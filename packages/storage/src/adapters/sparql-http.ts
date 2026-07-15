@@ -45,6 +45,7 @@ import {
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import { readResponseTextBounded } from '../http-response-limit.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -462,11 +463,18 @@ export class SparqlHttpStore implements TripleStore {
 
         const res = await this.postQuery(trimmed, 'application/sparql-results+json', options);
         if (!res.ok) {
-          const text = await res.text().catch(() => '');
+          const text = await (options?.maxResponseBytes === undefined
+            ? res.text()
+            : readResponseTextBounded(res, options.maxResponseBytes)
+          ).catch(() => '');
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = (await res.json()) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
+        const json = options?.maxResponseBytes === undefined
+          ? await res.json() as AdapterSparqlJsonSelectResponse | W3CAskResponse
+          : JSON.parse(
+              await readResponseTextBounded(res, options.maxResponseBytes),
+            ) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
         if (isAsk || 'boolean' in json) {
           return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
@@ -488,10 +496,15 @@ export class SparqlHttpStore implements TripleStore {
   private async queryConstruct(sparql: string, options?: SparqlHttpQueryOptions): Promise<ConstructResult> {
     const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', options);
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
+      const text = await (options?.maxResponseBytes === undefined
+        ? res.text()
+        : readResponseTextBounded(res, options.maxResponseBytes)
+      ).catch(() => '');
       throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    const text = await res.text();
+    const text = options?.maxResponseBytes === undefined
+      ? await res.text()
+      : await readResponseTextBounded(res, options.maxResponseBytes);
     const quads = parseNQuadsText(text);
     return { type: 'quads', quads };
   }

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BlazegraphStore,
   ExactGraphReadError,
+  SparqlHttpStore,
   quadToNQuad,
   quadsToNQuads,
   readExactGraphPaged,
@@ -194,12 +196,12 @@ describe('readExactGraphPaged', () => {
     expect(queries).toHaveLength(2);
     expect(queries[0]).toMatch(/ORDER BY \?s \?p \?o\s+LIMIT 2\s+OFFSET 0/);
     expect(queries[1]).toMatch(/ORDER BY \?s \?p \?o\s+LIMIT 2\s+OFFSET 2/);
-    expect(seenOptions).toEqual([
-      queryOptions,
-      queryOptions,
-      queryOptions,
-      queryOptions,
-    ]);
+    expect(seenOptions).toHaveLength(4);
+    for (const options of seenOptions) {
+      expect(options).toMatchObject(queryOptions);
+      expect(options?.maxResponseBytes).toBeGreaterThan(0);
+      expect(options?.maxResponseBytes).toBeLessThanOrEqual(10 * 1024 * 1024);
+    }
   });
 
   it('fails with a typed limit error before materializing an oversized graph', async () => {
@@ -323,5 +325,37 @@ describe('readExactGraphPaged', () => {
       code: 'INVALID_QUERY_RESULT',
       graphIri: graph,
     });
+  });
+});
+
+describe('bounded HTTP query responses', () => {
+  it.each([
+    ['SPARQL HTTP', () => new SparqlHttpStore({ queryEndpoint: 'http://store.test/query' })],
+    ['Blazegraph', () => new BlazegraphStore('http://store.test/query')],
+  ])('rejects an oversized %s SELECT response before JSON materialization', async (_name, makeStore) => {
+    const originalFetch = globalThis.fetch;
+    const body = JSON.stringify({
+      head: { vars: ['o'] },
+      results: {
+        bindings: [{ o: { type: 'literal', value: 'x'.repeat(256) } }],
+      },
+    });
+    globalThis.fetch = (async () => new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    })) as typeof fetch;
+
+    try {
+      const store = makeStore();
+      await expect(store.query(
+        'SELECT ?o WHERE { ?s ?p ?o }',
+        { maxResponseBytes: 64 },
+      )).rejects.toMatchObject({
+        code: 'STORE_RESPONSE_TOO_LARGE',
+        maxBytes: 64,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

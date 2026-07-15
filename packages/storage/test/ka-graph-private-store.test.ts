@@ -29,6 +29,17 @@ describe('graph-scoped private content', () => {
     privateStore = new PrivateContentStore(store, new GraphManager(store));
   });
 
+  it('rejects context graph IDs that alias structural storage partitions', async () => {
+    const graphManager = new GraphManager(store);
+
+    await expect(graphManager.ensureContextGraph('victim/_meta')).rejects.toThrow(
+      /reserved storage partition/,
+    );
+    await expect(store.listGraphs()).resolves.not.toContain(
+      'did:dkg:context-graph:victim/_meta',
+    );
+  });
+
   it('keys exact private payloads by both UAL and assertion version', async () => {
     const first = createGraphKnowledgeAssetScope(UAL, 1);
     const second = createGraphKnowledgeAssetScope(UAL, 2);
