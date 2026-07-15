@@ -32,6 +32,7 @@ interface KAMetaBase {
   hasInvalidExplicitPolicy?: boolean;
   publisherPeerId?: string;
   allowedPeers?: string[];
+  graphScope?: ReturnType<typeof createGraphKnowledgeAssetScope>;
 }
 
 interface GraphScopedKAMeta extends KAMetaBase {
@@ -210,6 +211,16 @@ export class AccessHandler {
           servedRootEntity!,
           meta.subGraphName,
         );
+      }
+
+      if (meta.graphScope && meta.privateMerkleRoot) {
+        const actualPrivateRoot = computePrivateRoot(privateQuads);
+        if (
+          !actualPrivateRoot
+          || toHex(actualPrivateRoot) !== toHex(meta.privateMerkleRoot)
+        ) {
+          return this.deny('Private content does not match the durable KA commitment');
+        }
       }
 
       const nquads = privateQuads
@@ -581,6 +592,12 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+function hexToBytes(value: string): Uint8Array {
+  const hex = value.replace(/^0x/, '');
+  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('Invalid private Merkle root');
+  return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
 }
 
 function stripLiteral(s: string): string {

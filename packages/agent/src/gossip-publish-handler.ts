@@ -21,6 +21,8 @@ import {
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   generateGraphKnowledgeAssetMetadata,
+  resolveKnowledgeAssetWorkspaceHead,
+  workspacePublicQuadsDigest,
   shouldApplyMaterialization,
   withMaterializationLock,
   writeMaterializedVersion,
@@ -150,6 +152,8 @@ export interface GossipPublishHandlerCallbacks {
    */
   hasConfirmedMetaState?: (id: string) => Promise<boolean>;
   getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
+  /** Resolve the topic Context Graph to its authoritative on-chain id. */
+  getContextGraphOnChainId?: (id: string) => Promise<string | null>;
   markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
@@ -495,6 +499,56 @@ export class GossipPublishHandler {
         const blockNumber = protoToNumber(request.blockNumber ?? 0);
         const startKAId = protoToBigInt(request.startKAId ?? 0);
         const endKAId = protoToBigInt(request.endKAId ?? 0);
+        const graphManager = new GraphManager(this.store);
+        let workspaceHead;
+        try {
+          workspaceHead = await resolveKnowledgeAssetWorkspaceHead({
+            store: this.store,
+            graphManager,
+            contextGraphId: request.contextGraphId,
+            kaUal: graphPublish.scope.ual,
+            subGraphName,
+          });
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `Gossip rejected corrupt graph-scoped SWM head for ${graphPublish.scope.ual}: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+          return;
+        }
+        const privateMerkleRoot = graphPublish.privateMerkleRoot
+          ? ethers.hexlify(graphPublish.privateMerkleRoot).toLowerCase()
+          : undefined;
+        const publicDigest = workspacePublicQuadsDigest(
+          normalized.map((quad) => ({ ...quad, graph: '' })),
+        );
+        if (
+          !workspaceHead
+          || workspaceHead.assertionVersion !== graphPublish.scope.assertionVersion
+          || workspaceHead.publicTripleCount !== graphPublish.publicTripleCount
+          || workspaceHead.publicQuadsDigest !== publicDigest
+          || workspaceHead.privateTripleCount !== graphPublish.privateTripleCount
+          || workspaceHead.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
+          || workspaceHead.accessPolicy === undefined
+        ) {
+          this.log.warn(
+            ctx,
+            `Gossip deferred graph-scoped publish ${graphPublish.scope.ual}: ` +
+              'no matching durable StorageACK workspace head',
+          );
+          return;
+        }
+        if (
+          graphPublish.accessPolicy !== workspaceHead.accessPolicy
+          || graphPublish.allowedPeers.join('\0') !== workspaceHead.allowedPeers.join('\0')
+          || (fromPeerId !== undefined && fromPeerId !== workspaceHead.publisherPeerId)
+        ) {
+          this.log.warn(
+            ctx,
+            `Gossip ignored untrusted graph-scoped access provenance for ${graphPublish.scope.ual}`,
+          );
+        }
         let verified = false;
         if (txHash && blockNumber > 0 && request.publisherAddress) {
           phase?.('chain-verify', 'start');
@@ -506,6 +560,7 @@ export class GossipPublishHandler {
             startKAId,
             endKAId,
             ctx,
+            request.contextGraphId,
           );
           phase?.('chain-verify', 'end');
         }
@@ -515,10 +570,10 @@ export class GossipPublishHandler {
             ual: graphPublish.scope.ual,
             contextGraphId: request.contextGraphId,
             merkleRoot,
-            publisherPeerId: fromPeerId ?? request.publisherAddress ?? 'unknown',
-            accessPolicy: graphPublish.accessPolicy,
-            ...(graphPublish.accessPolicy === 'allowList'
-              ? { allowedPeers: graphPublish.allowedPeers }
+            publisherPeerId: workspaceHead.publisherPeerId,
+            accessPolicy: workspaceHead.accessPolicy,
+            ...(workspaceHead.accessPolicy === 'allowList'
+              ? { allowedPeers: workspaceHead.allowedPeers }
               : {}),
             timestamp: new Date(),
             subGraphName,
@@ -733,6 +788,7 @@ export class GossipPublishHandler {
     expectedStartKAId: bigint,
     expectedEndKAId: bigint,
     ctx: OperationContext,
+    expectedContextGraphId?: string,
   ): Promise<boolean> {
     if (!this.chain || this.chain.chainId === 'none') return false;
 
@@ -742,6 +798,31 @@ export class GossipPublishHandler {
     }
 
     try {
+      if (expectedContextGraphId !== undefined) {
+        if (
+          typeof this.chain.getKAContextGraphId !== 'function'
+          || !this.callbacks.getContextGraphOnChainId
+        ) {
+          this.log.warn(ctx, 'Gossip verification rejected: Context Graph binding oracle unavailable');
+          return false;
+        }
+        const expectedOnChainId = await this.callbacks.getContextGraphOnChainId(
+          expectedContextGraphId,
+        );
+        if (expectedOnChainId === null) {
+          this.log.warn(ctx, `Gossip verification rejected: Context Graph ${expectedContextGraphId} is not registered`);
+          return false;
+        }
+        const actualOnChainId = await this.chain.getKAContextGraphId(expectedStartKAId);
+        if (actualOnChainId !== BigInt(expectedOnChainId)) {
+          this.log.warn(
+            ctx,
+            `Gossip verification rejected: KA ${expectedStartKAId} belongs to Context Graph ` +
+              `${actualOnChainId}, not ${expectedOnChainId}`,
+          );
+          return false;
+        }
+      }
       const filter: EventFilter = {
         eventTypes: ['KnowledgeBatchCreated', 'KCCreated'],
         fromBlock: blockNumber,

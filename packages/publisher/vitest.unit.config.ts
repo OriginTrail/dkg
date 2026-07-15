@@ -18,6 +18,7 @@ export default defineConfig({
       'test/async-promote-queue.test.ts',
       'test/lift-job-types.test.ts',
       'test/multi-root-token-rows.test.ts',
+      'test/access-verification.test.ts',
       'test/promote-step-tag.test.ts',
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',

@@ -2243,12 +2243,22 @@ export class DKGAgent extends DKGAgentBase {
     policy?: {
       accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
       allowedPeers?: string[];
+      /** Curated assertions stay on encrypted member channels. */
+      curated?: boolean;
     },
   ): Promise<void> {
     // Use the public quads from the publish result to avoid leaking private
     // triples that are stored in the same data graph.
     const publicQuads = result.publicQuads ?? [];
     const isGraphScoped = result.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
+    if (isGraphScoped && policy?.curated) {
+      this.log.info(
+        ctx,
+        `Skipping ordinary publish gossip for curated graph-scoped KA ${result.ual}; ` +
+          'the assertion is distributed only through encrypted member channels',
+      );
+      return;
+    }
     const graphScope = isGraphScoped
       ? createGraphKnowledgeAssetScope(result.ual, result.assertionVersion ?? '')
       : undefined;

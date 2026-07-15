@@ -1665,6 +1665,7 @@ export class PublishMethods extends DKGAgentBase {
     await this.broadcastPublish(contextGraphId, result, ctx, {
       accessPolicy: opts?.accessPolicy,
       allowedPeers: opts?.allowedPeers,
+      curated: preparedCatalog !== undefined,
     });
     onPhase?.('broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kaId=${result.kaId}`);

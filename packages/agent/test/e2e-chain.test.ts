@@ -6,6 +6,10 @@ import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   buildUpdateAuthorAttestationTypedData,
   AUTHOR_SCHEME_VERSION_V1,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
   type PrecomputedUpdateAttestation,
 } from '@origintrail-official/dkg-core';
 import {
@@ -213,11 +217,16 @@ describe('E2E: DKGAgent with real blockchain', () => {
     const result = await agents[0].publish(CONTEXT_GRAPH_ID, quads);
     expect(result).toBeDefined();
     expect(result.kaManifest).toEqual([]);
+    expect(result.contentScopeVersion).toBe(GRAPH_KA_CONTENT_SCOPE_VERSION);
+    expect(result.assertionVersion).toBe('1');
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
     expect(result.onChainResult!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
     expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
-    expect(result.ual).toContain('did:dkg:evm:31337/');
+    const scope = createGraphKnowledgeAssetScope(result.ual, result.assertionVersion!);
+    expect(scope.ual).toBe(result.ual);
+    expect((BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber))
+      .toBe(result.onChainResult!.batchId);
     firstPublishBatchId = result.onChainResult!.batchId;
   }, 60_000);
 
@@ -347,6 +356,10 @@ describe('E2E: DKGAgent with real blockchain', () => {
     expect(result).toBeDefined();
     expect(result.kaManifest).toEqual([]);
     expect(result.publicTripleCount).toBe(quads.length);
+    expect(result.contentScopeVersion).toBe(GRAPH_KA_CONTENT_SCOPE_VERSION);
+    const scope = createGraphKnowledgeAssetScope(result.ual, result.assertionVersion!);
+    expect((BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber))
+      .toBe(result.onChainResult!.batchId);
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
 
@@ -389,6 +402,21 @@ describe('E2E: DKGAgent with real blockchain', () => {
     expect(result.onChainResult).toBeDefined();
     expect(result.kaManifest).toEqual([]);
     expect(result.publicTripleCount).toBe(quads.length);
+    expect(result.contentScopeVersion).toBe(GRAPH_KA_CONTENT_SCOPE_VERSION);
+    const scope = createGraphKnowledgeAssetScope(result.ual, result.assertionVersion!);
+    const exactGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const exact = await (agents[0] as unknown as { store: {
+      query: (sparql: string) => Promise<{ type: string; bindings?: Record<string, string>[] }>;
+    } }).store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${exactGraph}> { ?s ?p ?o } }`,
+    );
+    expect(exact.type).toBe('bindings');
+    expect(exact.bindings).toHaveLength(6);
+    expect(new Set(exact.bindings!.map((binding) => binding.s))).toEqual(new Set(entities));
   }, 30_000);
 
   // -------------------------------------------------------------------------
