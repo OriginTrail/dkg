@@ -4589,71 +4589,100 @@ export class DKGPublisher implements Publisher {
       if (graphUpdate) {
         const labelMeta = options.targetMetaGraphUri
           ?? this.graphManager.metaGraphUri(contextGraphId);
-        const inherited = await this.readGraphKnowledgeAssetIdentity(
-          labelMeta,
-          graphUpdate.scope.ual,
-        );
-        if (inherited.subGraphName !== options.subGraphName) {
-          throw new Error(
-            `Graph-scoped KA update cannot move ${graphUpdate.scope.ual} from ` +
-              `${inherited.subGraphName ?? '(root)'} to ${options.subGraphName ?? '(root)'}`,
-          );
-        }
-        await this.replaceExactKnowledgeAssetGraph(
-          dataGraph,
-          allSkolemizedQuads,
-          'Graph-scoped KA update',
-        );
-        await this.privateStore.replaceKnowledgeAssetPrivateTriples(
-          contextGraphId,
-          graphUpdate.scope,
-          canonicalPrivateQuads,
-          options.subGraphName,
-        );
-        // 🔴 PR #1712 review (3586192289): the converge below replaces the
-        // KA's entire access row set, so passing raw update options here let
-        // an update that omitted `accessPolicy` rewrite a private KA to the
-        // metadata generator's 'public' default (and its owner to 'unknown'),
-        // silently exposing its private triples. `graphUpdateAccess` resolves
-        // explicit option → existing stored row → publish()'s private-content
-        // default, with publish()'s option validation applied.
-        const metadata = generateGraphKnowledgeAssetMetadata(
-          {
-            ual: graphUpdate.scope.ual,
-            contextGraphId,
-            merkleRoot: kcMerkleRoot,
-            publisherPeerId: graphUpdateAccess!.publisherPeerId,
-            accessPolicy: graphUpdateAccess!.accessPolicy,
-            allowedPeers: graphUpdateAccess!.allowedPeers.length > 0
-              ? graphUpdateAccess!.allowedPeers
-              : undefined,
-            timestamp: new Date(),
-            subGraphName: inherited.subGraphName,
-            authorAddress: inherited.authorAddress,
-            assertionVersion: graphUpdate.scope.assertionVersion,
-            publicTripleCount: graphUpdate.publicTripleCount,
-            privateTripleCount: graphUpdate.privateTripleCount,
-            ...(updatePrivateRoots[0]
-              ? { privateMerkleRoot: updatePrivateRoots[0] }
-              : {}),
-            assertionGraph: dataGraph,
-          },
-          provenance ? 'confirmed' : 'tentative',
-          provenance,
-        );
-        await this.convergeKnowledgeAssetMetadataRows(
-          labelMeta,
-          graphUpdate.scope.ual,
-          metadata,
-        );
-        if (version) {
-          await writeMaterializedVersion(
-            this.store,
+        // GH#842 last-writer-wins + atomicity. Serialise the whole exact-graph
+        // replace + private replace + metadata converge + version stamp under
+        // the per-KA materialization lock, and skip a stale (lower chain
+        // version) re-run — exactly like the publish-promote path (~4182) and
+        // the legacy update restate. Without this the graph-scoped update was
+        // the only materialising writer with no lock and no version gate: two
+        // racing updates could interleave their multi-step replace, and a late
+        // v2 could overwrite a materialised v3's data graph and delete v3's
+        // metadata rows via the converge, leaving the node permanently serving
+        // the superseded assertion with no self-heal (cross-node divergence).
+        await withMaterializationLock(labelMeta, graphUpdate.scope.ual, async () => {
+          // Gate only on a confirmed run (one that carries a chain version); the
+          // tentative local write has none and is the current-version write.
+          if (
+            version
+            && !(await shouldApplyMaterialization(
+              this.store,
+              labelMeta,
+              graphUpdate.scope.ual,
+              version,
+            ))
+          ) {
+            this.log.info(
+              ctx,
+              `Graph-scoped update: skipped ${graphUpdate.scope.ual} — a newer materialisation is present`,
+            );
+            return;
+          }
+          const inherited = await this.readGraphKnowledgeAssetIdentity(
             labelMeta,
             graphUpdate.scope.ual,
-            version,
           );
-        }
+          if (inherited.subGraphName !== options.subGraphName) {
+            throw new Error(
+              `Graph-scoped KA update cannot move ${graphUpdate.scope.ual} from ` +
+                `${inherited.subGraphName ?? '(root)'} to ${options.subGraphName ?? '(root)'}`,
+            );
+          }
+          await this.replaceExactKnowledgeAssetGraph(
+            dataGraph,
+            allSkolemizedQuads,
+            'Graph-scoped KA update',
+          );
+          await this.privateStore.replaceKnowledgeAssetPrivateTriples(
+            contextGraphId,
+            graphUpdate.scope,
+            canonicalPrivateQuads,
+            options.subGraphName,
+          );
+          // 🔴 PR #1712 review (3586192289): the converge below replaces the
+          // KA's entire access row set, so passing raw update options here let
+          // an update that omitted `accessPolicy` rewrite a private KA to the
+          // metadata generator's 'public' default (and its owner to 'unknown'),
+          // silently exposing its private triples. `graphUpdateAccess` resolves
+          // explicit option → existing stored row → publish()'s private-content
+          // default, with publish()'s option validation applied.
+          const metadata = generateGraphKnowledgeAssetMetadata(
+            {
+              ual: graphUpdate.scope.ual,
+              contextGraphId,
+              merkleRoot: kcMerkleRoot,
+              publisherPeerId: graphUpdateAccess!.publisherPeerId,
+              accessPolicy: graphUpdateAccess!.accessPolicy,
+              allowedPeers: graphUpdateAccess!.allowedPeers.length > 0
+                ? graphUpdateAccess!.allowedPeers
+                : undefined,
+              timestamp: new Date(),
+              subGraphName: inherited.subGraphName,
+              authorAddress: inherited.authorAddress,
+              assertionVersion: graphUpdate.scope.assertionVersion,
+              publicTripleCount: graphUpdate.publicTripleCount,
+              privateTripleCount: graphUpdate.privateTripleCount,
+              ...(updatePrivateRoots[0]
+                ? { privateMerkleRoot: updatePrivateRoots[0] }
+                : {}),
+              assertionGraph: dataGraph,
+            },
+            provenance ? 'confirmed' : 'tentative',
+            provenance,
+          );
+          await this.convergeKnowledgeAssetMetadataRows(
+            labelMeta,
+            graphUpdate.scope.ual,
+            metadata,
+          );
+          if (version) {
+            await writeMaterializedVersion(
+              this.store,
+              labelMeta,
+              graphUpdate.scope.ual,
+              version,
+            );
+          }
+        });
         onPhase?.('store', 'end');
         return;
       }
