@@ -13,16 +13,25 @@ import {
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  createGraphKnowledgeAssetScope,
   decodeStorageACK,
   decryptV10PublishPayload,
   encodePublishIntent,
   isStorageACKDecline,
+  knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
   StorageACKHandler,
   catalogTripleKey,
+  computeFlatKCRootV10,
+  computePrivateRootV10,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
+  skolemizeKnowledgeAssetParts,
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -491,7 +500,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       encryptInlinePayload,
       encryptInlineChunked,
     }));
-    expect(publishArgs).not.toHaveProperty('trustedNonManifestCatalogTriples');
+    expect(publishArgs.trustedNonManifestCatalogTriples).toBeUndefined();
   });
 
   it('keeps caller-supplied mismatched onChainContextGraphId as an explicit policy target', async () => {
@@ -553,6 +562,33 @@ describe('DKGAgent._publish inline encryption routing', () => {
 
 describe('DKGAgent.update inline encryption routing', () => {
   it('passes derived update on-chain id as binding-only while preserving publisher target', async () => {
+    const store = new OxigraphStore();
+    const chainId = 'mock:31337';
+    const author = '0x1111111111111111111111111111111111111111';
+    const kaNumber = 123n;
+    const kaId = (BigInt(author) << 96n) | kaNumber;
+    const ual = `did:dkg:${chainId}/${author}/${kaNumber.toString()}`;
+    const currentScope = createGraphKnowledgeAssetScope(ual, 1);
+    const metaGraph = contextGraphMetaUri('private-cg');
+    const assertionGraph = knowledgeAssetLayerGraphUri(
+      'private-cg',
+      MemoryLayer.VerifiableMemory,
+      currentScope,
+    );
+    const dkg = 'http://dkg.io/ontology/';
+    const xsdInteger = 'http://www.w3.org/2001/XMLSchema#integer';
+    await store.insert([
+      { subject: ual, predicate: `${dkg}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${xsdInteger}>`, graph: metaGraph },
+      { subject: ual, predicate: `${dkg}kaUal`, object: ual, graph: metaGraph },
+      { subject: ual, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: metaGraph },
+      { subject: ual, predicate: `${dkg}batchId`, object: `"${kaId.toString()}"^^<${xsdInteger}>`, graph: metaGraph },
+      { subject: ual, predicate: `${dkg}status`, object: '"confirmed"', graph: metaGraph },
+      { subject: ual, predicate: `${dkg}contextGraph`, object: contextGraphDataUri('private-cg'), graph: metaGraph },
+      { subject: ual, predicate: `${dkg}assertionGraph`, object: assertionGraph, graph: metaGraph },
+    ]);
+    const updateQuads = [{ subject: 'urn:update:subject', predicate: 'urn:update:predicate', object: '"o"', graph: '' }];
+    const canonical = await skolemizeKnowledgeAssetParts(updateQuads, []);
+    const updateRoot = computeFlatKCRootV10(canonical.publicQuads, []);
     const updateEncryptInlinePayload = async (plaintext: Uint8Array) => plaintext;
     const updateEncryptInlineChunked = async () => ({
       ciphertextChunksRoot: new Uint8Array(32),
@@ -564,17 +600,19 @@ describe('DKGAgent.update inline encryption routing', () => {
       status: 'confirmed',
     }));
     const agentLike = {
+      store,
       log: {
         info: recorder(() => undefined),
         warn: recorder(() => undefined),
         error: recorder(() => undefined),
         debug: recorder(() => undefined),
       },
+      chain: { chainId },
       getContextGraphOnChainId: recorder(async () => '42'),
       createV10UpdateACKProvider: recorder(() => undefined),
       node: { peerId: { toString: () => 'peer-1' } },
       publisher: {
-        update: publisherUpdate,
+        updateKnowledgeAssetFromSharedMemory: publisherUpdate,
       },
       _resolveEncryptInlinePayload: recorder(async () => updateEncryptInlinePayload),
       _resolveEncryptInlineChunked: recorder(async () => updateEncryptInlineChunked),
@@ -582,9 +620,18 @@ describe('DKGAgent.update inline encryption routing', () => {
 
     await (DKGAgent.prototype as any).update.call(
       agentLike,
-      123n,
+      kaId,
       'private-cg',
-      [{ subject: 's', predicate: 'p', object: '"o"', graph: 'g' }],
+      updateQuads,
+      [],
+      {
+        precomputedUpdateAttestation: {
+          expectedNewMerkleRoot: updateRoot,
+          authorAddress: author,
+          signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+          schemeVersion: 1,
+        },
+      },
     );
 
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
@@ -602,7 +649,7 @@ describe('DKGAgent.update inline encryption routing', () => {
       { aeadBindingContextGraphId: '42' },
     ]);
     expect(publisherUpdate.calls.at(-1)).toEqual([
-      123n,
+      kaId,
       expect.objectContaining({
         publishContextGraphId: '42',
         encryptInlinePayload: updateEncryptInlinePayload,
@@ -749,41 +796,55 @@ function makeQueuedAgentHarness(options: {
   return { agentLike, publisherPublish };
 }
 
-function makeQueuedPublishRequest(options: {
+async function makeQueuedPublishRequest(options: {
   contextGraphId: string;
   name: string;
   shareOperationId: string;
-  root: string;
   intentByte: string;
-  reservedKaId?: `${bigint}`;
-}): KnowledgeAssetVmPublishRequest {
+  quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+  privateQuads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+}): Promise<KnowledgeAssetVmPublishRequest> {
+  const canonical = await skolemizeKnowledgeAssetParts(
+    options.quads.map((quad) => ({ ...quad, graph: '' })),
+    (options.privateQuads ?? []).map((quad) => ({ ...quad, graph: '' })),
+  );
+  const privateRoot = computePrivateRootV10(canonical.privateQuads);
+  const merkleRoot = ethers.hexlify(computeFlatKCRootV10(
+    canonical.publicQuads,
+    privateRoot ? [privateRoot] : [],
+  ));
+  const packedKaId = (BigInt(QUEUED_TEST_AUTHOR) << 96n) | 1n;
   return {
     contextGraphId: options.contextGraphId,
     name: options.name,
     shareOperationId: options.shareOperationId,
-    roots: [options.root],
+    roots: [],
     seal: {
-      merkleRoot: `0x${'12'.repeat(32)}`,
+      merkleRoot,
       authorAddress: QUEUED_TEST_AUTHOR,
       signature: {
         r: `0x${'34'.repeat(32)}`,
         vs: `0x${'56'.repeat(32)}`,
       },
       schemeVersion: 1,
-      ...(options.reservedKaId === undefined
-        ? {}
-        : { reservedKaId: options.reservedKaId }),
+      reservedKaId: packedKaId.toString() as `${bigint}`,
     },
     sealChainId: '31337',
     sealKav10Address: QUEUED_TEST_LIFECYCLE,
     sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-    sealMerkleRoot: `0x${'12'.repeat(32)}`,
+    sealMerkleRoot: merkleRoot,
     intentKey: `sha256:${options.intentByte.repeat(32)}`,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: `did:dkg:mock:31337/${QUEUED_TEST_AUTHOR}/1`,
+    assertionVersion: '1',
+    publicTripleCount: canonical.publicQuads.length,
+    ...(privateRoot ? { privateMerkleRoot: ethers.hexlify(privateRoot) } : {}),
+    privateTripleCount: canonical.privateQuads.length,
   };
 }
 
 describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routing', () => {
-  it('reconstructs the curated catalog floor and lets real encryption override placeholders', async () => {
+  it('keeps the V2 snapshot exact while passing a detached catalog capability', async () => {
     const realInline = recorder(async (plaintext: Uint8Array) => new Uint8Array([...plaintext, 0xaa]));
     const realChunked = recorder(async () => ({
       ciphertextChunksRoot: ethers.getBytes(ethers.id('queued-real-chunk-root')),
@@ -809,30 +870,28 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       encryptInlinePayload: realInline,
       encryptInlineChunked: realChunked,
     });
-    const request = makeQueuedPublishRequest({
+    const generatedFloor = generatedPrivateCatalogFloorQuads('private-cg');
+    const legacyFloorQuad = { ...generatedFloor[0], graph: 'urn:legacy:catalog' };
+    const snapshotQuads = [
+      {
+        subject: 'urn:test:queued-private',
+        predicate: 'http://schema.org/name',
+        object: '"Queued Private"',
+        graph: '',
+      },
+      legacyFloorQuad,
+    ];
+    const request = await makeQueuedPublishRequest({
       contextGraphId: 'private-cg',
       name: 'queued-private-ka',
       shareOperationId: 'share-op-1',
-      root: 'urn:test:queued-private',
       intentByte: 'ab',
-      reservedKaId: (
-        (BigInt(QUEUED_TEST_AUTHOR) << 96n) | 1n
-      ).toString() as `${bigint}`,
+      quads: snapshotQuads,
     });
-    const generatedFloor = generatedPrivateCatalogFloorQuads('private-cg');
-    const legacyFloorQuad = { ...generatedFloor[0], graph: 'urn:legacy:catalog' };
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
       contextGraphId: request.contextGraphId,
-      quads: [
-        {
-          subject: 'urn:test:queued-private',
-          predicate: 'http://schema.org/name',
-          object: '"Queued Private"',
-          graph: '',
-        },
-        legacyFloorQuad,
-      ],
+      quads: snapshotQuads,
       encryptInlinePayload: failClosedInline,
       encryptInlineChunked: failClosedChunked,
     });
@@ -858,10 +917,11 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys('private-cg'),
     });
     const publishedQuads = publisherPublish.calls.at(-1)?.[0].quads;
+    expect(publishedQuads).toHaveLength(2);
     expect(publishedQuads).toContainEqual({ ...legacyFloorQuad, graph: '' });
-    for (const key of generatedPrivateCatalogTripleKeys('private-cg')) {
-      expect(publishedQuads.filter((quad: any) => catalogTripleKey(quad) === key)).toHaveLength(1);
-    }
+    expect([...generatedPrivateCatalogTripleKeys('private-cg')].filter((key) =>
+      publishedQuads.some((quad: any) => catalogTripleKey(quad) === key),
+    )).toHaveLength(1);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload).not.toBe(failClosedInline);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlineChunked).not.toBe(failClosedChunked);
   });
@@ -873,19 +933,19 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       ual: 'did:dkg:local/queued-private-local',
       encryptInlinePayload: realInline,
     });
-    const request = makeQueuedPublishRequest({
-      contextGraphId: 'private-local-cg',
-      name: 'queued-private-local-ka',
-      shareOperationId: 'share-op-private-local',
-      root: 'urn:test:queued-private-local',
-      intentByte: 'cd',
-    });
     const originalQuads = [{
       subject: 'urn:test:queued-private-local',
       predicate: 'http://schema.org/name',
       object: '"Queued Private Local"',
       graph: '',
     }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'private-local-cg',
+      name: 'queued-private-local-ka',
+      shareOperationId: 'share-op-private-local',
+      intentByte: 'cd',
+      quads: originalQuads,
+    });
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
       agentLike,
@@ -914,19 +974,19 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       peerId: 'did:dkg:agent:queued-placeholder',
       ual: 'did:dkg:local/queued-placeholder',
     });
-    const request = makeQueuedPublishRequest({
-      contextGraphId: 'public-cg',
-      name: 'queued-public-ka',
-      shareOperationId: 'share-op-placeholder',
-      root: 'urn:test:queued-public',
-      intentByte: 'ef',
-    });
     const originalQuads = [{
       subject: 'urn:test:queued-public',
       predicate: 'http://schema.org/name',
       object: '"Queued Public"',
       graph: '',
     }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'public-cg',
+      name: 'queued-public-ka',
+      shareOperationId: 'share-op-placeholder',
+      intentByte: 'ef',
+      quads: originalQuads,
+    });
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
       agentLike,
@@ -956,23 +1016,23 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       },
       onChainContextGraphId: null,
     });
-    const request = makeQueuedPublishRequest({
+    const queuedBindingQuads = [{
+      subject: 'urn:test:queued-binding',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Binding"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
       contextGraphId: 'memory-layers-e2e',
       name: 'queued-binding-ka',
       shareOperationId: 'share-op-1',
-      root: 'urn:test:queued-binding',
       intentByte: 'cd',
-      reservedKaId: '1',
+      quads: queuedBindingQuads,
     });
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
       contextGraphId: request.contextGraphId,
-      quads: [{
-        subject: 'urn:test:queued-binding',
-        predicate: 'http://schema.org/name',
-        object: '"Queued Binding"',
-        graph: '',
-      }],
+      quads: queuedBindingQuads,
       publishContextGraphId: '42',
     });
 
@@ -1012,25 +1072,25 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       },
       onChainContextGraphId: null,
     });
-    const request = makeQueuedPublishRequest({
+    const unregisteredQuads = [{
+      subject: 'urn:test:queued-unregistered',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Unregistered"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
       contextGraphId: 'unregistered-product-cg',
       name: 'queued-unregistered-ka',
       shareOperationId: 'share-op-1',
-      root: 'urn:test:queued-unregistered',
       intentByte: 'de',
-      reservedKaId: '1',
+      quads: unregisteredQuads,
     });
 
     let thrown: any;
     try {
       await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
         contextGraphId: request.contextGraphId,
-        quads: [{
-          subject: 'urn:test:queued-unregistered',
-          predicate: 'http://schema.org/name',
-          object: '"Queued Unregistered"',
-          graph: '',
-        }],
+        quads: unregisteredQuads,
       });
     } catch (err) {
       thrown = err;

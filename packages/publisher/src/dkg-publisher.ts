@@ -14,7 +14,7 @@ import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
   assertTrustedCatalogTriplesAreGeneratedFloor,
   catalogTripleKey,
-  replaceCatalogPartitionWithGeneratedPrivateFloor,
+  generatedPrivateCatalogFloorQuads,
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
@@ -109,6 +109,34 @@ export {
 // member rows — cannot be sealed-in-SWM and published as a partial asset.
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 const SHARE_OPERATION_ID_PRED = 'http://dkg.io/ontology/shareOperationId';
+
+/**
+ * Resolve the public catalog proof material independently from a V2 KA's
+ * canonical RDF payload.
+ *
+ * Legacy root-scoped publishes retain the combined-model partition: catalog
+ * rows already present in the payload stay committed by the KC root. A
+ * graph-scoped KA is different: every submitted triple is atomic asset data,
+ * including a user-authored triple whose subject happens to be the CG DID.
+ * Its protocol-owned private-CG floor is therefore generated into a detached
+ * catalog commitment and must never be removed from, or appended to, the KA.
+ */
+function resolveCatalogProofMaterial(
+  quads: readonly Quad[],
+  contextGraphId: string,
+  graphScoped: boolean,
+  trustedKeys: PublishOptions['trustedNonManifestCatalogTriples'],
+): { catalogQuads: Quad[]; otherQuads: Quad[] } {
+  if (!graphScoped) {
+    return partitionCatalogQuads(quads, contextGraphDataUri(contextGraphId));
+  }
+  return {
+    catalogQuads: trustedCatalogTripleKeySet(trustedKeys).size > 0
+      ? generatedPrivateCatalogFloorQuads(contextGraphId)
+      : [],
+    otherQuads: [...quads],
+  };
+}
 
 async function validateGraphScopedPayloadAgainstSeal(
   seal: AssertionSeal,
@@ -2295,6 +2323,7 @@ export class DKGPublisher implements Publisher {
     let allSkolemizedQuads: Quad[];
     let privateRoots: Uint8Array[];
     if (graphPublish) {
+      assertNoKnowledgeAssetPayloadNamedGraphs(quads, privateQuads);
       const canonicalParts = await skolemizeKnowledgeAssetParts(quads, privateQuads, {
         allowCanonicalSkolemTerms: isInternalOrigin(options),
       });
@@ -2508,16 +2537,18 @@ export class DKGPublisher implements Publisher {
     const publicNquadsBytes = new TextEncoder().encode(nquadsStr);
     const publicByteSize = BigInt(publicNquadsBytes.length);
 
-    // the public DCAT catalog entry rides in the KC merkle root
-    // (kcMerkleRoot, above, covers it) AND is the OT-RFC-49 curated random-
-    // sampling commitment (catalogRoot, below). It MUST NOT be encrypted: feed
-    // only the non-catalog (private data) quads to the MEMBER encryptor. No-op
-    // for public CGs and any private CG without a catalog entry (catalogQuads
-    // empty ⇒ encryptableNquadsStr === nquadsStr).
-    // Identity-based partition: the ONLY catalog subject is this CG's canonical
-    // DID (round-3 SECURITY). A forged `rdf:type dkg:PrivateContextGraph` on a
-    // user entity no longer routes that entity into the plaintext `_catalog`.
-    const { catalogQuads, otherQuads } = partitionCatalogQuads(allSkolemizedQuads, contextGraphDataUri(contextGraphId));
+    // Legacy payloads retain the combined catalog model. V2 graph-scoped KAs
+    // use a detached protocol-owned floor: their KC Merkle root and exact
+    // publicTripleCount cover only the submitted canonical RDF, while the
+    // independent catalogRoot/catalogLeafCount pair commits the generated
+    // public floor. This also prevents a user-authored CG-DID triple from being
+    // stripped out of the atomic KA or leaked into the plaintext catalog.
+    const { catalogQuads, otherQuads } = resolveCatalogProofMaterial(
+      allSkolemizedQuads,
+      contextGraphId,
+      graphPublish !== undefined,
+      options.trustedNonManifestCatalogTriples,
+    );
     const encryptableNquadsStr = catalogQuads.length === 0
       ? nquadsStr
       : otherQuads
@@ -3952,7 +3983,7 @@ export class DKGPublisher implements Publisher {
         kaNumber: BigInt(descriptor.scope.kaNumber),
       },
     };
-    let quads = await loadSharedMemoryQuadsForScope(
+    const quads = await loadSharedMemoryQuadsForScope(
       this.store,
       swmBucket,
       'all',
@@ -3962,19 +3993,13 @@ export class DKGPublisher implements Publisher {
     const hasTrustedCatalogTriples =
       trustedCatalogTripleKeySet(options.trustedNonManifestCatalogTriples).size > 0;
     if (hasTrustedCatalogTriples) {
-      // Curated updates refresh the deterministic public catalog floor. The
-      // trusted entrypoint still sources all user content from the exact SWM
-      // graph; only the four validated protocol-owned catalog triples are
-      // replaced here, so callers cannot smuggle arbitrary RDF around that
-      // boundary. `update()` re-validates the exact key set below.
+      // Validate the capability here, but do not mutate the exact SWM payload.
+      // `update()` derives the detached catalog commitment from this trusted
+      // marker after separately canonicalizing the submitted KA graph.
       assertTrustedCatalogTriplesAreGeneratedFloor(
         options.contextGraphId,
         options.trustedNonManifestCatalogTriples,
       );
-      quads = replaceCatalogPartitionWithGeneratedPrivateFloor(
-        options.contextGraphId,
-        quads,
-      ).quads;
     }
     if (quads.length === 0 && (options.privateQuads?.length ?? 0) === 0) {
       throw new Error(
@@ -4096,6 +4121,7 @@ export class DKGPublisher implements Publisher {
     let allSkolemizedQuads: Quad[];
     let updatePrivateRoots: Uint8Array[];
     if (graphUpdate) {
+      assertNoKnowledgeAssetPayloadNamedGraphs(quads, privateQuads);
       const canonicalParts = await skolemizeKnowledgeAssetParts(quads, privateQuads, {
         allowCanonicalSkolemTerms: isInternalOrigin(options),
       });
@@ -4400,7 +4426,12 @@ export class DKGPublisher implements Publisher {
     // DID, so a forged `rdf:type dkg:PrivateContextGraph` cannot route a user
     // entity into the plaintext `_catalog`.
     const { catalogQuads: updateCatalogQuads, otherQuads: updateOtherQuads } =
-      partitionCatalogQuads(allSkolemizedQuads, contextGraphDataUri(contextGraphId));
+      resolveCatalogProofMaterial(
+        allSkolemizedQuads,
+        contextGraphId,
+        graphUpdate !== undefined,
+        options.trustedNonManifestCatalogTriples,
+      );
     // Non-catalog plaintext fed to the MEMBER encryptor (graph term retained,
     // mirror 2031-2038). No-op for public updates / curated updates with no
     // catalog entry (then encryptableUpdateNquadsStr === updateNquadsStr).
@@ -5795,6 +5826,49 @@ export class DKGPublisher implements Publisher {
     }
   }
 
+  /**
+   * Discard may run while a confirmed VM version and a newly-finalized draft
+   * coexist. Retain an active seal only when it is the seal for that confirmed
+   * VM head; every other active seal belongs to the draft being discarded.
+   * Recovery seals live in the private partition and are deliberately untouched.
+   */
+  private async clearActiveAssertionSealsNotMatchingMerkle(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    confirmedVmMerkleHex: string,
+    subGraphName?: string,
+  ): Promise<void> {
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const expected = confirmedVmMerkleHex.replace(/^0x/i, '').toLowerCase();
+    for (const subject of await this.activeAssertionSealSubjects(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+    )) {
+      const result = await this.store.query(
+        `CONSTRUCT { <${subject}> ?p ?o } WHERE {
+          GRAPH <${metaGraph}> { <${subject}> ?p ?o }
+        }`,
+      );
+      const quads = result.type === 'quads' ? result.quads : [];
+      let matchesConfirmedVm = false;
+      try {
+        const seal = parseAssertionSealQuads(quads, subject);
+        matchesConfirmedVm = seal !== undefined
+          && ethers.hexlify(seal.merkleRoot).slice(2).toLowerCase() === expected;
+      } catch {
+        // A torn or mixed active seal cannot describe the confirmed VM head and
+        // must not outrank the complete recovery archive on the next pull.
+      }
+      if (matchesConfirmedVm) continue;
+      for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
+        await this.store.deleteByPattern({ graph: metaGraph, subject, predicate });
+      }
+    }
+  }
+
   private async loadAssertionSeals(
     contextGraphId: string,
     name: string,
@@ -5836,20 +5910,6 @@ export class DKGPublisher implements Publisher {
       }
     }
     return loaded;
-  }
-
-  private async loadAssertionSeal(
-    contextGraphId: string,
-    name: string,
-    agentAddress: string,
-    subGraphName?: string,
-  ): Promise<{ seal: AssertionSeal; subject: string; quads: Quad[] } | undefined> {
-    return (await this.loadAssertionSeals(
-      contextGraphId,
-      name,
-      agentAddress,
-      subGraphName,
-    ))[0];
   }
 
   /** Copy a verified active seal to a recovery-only subject before unlocking WM. */
@@ -6669,14 +6729,13 @@ export class DKGPublisher implements Publisher {
     const subGraphName = opts?.subGraphName;
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    const loadedSeal = await this.loadAssertionSeal(
+    const loadedSeals = await this.loadAssertionSeals(
       contextGraphId,
       name,
       agentAddress,
       subGraphName,
     );
-    const seal = loadedSeal?.seal;
-    if (!seal) {
+    if (loadedSeals.length === 0) {
       throw Object.assign(
         new Error(
           `Cannot pull "${name}" from ${sourceLayer.toUpperCase()}: rootless mutation requires a finalized v2 assertion seal`,
@@ -6684,30 +6743,89 @@ export class DKGPublisher implements Publisher {
         { code: 'UNSEALED_PULL_FROM_BLOCKED' },
       );
     }
-    if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
-    if (
-      !seal.kaUal
-      || !seal.assertionVersion
-      || seal.publicTripleCount === undefined
-      || seal.privateTripleCount === undefined
-    ) {
-      throw new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
+
+    let selectedSeal: typeof loadedSeals[number] | undefined;
+    let selectedScope: GraphKnowledgeAssetScope | undefined;
+    let validated: Awaited<ReturnType<typeof validateGraphScopedPayloadAgainstSeal>> | undefined;
+    let candidateError: unknown;
+    let sawLegacySeal = false;
+
+    // Active and recovery seals may legitimately coexist while an edit is
+    // open. Validate candidates against the requested exact source graph in
+    // priority order; a discarded/torn active seal must never shadow the last
+    // complete VM/SWM recovery commitment.
+    for (const loadedSeal of loadedSeals) {
+      const seal = loadedSeal.seal;
+      if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+        sawLegacySeal = true;
+        continue;
+      }
+      if (
+        !seal.kaUal
+        || !seal.assertionVersion
+        || seal.publicTripleCount === undefined
+        || seal.privateTripleCount === undefined
+      ) {
+        candidateError = new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
+        continue;
+      }
+
+      try {
+        const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+        const sourceGraph = knowledgeAssetLayerGraphUri(
+          contextGraphId,
+          sourceLayer === 'swm'
+            ? MemoryLayer.SharedWorkingMemory
+            : MemoryLayer.VerifiableMemory,
+          scope,
+          subGraphName,
+        );
+        const sourcePublicQuads = (await this.assertionScopedQuads(sourceGraph)).filter(
+          (quad) => !isSwmMerkleExcludedQuad(quad),
+        );
+        const sourcePrivateQuads = await this.privateStore.getKnowledgeAssetPrivateTriples(
+          contextGraphId,
+          scope,
+          subGraphName,
+        );
+        if (sourcePublicQuads.length === 0 && sourcePrivateQuads.length === 0) {
+          throw Object.assign(
+            new Error(
+              `No exact ${sourceLayer.toUpperCase()} content found for sealed KA ${scope.ual} assertion ${scope.assertionVersion}; WM draft was not modified.`,
+            ),
+            { code: 'PULL_FROM_EMPTY_SOURCE' },
+          );
+        }
+        const candidatePayload = await validateGraphScopedPayloadAgainstSeal(
+          seal,
+          sourcePublicQuads,
+          sourcePrivateQuads,
+          `${sourceLayer}-memory`,
+        );
+        selectedSeal = loadedSeal;
+        selectedScope = scope;
+        validated = candidatePayload;
+        break;
+      } catch (error) {
+        candidateError = error;
+      }
     }
 
-    const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+    if (!selectedSeal || !selectedScope || !validated) {
+      if (candidateError) throw candidateError;
+      if (sawLegacySeal) throw new LegacyKnowledgeAssetReadOnlyError();
+      throw Object.assign(
+        new Error(
+          `Cannot pull "${name}" from ${sourceLayer.toUpperCase()}: no complete v2 assertion seal matches the exact source graph`,
+        ),
+        { code: 'UNSEALED_PULL_FROM_BLOCKED' },
+      );
+    }
+
+    const scope = selectedScope;
     const wmGraph = knowledgeAssetLayerGraphUri(
       contextGraphId,
       MemoryLayer.WorkingMemory,
-      scope,
-      subGraphName,
-    );
-    const sourceGraph = knowledgeAssetLayerGraphUri(
-      contextGraphId,
-      sourceLayer === 'swm'
-        ? MemoryLayer.SharedWorkingMemory
-        : MemoryLayer.VerifiableMemory,
       scope,
       subGraphName,
     );
@@ -6727,39 +6845,15 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    const sourcePublicQuads = (await this.assertionScopedQuads(sourceGraph)).filter(
-      (quad) => !isSwmMerkleExcludedQuad(quad),
-    );
-    const sourcePrivateQuads = await this.privateStore.getKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      scope,
-      subGraphName,
-    );
-    if (sourcePublicQuads.length === 0 && sourcePrivateQuads.length === 0) {
-      throw Object.assign(
-        new Error(
-          `No exact ${sourceLayer.toUpperCase()} content found for sealed KA ${scope.ual} assertion ${scope.assertionVersion}; WM draft was not modified.`,
-        ),
-        { code: 'PULL_FROM_EMPTY_SOURCE' },
-      );
-    }
-    const validated = await validateGraphScopedPayloadAgainstSeal(
-      seal,
-      sourcePublicQuads,
-      sourcePrivateQuads,
-      `${sourceLayer}-memory`,
-    );
-
     // Archive the verified recovery commitment before unlocking the active
     // draft seal. Finalization must see no active seal so a sanctioned edit can
     // create the next assertion version, while pull/discard recovery can still
     // verify the last durable SWM/VM copy after a crash.
-    if (!loadedSeal) throw new Error('Assertion seal disappeared during pull-from');
     await this.archiveAssertionSeal(
       contextGraphId,
       name,
       agentAddress,
-      loadedSeal,
+      selectedSeal,
       subGraphName,
     );
     await this.clearActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
@@ -7394,9 +7488,14 @@ export class DKGPublisher implements Publisher {
     const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const cgMetaGraphForDiscard = contextGraphMetaUri(contextGraphId);
     const vmPointerRes = await this.store.query(
-      `ASK { GRAPH <${cgMetaGraphForDiscard}> { <${lifecycleSubject}> <${VM_CURRENT_ASSERTION_PRED}> ?vm } }`,
+      `SELECT ?vm WHERE { GRAPH <${cgMetaGraphForDiscard}> {
+        <${lifecycleSubject}> <${VM_CURRENT_ASSERTION_PRED}> ?vm
+      } } LIMIT 1`,
     );
-    const hasVmVersion = vmPointerRes.type === 'boolean' && vmPointerRes.value === true;
+    const confirmedVmMerkleHex = stripSparqlLiteral(
+      vmPointerRes.type === 'bindings' ? vmPointerRes.bindings[0]?.['vm'] : undefined,
+    )?.replace(/^0x/i, '').toLowerCase();
+    const hasVmVersion = confirmedVmMerkleHex !== undefined;
     let preserveSwmRecoverySeal = false;
     if (!hasVmVersion) {
       const loadedSeals = await this.loadAssertionSeals(
@@ -7434,6 +7533,17 @@ export class DKGPublisher implements Publisher {
       }
     }
     if (hasVmVersion) {
+      // A newly-finalized edit has an active seal even though the VM pointer
+      // still identifies the prior confirmed assertion. Discard that draft
+      // seal now; retain only an active seal that actually matches VM. The
+      // archived recovery seal for the confirmed version remains untouched.
+      await this.clearActiveAssertionSealsNotMatchingMerkle(
+        contextGraphId,
+        name,
+        agentAddress,
+        confirmedVmMerkleHex,
+        subGraphName,
+      );
       const DKG_STATE_PRED = 'http://dkg.io/ontology/state';
       const PROV_INVALIDATED = 'http://www.w3.org/ns/prov#wasInvalidatedBy';
       discarded.insert = discarded.insert.filter(

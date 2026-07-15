@@ -21,7 +21,7 @@ const AUTHOR = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
 const UAL = `did:dkg:base:8453/${AUTHOR}/41`;
 
 function quad(subject: string, predicate: string, object: string): Quad {
-  return { subject, predicate, object, graph: 'urn:input:placement-is-flattened' };
+  return { subject, predicate, object, graph: '' };
 }
 
 describe('graph-scoped KA publish storage', () => {
@@ -222,7 +222,7 @@ describe('graph-scoped KA publish storage', () => {
     )).toEqual(canonicalReplacement);
   });
 
-  it('refreshes only the deterministic curated catalog floor on a trusted SWM update', async () => {
+  it('keeps the deterministic curated catalog floor out of a trusted SWM update graph', async () => {
     const initial = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,
       quads: [quad('urn:curated:data', 'urn:predicate:value', '"old"')],
@@ -242,12 +242,12 @@ describe('graph-scoped KA publish storage', () => {
       graph: swmGraph,
     }]);
 
-    await publisher.updateKnowledgeAssetFromSharedMemory(initial.kaId, {
+    const updated = await publisher.updateKnowledgeAssetFromSharedMemory(initial.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       kaUal: UAL,
       assertionVersion: 2,
-      publicTripleCount: 5,
+      publicTripleCount: 1,
       privateTripleCount: 0,
       trustedNonManifestCatalogTriples:
         generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
@@ -258,7 +258,14 @@ describe('graph-scoped KA publish storage', () => {
       MemoryLayer.VerifiableMemory,
       scope,
     );
-    expect(await store.countQuads(vmGraph)).toBe(5);
+    expect(updated.publicQuads).toEqual([
+      expect.objectContaining({
+        subject: 'urn:curated:data',
+        predicate: 'urn:predicate:value',
+        object: '"new"',
+      }),
+    ]);
+    expect(await store.countQuads(vmGraph)).toBe(1);
     const catalogRows = await store.query(
       `SELECT ?p ?o WHERE { GRAPH <${vmGraph}> {
          <did:dkg:context-graph:${CONTEXT_GRAPH}> ?p ?o
@@ -266,10 +273,24 @@ describe('graph-scoped KA publish storage', () => {
     );
     expect(catalogRows.type).toBe('bindings');
     if (catalogRows.type !== 'bindings') throw new Error('expected catalog bindings');
-    expect(catalogRows.bindings).toHaveLength(4);
+    expect(catalogRows.bindings).toHaveLength(0);
   });
 
   it('rejects legacy and incomplete mutation envelopes before writing', async () => {
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [{
+          ...quad('urn:named', 'urn:predicate:value', '"named"'),
+          graph: 'urn:user:named-graph',
+        }],
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED' });
+
     await expect(
       publisher.publish({
         contextGraphId: CONTEXT_GRAPH,

@@ -26,6 +26,34 @@ describe('direct rootless agent publish entrypoint', () => {
     agent = undefined;
   });
 
+  it('rejects caller-authored named graphs before signing a V2 publish', async () => {
+    agent = await DKGAgent.create({
+      name: 'RootlessNamedGraphGuard',
+      store: new OxigraphStore(),
+      chainAdapter: new MockChainAdapter('mock:31337', AUTHOR),
+      nodeRole: 'edge',
+      skills: [],
+    });
+    const internals = agent as unknown as Record<string, any>;
+    internals.getContextGraphOnChainId = vi.fn(async () => '42');
+    internals._buildPrecomputedAttestationForSelection = vi.fn(async () => {
+      throw new Error('named-graph payload must be rejected before signing');
+    });
+
+    await expect(internals._publish(
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      [{
+        subject: 'urn:named:asset',
+        predicate: 'urn:p:value',
+        object: '"value"',
+        graph: 'urn:user:named-graph',
+      }],
+      [],
+      { onChainContextGraphId: '42' },
+    )).rejects.toMatchObject({ code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED' });
+    expect(internals._buildPrecomputedAttestationForSelection).not.toHaveBeenCalled();
+  });
+
   it('passes one complete V2 graph envelope into the publisher and broadcast', async () => {
     agent = await DKGAgent.create({
       name: 'DirectRootlessPublish',
@@ -112,16 +140,16 @@ describe('direct rootless agent publish entrypoint', () => {
       accessPolicy: 'ownerOnly',
       publishContextGraphId: '42',
     });
-    // A curated direct publish replaces any caller-provided catalog partition
-    // with the deterministic four-triple public floor inside this same KA.
-    expect(capturedOptions!.quads).toHaveLength(5);
-    expect(capturedOptions!.publicTripleCount).toBe(5);
+    // The submitted canonical RDF remains the complete atomic KA. The trusted
+    // four-key capability produces a separate catalog commitment downstream.
+    expect(capturedOptions!.quads).toEqual(publicQuads);
+    expect(capturedOptions!.publicTripleCount).toBe(1);
     expect(capturedOptions!.privateMerkleRoot).toHaveLength(32);
     expect(capturedOptions!.trustedNonManifestCatalogTriples).toHaveLength(4);
     expect(capturedOptions!.quads.some((quad) =>
       quad.subject === 'did:dkg:context-graph:ontology'
       && quad.predicate === 'http://purl.org/dc/terms/accessRights'
-    )).toBe(true);
+    )).toBe(false);
     expect(internals._buildPrecomputedAttestationForSelection).toHaveBeenCalledWith(
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       expect.arrayContaining(capturedOptions!.quads),

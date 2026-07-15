@@ -9,9 +9,9 @@ import {
   type PrecomputedUpdateAttestation,
 } from '@origintrail-official/dkg-core';
 import {
-  autoPartition,
   computeFlatKCRootV10,
   computePrivateRootV10,
+  skolemizeKnowledgeAssetParts,
 } from '../../publisher/src/index.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -42,20 +42,15 @@ async function buildUpdateSeal(opts: {
   provider: ethers.JsonRpcProvider;
   kav10Address: string;
 }): Promise<PrecomputedUpdateAttestation> {
-  const kaMap = autoPartition(opts.quads);
-  const allPublic = [...kaMap.values()].flat();
-  const privateRoots: Uint8Array[] = [];
-  for (const rootEntity of kaMap.keys()) {
-    const entityPrivateQuads = (opts.privateQuads ?? []).filter(
-      (q) =>
-        q.subject === rootEntity ||
-        q.subject.startsWith(rootEntity + '/.well-known/genid/'),
-    );
-    if (entityPrivateQuads.length === 0) continue;
-    const root = computePrivateRootV10(entityPrivateQuads);
-    if (root) privateRoots.push(root);
-  }
-  const newMerkleRoot = computeFlatKCRootV10(allPublic, privateRoots);
+  const canonical = await skolemizeKnowledgeAssetParts(
+    opts.quads,
+    opts.privateQuads ?? [],
+  );
+  const privateRoot = computePrivateRootV10(canonical.privateQuads);
+  const newMerkleRoot = computeFlatKCRootV10(
+    canonical.publicQuads,
+    privateRoot ? [privateRoot] : [],
+  );
   const chainId = await opts.provider.getNetwork().then((n) => n.chainId);
   const td = buildUpdateAuthorAttestationTypedData({
     chainId: BigInt(chainId),
@@ -205,20 +200,19 @@ describe('E2E: DKGAgent with real blockchain', () => {
         subject: 'did:dkg:test:Alice',
         predicate: 'http://schema.org/name',
         object: '"Alice"',
-        graph: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`,
+        graph: '',
       },
       {
         subject: 'did:dkg:test:Alice',
         predicate: 'http://schema.org/knows',
         object: 'did:dkg:test:Bob',
-        graph: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`,
+        graph: '',
       },
     ];
 
     const result = await agents[0].publish(CONTEXT_GRAPH_ID, quads);
     expect(result).toBeDefined();
-    expect(result.kaManifest).toBeDefined();
-    expect(result.kaManifest.length).toBeGreaterThan(0);
+    expect(result.kaManifest).toEqual([]);
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
     expect(result.onChainResult!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
@@ -262,7 +256,10 @@ describe('E2E: DKGAgent with real blockchain', () => {
         subject: 'did:dkg:test:Alice',
         predicate: 'http://schema.org/name',
         object: '"Alice Updated"',
-        graph: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`,
+        // V2 KAs commit one exact RDF triple set. The DKG-owned VM graph is
+        // derived from the UAL; it is storage placement, not a caller-authored
+        // RDF named graph.
+        graph: '',
       },
     ];
 
@@ -336,19 +333,20 @@ describe('E2E: DKGAgent with real blockchain', () => {
         subject: 'did:dkg:test:Dave',
         predicate: 'http://schema.org/name',
         object: '"Dave"',
-        graph: `did:dkg:context-graph:${secondCG}`,
+        graph: '',
       },
       {
         subject: 'did:dkg:test:Dave',
         predicate: 'http://schema.org/jobTitle',
         object: '"Researcher"',
-        graph: `did:dkg:context-graph:${secondCG}`,
+        graph: '',
       },
     ];
 
     const result = await agents[0].publish(secondCG, quads);
     expect(result).toBeDefined();
-    expect(result.kaManifest.length).toBeGreaterThan(0);
+    expect(result.kaManifest).toEqual([]);
+    expect(result.publicTripleCount).toBe(quads.length);
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
 
@@ -363,10 +361,9 @@ describe('E2E: DKGAgent with real blockchain', () => {
   }, 60_000);
 
   // -------------------------------------------------------------------------
-  // Multi-entity publish — OT-RFC-44 / Design B.
-  // Direct agent.publish now routes multi-root payloads as one KA with multiple
-  // member entities. The on-chain publish still uses knowledgeAssetsAmount=1;
-  // the manifest keeps per-root compatibility token IDs for UAL suffix callers.
+  // Multi-entity publish — rootless V2.
+  // Subjects are data, not KA partitions: direct agent.publish commits the
+  // complete six-triple set as one KA and emits no legacy root manifest.
   // -------------------------------------------------------------------------
 
   it('publishes multi-root payloads through agent.publish as one Knowledge Asset', async () => {
@@ -376,13 +373,13 @@ describe('E2E: DKGAgent with real blockchain', () => {
         subject: e,
         predicate: 'http://schema.org/name',
         object: `"${e.split(':').pop()}"`,
-        graph: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`,
+        graph: '',
       },
       {
         subject: e,
         predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
         object: 'http://schema.org/Thing',
-        graph: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`,
+        graph: '',
       },
     ]);
 
@@ -390,8 +387,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
-    expect(new Set(result.kaManifest.map((m) => m.rootEntity))).toEqual(new Set(entities));
-    expect(new Set(result.kaManifest.map((m) => String(m.tokenId)))).toEqual(new Set(['1', '2', '3']));
+    expect(result.kaManifest).toEqual([]);
+    expect(result.publicTripleCount).toBe(quads.length);
   }, 30_000);
 
   // -------------------------------------------------------------------------
@@ -425,7 +422,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
         subject: 'did:dkg:test:GossipEntity',
         predicate: 'http://schema.org/name',
         object: '"GossipTest"',
-        graph: `did:dkg:context-graph:${gossipCG}`,
+        graph: '',
       },
     ];
 

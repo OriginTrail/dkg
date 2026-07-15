@@ -277,9 +277,11 @@ export interface PublishOptions {
    */
   onChainContextGraphId?: string | bigint;
   /**
-   * Internal/private-CG catalog path: exact generated catalog triples that ride
-   * in the KC Merkle root but are not user KA manifest roots. Public callers
-   * should not set this for arbitrary metadata.
+   * Internal/private-CG catalog capability: the exact deterministic floor keys.
+   * Legacy publishes use them to recognize combined-model catalog rows. V2
+   * graph-scoped publishes use them to derive a detached catalog commitment;
+   * the generated floor is never appended to the atomic KA graph or KC root.
+   * Public callers must not set this for arbitrary metadata.
    */
   trustedNonManifestCatalogTriples?: TrustedCatalogTripleKeys;
   /**

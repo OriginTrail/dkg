@@ -68,6 +68,8 @@ export default defineConfig({
       "test/storage-ack-lifecycle-identity.test.ts",
       "test/v10-ack-provider-wiring.test.ts",
       "test/direct-rootless-publish.test.ts",
+      "test/rootless-update-boundary.test.ts",
+      "test/encrypt-inline-policy.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
       "test/network-identity-proof.test.ts",

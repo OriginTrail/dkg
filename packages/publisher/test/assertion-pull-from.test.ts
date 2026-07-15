@@ -375,6 +375,67 @@ describe('rootless assertionPullFrom', () => {
     expect(draft.some((quad) => quad.subject.includes('decoy'))).toBe(false);
   });
 
+  it('recovers confirmed VM v1 after finalizing and discarding an unpublished v2 edit', async () => {
+    const { publisher, store } = await makePublisher();
+    const v1 = await seedShared(publisher, store, {
+      publicQuads: [q(ENTITY_1, SCHEMA, '"Confirmed version one"')],
+    });
+    const v1Scope = createGraphKnowledgeAssetScope(v1.kaUal, v1.assertionVersion);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.VerifiableMemory,
+      v1Scope,
+    );
+    await store.insert(v1.publicQuads.map((quad) => ({ ...quad, graph: vmGraph })));
+
+    const sealSubject = contextGraphAssertionUri(CG, AGENT, NAME);
+    const metaGraph = contextGraphMetaUri(CG);
+    const rootResult = await store.query(
+      `SELECT ?root WHERE { GRAPH <${metaGraph}> {
+        <${sealSubject}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root
+      } } LIMIT 1`,
+    );
+    const rootTerm = rootResult.type === 'bindings'
+      ? rootResult.bindings[0]?.['root']
+      : undefined;
+    const confirmedRoot = rootTerm
+      ?.replace(/^"/, '')
+      .replace(/"(\^\^<[^>]+>)?$/, '');
+    expect(confirmedRoot).toBeTruthy();
+    const lifecycle = assertionLifecycleUri(CG, AGENT, NAME);
+    await store.insert([
+      q(lifecycle, `${DKG}vmCurrentAssertion`, `"${confirmedRoot}"`, metaGraph),
+    ]);
+
+    // Pulling v1 archives its seal and unlocks an editable WM draft.
+    await publisher.assertionPullFrom(CG, NAME, AGENT, 'vm');
+    await publisher.assertionWrite(CG, NAME, AGENT, [
+      q(ENTITY_2, SCHEMA, '"Unpublished version two"'),
+    ]);
+    const v2 = await finalizeRootlessAssertionForTest({
+      publisher,
+      store,
+      contextGraphId: CG,
+      name: NAME,
+      agentAddress: AGENT,
+      assertionVersion: 2,
+    });
+    expect(v2.publicQuads).toHaveLength(2);
+
+    await publisher.assertionDiscard(CG, NAME, AGENT);
+    const reopened = await publisher.assertionPullFrom(CG, NAME, AGENT, 'vm');
+
+    expect(reopened).toMatchObject({
+      kaUal: v1.kaUal,
+      assertionVersion: v1.assertionVersion,
+      seededPublic: v1.publicQuads.length,
+    });
+    expect(new Set((await publisher.assertionQuery(CG, NAME, AGENT)).map(key)))
+      .toEqual(new Set(v1.publicQuads.map(key)));
+    expect((await publisher.assertionQuery(CG, NAME, AGENT))
+      .some((quad) => quad.object === '"Unpublished version two"')).toBe(false);
+  });
+
   it('retains a durable SWM recovery seal across pull and draft discard', async () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);

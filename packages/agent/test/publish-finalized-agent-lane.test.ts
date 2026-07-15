@@ -90,7 +90,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       .toThrow(/not in author .* namespace/);
   });
 
-  it('injects the curated catalog floor into the exact named lifecycle graph', async () => {
+  it('keeps the legacy catalog-in-SWM helper scoped to the selected lifecycle graph', async () => {
     const store = new OxigraphStore();
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
