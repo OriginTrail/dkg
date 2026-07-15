@@ -284,6 +284,41 @@ export async function assertValidPrecomputedUpdateAttestation(
   }
 }
 
+/**
+ * Decode a chain rejection to its contract error name for update() failure
+ * classification. Prefers the adapter's `enrichEvmError` decode, falling back
+ * to an ethers-predecoded `revert.name`. Shared by update()'s pre-staging owner
+ * check and its chain-submit path so both classify rejections identically.
+ */
+function extractV10UpdateRejectionName(err: unknown): string | undefined {
+  return enrichEvmError(err) ?? (err as { revert?: { name?: string } })?.revert?.name;
+}
+
+/**
+ * Reverts the pre-staging owner check (`getKnowledgeAssetOwner` -> `ownerOf`)
+ * can surface that mean "there is no updatable KA on chain" — update() returns
+ * a failed result instead of throwing. Deliberately a strict subset of
+ * {@link V10_DEFINITIVE_UPDATE_ERRORS}: an authorization failure (wrong owner,
+ * bad signature) must still THROW before staging. Expiry/immutability are NOT
+ * here — those are submit-time reverts from `KnowledgeAssetsLifecycle`, never
+ * from the storage contract's `ownerOf`, so they cannot reach this check.
+ */
+const PRE_STAGING_NO_UPDATABLE_KA_ERRORS = ['ERC721NonexistentToken'];
+
+/**
+ * Definitive chain rejections at update submit — convert to a failed result
+ * rather than throw (by submit time the KA/authorship are already validated).
+ */
+const V10_DEFINITIVE_UPDATE_ERRORS = [
+  'NotKnowledgeAssetOwner',
+  'InvalidAuthorSignature',
+  'InvalidAuthorSignature1271',
+  'AuthorRequired',
+  'KnowledgeAssetExpired',
+  'CannotUpdateImmutableKnowledgeAsset',
+  'ExceededKnowledgeAssetBatchSize',
+];
+
 async function validateGraphScopedPayloadAgainstSeal(
   seal: AssertionSeal,
   publicQuads: readonly Quad[],
@@ -657,9 +692,47 @@ type InternalPublishOptions = PublishOptions & {
 
 interface GraphScopedPublishDescriptor {
   scope: GraphKnowledgeAssetScope;
+  /** Packed V10 kaId derived once from the immutable UAL author/number pair. */
+  expectedPackedKaId: bigint;
   publicTripleCount: number;
   privateTripleCount: number;
   expectedPrivateMerkleRoot?: Uint8Array;
+}
+
+/**
+ * Return the numeric EIP-155 suffix carried by a DKG chain label.
+ *
+ * UALs in persisted jobs use both bare numeric labels (`31337`) and
+ * namespaced labels (`evm:31337`, `base:8453`).  The adapter exposes the
+ * authoritative numeric network through `getEvmChainId()`, so representation
+ * aliases must compare by that value rather than by their raw strings.
+ */
+function numericEvmChainId(chainId: string): bigint | undefined {
+  const match = /(?:^|:)([0-9]+)$/.exec(chainId.trim());
+  if (!match) return undefined;
+  try {
+    return BigInt(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+function graphScopeTargetsChain(
+  scopeChainId: string,
+  adapterChainId: string,
+  evmChainId?: bigint,
+): boolean {
+  const scopeNumericId = numericEvmChainId(scopeChainId);
+  // When the adapter exposes the live EIP-155 id, it is authoritative even
+  // if a stale configured label happens to match the UAL textually.
+  if (scopeNumericId !== undefined && evmChainId !== undefined) {
+    return scopeNumericId === evmChainId;
+  }
+  if (scopeChainId === adapterChainId) return true;
+  const adapterNumericId = evmChainId ?? numericEvmChainId(adapterChainId);
+  return scopeNumericId !== undefined
+    && adapterNumericId !== undefined
+    && scopeNumericId === adapterNumericId;
 }
 
 /**
@@ -712,8 +785,37 @@ function resolveGraphScopedPublishDescriptor(
   if ((options.manifest?.length ?? 0) > 0) {
     throw new Error('Graph-scoped publish must not carry a root-entity manifest');
   }
+  const scope = createGraphKnowledgeAssetScope(options.kaUal, options.assertionVersion);
+  const expectedPackedKaId =
+    (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+  // Reject conflicting caller-supplied identity before planner, chain, or
+  // storage work. Discovering it only after mint would strand an on-chain KA
+  // that can never materialize under the requested UAL.
+  const suppliedReservedKaId =
+    options.reservedKaId ?? options.precomputedAttestation?.reservedKaId;
+  if (suppliedReservedKaId !== undefined) {
+    if (suppliedReservedKaId !== expectedPackedKaId) {
+      throw new Error(
+        `Graph-scoped publish carries reserved kaId ${suppliedReservedKaId}, but UAL ` +
+          `${scope.ual} derives packed kaId ${expectedPackedKaId}`,
+      );
+    }
+  }
+  const attestationAuthor =
+    options.precomputedAttestation?.authorAddress
+    ?? options.precomputedUpdateAttestation?.authorAddress;
+  if (
+    attestationAuthor !== undefined
+    && attestationAuthor.toLowerCase() !== scope.agentAddress
+  ) {
+    throw new Error(
+      `Graph-scoped publish attestation author ${attestationAuthor} does not match ` +
+        `the UAL author ${scope.agentAddress}`,
+    );
+  }
   return {
-    scope: createGraphKnowledgeAssetScope(options.kaUal, options.assertionVersion),
+    scope,
+    expectedPackedKaId,
     publicTripleCount: options.publicTripleCount!,
     privateTripleCount,
     ...(options.privateMerkleRoot
@@ -2499,6 +2601,7 @@ export class DKGPublisher implements Publisher {
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
+    const graphPublish = resolveGraphScopedPublishDescriptor(options);
     const onChainContextGraphId = options.onChainContextGraphId ?? options.publishContextGraphId;
     let publisherContextGraphId: bigint | undefined;
     try {
@@ -2570,7 +2673,6 @@ export class DKGPublisher implements Publisher {
       onChainContextGraphId: publisherContextGraphId,
       internalCatalogOrigin: isTrustedCatalogInternalOrigin(options),
     });
-    const graphPublish = resolveGraphScopedPublishDescriptor(options);
     let canonical: ReturnType<typeof canonicalPublishPayload> | undefined;
     let canonicalPrivateQuads: Quad[] = [];
     let allSkolemizedQuads: Quad[];
@@ -3719,6 +3821,25 @@ export class DKGPublisher implements Publisher {
           // precomputedAttestation (the agent is the single allocation point).
           (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId,
         );
+        if (graphPublish && reservedKaId !== undefined) {
+          if (reservedKaId !== graphPublish.expectedPackedKaId) {
+            throw new Error(
+              `Graph-scoped publish reserved kaId ${reservedKaId} does not derive from ` +
+                `UAL ${graphPublish.scope.ual} (expected ${graphPublish.expectedPackedKaId}); refusing to mint`,
+            );
+          }
+          if (!graphScopeTargetsChain(
+            graphPublish.scope.chainId,
+            this.chain.chainId,
+            v10ChainId,
+          )) {
+            throw new Error(
+              `Graph-scoped publish UAL ${graphPublish.scope.ual} targets chain ` +
+                `${graphPublish.scope.chainId}, but this publisher mints on ` +
+                `${this.chain.chainId} (EIP-155 ${v10ChainId})`,
+            );
+          }
+        }
         await lifecycle.rememberAssetUal(reservedKaId);
         if (!lifecycle.identityAllocatedEmitted && reservedKaId !== undefined) {
           lifecycle.emit('identity', 'asset_ual_allocated', {
@@ -3830,13 +3951,10 @@ export class DKGPublisher implements Publisher {
           throw new Error('Publish succeeded but DKGKnowledgeAssets address is unavailable for UAL assignment');
         }
         if (graphPublish) {
-          const expectedPackedKaId =
-            (BigInt(graphPublish.scope.agentAddress) << 96n)
-            | BigInt(graphPublish.scope.kaNumber);
-          if (kaId !== expectedPackedKaId) {
+          if (kaId !== graphPublish.expectedPackedKaId) {
             throw new Error(
               `Graph-scoped publish returned kaId ${kaId}, but UAL ${graphPublish.scope.ual} ` +
-                `derives packed kaId ${expectedPackedKaId}`,
+                `derives packed kaId ${graphPublish.expectedPackedKaId}`,
             );
           }
           ual = graphPublish.scope.ual;
@@ -4364,12 +4482,10 @@ export class DKGPublisher implements Publisher {
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const graphUpdate = resolveGraphScopedPublishDescriptor(options);
     if (graphUpdate) {
-      const scopeKaId =
-        (BigInt(graphUpdate.scope.agentAddress) << 96n)
-        | BigInt(graphUpdate.scope.kaNumber);
-      if (scopeKaId !== kaId) {
+      if (graphUpdate.expectedPackedKaId !== kaId) {
         throw new Error(
-          `Graph-scoped update kaId ${kaId} does not match UAL-derived kaId ${scopeKaId}`,
+          `Graph-scoped update kaId ${kaId} does not match UAL-derived kaId ` +
+            `${graphUpdate.expectedPackedKaId}`,
         );
       }
       // 🔴 PR #1712 review (3586686572): the packed-id check above proves
@@ -4378,11 +4494,27 @@ export class DKGPublisher implements Publisher {
       // identity that names another chain. Mirror publish()'s pre-mint guard;
       // chainless (NoChainAdapter) updates stay exempt like local publishes —
       // with no chain identity there is nothing for the UAL to disagree with.
-      if (this.chain.chainId !== 'none' && graphUpdate.scope.chainId !== this.chain.chainId) {
-        throw new Error(
-          `Graph-scoped update UAL ${graphUpdate.scope.ual} targets chain ` +
-            `${graphUpdate.scope.chainId}, but this publisher operates on ${this.chain.chainId}`,
-        );
+      if (this.chain.chainId !== 'none') {
+        let updateEvmChainId: bigint | undefined;
+        try {
+          updateEvmChainId = await this.chain.getEvmChainId?.();
+        } catch {
+          // Legacy/non-V10 adapters can still compare exact labels or their
+          // configured numeric suffix; V10 adapters are checked again while
+          // validating the update attestation before submission.
+        }
+        if (!graphScopeTargetsChain(
+          graphUpdate.scope.chainId,
+          this.chain.chainId,
+          updateEvmChainId,
+        )) {
+          throw new Error(
+            `Graph-scoped update UAL ${graphUpdate.scope.ual} targets chain ` +
+              `${graphUpdate.scope.chainId}, but this publisher operates on ` +
+              `${this.chain.chainId}` +
+              (updateEvmChainId === undefined ? '' : ` (EIP-155 ${updateEvmChainId})`),
+          );
+        }
       }
     }
     // Round 12 Bug 34: `update()` is a Bucket A public write entry
@@ -4963,12 +5095,47 @@ export class DKGPublisher implements Publisher {
     const updateSeal = options.precomputedUpdateAttestation;
     const effectiveAuthorAddress = updateSeal.authorAddress;
     const effectiveSchemeVersion = updateSeal.schemeVersion;
-    await assertValidPrecomputedUpdateAttestation(
-      this.chain,
+    // Single source of truth for the "update rejected on chain" result shape,
+    // shared by the pre-staging owner check and the chain-submit path below so
+    // a definitive rejection returns one canonical failed PublishResult.
+    const buildFailedUpdateResult = async (): Promise<PublishResult> => ({
       kaId,
-      kcMerkleRoot,
-      updateSeal,
-    );
+      ual: graphUpdate?.scope.ual ?? await this.resolveKaUal(kaId),
+      merkleRoot: kcMerkleRoot,
+      kaManifest: manifestEntries,
+      status: 'failed',
+      publicQuads: allSkolemizedQuads,
+    });
+    try {
+      await assertValidPrecomputedUpdateAttestation(
+        this.chain,
+        kaId,
+        kcMerkleRoot,
+        updateSeal,
+      );
+    } catch (attestErr) {
+      // Fail-closed contract: update() returns {status:'failed'} and mutates
+      // nothing when the chain has no updatable KA. This pre-staging owner
+      // check reads chain-truth (getKnowledgeAssetOwner -> ownerOf) BEFORE the
+      // chain-submit try/catch below, so an update against a non-existent KA
+      // reverts HERE and — before the rootless cutover moved this check ahead
+      // of staging — would escape update() as a throw instead of a failed
+      // result. Convert only the definitive "no updatable KA" class to a failed
+      // result; every authorization failure (wrong owner of an EXISTING KA ->
+      // KA_UPDATE_AUTHOR_NOT_OWNER, signer mismatch, or a missing-adapter-method
+      // config error) still throws, preserving reject-unauthorized-before-staging.
+      const errorName = extractV10UpdateRejectionName(attestErr);
+      if (!errorName || !PRE_STAGING_NO_UPDATABLE_KA_ERRORS.includes(errorName)) {
+        throw attestErr;
+      }
+      this.log.warn(
+        ctx,
+        `V10 update rejected pre-staging (${errorName}) for kaId=${kaId}: no updatable KA on chain`,
+      );
+      onPhase?.('chain:submit', 'end');
+      onPhase?.('chain', 'end');
+      return buildFailedUpdateResult();
+    }
 
     // P-1 review (iter-2): `chain:writeahead:start` fires from inside
     // the V10 adapter via `onBroadcast` — i.e. AFTER allowance +
@@ -5158,26 +5325,10 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
           });
         } catch (v10Err) {
-          const errorName = enrichEvmError(v10Err);
-          const V10_DEFINITIVE_ERRORS = [
-            'NotKnowledgeAssetOwner',
-            'InvalidAuthorSignature',
-            'InvalidAuthorSignature1271',
-            'AuthorRequired',
-            'KnowledgeAssetExpired',
-            'CannotUpdateImmutableKnowledgeAsset',
-            'ExceededKnowledgeAssetBatchSize',
-          ];
-          if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
+          const errorName = extractV10UpdateRejectionName(v10Err);
+          if (errorName && V10_DEFINITIVE_UPDATE_ERRORS.includes(errorName)) {
             this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
-            earlyReturn = {
-              kaId,
-              ual: graphUpdate?.scope.ual ?? await this.resolveKaUal(kaId),
-              merkleRoot: kcMerkleRoot,
-              kaManifest: manifestEntries,
-              status: 'failed',
-              publicQuads: allSkolemizedQuads,
-            };
+            earlyReturn = await buildFailedUpdateResult();
             txResult = { success: false, hash: '' };
           } else {
             // V9 legacy update fallback archived (issue 0004).
@@ -5200,14 +5351,7 @@ export class DKGPublisher implements Publisher {
     if (!txResult.success) {
       onPhase?.('chain:submit', 'end');
       onPhase?.('chain', 'end');
-      return {
-        kaId,
-        ual: graphUpdate?.scope.ual ?? await this.resolveKaUal(kaId),
-        merkleRoot: kcMerkleRoot,
-        kaManifest: manifestEntries,
-        status: 'failed',
-        publicQuads: allSkolemizedQuads,
-      };
+      return buildFailedUpdateResult();
     }
     let effectivePublisherAddress = coercePublisherAddress(txResult.publisherAddress);
     if (!effectivePublisherAddress && typeof this.chain.getLatestMerkleRootPublisher === 'function') {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -359,6 +359,78 @@ describe('graph-scoped KA publish storage', () => {
     expect(catalogRows.type).toBe('bindings');
     if (catalogRows.type !== 'bindings') throw new Error('expected catalog bindings');
     expect(catalogRows.bindings).toHaveLength(0);
+  });
+
+  it('rejects graph-scoped identity conflicts before planner or storage work', async () => {
+    const expectedPackedKaId = (BigInt(AUTHOR) << 96n) | 41n;
+    const payload = [quad('urn:conflict', 'urn:predicate:value', '"conflict"')];
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const plannerPrepare = vi.spyOn(
+      (publisher as unknown as {
+        publisherPlanner: { prepare: (...args: unknown[]) => Promise<unknown> };
+      }).publisherPlanner,
+      'prepare',
+    );
+    const ensureContextGraph = vi.spyOn(
+      (publisher as unknown as {
+        graphManager: { ensureContextGraph: (...args: unknown[]) => Promise<unknown> };
+      }).graphManager,
+      'ensureContextGraph',
+    );
+
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: payload,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        reservedKaId: expectedPackedKaId + 1n,
+      }),
+    ).rejects.toThrow(/derives packed kaId/);
+    expect(plannerPrepare).not.toHaveBeenCalled();
+    expect(ensureContextGraph).not.toHaveBeenCalled();
+    expect(await store.hasGraph(vmGraph)).toBe(false);
+
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: payload,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        precomputedAttestation: {
+          expectedMerkleRoot: new Uint8Array(32),
+          authorAddress: '0x000000000000000000000000000000000000dEaD',
+          signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+          schemeVersion: 1,
+          reservedKaId: expectedPackedKaId,
+        },
+      }),
+    ).rejects.toThrow(/does not match/);
+    expect(plannerPrepare).not.toHaveBeenCalled();
+    expect(ensureContextGraph).not.toHaveBeenCalled();
+    expect(await store.hasGraph(vmGraph)).toBe(false);
+
+    const accepted = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: payload,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+      reservedKaId: expectedPackedKaId,
+    });
+    expect(accepted.ual).toBe(UAL);
+    expect(plannerPrepare).toHaveBeenCalledTimes(1);
+    expect(ensureContextGraph).toHaveBeenCalledTimes(1);
   });
 
   it('rejects legacy and incomplete mutation envelopes before writing', async () => {

@@ -57,6 +57,7 @@ function durableProcessResult() {
   return {
     verifiedData: [] as Quad[],
     verifiedMeta: [] as Quad[],
+    droppedSyncControlTriples: 0,
     totalFetchedDataQuads: 0,
     totalFetchedMetaQuads: 0,
     rejectedKcs: 0,
@@ -488,6 +489,86 @@ describe('sync requester progress accounting', () => {
     expect(deleteCheckpoint.calls).toEqual([]);
     expect(setCheckpoint.calls).toHaveLength(1);
     expect(setCheckpoint.calls).toContainEqual(['meta-only-cg:meta', 5]);
+  });
+
+  it('advances the meta cursor when every fetched metadata row was deliberately discarded', async () => {
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['discarded-controls'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        droppedSyncControlTriples: 3,
+        totalFetchedMetaQuads: 3,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.metaOnlyResponses).toBe(1);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([['discarded-controls:meta', 3]]);
+  });
+
+  it('keeps the meta cursor pinned when discarded rows do not account for the whole page', async () => {
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
+      : pageResult(contextGraphId, phase));
+
+    await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['partially-discarded-controls'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        droppedSyncControlTriples: 2,
+        totalFetchedMetaQuads: 3,
+      }),
+      storeInsert: async () => {},
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([]);
   });
 
   it('deletes only the durable meta checkpoint after completing metadata-only responses', async () => {

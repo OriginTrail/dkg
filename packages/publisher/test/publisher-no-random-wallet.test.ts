@@ -1648,7 +1648,9 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     });
     const kaId = publishSeal.reservedKaId!;
     const kaNumber = kaId & ((1n << 96n) - 1n);
-    const ual = `did:dkg:mock:31337/${wallet.address}/${kaNumber}`;
+    // Persisted jobs may use the bare EIP-155 label even though this adapter
+    // reports `mock:31337`; the publish guard must treat those as one chain.
+    const ual = `did:dkg:31337/${wallet.address}/${kaNumber}`;
     const scopeV1 = createGraphKnowledgeAssetScope(ual, 1);
     const swmGraph = knowledgeAssetLayerGraphUri(
       contextGraphId,
@@ -1686,6 +1688,7 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       encryptInlineChunked,
     });
     expect(published.status).toBe('confirmed');
+    expect(chain.capturedCreateParams).toBeDefined();
     expect(capturedPlaintexts).toHaveLength(1);
     const publishVmGraph = knowledgeAssetLayerGraphUri(
       contextGraphId,
@@ -1728,6 +1731,62 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(parseSimpleNQuads(new TextDecoder().decode(capturedPlaintexts[1]))).toEqual([
       { ...updateQuad, graph: updateVmGraph },
     ]);
+  });
+
+  it('rejects a graph-scoped UAL for another EVM network before mint submission', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new CatalogPlanningChain(wallet);
+    (chain as unknown as { getContextGraphAccessPolicy: () => Promise<number> })
+      .getContextGraphAccessPolicy = async () => 1;
+    const publisher = await makeEpochPublisher(chain, wallet);
+    const store = (publisher as unknown as { store: OxigraphStore }).store;
+    const contextGraphId = '1';
+    const publishQuad = {
+      subject: 'urn:test:wrong-chain-graph-publish',
+      predicate: 'http://schema.org/name',
+      object: '"wrong-chain"',
+      graph: '',
+    };
+    const publishSeal = await buildSeal({
+      quads: [publishQuad],
+      author: wallet,
+      contextGraphId,
+      ctx: mockSealCtx(),
+    });
+    const kaId = publishSeal.reservedKaId!;
+    const kaNumber = kaId & ((1n << 96n) - 1n);
+    const ual = `did:dkg:gnosis:100/${wallet.address}/${kaNumber}`;
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+    );
+    await store.insert([{ ...publishQuad, graph: swmGraph }]);
+
+    await expect(publisher.publishFromSharedMemory(contextGraphId, 'all', {
+      onChainContextGraphId: contextGraphId,
+      sharedMemoryScope: {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: wallet.address, kaNumber },
+      },
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: ual,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      trustedNonManifestCatalogTriples:
+        generatedPrivateCatalogTripleKeys(contextGraphId),
+      precomputedAttestation: publishSeal,
+      encryptInlinePayload: async (plaintext) => plaintext,
+      encryptInlineChunked: async ({ plaintextNquads }) => ({
+        ciphertextChunksRoot: new Uint8Array(32),
+        ciphertextChunkCount: 1,
+        totalCiphertextBytes: plaintextNquads.length,
+      }),
+    })).rejects.toThrow(/targets chain gnosis:100/);
+
+    expect(chain.capturedCreateParams).toBeUndefined();
   });
 
   it('prices curated publishes from the exact public catalog bytes across plan, ACK, and tx', async () => {

@@ -281,6 +281,18 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // (the mock's getMaxKaNumberForAuthor is an in-memory scan, no providers).
   'queryKaCreatedPage',
   'queryEventLogsPage',
+  // EIP-1271 `isValidSignature(bytes32,bytes)` on-chain view call against a
+  // deployed smart-contract wallet. Its sole production caller
+  // (dkg-publisher.ts contract-author update authorization) is gated by
+  // `hasContractCode(author)`, which the mock hardcodes to false — so the
+  // contract-author branch is structurally unreachable on the mock. A `true`
+  // shim would be a false-accept on a security-sensitive auth path and a
+  // `false` shim would be dead code; a faithful impl would have to model
+  // deployed 1271 bytecode + the 0x1626ba7e magic value, which is out of the
+  // mock's remit. The two tests that exercise the contract-author branch stub
+  // both methods per-test. EVM-only — same family as the on-chain-derived
+  // helpers above.
+  'verifyContractSignature',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([
