@@ -13,15 +13,16 @@ import { estimateStringRowHeapBytes } from '../src/sync/memory-telemetry.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 /**
- * The oversized-snapshot fallbacks for durable-meta and TTL-cutoff SWM-data now
+ * The oversized-snapshot fallbacks for durable-meta and TTL-cutoff SWM-data
  * use store-bounded paged SPARQL (readDurableMetaRowsPage / readFreshSwmDataRowsPage)
  * instead of re-materializing the complete filtered set per page. These tests
- * prove the paged path returns the SAME SET of rows as the canonical in-memory
- * filter, and that it issues bounded ORDER BY/OFFSET/LIMIT store queries.
+ * prove a full paged sweep returns the SAME SET of rows regardless of page
+ * size, and that it issues bounded ORDER BY/OFFSET/LIMIT store queries.
  *
  * The canonical result is produced by the SAME handler with a generous budget
- * (cached path → readDurableMetaRows / readFreshSwmDataRows); the paged result
- * is produced with a tiny per-snapshot budget that forces the fallback.
+ * (cached path → one bounded snapshot query, see loadBoundedSnapshot); the
+ * paged result is produced with a tiny per-snapshot budget that forces the
+ * per-wire-page fallback.
  */
 
 const TINY_SNAPSHOT_BUDGET = {

@@ -146,7 +146,7 @@ describe('sync responder pagination interleaving', () => {
     const cgId = 'oversized-durable-meta';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const metaGraph = `${cgPrefix}/_meta`;
-    // Rows keyed on the CG entity subject survive readDurableMetaRows filtering.
+    // Rows keyed on the CG entity subject survive the durable-meta admission filter.
     await store.insert(Array.from({ length: 3 }, (_, i) => ({
       graph: metaGraph,
       subject: cgPrefix,
@@ -470,7 +470,7 @@ describe('sync responder pagination interleaving', () => {
     expect(lineGraphsFromNquads(out)).toEqual(new Set([cgPrefix, fallbackGraph]));
   });
 
-  it('builds a reusable durable-data snapshot only from ordered bounded store pages', async () => {
+  it('builds a reusable durable-data snapshot from a single ordered bounded store query', async () => {
     const store = new OxigraphStore();
     const cgId = 'single-query-durable-fallback';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;

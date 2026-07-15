@@ -20,18 +20,20 @@ export type SyncRow = Readonly<{ s: string; p: string; o: string; g: string }>;
  * They bound temporary materialization even when an operator configures a very
  * large cache. Larger phases use direct store paging instead of being cached.
  */
-export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 10_000;
-export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
-export const SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS = 500;
+const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 10_000;
+const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
 
-export interface SyncRowSnapshotLoadLimits {
+interface SyncRowSnapshotLoadLimits {
   maxRows: number;
   maxBytesEstimate: number;
-  pageRows: number;
 }
 
 export interface SyncRowListMemo {
-  /** Store-paged loader limits; present on production memos. */
+  /**
+   * Bounded single-read snapshot-build limits; present on production memos
+   * (derived from the shared budget's per-snapshot caps). Tests may build a
+   * memo without them to fall back to the hard build caps above.
+   */
   readonly snapshotLoadLimits?: Readonly<SyncRowSnapshotLoadLimits>;
   get(
     key: string,
@@ -55,6 +57,76 @@ export interface SyncRowListMemo {
 interface SyncRowListMemoOptions {
   phase: SyncMemoryPhase;
   budget?: SyncResponderSnapshotBudget;
+}
+
+/**
+ * Loader for one `ORDER BY ?g ?s ?p ?o OFFSET/LIMIT` store read. The cached
+ * snapshot build calls it exactly once (offset 0); the oversized fallback in
+ * graph-plan drives it once per wire page.
+ */
+export type SyncRowSnapshotPageLoader = (
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+) => Promise<SyncRow[]>;
+
+/**
+ * Materialize one cacheable responder snapshot with ONE bounded store query.
+ *
+ * A single SPARQL query executes against one consistent store view, so a write
+ * landing while the snapshot builds can never tear the memoized row set — the
+ * multi-`OFFSET`-page build this replaces could duplicate and skip rows when a
+ * concurrent insert shifted the window between internal pages. Reading
+ * `maxRows + 1` detects an over-cap result while materializing at most one row
+ * past the cap; over-cap snapshots throw {@link SyncRowSnapshotBudgetError}
+ * (reason `snapshot_rows`) so the memo records the rejection and the caller's
+ * store-bounded fallback engages for the rest of the session.
+ *
+ * The byte-estimate cap is enforced POST-read (reason `snapshot_bytes`): the
+ * temporary materialization it inspects is already bounded by the row cap, and
+ * rejecting after the single read — rather than aborting mid-page-stream — is
+ * what restores the base single-query consistency guarantee for cacheable
+ * snapshots.
+ *
+ * The load is owner-independent: no abort signal is forwarded, because the
+ * settled snapshot is shared with coalesced waiters even if the first
+ * requester aborts (see SyncRowListMemo.get).
+ */
+export async function loadBoundedSnapshot(
+  memo: SyncRowListMemo,
+  key: string,
+  loadPage: SyncRowSnapshotPageLoader,
+): Promise<readonly SyncRow[]> {
+  const limits = memo.snapshotLoadLimits ?? {
+    maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+    maxBytesEstimate: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+  };
+  const maxRows = Math.max(0, Math.floor(limits.maxRows));
+  const maxBytesEstimate = Math.max(0, Math.floor(limits.maxBytesEstimate));
+  const rows = await loadPage(0, maxRows + 1, undefined);
+  let bytesEstimate = 0;
+  for (const row of rows) {
+    bytesEstimate += estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
+  }
+  if (rows.length > maxRows) {
+    throw new SyncRowSnapshotBudgetError({
+      key,
+      reason: 'snapshot_rows',
+      rows: rows.length,
+      bytesEstimate,
+      limit: maxRows,
+    });
+  }
+  if (bytesEstimate > maxBytesEstimate) {
+    throw new SyncRowSnapshotBudgetError({
+      key,
+      reason: 'snapshot_bytes',
+      rows: rows.length,
+      bytesEstimate,
+      limit: maxBytesEstimate,
+    });
+  }
+  return rows;
 }
 
 interface CachedSnapshot {
@@ -152,7 +224,6 @@ export function createResponderSyncRowListMemo(
       SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
       configuredLimits?.maxSnapshotBytesEstimate ?? SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
     ),
-    pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
   };
   const cached = new Map<string, CachedSnapshot>();
   const expired = new Map<string, ExpiredSnapshot>();
@@ -411,10 +482,11 @@ export function createResponderSyncRowListMemo(
         })
         .catch((error) => {
           loadOutcome = 'error';
-          // A store-paged snapshot builder can detect its local row/byte cap
-          // before materialising the complete query result. Remember that
-          // intrinsic rejection exactly like storeCached() does, so every later
-          // page in this responder session goes straight to bounded store paging.
+          // The bounded snapshot builder (loadBoundedSnapshot) detects its
+          // local row/byte cap before the snapshot reaches storeCached().
+          // Remember that intrinsic rejection exactly like storeCached() does,
+          // so every later page in this responder session goes straight to
+          // bounded store paging.
           if (
             error instanceof SyncRowSnapshotBudgetError &&
             (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')

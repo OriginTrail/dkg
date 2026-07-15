@@ -41,6 +41,7 @@ export default defineConfig({
       "test/durable-meta-admission.test.ts",
       "test/sync-responder-log-volume.test.ts",
       "test/sync-responder-snapshot-cache.test.ts",
+      "test/sync-responder-snapshot-consistency.test.ts",
       "test/sync-responder-oversized-fallback.test.ts",
       "test/sync-responder-large-graph-stack-overflow.test.ts",
       "test/sync-append-in-place.test.ts",
