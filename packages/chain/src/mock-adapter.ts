@@ -306,6 +306,14 @@ export class MockChainAdapter implements ChainAdapter {
     return 1n;
   }
 
+  async getKnowledgeAssetOwner(kaId: bigint): Promise<string> {
+    const collection = this.collections.get(kaId);
+    if (!collection || collection.authorAddress === ethers.ZeroAddress) {
+      throw new Error(`Mock Knowledge Asset ${kaId.toString()} does not exist`);
+    }
+    return ethers.getAddress(collection.authorAddress);
+  }
+
   async verifyPublisherOwnsRange(
     publisherAddress: string,
     startKAId: bigint,

@@ -711,6 +711,10 @@ class AdapterManagedUpdateChain implements ChainAdapter {
     return '0x000000000000000000000000000000000000c10a';
   }
 
+  async getKnowledgeAssetOwner(_kaId: bigint): Promise<string> {
+    return _SEAL_WALLET.address;
+  }
+
   async updateKnowledgeCollectionV10(params: V10UpdateKAParams): Promise<TxResult> {
     this.capturedPublisherAddress = params.publisherAddress;
     this.capturedPublisherNodeIdentityId = params.publisherNodeIdentityId;
