@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  createResponderFreshSwmDataGraphPlanMemo,
   createResponderSyncRowListMemo,
   readDurableMetaPage,
   SyncRowSnapshotLimitError,
@@ -110,6 +111,40 @@ describe('sync responder snapshot budget defaults', () => {
     });
     expect(warnings).toHaveLength(3);
     expect(warnings[0]).toContain('DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT');
+  });
+});
+
+describe('fresh SWM data graph-plan memo', () => {
+  it('does not let a refreshed session join an older in-flight plan', async () => {
+    const memo = createResponderFreshSwmDataGraphPlanMemo();
+    const firstGate = deferred<{ entries: []; totalRows: number }>();
+    const secondGate = deferred<{ entries: []; totalRows: number }>();
+    let secondLoads = 0;
+
+    const first = memo.get('peer/cg', () => firstGate.promise, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+    const second = memo.get('peer/cg', () => {
+      secondLoads += 1;
+      return secondGate.promise;
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-b',
+    });
+
+    await Promise.resolve();
+    expect(secondLoads).toBe(0);
+    firstGate.resolve({ entries: [], totalRows: 1 });
+    await expect(first).resolves.toMatchObject({ totalRows: 1 });
+    while (secondLoads === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    secondGate.resolve({ entries: [], totalRows: 2 });
+    await expect(second).resolves.toMatchObject({ totalRows: 2 });
+
+    await expect(memo.get('peer/cg', async () => ({ entries: [], totalRows: 3 }), {
+      refreshGeneration: 'session-b',
+      requireExisting: true,
+    })).resolves.toMatchObject({ totalRows: 2 });
   });
 });
 

@@ -95,7 +95,12 @@ export interface FreshSwmDataGraphPlanMemo {
   get(
     key: string,
     load: () => Promise<FreshSwmDataGraphPlan>,
-    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+    options?: {
+      refresh?: boolean;
+      refreshGeneration?: string;
+      requireExisting?: boolean;
+      signal?: AbortSignal;
+    },
   ): Promise<FreshSwmDataGraphPlan | null>;
 }
 
@@ -248,8 +253,15 @@ export function createResponderFreshSwmDataGraphPlanMemo(
   ttlMs = 10 * 60_000,
   maxEntries = 32,
 ): FreshSwmDataGraphPlanMemo {
-  const cached = new Map<string, { value: FreshSwmDataGraphPlan; cachedAt: number }>();
-  const inflight = new Map<string, Promise<FreshSwmDataGraphPlan>>();
+  const cached = new Map<string, {
+    value: FreshSwmDataGraphPlan;
+    cachedAt: number;
+    refreshGeneration?: string;
+  }>();
+  const inflight = new Map<string, {
+    promise: Promise<FreshSwmDataGraphPlan>;
+    refreshGeneration?: string;
+  }>();
   const prune = (now = Date.now()) => {
     for (const [key, entry] of cached) {
       if (now - entry.cachedAt >= ttlMs) cached.delete(key);
@@ -258,25 +270,57 @@ export function createResponderFreshSwmDataGraphPlanMemo(
   return {
     async get(key, load, options) {
       throwIfAborted(options?.signal);
+      const requestedGeneration = options?.refreshGeneration;
+      while (true) {
+        const pending = inflight.get(key);
+        if (!pending) break;
+        const supersedesPending = requestedGeneration !== undefined &&
+          requestedGeneration !== pending.refreshGeneration;
+        if (!supersedesPending) {
+          return raceAgainstAbort(pending.promise, options?.signal);
+        }
+        try {
+          await raceAgainstAbort(pending.promise, options?.signal);
+        } catch {
+          // A newer responder session owns an independent plan attempt. Do not
+          // inherit an older generation's load failure, but keep caller aborts.
+          throwIfAborted(options?.signal);
+        }
+      }
       const now = Date.now();
       prune(now);
-      const pending = inflight.get(key);
-      if (pending) return raceAgainstAbort(pending, options?.signal);
-      const existing = cached.get(key);
+      let existing = cached.get(key);
+      if (
+        existing &&
+        requestedGeneration !== undefined &&
+        existing.refreshGeneration !== requestedGeneration
+      ) {
+        cached.delete(key);
+        existing = undefined;
+      }
       if (!options?.refresh && existing) {
         cached.delete(key);
-        cached.set(key, { value: existing.value, cachedAt: now });
+        cached.set(key, { ...existing, cachedAt: now });
         return existing.value;
       }
       if (options?.requireExisting) return null;
       if (!existing && cached.size >= maxEntries) cached.delete(cached.keys().next().value!);
       const pendingLoad = load()
         .then((value) => {
-          cached.set(key, { value, cachedAt: Date.now() });
+          cached.set(key, {
+            value,
+            cachedAt: Date.now(),
+            refreshGeneration: requestedGeneration,
+          });
           return value;
         })
-        .finally(() => inflight.delete(key));
-      inflight.set(key, pendingLoad);
+        .finally(() => {
+          if (inflight.get(key)?.promise === pendingLoad) inflight.delete(key);
+        });
+      inflight.set(key, {
+        promise: pendingLoad,
+        refreshGeneration: requestedGeneration,
+      });
       return raceAgainstAbort(pendingLoad, options?.signal);
     },
   };
@@ -522,21 +566,22 @@ export async function readSwmDataPage(params: {
   }
 
   const loadStoreBoundedPage: StorePageLoader = async (offset, limit, signal) => {
-    const loadPlan = () => buildFreshSwmDataGraphPlan(
+    const loadPlan = (planSignal?: AbortSignal) => buildFreshSwmDataGraphPlan(
       params.store,
       dataGraphs,
       graphSet,
       candidateGraphsFor,
       params.cutoffIso!,
-      signal,
+      planSignal,
     );
     const plan = params.freshGraphPlanMemo && params.rowListCacheKey
-      ? await params.freshGraphPlanMemo.get(params.rowListCacheKey, loadPlan, {
+      ? await params.freshGraphPlanMemo.get(params.rowListCacheKey, () => loadPlan(), {
         refresh: offset === 0 ? params.refreshRowList : false,
+        refreshGeneration: params.refreshGeneration,
         requireExisting: offset > 0,
         signal,
       })
-      : await loadPlan();
+      : await loadPlan(signal);
     if (!plan) {
       throw new Error('Shared-memory data sync session graph plan expired before page completion');
     }
