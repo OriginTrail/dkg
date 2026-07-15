@@ -85,6 +85,24 @@ export interface FreshSwmDataGraphPlanMemo {
   ): Promise<FreshSwmDataGraphPlan | null>;
 }
 
+interface ExactGraphPagePlanEntry {
+  graph: string;
+  rowCount: number;
+}
+
+interface ExactGraphPagePlan {
+  entries: readonly ExactGraphPagePlanEntry[];
+  totalRows: number;
+}
+
+export interface ExactGraphPagePlanMemo {
+  get(
+    key: string,
+    load: () => Promise<ExactGraphPagePlan>,
+    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+  ): Promise<ExactGraphPagePlan | null>;
+}
+
 interface RowListCache {
   memo: SyncRowListMemo;
   key: string;
@@ -196,6 +214,51 @@ export function createResponderFreshSwmDataGraphPlanMemo(
 ): FreshSwmDataGraphPlanMemo {
   const cached = new Map<string, { value: FreshSwmDataGraphPlan; cachedAt: number }>();
   const inflight = new Map<string, Promise<FreshSwmDataGraphPlan>>();
+  const prune = (now = Date.now()) => {
+    for (const [key, entry] of cached) {
+      if (now - entry.cachedAt >= ttlMs) cached.delete(key);
+    }
+  };
+  return {
+    async get(key, load, options) {
+      throwIfAborted(options?.signal);
+      const now = Date.now();
+      prune(now);
+      const pending = inflight.get(key);
+      if (pending) return raceAgainstAbort(pending, options?.signal);
+      const existing = cached.get(key);
+      if (!options?.refresh && existing) {
+        cached.delete(key);
+        cached.set(key, { value: existing.value, cachedAt: now });
+        return existing.value;
+      }
+      if (options?.requireExisting) return null;
+      if (!existing && cached.size >= maxEntries) cached.delete(cached.keys().next().value!);
+      const pendingLoad = load()
+        .then((value) => {
+          cached.set(key, { value, cachedAt: Date.now() });
+          return value;
+        })
+        .finally(() => inflight.delete(key));
+      inflight.set(key, pendingLoad);
+      return raceAgainstAbort(pendingLoad, options?.signal);
+    },
+  };
+}
+
+/**
+ * Session-scoped inventory for ordinary durable/SWM graph paging. The memo
+ * stores only exact graph IRIs and their row counts. Payload rows remain in the
+ * triple store and each page addresses one concrete graph at a time, avoiding
+ * the global `VALUES ?g ... ORDER BY ?g ?s ?p ?o OFFSET ...` scan that grows
+ * super-linearly on large stores.
+ */
+export function createResponderExactGraphPagePlanMemo(
+  ttlMs = 10 * 60_000,
+  maxEntries = 32,
+): ExactGraphPagePlanMemo {
+  const cached = new Map<string, { value: ExactGraphPagePlan; cachedAt: number }>();
+  const inflight = new Map<string, Promise<ExactGraphPagePlan>>();
   const prune = (now = Date.now()) => {
     for (const [key, entry] of cached) {
       if (now - entry.cachedAt >= ttlMs) cached.delete(key);
@@ -378,6 +441,7 @@ export async function readSwmDataPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
   freshGraphPlanMemo?: FreshSwmDataGraphPlanMemo;
+  exactGraphPlanMemo?: ExactGraphPagePlanMemo;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
@@ -404,6 +468,7 @@ export async function readSwmDataPage(params: {
       async () => true,
       cache,
       params.signal,
+      params.exactGraphPlanMemo,
     );
   }
 
@@ -660,6 +725,7 @@ export async function readDurableDataPage(params: {
   rowListCacheScope?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
+  exactGraphPlanMemo?: ExactGraphPagePlanMemo;
 }): Promise<SyncRow[]> {
   // Admission context (candidate exclusions + RFC-49 `isAdmitted`) — extracted to
   // a module factory so `readChangelogDeltaPage` reuses it verbatim. Behaviour
@@ -684,6 +750,7 @@ export async function readDurableDataPage(params: {
         }
         : undefined,
       params.signal,
+      params.exactGraphPlanMemo,
     );
   }
 
@@ -748,41 +815,110 @@ async function readPagedRowsAcrossGraphs(
   isAdmitted: (graph: string) => Promise<boolean>,
   cache?: RowListCache,
   signal?: AbortSignal,
+  planMemo?: ExactGraphPagePlanMemo,
 ): Promise<SyncRow[]> {
+  // A small snapshot is first assembled into the row cache. If that build
+  // crosses its cap, readResponderRowsPage immediately retries page zero via
+  // the store-bounded path. Consume the explicit session refresh only once so
+  // that fallback reuses the exact graph/count plan instead of counting every
+  // graph twice.
+  let planRefreshPending = cache?.refresh === true;
+  const loadPage: StorePageLoader = async (pageOffset, pageLimit, pageSignal) => {
+    const loadPlan = () => buildExactGraphPagePlan(
+      store,
+      graphs,
+      isAdmitted,
+      pageSignal,
+    );
+    const refreshPlan = pageOffset === 0 && planRefreshPending;
+    if (refreshPlan) planRefreshPending = false;
+    const plan = planMemo && cache
+      ? await planMemo.get(cache.key, loadPlan, {
+        refresh: refreshPlan,
+        requireExisting: pageOffset > 0,
+        signal: pageSignal,
+      })
+      : await loadPlan();
+    if (!plan) {
+      throw new Error('Sync session exact-graph plan expired before page completion');
+    }
+    return readRowsPageFromExactGraphPlan(store, plan, pageOffset, pageLimit, pageSignal);
+  };
   return readResponderRowsPage(
     cache && {
       ...cache,
       expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
     },
-    (pageOffset, pageLimit, pageSignal) => readPagedRowsAcrossGraphsStoreBounded(
-      store,
-      graphs,
-      pageOffset,
-      pageLimit,
-      isAdmitted,
-      pageSignal,
-    ),
+    loadPage,
     offset,
     limit,
     signal,
   );
 }
 
-async function readPagedRowsAcrossGraphsStoreBounded(
+async function buildExactGraphPagePlan(
   store: TripleStore,
   graphs: readonly string[],
-  offset: number,
-  limit: number,
   isAdmitted: (graph: string) => Promise<boolean>,
   signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const admittedGraphs: string[] = [];
-  for (const graph of graphs) {
+): Promise<ExactGraphPagePlan> {
+  const entries: ExactGraphPagePlanEntry[] = [];
+  for (const graph of dedupeStrings(graphs).sort(compareCodePoint)) {
+    throwIfAborted(signal);
     if (!(await isAdmitted(graph))) continue;
-    admittedGraphs.push(graph);
+    const rowCount = await store.countQuads(
+      graph,
+      syncResponderStoreOptions(signal, 'sync.responder.countExactGraphRows'),
+    );
+    if (rowCount > 0) entries.push({ graph, rowCount });
   }
+  return {
+    entries,
+    totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
+  };
+}
 
-  return readRowsPageAcrossGraphs(store, admittedGraphs, offset, limit, signal);
+async function readRowsPageFromExactGraphPlan(
+  store: TripleStore,
+  plan: ExactGraphPagePlan,
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  let skip = Math.max(0, Math.floor(offset));
+  let remaining = Math.max(0, Math.floor(limit));
+  if (remaining === 0 || skip >= plan.totalRows) return [];
+  const rows: SyncRow[] = [];
+  for (const entry of plan.entries) {
+    if (skip >= entry.rowCount) {
+      skip -= entry.rowCount;
+      continue;
+    }
+    const result = await store.query(`
+      SELECT ?s ?p ?o WHERE {
+        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
+      }
+      ORDER BY ?s ?p ?o
+      OFFSET ${skip}
+      LIMIT ${remaining}
+    `, syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'));
+    let added = 0;
+    if (result.type === 'bindings') {
+      for (const row of result.bindings) {
+        const s = row['s'];
+        const p = row['p'];
+        const o = row['o'];
+        if (s && p && o) {
+          rows.push({ s, p, o, g: entry.graph });
+          added += 1;
+        }
+      }
+    }
+    remaining -= added;
+    if (remaining <= 0) break;
+    skip = 0;
+  }
+  return rows;
 }
 
 async function readPagedDurableDeltaRowsAcrossGraphs(
@@ -834,16 +970,17 @@ function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudge
  * retryable limit and the requester retries once other sessions drain.
  *
  * KNOWN LIMITATION (tracked as follow-up): the store-bounded fallback pages via
- * `OFFSET`, which — unlike a retained session snapshot — is NOT stable if the
- * graph mutates between two page requests of the same session (a row inserted
- * before the current offset can shift the window, duplicating or skipping a
- * row). This is inherent to any non-cached fallback and pre-dates the meta/SWM
- * work (durable-data already paged this way). It is bounded in blast radius:
+ * a per-exact-graph `OFFSET`, which — unlike a retained session snapshot — is
+ * NOT stable if that exact graph mutates between two page requests of the same
+ * session (a row inserted before the current offset can shift the window,
+ * duplicating or skipping a row). New graph-scoped KAs are immutable for one
+ * assertion version, so this caveat is limited to legacy mutable graph shapes.
+ * It is bounded in blast radius:
  * durable data is Merkle-verified end-to-end, so an inconsistent assembly fails
  * verification and the requester restarts the phase (churn, not silent
  * corruption); it only bites an oversized AND concurrently-mutating context
- * graph. The durable fix is a stable keyset/seek cursor for the fallback (page
- * on `(g,s,p,o) > lastKey` instead of `OFFSET`); see the PR follow-up list.
+ * graph. The durable legacy fix is a stable keyset/seek cursor within the exact
+ * graph; the global cross-graph sort/offset is deliberately no longer used.
  */
 type StorePageLoader = (
   offset: number,
@@ -1159,32 +1296,6 @@ async function readRowsAcrossGraphsExcludingSubjectPrefix(
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
     .filter((row) => row.s && row.p && row.o && row.g)
     .sort(compareRows);
-}
-
-async function readRowsPageAcrossGraphs(
-  store: TripleStore,
-  graphs: readonly string[],
-  offset: number,
-  limit: number,
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  const values = graphValues(graphs);
-  if (safeLimit === 0 || !values) return [];
-  const res = await store.query(`
-    SELECT ?g ?s ?p ?o WHERE {
-      VALUES ?g { ${values} }
-      GRAPH ?g { ?s ?p ?o }
-    }
-    ORDER BY ?g ?s ?p ?o
-    OFFSET ${safeOffset}
-    LIMIT ${safeLimit}
-  `, syncResponderStoreOptions(signal, 'sync.responder.readRowsPageAcrossGraphs'));
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
-    .filter((row) => row.s && row.p && row.o && row.g);
 }
 
 async function readSwmMetaRows(

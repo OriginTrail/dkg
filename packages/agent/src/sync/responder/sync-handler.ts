@@ -14,6 +14,7 @@ import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
+  createResponderExactGraphPagePlanMemo,
   createResponderFreshSwmDataGraphPlanMemo,
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
@@ -438,6 +439,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
   );
+  const durableDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+  );
+  const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
   const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
@@ -673,6 +682,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             freshGraphPlanMemo: freshSwmDataGraphPlanMemo,
+            exactGraphPlanMemo: swmDataExactGraphPlanMemo,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -759,6 +769,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
+          exactGraphPlanMemo: durableDataExactGraphPlanMemo,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();

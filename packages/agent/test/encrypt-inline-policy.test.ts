@@ -607,7 +607,16 @@ describe('DKGAgent.update inline encryption routing', () => {
         error: recorder(() => undefined),
         debug: recorder(() => undefined),
       },
-      chain: { chainId },
+      chain: {
+        chainId,
+        getEvmChainId: recorder(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: recorder(
+          async () => '0x2222222222222222222222222222222222222222',
+        ),
+        hasContractCode: recorder(async () => true),
+        verifyContractSignature: recorder(async () => true),
+        getKnowledgeAssetOwner: recorder(async () => author),
+      },
       getContextGraphOnChainId: recorder(async () => '42'),
       createV10UpdateACKProvider: recorder(() => undefined),
       node: { peerId: { toString: () => 'peer-1' } },
@@ -927,11 +936,12 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
   });
 
   it('does not trust or append a catalog floor for a private local-only queued publish', async () => {
-    const realInline = recorder(async (plaintext: Uint8Array) => plaintext);
+    const liveResolverInline = recorder(async (plaintext: Uint8Array) => plaintext);
+    const queuedInline = recorder(async (plaintext: Uint8Array) => plaintext);
     const { agentLike, publisherPublish } = makeQueuedAgentHarness({
       peerId: 'did:dkg:agent:queued-private-local',
       ual: 'did:dkg:local/queued-private-local',
-      encryptInlinePayload: realInline,
+      encryptInlinePayload: liveResolverInline,
     });
     const originalQuads = [{
       subject: 'urn:test:queued-private-local',
@@ -950,14 +960,20 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
       agentLike,
       request,
-      { contextGraphId: request.contextGraphId, quads: originalQuads },
+      {
+        contextGraphId: request.contextGraphId,
+        quads: originalQuads,
+        encryptInlinePayload: queuedInline,
+      },
     );
 
     expect(publisherPublish.calls.at(-1)?.[0]).toMatchObject({
       quads: originalQuads,
-      encryptInlinePayload: realInline,
+      encryptInlinePayload: queuedInline,
       onChainContextGraphId: undefined,
     });
+    expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload)
+      .not.toBe(liveResolverInline);
     expect(publisherPublish.calls.at(-1)?.[0]).not.toHaveProperty(
       'trustedNonManifestCatalogTriples',
     );
