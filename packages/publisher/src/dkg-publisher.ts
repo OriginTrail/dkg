@@ -3916,6 +3916,91 @@ export class DKGPublisher implements Publisher {
     } as InternalPublishOptions);
   }
 
+  /**
+   * Effective access-control metadata for a graph-scoped update. Graph-scoped
+   * updates converge the KA's `_meta` row set to exactly what the metadata
+   * generator emits, so any field regenerated from raw update options loses
+   * its stored value. For the access fields that is a privacy hole: the
+   * generator defaults a missing `accessPolicy` to 'public', so an update
+   * that omitted policy options flipped a private KA public (PR #1712 review,
+   * otReviewAgent 3586192289). Resolution order per field: explicit update
+   * option → existing stored `_meta` row → the same private-content default
+   * `publish()` applies. Conflicting or invalid stored policy rows (e.g. an
+   * interrupted converge) fail closed to 'ownerOnly' — mirroring the access
+   * handler, which denies on invalid explicit policy rather than serving.
+   */
+  private async resolveGraphScopedUpdateAccessMeta(
+    metaGraph: string,
+    kaUal: string,
+    options: PublishOptions,
+    hasPrivateContent: boolean,
+  ): Promise<{
+    accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+    publisherPeerId: string;
+    allowedPeers: string[];
+  }> {
+    const DKG_ONT = 'http://dkg.io/ontology/';
+    const safeUal = assertSafeIri(kaUal);
+    const existing = await this.store.query(
+      `SELECT ?policy ?peer ?allowed WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
+        { <${safeUal}> <${DKG_ONT}accessPolicy> ?policy }
+        UNION { <${safeUal}> <${DKG_ONT}publisherPeerId> ?peer }
+        UNION { <${safeUal}> <${DKG_ONT}allowedPeer> ?allowed }
+      } }`,
+    );
+    const storedPolicies = new Set<string>();
+    const storedPeerIds = new Set<string>();
+    const storedAllowedPeers = new Set<string>();
+    if (existing.type === 'bindings') {
+      for (const row of existing.bindings) {
+        const policy = stripSparqlLiteral(row['policy']);
+        if (policy) storedPolicies.add(policy);
+        const peer = stripSparqlLiteral(row['peer']);
+        if (peer && peer !== 'unknown') storedPeerIds.add(peer);
+        const allowed = stripSparqlLiteral(row['allowed']);
+        if (allowed) storedAllowedPeers.add(allowed);
+      }
+    }
+    const isPolicy = (v: string): v is 'public' | 'ownerOnly' | 'allowList' =>
+      v === 'public' || v === 'ownerOnly' || v === 'allowList';
+    let storedPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined;
+    const [firstPolicy] = storedPolicies;
+    if (storedPolicies.size === 1 && firstPolicy !== undefined && isPolicy(firstPolicy)) {
+      storedPolicy = firstPolicy;
+    } else if (storedPolicies.size > 0) {
+      storedPolicy = 'ownerOnly';
+    }
+    // Distinct real stored owner ids are ambiguous — treat as absent so a
+    // non-public update must name the owner explicitly instead of guessing.
+    const [storedPeerId] = storedPeerIds.size === 1 ? storedPeerIds : [];
+
+    const explicitPeerId = options.publisherPeerId?.trim() || undefined;
+    const explicitAllowedPeers = options.allowedPeers === undefined
+      ? undefined
+      : [...new Set(options.allowedPeers.map((p) => p.trim()).filter(Boolean))];
+
+    const accessPolicy = options.accessPolicy
+      ?? storedPolicy
+      ?? (hasPrivateContent ? 'ownerOnly' : 'public');
+    const publisherPeerId = explicitPeerId ?? storedPeerId ?? '';
+    const allowedPeers = explicitAllowedPeers
+      ?? (accessPolicy === 'allowList' ? [...storedAllowedPeers] : []);
+
+    if (accessPolicy !== 'public' && publisherPeerId.length === 0) {
+      throw new Error(
+        `Update rejected: accessPolicy "${accessPolicy}" requires a non-empty "publisherPeerId" ` +
+          '(none supplied and no unambiguous stored owner to preserve)',
+      );
+    }
+    if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+      throw new Error('Update rejected: accessPolicy "allowList" requires non-empty "allowedPeers"');
+    }
+    if (accessPolicy !== 'allowList' && (explicitAllowedPeers?.length ?? 0) > 0) {
+      throw new Error('Update rejected: "allowedPeers" is only valid when accessPolicy is "allowList"');
+    }
+    return { accessPolicy, publisherPeerId: publisherPeerId || 'unknown', allowedPeers };
+  }
+
   async update(kaId: bigint, options: PublishOptions): Promise<PublishResult> {
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const graphUpdate = resolveGraphScopedPublishDescriptor(options);
@@ -4020,6 +4105,9 @@ export class DKGPublisher implements Publisher {
     let canonicalPrivateQuads: Quad[] = [];
     let allSkolemizedQuads: Quad[];
     let updatePrivateRoots: Uint8Array[];
+    let graphUpdateAccess:
+      | { accessPolicy: 'public' | 'ownerOnly' | 'allowList'; publisherPeerId: string; allowedPeers: string[] }
+      | undefined;
     if (graphUpdate) {
       const canonicalParts = await skolemizeKnowledgeAssetParts(quads, privateQuads, {
         allowCanonicalSkolemTerms: isInternalOrigin(options),
@@ -4051,6 +4139,12 @@ export class DKGPublisher implements Publisher {
         }
       }
       updatePrivateRoots = privateRoot ? [privateRoot] : [];
+      graphUpdateAccess = await this.resolveGraphScopedUpdateAccessMeta(
+        options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId),
+        graphUpdate.scope.ual,
+        options,
+        graphUpdate.privateTripleCount > 0,
+      );
     } else {
       kaMap = skolemizeByEntity(quads);
       const split = splitTrustedGeneratedCatalogRootMap(
@@ -4134,14 +4228,23 @@ export class DKGPublisher implements Publisher {
         );
         const labelMeta = options.targetMetaGraphUri
           ?? this.graphManager.metaGraphUri(contextGraphId);
+        // 🔴 PR #1712 review (3586192289): the converge below replaces the
+        // KA's entire access row set, so passing raw update options here let
+        // an update that omitted `accessPolicy` rewrite a private KA to the
+        // metadata generator's 'public' default (and its owner to 'unknown'),
+        // silently exposing its private triples. `graphUpdateAccess` resolves
+        // explicit option → existing stored row → publish()'s private-content
+        // default, with publish()'s option validation applied.
         const metadata = generateGraphKnowledgeAssetMetadata(
           {
             ual: graphUpdate.scope.ual,
             contextGraphId,
             merkleRoot: kcMerkleRoot,
-            publisherPeerId: options.publisherPeerId?.trim() || 'unknown',
-            accessPolicy: options.accessPolicy,
-            allowedPeers: options.allowedPeers,
+            publisherPeerId: graphUpdateAccess!.publisherPeerId,
+            accessPolicy: graphUpdateAccess!.accessPolicy,
+            allowedPeers: graphUpdateAccess!.allowedPeers.length > 0
+              ? graphUpdateAccess!.allowedPeers
+              : undefined,
             timestamp: new Date(),
             subGraphName: options.subGraphName,
             authorAddress: options.precomputedUpdateAttestation?.authorAddress,
@@ -5761,27 +5864,6 @@ export class DKGPublisher implements Publisher {
       return { agentAddress, number };
     }
     return null;
-  }
-
-  /** Mutation gate: missing/legacy scope is query/export-only. */
-  private async assertGraphScopedLifecycleWritable(
-    contextGraphId: string,
-    agentAddress: string,
-    name: string,
-    subGraphName?: string,
-  ): Promise<void> {
-    const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?scope WHERE { GRAPH <${metaGraph}> {
-        <${lifecycle}> <${ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION}> ?scope
-      } } LIMIT 1`,
-    );
-    const raw = result.type === 'bindings' ? result.bindings[0]?.['scope'] : undefined;
-    const version = raw?.match(/(\d+)/)?.[1];
-    if (version !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
   }
 
   /** Read a KA's allocated number (dkg:kaId) off its lifecycle URN, or null if not yet minted. */

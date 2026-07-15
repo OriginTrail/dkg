@@ -170,14 +170,108 @@ describe('graph-scoped KA private access & metadata convergence', () => {
       .toContain(Buffer.from(v2.privateMerkleRoot).toString('hex'));
 
     // Access must follow the converged head: v2 secret, v2 attestation.
+    // (Owner-authenticated: the update preserves v1's ownerOnly default —
+    // the pre-fix behavior where this request succeeded UNSIGNED was the
+    // access-policy regression, not the contract.)
     const response = decodeAccessResponse(
-      await handler.handler(accessRequestBytes(UAL), 'graph-scope-requester' as never),
+      await handler.handler(await ownerAccessRequestBytes(UAL), 'rootless-publisher' as never),
     );
+    expect(response.rejectionReason).toBe('');
     expect(response.granted).toBe(true);
     const served = parseSimpleNQuads(new TextDecoder().decode(response.nquads));
     expect(served.map((q) => q.object)).toEqual(['"v2-secret"']);
     expect(Buffer.from(response.privateMerkleRoot).toString('hex'))
       .toBe(Buffer.from(v2.privateMerkleRoot).toString('hex'));
+  });
+
+  it('preserves stored access policy and owner across an update that omits policy options', async () => {
+    // Publish v1 private with the ownerOnly default.
+    const v1 = await publishVersion(
+      publisher,
+      1,
+      [quad('urn:public:one', 'urn:predicate:value', '"v1"')],
+      [quad('urn:private:one', 'urn:predicate:secret', '"v1-secret"')],
+    );
+
+    // Regression (otReviewAgent 3586192289): a graph-scoped update whose
+    // options omit accessPolicy AND publisherPeerId used to converge the
+    // metadata row set to the generator defaults — accessPolicy "public",
+    // owner "unknown" — silently exposing the private triples.
+    const publicQuads = [quad('urn:public:one', 'urn:predicate:value', '"v2"')];
+    const privateQuads = [quad('urn:private:one', 'urn:predicate:secret', '"v2-secret"')];
+    const canonicalPublic = await skolemizeKnowledgeAsset(publicQuads);
+    const canonicalPrivate = await skolemizeKnowledgeAsset(privateQuads);
+    await publisher.update(v1.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: publicQuads,
+      privateQuads,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 2,
+      publicTripleCount: canonicalPublic.length,
+      privateTripleCount: canonicalPrivate.length,
+      privateMerkleRoot: computePrivateRootV10(canonicalPrivate)!,
+    });
+
+    // Stored access rows must be carried forward, not regenerated.
+    const meta = await store.query(
+      `SELECT ?policy ?peer WHERE { GRAPH <${META_GRAPH}> {
+        <${UAL}> <http://dkg.io/ontology/accessPolicy> ?policy .
+        <${UAL}> <http://dkg.io/ontology/publisherPeerId> ?peer .
+      } }`,
+    );
+    if (meta.type !== 'bindings') throw new Error('expected bindings');
+    expect(meta.bindings.map((b) => b['policy'])).toEqual(['"ownerOnly"']);
+    expect(meta.bindings.map((b) => b['peer'])).toEqual(['"rootless-publisher"']);
+
+    // Unsigned non-owner request stays denied after the update…
+    const denied = decodeAccessResponse(
+      await handler.handler(accessRequestBytes(UAL), 'graph-scope-requester' as never),
+    );
+    expect(denied.granted).toBe(false);
+
+    // …while the owner still reads the new version.
+    const granted = decodeAccessResponse(
+      await handler.handler(await ownerAccessRequestBytes(UAL), 'rootless-publisher' as never),
+    );
+    expect(granted.rejectionReason).toBe('');
+    expect(granted.granted).toBe(true);
+    const served = parseSimpleNQuads(new TextDecoder().decode(granted.nquads));
+    expect(served.map((q) => q.object)).toEqual(['"v2-secret"']);
+  });
+
+  it('lets an explicit accessPolicy option override the stored policy on update', async () => {
+    const v1 = await publishVersion(
+      publisher,
+      1,
+      [quad('urn:public:one', 'urn:predicate:value', '"v1"')],
+      [quad('urn:private:one', 'urn:predicate:secret', '"v1-secret"')],
+    );
+
+    const publicQuads = [quad('urn:public:one', 'urn:predicate:value', '"v2"')];
+    const privateQuads = [quad('urn:private:one', 'urn:predicate:secret', '"v2-secret"')];
+    const canonicalPublic = await skolemizeKnowledgeAsset(publicQuads);
+    const canonicalPrivate = await skolemizeKnowledgeAsset(privateQuads);
+    await publisher.update(v1.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: publicQuads,
+      privateQuads,
+      publisherPeerId: 'rootless-publisher',
+      accessPolicy: 'public',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 2,
+      publicTripleCount: canonicalPublic.length,
+      privateTripleCount: canonicalPrivate.length,
+      privateMerkleRoot: computePrivateRootV10(canonicalPrivate)!,
+    });
+
+    // Deliberate owner-driven downgrade: unsigned requests are now served.
+    const response = decodeAccessResponse(
+      await handler.handler(accessRequestBytes(UAL), 'graph-scope-requester' as never),
+    );
+    expect(response.rejectionReason).toBe('');
+    expect(response.granted).toBe(true);
   });
 
   it('denies cleanly when a graph-scoped KA has no private content', async () => {
