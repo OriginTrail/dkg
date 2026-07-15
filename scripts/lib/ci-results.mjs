@@ -1,4 +1,4 @@
-import { CI_LANES, EVM_SCOPES } from './ci-delta.mjs';
+import { CI_LANES, EVM_SCOPES, NODE_EVM_LANES } from './ci-delta.mjs';
 
 export const PRIMARY_LANE_JOBS = Object.freeze({
   tornado_core: 'tornado-core',
@@ -39,8 +39,15 @@ function checkPlanShape(plan, eventName, errors) {
   if (!['full', 'delta', 'docs-only'].includes(plan.mode)) {
     errors.push(`CI plan has invalid mode ${plan.mode}`);
   }
-  if (typeof plan.fullCi !== 'boolean' || typeof plan.runNode !== 'boolean') {
-    errors.push('CI plan fullCi/runNode flags must be booleans');
+  if (
+    typeof plan.fullCi !== 'boolean'
+    || typeof plan.runNode !== 'boolean'
+    || typeof plan.solidityRelevant !== 'boolean'
+  ) {
+    errors.push('CI plan fullCi/runNode/solidityRelevant flags must be booleans');
+  }
+  if (plan.lanes?.contracts !== plan.solidityRelevant) {
+    errors.push('CI plan contracts output must match solidityRelevant');
   }
   for (const lane of CI_LANES) {
     if (typeof plan.lanes?.[lane] !== 'boolean') {
@@ -55,11 +62,8 @@ function checkPlanShape(plan, eventName, errors) {
     errors.push('CI plan has an invalid EVM scope matrix');
   }
   if (plan.mode === 'full') {
-    const requiredFullLanes = eventName === 'pull_request'
-      ? CI_LANES.filter((lane) => lane !== 'contracts')
-      : CI_LANES;
-    if (!plan.fullCi || requiredFullLanes.some((lane) => plan.lanes?.[lane] !== true)) {
-      errors.push('Full CI mode must select every required lane');
+    if (!plan.fullCi || NODE_EVM_LANES.some((lane) => plan.lanes?.[lane] !== true)) {
+      errors.push('Full CI mode must select every Node/EVM lane');
     }
     if (EVM_SCOPES.some((scope) => !plan.evmScopes?.includes(scope))) {
       errors.push('Full CI mode must select every EVM scope');
@@ -96,7 +100,7 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
     requireSuccess(needs, job, Boolean(plan.lanes?.[lane]), errors);
   }
 
-  const contracts = Boolean(plan.lanes?.contracts);
+  const contracts = Boolean(plan.solidityRelevant);
   requireSuccess(needs, 'abi-freshness', contracts, errors);
   const candidateEvent = eventName === 'pull_request' || eventName === 'merge_group';
   requireSuccess(needs, 'solidity', candidateEvent && contracts, errors);

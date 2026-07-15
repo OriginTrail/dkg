@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CI_LANES,
   EVM_SCOPES,
+  NODE_EVM_LANES,
   WORKSPACE_OWNING_EVM_SCOPES,
   WORKSPACE_OWNING_LANES,
   WORKSPACE_RULES,
@@ -62,6 +63,37 @@ test('non-PR events run every lane while full-PR overrides preserve the Solidity
   assert.equal(labeled.fullCi, true);
   assert.deepEqual(selectedLanes(labeled), NON_SOLIDITY_LANES);
   assert.deepEqual(labeled.evmScopes, EVM_SCOPES);
+  assert.equal(labeled.solidityRelevant, false);
+  assert.deepEqual(NODE_EVM_LANES, NON_SOLIDITY_LANES);
+});
+
+test('unknown PR diffs fail closed with Solidity selected and enforced', () => {
+  const plan = pullRequestPlan([]);
+  assert.equal(plan.mode, 'full');
+  assert.equal(plan.fullCi, true);
+  assert.equal(plan.solidityRelevant, true);
+  assert.deepEqual(selectedLanes(plan), CI_LANES);
+  assert.match(plan.reasons.join('\n'), /failing closed/);
+
+  const needs = {
+    changes: { result: 'success' },
+    build: { result: 'success' },
+    'abi-freshness': { result: 'success' },
+    solidity: { result: 'skipped' },
+    'solidity-coverage': { result: 'skipped' },
+    'tornado-static-analysis': { result: 'success' },
+    'evm-node-test-artifacts': { result: 'success' },
+    'evm-devnet-test-artifacts': { result: 'success' },
+    ...Object.fromEntries(
+      Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'success' }]),
+    ),
+  };
+  assert.match(
+    validatePrimaryResults({ eventName: 'pull_request', plan, needs }).join('\n'),
+    /solidity was selected but ended with skipped/,
+  );
+  needs.solidity.result = 'success';
+  assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan, needs }), []);
 });
 
 test('five percent of PR SHAs are deterministic full-CI audit samples', () => {
@@ -577,6 +609,7 @@ test('GitHub outputs are booleans plus compact JSON matrices', () => {
   const gatePlan = JSON.parse(outputs.plan_json);
   assert.equal(gatePlan.mode, 'delta');
   assert.equal(gatePlan.lanes.kosava_supporting, true);
+  assert.equal(gatePlan.solidityRelevant, false);
   assert.equal('changedFiles' in gatePlan, false);
   assert.equal('reasons' in gatePlan, false);
 });
