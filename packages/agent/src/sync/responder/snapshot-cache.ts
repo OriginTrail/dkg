@@ -20,7 +20,10 @@ export type SyncRow = Readonly<{ s: string; p: string; o: string; g: string }>;
  * They bound temporary materialization even when an operator configures a very
  * large cache. Larger phases use direct store paging instead of being cached.
  */
-export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 10_000;
+// Keep the ordinary 50 x 1,000-triple release gate on the snapshot path. The
+// byte ceiling remains the primary heap bound, so raising the row ceiling does
+// not permit a large-literal snapshot to exceed 32 MiB of estimated row data.
+export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 64_000;
 export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
 export const SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS = 500;
 
