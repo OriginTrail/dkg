@@ -434,6 +434,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 
   const eventBus = new TypedEventBus();
   const wallets: ConfiguredPublisherWallet[] = [];
+  const writeLocks = new Map<string, Promise<void>>();
 
   for (const wallet of publisherWallets.wallets) {
     const chain = createPublisherWalletChain(args.chainBase, wallet.privateKey);
@@ -450,6 +451,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         publisherNodeIdentityId: identityId,
         publisherPrivateKey: wallet.privateKey,
         publicSnapshotStore: args.publicSnapshotStore,
+        writeLocks,
       }),
     });
   }

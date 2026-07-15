@@ -194,17 +194,22 @@ describe('Working Memory Assertion Lifecycle', () => {
     publisher = await createPublisher();
   });
 
-  it('uses one canonical write-lock domain per store', async () => {
-    const isolatedStore = new OxigraphStore();
+  it('keeps lifecycle lock domains explicit regardless of construction order', async () => {
+    const defaultFirstStore = new OxigraphStore();
     const suppliedLocks = new Map<string, Promise<void>>();
-    const configuredPublisher = await createPublisher(suppliedLocks, isolatedStore);
-    const defaultPublisher = await createPublisher(undefined, isolatedStore);
+    const defaultFirst = await createPublisher(undefined, defaultFirstStore);
+    const configuredSecond = await createPublisher(suppliedLocks, defaultFirstStore);
 
-    expect(configuredPublisher.writeLocks).toBe(suppliedLocks);
-    expect(defaultPublisher.writeLocks).toBe(suppliedLocks);
-    await expect(
-      createPublisher(new Map<string, Promise<void>>(), isolatedStore),
-    ).rejects.toThrow('must share the same writeLocks map');
+    expect(defaultFirst.writeLocks).not.toBe(suppliedLocks);
+    expect(configuredSecond.writeLocks).toBe(suppliedLocks);
+
+    const configuredFirstStore = new OxigraphStore();
+    const configuredFirst = await createPublisher(suppliedLocks, configuredFirstStore);
+    const defaultSecond = await createPublisher(undefined, configuredFirstStore);
+
+    expect(configuredFirst.writeLocks).toBe(suppliedLocks);
+    expect(defaultSecond.writeLocks).not.toBe(suppliedLocks);
+    expect(defaultSecond.writeLocks).not.toBe(defaultFirst.writeLocks);
   });
 
   it('create returns the correct assertion graph URI', async () => {
@@ -989,11 +994,13 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
   });
 
-  it('serializes lifecycle mutations across publishers sharing one store', async () => {
+  it('serializes lifecycle mutations across publishers given one explicit lock domain', async () => {
+    const sharedLocks = new Map<string, Promise<void>>();
+    publisher = await createPublisher(sharedLocks);
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     await finalizeAssertion();
-    const otherPublisher = await createPublisher();
+    const otherPublisher = await createPublisher(sharedLocks);
 
     let releaseConfirmation!: () => void;
     const confirmationReleased = new Promise<void>((resolve) => {
@@ -2642,6 +2649,33 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     if (swmResult.type === 'bindings') {
       expect(swmResult.bindings.length).toBe(3);
     }
+  });
+
+  it('normalizes canonical sub-graph placement input before finalization and promote', async () => {
+    await registerSubGraph();
+    await publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    await publisher.assertionWrite(SG_CG_ID, ASSERTION_NAME, AGENT, [{
+      subject: 'urn:test:entity:canonical-subgraph-input',
+      predicate: 'http://www.w3.org/2000/01/rdf-schema#label',
+      object: '"Canonical subgraph input"',
+      graph: contextGraphDataUri(SG_CG_ID, SG_NAME),
+    }], SG_NAME);
+
+    expect(await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:canonical-subgraph-input',
+        graph: '',
+      }),
+    ]);
+    const finalized = await finalizeSubGraphAssertion();
+    await expect(
+      publisher.assertionPromote(SG_CG_ID, ASSERTION_NAME, AGENT, { subGraphName: SG_NAME }),
+    ).resolves.toMatchObject({ promotedCount: 1 });
+    const promoted = await store.query(
+      `ASK { GRAPH <${finalized.sharedGraphUri}> { `
+      + '<urn:test:entity:canonical-subgraph-input> ?p ?o } }',
+    );
+    expect(promoted).toEqual({ type: 'boolean', value: true });
   });
 
   it('assertion ops without a sub-graph name still work (guard is opt-in)', async () => {

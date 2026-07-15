@@ -276,7 +276,10 @@ export interface DKGPublisherConfig {
   sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
   /** Shared batch→context graph binding map. Pass to UpdateHandler so it uses trusted local bindings. */
   knownBatchContextGraphs?: Map<string, string>;
-  /** Shared write lock map. Pass to SharedMemoryHandler so gossip writes serialize against CAS writes. */
+  /**
+   * Explicit lifecycle write-lock domain. Publishers and handlers that mutate
+   * the same store must receive the same map from their application factory.
+   */
   writeLocks?: Map<string, Promise<void>>;
   /** Resolves DKG-agent public encryption keys for private/agent-gated remote SWM gossip. */
   workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
@@ -299,33 +302,6 @@ export interface DKGPublisherConfig {
    * the lifecycle subject; the history API returns `events: []` gracefully.
    */
   provenanceEvents?: boolean;
-}
-
-/**
- * Publisher instances that target the same in-process store must serialize
- * lifecycle mutations together. A per-instance default lets a writer race a
- * promote in another publisher and disappear when promote drops the stale WM
- * snapshot. Explicitly supplied locks still win so the agent can share its
- * wider handler lock domain with the publisher.
- */
-const STORE_WRITE_LOCKS = new WeakMap<TripleStore, Map<string, Promise<void>>>();
-
-function writeLocksForStore(
-  store: TripleStore,
-  suppliedLocks?: Map<string, Promise<void>>,
-): Map<string, Promise<void>> {
-  const existingLocks = STORE_WRITE_LOCKS.get(store);
-  if (existingLocks) {
-    if (suppliedLocks && suppliedLocks !== existingLocks) {
-      throw new Error(
-        'DKGPublisher instances sharing one TripleStore must share the same writeLocks map',
-      );
-    }
-    return existingLocks;
-  }
-  const locks = suppliedLocks ?? new Map();
-  STORE_WRITE_LOCKS.set(store, locks);
-  return locks;
 }
 
 export interface WorkspaceSenderKeyEncryptInput {
@@ -903,7 +879,7 @@ export class DKGPublisher implements Publisher {
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
-    this.writeLocks = writeLocksForStore(this.store, config.writeLocks);
+    this.writeLocks = config.writeLocks ?? new Map();
     this.workspaceAgentRecipientResolver = config.workspaceAgentRecipientResolver;
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;

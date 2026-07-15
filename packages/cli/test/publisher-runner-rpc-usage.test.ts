@@ -14,11 +14,28 @@ import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { rpcUsageWindowTotal } from '@origintrail-official/dkg-chain';
 import { createPublisherRuntimeFromAgent, type PublisherRuntime } from '../src/publisher-runner.js';
+
+const observedPublisherConfigs = vi.hoisted(
+  () => [] as Array<{ writeLocks?: Map<string, Promise<void>> }>,
+);
+
+vi.mock('@origintrail-official/dkg-publisher', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-publisher')>();
+  return {
+    ...actual,
+    DKGPublisher: class ObservedDKGPublisher extends actual.DKGPublisher {
+      constructor(config: ConstructorParameters<typeof actual.DKGPublisher>[0]) {
+        observedPublisherConfigs.push(config);
+        super(config);
+      }
+    },
+  };
+});
 
 // Hardhat dev keys #0 and #1 — loopback only, never touch a real network.
 // TWO wallets so the merge across ALL per-wallet adapters is what's proven:
@@ -78,6 +95,7 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     await store?.close().catch(() => {});
     await loopback?.close().catch(() => {});
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
+    observedPublisherConfigs.length = 0;
     runtime = null; store = null; loopback = null; dataDir = null;
   });
 
@@ -103,6 +121,9 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     // holds if EVERY adapter's tracker is merged (each wallet's identity
     // lookups bill separately).
     expect(runtime.walletIds).toHaveLength(WALLETS.length);
+    expect(observedPublisherConfigs).toHaveLength(WALLETS.length);
+    expect(observedPublisherConfigs.every((config) => config.writeLocks instanceof Map)).toBe(true);
+    expect(new Set(observedPublisherConfigs.map((config) => config.writeLocks)).size).toBe(1);
     const usage = runtime.drainRpcUsage();
     expect(usage).toBeDefined();
     expect(rpcUsageWindowTotal(usage!)).toBeGreaterThanOrEqual(2); // non-vacuous: both adapters made calls
