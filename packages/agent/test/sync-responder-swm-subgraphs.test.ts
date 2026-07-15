@@ -410,6 +410,64 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
     });
   });
 
+  it('serves an exact graph-backed rootless snapshot without a snapshot store', async () => {
+    const storeSnapshot = new OxigraphStore();
+    const snapshotGraph =
+      `${CG_PREFIX}/_shared_memory_snapshots/_/graph-backed-op/ka`;
+    const unregisteredSubGraphSnapshot =
+      `${CG_PREFIX}/_shared_memory_snapshots/${OTHER_SUB}/graph-backed-op/ka`;
+    await storeSnapshot.insert([
+      {
+        graph: snapshotGraph,
+        subject: 'urn:rootless:snapshot',
+        predicate: 'http://schema.org/status',
+        object: '"graph-backed"',
+      },
+      {
+        graph: unregisteredSubGraphSnapshot,
+        subject: 'urn:rootless:private-subgraph',
+        predicate: 'http://schema.org/status',
+        object: '"must-not-leak"',
+      },
+    ]);
+    const capSnapshot = captureHandler();
+    registerSyncHandler({
+      register: capSnapshot.register,
+      protocolSync: '/origintrail/dkg/sync/1.0.0',
+      syncDeniedResponse: 'sync-denied',
+      syncPageSize: 5000,
+      sharedMemoryTtlMs: 0,
+      store: storeSnapshot,
+      peerId: 'self-peer',
+      parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+      authorizeSyncRequest: async () => true,
+      logWarn: noopLog,
+      logDebug: noopLog,
+    });
+
+    const out = await capSnapshot.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: 5000,
+      includeSharedMemory: true,
+      phase: 'snapshot',
+      snapshotRef: snapshotGraph,
+    });
+    expect(out).toContain('"graph-backed"');
+    expect(out).not.toContain(snapshotGraph);
+
+    const denied = await capSnapshot.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: 5000,
+      includeSharedMemory: true,
+      phase: 'snapshot',
+      snapshotRef: unregisteredSubGraphSnapshot,
+    });
+    expect(denied).toBe('');
+    await storeSnapshot.close();
+  });
+
   // Codex review on #885 — URI shape alone is NOT a sufficient CG
   // boundary because `validateContextGraphId` permits `/` in the CG
   // ID (wallet-scoped IDs do, e.g. `0xabc/project`). For a request on

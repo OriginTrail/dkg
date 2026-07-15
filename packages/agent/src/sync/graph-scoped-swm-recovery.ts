@@ -34,6 +34,41 @@ const ALLOWED_PEER = `${DKG}allowedPeer`;
 const SUB_GRAPH_NAME = `${DKG}subGraphName`;
 const HEAD_SUFFIX = '#dkg-swm-head';
 
+/** Canonical responder pattern binding an untimestamped active head to its operation timestamp. */
+export function graphScopedSwmHeadFreshnessPattern(): string {
+  return `
+            ?s <${CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
+               <${KA_UAL}> ?headUal ;
+               <${ASSERTION_VERSION}> ?headVersion ;
+               <${SHARE_OPERATION_ID}> ?shareId .
+            ?headOperation <${RDF_TYPE}> <${WORKSPACE_OPERATION}> ;
+               <${CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
+               <${KA_UAL}> ?headUal ;
+               <${ASSERTION_VERSION}> ?headVersion ;
+               <${SHARE_OPERATION_ID}> ?shareId ;
+               <${PUBLISHED_AT}> ?ts .`;
+}
+
+/** Restrict graph-backed snapshot reads to the requested CG and admitted SWM lane. */
+export function isGraphScopedSwmSnapshotGraph(params: {
+  readonly contextGraphId: string;
+  readonly snapshotGraph: string;
+  readonly registeredSubGraphNames?: readonly string[];
+}): boolean {
+  const contextGraphComponent = encodeURIComponent(params.contextGraphId);
+  const prefix = `did:dkg:context-graph:${contextGraphComponent}/_shared_memory_snapshots/`;
+  if (!params.snapshotGraph.startsWith(prefix)) return false;
+  const parts = params.snapshotGraph.slice(prefix.length).split('/');
+  if (parts.length !== 3 || parts[2] !== 'ka' || !isCanonicalEncodedComponent(parts[1]!)) {
+    return false;
+  }
+  const admittedLaneComponents = new Set([
+    '_',
+    ...(params.registeredSubGraphNames ?? []).map(encodeURIComponent),
+  ]);
+  return admittedLaneComponents.has(parts[0]!);
+}
+
 export interface GraphScopedSwmRecoveryDescriptor {
   readonly metaGraph: string;
   readonly headSubject: string;
@@ -379,6 +414,15 @@ function knowledgeAssetSnapshotGraph(
 ): string {
   const parts = [contextGraphId, subGraphName ?? '_', shareOperationId].map(encodeURIComponent);
   return `did:dkg:context-graph:${parts[0]}/_shared_memory_snapshots/${parts[1]}/${parts[2]}/ka`;
+}
+
+function isCanonicalEncodedComponent(value: string): boolean {
+  if (!value) return false;
+  try {
+    return encodeURIComponent(decodeURIComponent(value)) === value;
+  } catch {
+    return false;
+  }
 }
 
 function groupByGraphAndSubject(quads: readonly Quad[]): Map<string, Quad[]> {

@@ -5,7 +5,7 @@ import {
   getMetrics,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
@@ -20,6 +20,7 @@ import {
   readCatalogPage,
   readDurableDataPage,
   readDurableMetaPage,
+  readGraphBackedSwmSnapshotPage,
   readSwmDataPage,
   readSwmMetaPage,
   serializeResponderRows,
@@ -580,19 +581,41 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
         if (phase === 'snapshot') {
           const snapshotRef = request.snapshotRef?.trim();
-          if (!snapshotRef || !publicSnapshotStore) {
+          if (!snapshotRef) {
             return new TextEncoder().encode('');
           }
-          const snapshot = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal);
-          if (!snapshot) {
+          let snapshot: Quad[];
+          if (snapshotRef.startsWith('did:dkg:context-graph:')) {
+            const rows = await readGraphBackedSwmSnapshotPage({
+              store,
+              graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+              registeredSubGraphNames: await swmAdmissionMemo.get(
+                contextGraphId,
+                { refresh: offset === 0, signal },
+              ),
+              contextGraphId,
+              snapshotGraph: snapshotRef,
+              offset,
+              limit,
+              signal,
+            });
+            snapshot = rows.map((row) => ({
+              subject: row.s,
+              predicate: row.p,
+              object: row.o,
+              graph: '',
+            }));
+          } else {
+            if (!publicSnapshotStore) return new TextEncoder().encode('');
+            const stored = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal);
+            if (!stored) return new TextEncoder().encode('');
+            snapshot = stored.slice(offset, offset + limit);
+          }
+          if (snapshot.length === 0) {
             return new TextEncoder().encode('');
           }
-          const page = snapshot.slice(offset, offset + limit);
-          if (page.length === 0) {
-            return new TextEncoder().encode('');
-          }
-          nquads.push(serializeWorkspacePublicSnapshotQuads(page).trimEnd());
-          logFirstPageDetail(() => `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
+          nquads.push(serializeWorkspacePublicSnapshotQuads(snapshot).trimEnd());
+          logFirstPageDetail(() => `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${snapshot.length}`);
         } else if (phase === 'meta') {
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(

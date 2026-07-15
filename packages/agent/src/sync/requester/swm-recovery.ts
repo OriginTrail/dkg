@@ -18,6 +18,7 @@ import {
   materializeGraphScopedSwmRecoveryAsset,
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
+  type MaterializedGraphScopedSwmRecoveryAsset,
 } from '../graph-scoped-swm-recovery.js';
 
 /**
@@ -96,8 +97,8 @@ export interface RecoverContextGraphSwmDeps {
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
   ) => Promise<void>;
-  /** Replace the active head/operation rows for each exact graph asset. */
-  readonly replaceMetaForGraphAssets?: (
+  /** Required metadata half of exact graph replacement. */
+  readonly replaceMetaForGraphAssets: (
     assets: readonly GraphScopedSwmRecoveryDescriptor[],
   ) => Promise<void>;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
@@ -159,6 +160,52 @@ async function fetchPhaseFully(
   // list) and rebuild the COMPLETE state before the apply gate can pass.
   if (lastCheckpointKey !== undefined) deps.deleteCheckpoint(lastCheckpointKey);
   return { quads: all, completed: false };
+}
+
+async function fetchGraphBackedSnapshotQuads(
+  deps: RecoverContextGraphSwmDeps,
+  descriptors: readonly GraphScopedSwmRecoveryDescriptor[],
+  fetchedDataQuads: readonly Quad[],
+): Promise<{ quads: Quad[]; completed: boolean }> {
+  const quads: Quad[] = [];
+  for (const descriptor of descriptors) {
+    if (!descriptor.publicSnapshotGraph) continue;
+    try {
+      // Rolling responders may already carry immutable snapshot graphs in the
+      // SWM data phase. Accept a complete integrity-checked copy without a
+      // redundant snapshot RPC; partial/corrupt copies fall through to the
+      // authenticated exact-graph fetch below.
+      await materializeGraphScopedSwmRecoveryAsset({
+        descriptor,
+        fetchedDataQuads,
+      });
+      continue;
+    } catch {
+      // Fetch the canonical graph explicitly and validate the combined plan
+      // before any store mutation.
+    }
+    const result = await deps.fetchSyncPages(
+      deps.ctx,
+      deps.remotePeerId,
+      deps.contextGraphId,
+      true,
+      'snapshot',
+      descriptor.publicSnapshotGraph,
+      deps.deadline,
+      descriptor.publicSnapshotGraph,
+    );
+    // Recovery has no durable cross-invocation snapshot accumulator. A resumed
+    // or incomplete page would be only a suffix, so discard its checkpoint and
+    // force the next attempt to verify the complete immutable graph from zero.
+    deps.deleteCheckpoint(result.checkpointKey);
+    if (!result.completed || result.resumedFromOffset > 0) {
+      return { quads: [], completed: false };
+    }
+    for (const quad of result.quads) {
+      quads.push({ ...quad, graph: descriptor.publicSnapshotGraph });
+    }
+  }
+  return { quads, completed: true };
 }
 
 export async function recoverContextGraphSwm(
@@ -249,6 +296,27 @@ export async function recoverContextGraphSwm(
     }
   }
 
+  const graphBackedSnapshots = await fetchGraphBackedSnapshotQuads(
+    deps,
+    graphScopedDescriptors,
+    data.quads,
+  );
+  if (!graphBackedSnapshots.completed) {
+    deps.logInfo?.(
+      deps.ctx,
+      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+      'graph-backed public snapshot fetch incomplete — skipped, will retry',
+    );
+    return {
+      replacedRoots: 0,
+      replacedGraphs: 0,
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      droppedDataTriples: 0,
+      completed: false,
+    };
+  }
+
   // Rootless exact graphs and graph-backed immutable snapshots are verified
   // per KA below. Keep them out of the legacy rootEntity worker path so they
   // are not counted as invalid root subjects or inserted by union.
@@ -267,6 +335,19 @@ export async function recoverContextGraphSwm(
     legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
   );
 
+  // Build the complete exact-graph apply plan before the first store mutation.
+  // A corrupt graph-scoped snapshot must not leave already-replaced legacy
+  // roots or an earlier exact graph behind.
+  const graphScopedAssets: MaterializedGraphScopedSwmRecoveryAsset[] = [];
+  const graphSnapshotQuads = [...data.quads, ...graphBackedSnapshots.quads];
+  for (const descriptor of graphScopedDescriptors) {
+    graphScopedAssets.push(await materializeGraphScopedSwmRecoveryAsset({
+      descriptor,
+      fetchedDataQuads: graphSnapshotQuads,
+      publicSnapshotStore: deps.publicSnapshotStore,
+    }));
+  }
+
   await deps.ensureContextGraph(deps.contextGraphId);
 
   // REPLACE per root (the recovery fix), applied over the COMPLETE fetched state.
@@ -277,12 +358,7 @@ export async function recoverContextGraphSwm(
   });
   let replacedGraphs = 0;
   let insertedGraphQuads = 0;
-  for (const descriptor of graphScopedDescriptors) {
-    const asset = await materializeGraphScopedSwmRecoveryAsset({
-      descriptor,
-      fetchedDataQuads: data.quads,
-      publicSnapshotStore: deps.publicSnapshotStore,
-    });
+  for (const asset of graphScopedAssets) {
     await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
     replacedGraphs += 1;
     insertedGraphQuads += asset.quads.length;
@@ -297,7 +373,7 @@ export async function recoverContextGraphSwm(
     await deps.replaceMetaForRoots?.(processed.entityCreators, metaGraphs);
   }
   if (graphScopedDescriptors.length > 0) {
-    await deps.replaceMetaForGraphAssets?.(graphScopedDescriptors);
+    await deps.replaceMetaForGraphAssets(graphScopedDescriptors);
   }
   if (processed.verifiedMeta.length > 0) {
     await deps.store.insert([...processed.verifiedMeta]);

@@ -64,7 +64,10 @@ export function classifyDurableMetaGraph(
     if (quad.predicate === MERKLE_ROOT) hasMerkleRoot = true;
     if (
       DURABLE_INTEGRITY_META_PREDICATE_SET.has(quad.predicate)
-      && (quad.predicate === MERKLE_ROOT || isDeterministicKaMetadataSubject(quad.subject))
+      && (
+        quad.predicate === MERKLE_ROOT
+        || !isInternalNonKaMetadataSubject(quad.subject)
+      )
     ) {
       hasIntegrityEnvelope = true;
     }
@@ -461,6 +464,17 @@ function isDeterministicKaMetadataSubject(subject: string): boolean {
     // the integrity envelope for the verifier to reject.
   }
   return true;
+}
+
+/**
+ * DKG lifecycle, seal, and workspace-operation rows may repeat V2 scope
+ * predicates without being KA integrity descriptors. Exclude those known DKG
+ * subjects while keeping unknown/external subjects fail-closed, as required by
+ * changelog admission when a malformed envelope has no Merkle root.
+ */
+function isInternalNonKaMetadataSubject(subject: string): boolean {
+  if (isDeterministicKaMetadataSubject(subject)) return false;
+  return subject.startsWith('did:dkg:') || subject.startsWith('urn:dkg:');
 }
 
 function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphScopedDescriptor {

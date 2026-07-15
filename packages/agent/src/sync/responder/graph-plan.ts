@@ -1,6 +1,5 @@
 import {
   DKG_ONTOLOGY,
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   assertSafeIri,
   sparqlString,
@@ -19,6 +18,10 @@ import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
+import {
+  graphScopedSwmHeadFreshnessPattern,
+  isGraphScopedSwmSnapshotGraph,
+} from '../graph-scoped-swm-recovery.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -32,10 +35,6 @@ const DKG_SUB_GRAPH = `${DKG}SubGraph`;
 const DKG_WORKSPACE_OPERATION = `${DKG}WorkspaceOperation`;
 const DKG_PUBLISHED_AT = `${DKG}publishedAt`;
 const DKG_ROOT_ENTITY = `${DKG}rootEntity`;
-const DKG_CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
-const DKG_KA_UAL = `${DKG}kaUal`;
-const DKG_ASSERTION_VERSION = `${DKG}assertionVersion`;
-const DKG_SHARE_OPERATION_ID = `${DKG}shareOperationId`;
 const DKG_ASSERTION_GRAPH = `${DKG}assertionGraph`;
 const DKG_ASSERTION_NAME = `${DKG}assertionName`;
 const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
@@ -352,6 +351,35 @@ export async function readSwmDataPage(params: {
       limit,
       signal,
     ),
+    params.offset,
+    params.limit,
+    params.signal,
+  );
+}
+
+export async function readGraphBackedSwmSnapshotPage(params: {
+  store: TripleStore;
+  graphList: readonly string[];
+  registeredSubGraphNames: readonly string[];
+  contextGraphId: string;
+  snapshotGraph: string;
+  offset: number;
+  limit: number;
+  signal?: AbortSignal;
+}): Promise<SyncRow[]> {
+  if (
+    !params.graphList.includes(params.snapshotGraph)
+    || !isGraphScopedSwmSnapshotGraph({
+      contextGraphId: params.contextGraphId,
+      snapshotGraph: params.snapshotGraph,
+      registeredSubGraphNames: params.registeredSubGraphNames,
+    })
+  ) {
+    return [];
+  }
+  return readRowsPageAcrossGraphs(
+    params.store,
+    [params.snapshotGraph],
     params.offset,
     params.limit,
     params.signal,
@@ -1156,16 +1184,7 @@ async function readSwmMetaRowsPage(
             # intentionally have no independent publishedAt row. Bind them to
             # the timestamped WorkspaceOperation they select so TTL recovery
             # receives the head plus its immutable commitment atomically.
-            ?s <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
-               <${DKG_KA_UAL}> ?headUal ;
-               <${DKG_ASSERTION_VERSION}> ?headVersion ;
-               <${DKG_SHARE_OPERATION_ID}> ?shareId .
-            ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-               <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
-               <${DKG_KA_UAL}> ?headUal ;
-               <${DKG_ASSERTION_VERSION}> ?headVersion ;
-               <${DKG_SHARE_OPERATION_ID}> ?shareId ;
-               <${DKG_PUBLISHED_AT}> ?ts .
+            ${graphScopedSwmHeadFreshnessPattern()}
           }
           FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`
             : ''}

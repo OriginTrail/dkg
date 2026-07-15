@@ -231,6 +231,7 @@ import {
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
+import { replaceGraphScopedSwmRecoveryMetadata } from './sync/requester/graph-scoped-swm-meta-replace.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import {
@@ -6837,43 +6838,8 @@ async function runRecoverContextGraphSwmFromPeer(
         }
       }
     },
-    replaceMetaForGraphAssets: async (assets) => {
-      for (const asset of assets) {
-        const linkedOperations = await dependencies.store.query(
-          `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
-            `<${assertSafeIri(asset.headSubject)}> <http://dkg.io/ontology/shareOperationId> ?shareId . ` +
-            `?op <http://dkg.io/ontology/shareOperationId> ?shareId ; ` +
-            `<http://dkg.io/ontology/kaUal> <${assertSafeIri(asset.kaUal)}> . } }`,
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.replaceMetaForGraphAssets.findOperations',
-          },
-        );
-        const operationSubjects = new Set<string>([asset.operationSubject]);
-        if (linkedOperations.type === 'bindings') {
-          for (const row of linkedOperations.bindings) {
-            const operation = row['op'];
-            if (operation) operationSubjects.add(operation);
-          }
-        }
-        await dependencies.store.deleteByPattern(
-          { graph: asset.metaGraph, subject: asset.headSubject },
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead',
-          },
-        );
-        for (const operationSubject of operationSubjects) {
-          await dependencies.store.deleteByPattern(
-            { graph: asset.metaGraph, subject: operationSubject },
-            {
-              priority: 'background',
-              source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation',
-            },
-          );
-        }
-      }
-    },
+    replaceMetaForGraphAssets: (assets) =>
+      replaceGraphScopedSwmRecoveryMetadata(dependencies.store, assets),
     ensureContextGraph: async (cgId) => {
       const graphManager = new GraphManager(dependencies.store);
       await graphManager.ensureContextGraph(cgId);
