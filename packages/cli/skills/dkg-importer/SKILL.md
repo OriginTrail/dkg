@@ -171,11 +171,11 @@ manifest and sends entity arrays for declaration and status updates; those
 requests now fail with `400 KA_ATOMIC_SHARE_REQUIRED` after the WM write.
 
 Until that helper is redesigned, do not call `createImportManifest`,
-`markPartitionStatus`, or build new importers on it. Persist partition state in
-an external durable store, including each KA name, source range, write status,
-share job ID, and terminal share result. Resume only KAs whose recorded share
-has not succeeded. Keep the WM draft after failures so the same whole-KA share
-can be retried safely.
+`markPartitionStatus`, or `loadImportManifest`, and do not build new importers
+on it. Persist partition state in an external durable store, including each KA
+name, source range, write status, share job ID, and terminal share result.
+Resume only KAs whose recorded share has not succeeded. Keep the WM draft after
+failures so the same whole-KA share can be retried safely.
 
 The owning follow-up should model a small index KA plus independently named,
 size-bounded manifest page/status KAs. Each must be sealed and shared in full;
