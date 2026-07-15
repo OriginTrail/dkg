@@ -22,6 +22,7 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
 const CONTEXT_GRAPH = 'agent-registry';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META = `${GRAPH}/_meta`;
+const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DKG_SUB_GRAPH = 'http://dkg.io/ontology/SubGraph';
@@ -41,6 +42,7 @@ function subGraphRegistration(name: string): Quad[] {
   const subGraphUri = `${GRAPH}/${name}`;
   return [
     q(subGraphUri, RDF_TYPE, DKG_SUB_GRAPH, META),
+    q(subGraphUri, `${DKG}parentContextGraph`, GRAPH, META),
     q(subGraphUri, SCHEMA_NAME, `"${name}"`, META),
     q(subGraphUri, 'http://dkg.io/ontology/createdBy', 'did:dkg:agent:test', META),
   ];
@@ -92,6 +94,7 @@ describe('DKGQueryEngine', () => {
 
     // Seed data
     await store.insert([
+      q(GRAPH, RDF_TYPE, DKG_CONTEXT_GRAPH, ONTOLOGY_GRAPH),
       q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
       q(ENTITY, 'http://schema.org/description', '"Analyzes images"'),
       q(
@@ -276,6 +279,125 @@ describe('DKGQueryEngine', () => {
       expect(result.quads).toEqual([
         q('urn:asset:trusted', 'urn:p', '"trusted"', vmGraph),
       ]);
+    });
+
+    it.each([
+      ['current', 'https://dkg.network/ontology#'],
+      ['legacy', 'http://dkg.io/ontology/'],
+    ])('rejects a %s named-subgraph meta graph impersonating a registered root', async (_label, namespace) => {
+      const nestedContextGraphId = `${CONTEXT_GRAPH}/updates`;
+      const nestedContextGraphUri = `did:dkg:context-graph:${nestedContextGraphId}`;
+      const poisonedMetaGraph = `${nestedContextGraphUri}/_meta`;
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        nestedContextGraphId,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const poisonedMetadata = graphScopedMetadata(
+        UAL,
+        '1',
+        vmGraph,
+        1,
+        undefined,
+        poisonedMetaGraph,
+      ).map((entry) => entry.predicate === `${DKG}contextGraph`
+        ? { ...entry, object: nestedContextGraphUri }
+        : entry);
+      await store.insert([
+        q(nestedContextGraphUri, RDF_TYPE, `${namespace}SubGraph`, META),
+        q(nestedContextGraphUri, `${namespace}parentContextGraph`, GRAPH, META),
+        q(nestedContextGraphUri, RDF_TYPE, DKG_CONTEXT_GRAPH, poisonedMetaGraph),
+        q('urn:poisoned:asset', 'urn:p', '"must-not-resolve"', vmGraph),
+        ...poisonedMetadata,
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/KA not found/);
+    });
+
+    it('accepts the genesis agents root registration from the agents data graph', async () => {
+      const agentsContextGraphId = 'agents';
+      const agentsContextGraphUri = 'did:dkg:context-graph:agents';
+      const agentsMetaGraph = `${agentsContextGraphUri}/_meta`;
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        agentsContextGraphId,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const metadata = graphScopedMetadata(
+        UAL,
+        '1',
+        vmGraph,
+        1,
+        undefined,
+        agentsMetaGraph,
+      ).map((entry) => entry.predicate === `${DKG}contextGraph`
+        ? { ...entry, object: agentsContextGraphUri }
+        : entry);
+      await store.insert([
+        q(agentsContextGraphUri, RDF_TYPE, DKG_CONTEXT_GRAPH, agentsContextGraphUri),
+        q('urn:agents-root:asset', 'urn:p', '"trusted"', vmGraph),
+        ...metadata,
+      ]);
+
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.contextGraphId).toBe(agentsContextGraphId);
+      expect(result.quads).toEqual([
+        q('urn:agents-root:asset', 'urn:p', '"trusted"', vmGraph),
+      ]);
+    });
+
+    it('accepts an independently registered slash-shaped wallet root', async () => {
+      const walletContextGraphId = '0x2222222222222222222222222222222222222222/project';
+      const walletContextGraphUri = `did:dkg:context-graph:${walletContextGraphId}`;
+      const walletMetaGraph = `${walletContextGraphUri}/_meta`;
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        walletContextGraphId,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const metadata = graphScopedMetadata(
+        UAL,
+        '1',
+        vmGraph,
+        1,
+        undefined,
+        walletMetaGraph,
+      ).map((entry) => entry.predicate === `${DKG}contextGraph`
+        ? { ...entry, object: walletContextGraphUri }
+        : entry);
+      await store.insert([
+        q(walletContextGraphUri, RDF_TYPE, DKG_CONTEXT_GRAPH, walletMetaGraph),
+        q('urn:wallet-root:asset', 'urn:p', '"trusted"', vmGraph),
+        ...metadata,
+      ]);
+
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.contextGraphId).toBe(walletContextGraphId);
+      expect(result.quads).toEqual([
+        q('urn:wallet-root:asset', 'urn:p', '"trusted"', vmGraph),
+      ]);
+    });
+
+    it('rejects metadata when its partition is also a registered legacy root payload graph', async () => {
+      const aliasMetaGraph = `${META}/_meta`;
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert([
+        q(META, RDF_TYPE, DKG_CONTEXT_GRAPH, aliasMetaGraph),
+        q('urn:poisoned:legacy-asset', 'urn:p', '"must-not-resolve"', vmGraph),
+        ...graphScopedMetadata(UAL, '1', vmGraph, 1),
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/KA not found/);
     });
 
     it('pages exact-graph reads before materializing the resolved payload', async () => {

@@ -25,9 +25,20 @@ const META_GRAPH = `${CONTEXT_GRAPH_URI}/_meta`;
 const UAL = 'did:dkg:base:8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/41';
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const DKG_CONTEXT_GRAPH = 'https://dkg.network/ontology#ContextGraph';
 
 function quad(subject: string, predicate: string, object: string): Quad {
   return { subject, predicate, object, graph: '' };
+}
+
+function rootContextGraphRegistration(): Quad {
+  return {
+    subject: CONTEXT_GRAPH_URI,
+    predicate: RDF_TYPE,
+    object: DKG_CONTEXT_GRAPH,
+    graph: META_GRAPH,
+  };
 }
 
 function request(handler: AccessHandler, kaUal = UAL, peerId = 'requester-peer') {
@@ -107,6 +118,7 @@ async function seedRootlessPrivateKA(options: {
     },
     'tentative',
   ));
+  await store.insert([rootContextGraphRegistration()]);
   return { store, privateStore, scope, payload, privateRoot };
 }
 
@@ -127,6 +139,21 @@ describe('rootless graph-scoped private access', () => {
     );
     expect(result.quads.every((entry) => entry.graph === '')).toBe(true);
     expect(Array.from(result.privateMerkleRoot ?? [])).toEqual(Array.from(privateRoot));
+  });
+
+  it('denies private access when the metadata partition is also a registered legacy root', async () => {
+    const { store } = await seedRootlessPrivateKA();
+    await store.insert([{
+      subject: META_GRAPH,
+      predicate: RDF_TYPE,
+      object: DKG_CONTEXT_GRAPH,
+      graph: `${META_GRAPH}/_meta`,
+    }]);
+
+    const response = await request(new AccessHandler(store, new TypedEventBus()));
+
+    expect(response.granted).toBe(false);
+    expect(response.rejectionReason).toContain('KA not found');
   });
 
   it('selects the metadata assertion version and never leaks an older private graph', async () => {
@@ -268,6 +295,7 @@ describe('rootless graph-scoped private access', () => {
     const store = new OxigraphStore();
     const legacyRoot = 'urn:legacy:version-zero';
     await store.insert([
+      rootContextGraphRegistration(),
       {
         subject: UAL,
         predicate: `${DKG}contentScopeVersion`,
@@ -310,6 +338,7 @@ describe('rootless graph-scoped private access', () => {
     const store = new OxigraphStore();
     const legacyRoot = 'urn:legacy:poison';
     await store.insert([
+      rootContextGraphRegistration(),
       {
         subject: UAL,
         predicate: `${DKG}contentScopeVersion`,
@@ -357,6 +386,7 @@ describe('rootless graph-scoped private access', () => {
       '0x70997970C51812DC3A010C7D01B50E0D17DC79C8',
     );
     await store.insert([
+      rootContextGraphRegistration(),
       {
         subject: UAL,
         predicate: `${DKG}contentScopeVersion`,

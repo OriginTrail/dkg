@@ -26,6 +26,7 @@ import {
   TRUST_LEVEL_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   buildGraphKnowledgeAssetMetadataQuery,
+  buildTrustedRootContextGraphRegistrationFilter,
   parseGraphKnowledgeAssetMetadataBindings,
 } from '@origintrail-official/dkg-core';
 import {
@@ -1030,6 +1031,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           BIND(CONCAT(STR(?ctxGraph), "/_meta") AS ?expectedMetaGraph)
           FILTER(STR(?g) = ?expectedMetaGraph)
         }
+        ${buildTrustedRootContextGraphRegistrationFilter('?ctxGraph', '?g')}
       } ORDER BY ?ka`,
     );
 
