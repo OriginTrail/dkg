@@ -2431,6 +2431,14 @@ export class DKGAgent extends DKGAgentBase {
             { code: 'UNSEALED_SHARE_BLOCKED' },
           );
         }
+        if (opts?.entities && opts.entities !== 'all') {
+          throw Object.assign(
+            new Error(
+              'A graph-scoped Knowledge Asset is atomic. Create a new KA instead of sharing a subject subset.',
+            ),
+            { code: 'KA_ATOMIC_SHARE_REQUIRED' },
+          );
+        }
         // Seal-before-share: the on-chain publish path
         // (`publishFromFinalizedAssertion`) requires a FINALIZED assertion, and
         // the seal must be computed over the Working-Memory content BEFORE
@@ -2451,75 +2459,47 @@ export class DKGAgent extends DKGAgentBase {
         // route) so the seal attests the intended author rather than silently
         // falling back to the daemon signer.
         //
-        // A graph-scoped KA is atomic. Full sharing finalizes first; selective
-        // requests are rejected at the publisher boundary and skipSeal is rejected
-        // above. Keeping the full-selection check here avoids doing signing work
-        // before returning the stable KA_ATOMIC_SHARE_REQUIRED error.
-        const promotingAllEntities = !opts?.entities || opts.entities === 'all';
-        let sealed = false;
-        if (promotingAllEntities) {
-          const [publicDraft, privateDraft] = await Promise.all([
-            agent.publisher.assertionQuery(
-              contextGraphId,
-              name,
-              promoteAgentAddress,
-              opts?.subGraphName,
-            ),
-            agent.publisher.assertionQueryPrivate(
-              contextGraphId,
-              name,
-              promoteAgentAddress,
-              opts?.subGraphName,
-            ),
-          ]);
-          const hasOpenDraft = publicDraft.length > 0 || privateDraft.length > 0;
-          try {
-            if (hasOpenDraft) {
-              await agent.assertionFinalize(contextGraphId, name, promoteAgentAddress, {
-                subGraphName: opts?.subGraphName,
-                authorAgentAddress: opts?.authorAgentAddress,
-                preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-              });
-            }
-            // With no mutable draft, the publisher is the recovery authority:
-            // it verifies a sealed exact SWM/VM graph and either repairs the
-            // interrupted commit tail or returns the already-published no-op.
-            // Treat the call as sealed only after that downstream validation;
-            // any missing/corrupt seal still throws before a result is returned.
-            sealed = true;
-          } catch (err: any) {
-            const msg = err?.message ?? String(err);
-            // Classify finalize failures so capability gaps retain a stable API
-            // code while validation/integrity errors keep their original detail.
-            //
-            // Capability gaps carry the stable SEAL_CAPABILITY_GAP code (tagged at the
-            // assertionFinalize throw sites). The message regex is a back-compat
-            // fallback ONLY for the same known capability messages, in case an error
-            // was re-wrapped and lost its code — it must NOT broaden the net to
-            // validation errors.
-            const isCapabilityGap =
-              err?.code === SEAL_CAPABILITY_GAP_CODE ||
-              /requires a V10-capable chain adapter|has no private key on file|no publisher signer is available|failed to reconcile KA-number floor|no\s+kaNumberAllocator is configured/i.test(msg);
-            if (!isCapabilityGap) {
-              // Validation/integrity (incl. the stale-seal / corrupt-seal cases that
-              // were previously special-cased) — fail fast with the real error. WM is
-              // preserved because we throw BEFORE assertionPromote.
-              throw err;
-            }
-            // Fail closed before assertionPromote so WM remains intact.
-            throw Object.assign(
-              new Error(
-                `Cannot seal "${name}" for sharing to Shared Memory — the asset would be left ` +
-                  `unpublishable and Working Memory was NOT emptied. ${msg}`,
-              ),
-              {
-                code: 'UNSEALED_SHARE_BLOCKED',
-                recovery:
-                  'Resolve the signing capability (a local agent key + a V10 chain adapter), then retry.',
-              },
-            );
+        // Atomic-share options were normalized above. The helper owns draft
+        // readiness; assertionPromote owns exact SWM/VM replay validation.
+        try {
+          await agent.prepareAtomicAssertionShare(contextGraphId, name, promoteAgentAddress, {
+            subGraphName: opts?.subGraphName,
+            authorAgentAddress: opts?.authorAgentAddress,
+            preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+          });
+        } catch (err: any) {
+          const msg = err?.message ?? String(err);
+          // Classify finalize failures so capability gaps retain a stable API
+          // code while validation/integrity errors keep their original detail.
+          //
+          // Capability gaps carry the stable SEAL_CAPABILITY_GAP code (tagged at the
+          // assertionFinalize throw sites). The message regex is a back-compat
+          // fallback ONLY for the same known capability messages, in case an error
+          // was re-wrapped and lost its code — it must NOT broaden the net to
+          // validation errors.
+          const isCapabilityGap =
+            err?.code === SEAL_CAPABILITY_GAP_CODE ||
+            /requires a V10-capable chain adapter|has no private key on file|no publisher signer is available|failed to reconcile KA-number floor|no\s+kaNumberAllocator is configured/i.test(msg);
+          if (!isCapabilityGap) {
+            // Validation/integrity (incl. the stale-seal / corrupt-seal cases that
+            // were previously special-cased) — fail fast with the real error. WM is
+            // preserved because we throw BEFORE assertionPromote.
+            throw err;
           }
+          // Fail closed before assertionPromote so WM remains intact.
+          throw Object.assign(
+            new Error(
+              `Cannot seal "${name}" for sharing to Shared Memory — the asset would be left ` +
+                `unpublishable and Working Memory was NOT emptied. ${msg}`,
+            ),
+            {
+              code: 'UNSEALED_SHARE_BLOCKED',
+              recovery:
+                'Resolve the signing capability (a local agent key + a V10 chain adapter), then retry.',
+            },
+          );
         }
+        const sealed = true;
         // Resolve the gossip signer up-front (mirrors `share()` /
         // `conditionalShare()` patterns) so the publisher can wrap the
         // promoted SWM gossip in the Sender Key encrypted envelope.
@@ -2546,7 +2526,6 @@ export class DKGAgent extends DKGAgentBase {
         const { promotedCount, gossipMessage, promotedAllRoots, shareOperationId } = await agent.publisher.assertionPromote(
           contextGraphId, name, promoteAgentAddress,
           {
-            ...(opts?.entities !== undefined ? { entities: opts.entities } : {}),
             ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
             publisherPeerId: agent.node.peerId.toString(),
             senderAgentAddress: gossipSigner?.agentAddress,
@@ -2574,7 +2553,7 @@ export class DKGAgent extends DKGAgentBase {
         // A repaired/replayed share has promotedCount=0 but retains its durable
         // shareOperationId. It is just as publish-ready as the first response;
         // a VM no-op has no share operation id and remains false here.
-        const publishReady = promotingAllEntities && sealed && promotedAllRoots && !!shareOperationId;
+        const publishReady = sealed && promotedAllRoots && !!shareOperationId;
         return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<void> {

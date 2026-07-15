@@ -2053,6 +2053,40 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
+   * Prepare the only valid graph-scoped share mode. Mutable WM content is
+   * finalized here; a draft-free retry is left untouched for assertionPromote
+   * to validate against its durable exact SWM/VM state.
+   */
+  async prepareAtomicAssertionShare(
+    this: DKGAgent,
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    opts?: {
+      subGraphName?: string;
+      authorAgentAddress?: string;
+      preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+    },
+  ): Promise<void> {
+    const [publicDraft, privateDraft] = await Promise.all([
+      this.publisher.assertionQuery(
+        contextGraphId,
+        name,
+        agentAddress,
+        opts?.subGraphName,
+      ),
+      this.publisher.assertionQueryPrivate(
+        contextGraphId,
+        name,
+        agentAddress,
+        opts?.subGraphName,
+      ),
+    ]);
+    if (publicDraft.length === 0 && privateDraft.length === 0) return;
+    await this.assertionFinalize(contextGraphId, name, agentAddress, opts);
+  }
+
+  /**
    * RFC-001 §9.x — finalize an assertion: compute merkleRoot, build the
    * EIP-712 AuthorAttestation typed data, sign (or accept pre-signed),
    * and write seal triples to the CG `_meta` graph keyed by the
@@ -4096,10 +4130,6 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
-    const queuedScope = createGraphKnowledgeAssetScope(
-      request.kaUal,
-      request.assertionVersion,
-    );
     const recovered = await normalizeRecoveredNamedKaPublish({
       request,
       job,
@@ -4123,7 +4153,7 @@ export class PublishMethods extends DKGAgentBase {
     const materialization = await this.getOrCreateFinalizationHandler().handleChainReconciledKC({
       contextGraphId: request.contextGraphId,
       onChainCgId,
-      ual: recovered.ual,
+      ual: recovered.localUal,
       merkleRoot: ethers.getBytes(recovered.materialization.merkleRoot),
       publisherAddress: recovered.materialization.publisherAddress,
       kaId: recovered.reservedKaId,
@@ -4158,48 +4188,19 @@ export class PublishMethods extends DKGAgentBase {
     if (materialization !== 'stale-target') {
       await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
         request,
-        recovered.ual,
+        recovered.receiptUal,
         recovered.reservedKaId,
         recovered.materialization.merkleRoot,
       );
     }
 
-    if (!recovered.materialization.superseded) {
-      const publisher = input.publisher ?? this.publisher;
-      const sharedMemoryScope: SharedMemoryGraphScope = {
-        kind: 'named-lifecycle',
-        identity: {
-          agentAddress: queuedScope.agentAddress,
-          kaNumber: BigInt(queuedScope.kaNumber),
-        },
-      };
-      try {
-        await publisher.clearPublishedKnowledgeAssetSwm(
-          request.contextGraphId,
-          sharedMemoryScope,
-          request.subGraphName,
-          ctx,
-        );
-        if (request.clearSharedMemoryAfter === true) {
-          await publisher.clearRemainingSharedMemory(request.contextGraphId, request.subGraphName, ctx);
-        }
-        await publisher.clearSwmShareComplete(
-          request.contextGraphId,
-          request.name,
-          request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
-          request.subGraphName,
-        );
-      } catch (error) {
-        this.log.warn(
-          ctx,
-          `Recovered named KA ${request.name}, but post-finalization SWM cleanup was incomplete: ` +
-            (error instanceof Error ? error.message : String(error)),
-        );
-      }
-    }
+    // SWM-source materialization owns its exact transition. VM-only recovery
+    // must not run a second, unlocked cleanup: a newer unpublished assertion
+    // can already occupy the same per-KA SWM graph. Publisher lifecycle owns
+    // the shared writer-lock cleanup needed to close that wider race.
     this.log.info(
       ctx,
-      `Recovered confirmed named KA publish ${recovered.ual} from ${job.status} job ${job.jobId}` +
+      `Recovered confirmed named KA publish ${recovered.receiptUal} from ${job.status} job ${job.jobId}` +
         (recovered.materialization.superseded ? ' (materialized current superseding version)' : ''),
     );
   }
