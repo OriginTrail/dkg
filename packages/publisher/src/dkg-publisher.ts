@@ -138,6 +138,70 @@ function resolveCatalogProofMaterial(
   };
 }
 
+/**
+ * Verify the off-band owner authorization before any update payload is staged.
+ *
+ * Both the agent's direct-update boundary and the publisher's final chain
+ * submission call this helper. Keeping the verification here prevents the two
+ * layers from drifting while allowing callers to reject an unauthorized update
+ * before replacing local SWM or private state.
+ */
+export async function assertValidPrecomputedUpdateAttestation(
+  chain: ChainAdapter,
+  kaId: bigint,
+  merkleRoot: Uint8Array,
+  updateSeal: NonNullable<PublishOptions['precomputedUpdateAttestation']>,
+): Promise<void> {
+  const expected = updateSeal.expectedNewMerkleRoot;
+  if (
+    expected.length !== merkleRoot.length
+    || !expected.every((byte, index) => byte === merkleRoot[index])
+  ) {
+    throw new Error(
+      `precomputedUpdateAttestation.expectedNewMerkleRoot mismatch: seal expects ${ethers.hexlify(expected)} `
+      + `but update-time recompute yielded ${ethers.hexlify(merkleRoot)}.`,
+    );
+  }
+
+  const v10ChainId = await chain.getEvmChainId?.();
+  const v10KavAddress = await chain.getKnowledgeAssetsLifecycleAddress?.();
+  if (v10ChainId === undefined || !v10KavAddress) {
+    throw new Error(
+      'V10 update requires getEvmChainId() and getKnowledgeAssetsLifecycleAddress() on the chain adapter.',
+    );
+  }
+
+  const updateAuthorTyped = buildUpdateAuthorAttestationTypedData({
+    chainId: v10ChainId,
+    kav10Address: v10KavAddress,
+    kaId,
+    newMerkleRoot: merkleRoot,
+    authorAddress: updateSeal.authorAddress,
+    schemeVersion: updateSeal.schemeVersion,
+  });
+  const signature = ethers.Signature.from({
+    r: ethers.hexlify(updateSeal.signature.r),
+    yParityAndS: ethers.hexlify(updateSeal.signature.vs),
+  });
+  const digest = ethers.TypedDataEncoder.hash(
+    updateAuthorTyped.domain,
+    updateAuthorTyped.types,
+    updateAuthorTyped.message,
+  );
+  const isContractAuthor = typeof chain.hasContractCode === 'function'
+    ? await chain.hasContractCode(updateSeal.authorAddress)
+    : false;
+  if (isContractAuthor) return;
+
+  const recovered = ethers.recoverAddress(digest, signature);
+  if (recovered.toLowerCase() !== updateSeal.authorAddress.toLowerCase()) {
+    throw new Error(
+      `precomputedUpdateAttestation signer mismatch: recovers ${recovered} `
+      + `but claims ${updateSeal.authorAddress}.`,
+    );
+  }
+}
+
 async function validateGraphScopedPayloadAgainstSeal(
   seal: AssertionSeal,
   publicQuads: readonly Quad[],
@@ -4548,53 +4612,12 @@ export class DKGPublisher implements Publisher {
     const updateSeal = options.precomputedUpdateAttestation;
     const effectiveAuthorAddress = updateSeal.authorAddress;
     const effectiveSchemeVersion = updateSeal.schemeVersion;
-    {
-      const expected = updateSeal.expectedNewMerkleRoot;
-      if (expected.length !== kcMerkleRoot.length || !expected.every((b, i) => b === kcMerkleRoot[i])) {
-        throw new Error(
-          `precomputedUpdateAttestation.expectedNewMerkleRoot mismatch: seal expects ${ethers.hexlify(expected)} ` +
-          `but update-time recompute yielded ${ethers.hexlify(kcMerkleRoot)}.`,
-        );
-      }
-    }
-    const v10ChainId = await this.chain.getEvmChainId?.();
-    const v10KavAddress = await this.chain.getKnowledgeAssetsLifecycleAddress?.();
-    if (v10ChainId === undefined || !v10KavAddress) {
-      throw new Error(
-        'V10 update requires getEvmChainId() and getKnowledgeAssetsLifecycleAddress() on the chain adapter.',
-      );
-    }
-    const updateAuthorTyped = buildUpdateAuthorAttestationTypedData({
-      chainId: v10ChainId,
-      kav10Address: v10KavAddress,
-      kaId: kaId,
-      newMerkleRoot: kcMerkleRoot,
-      authorAddress: effectiveAuthorAddress,
-      schemeVersion: effectiveSchemeVersion,
-    });
-    {
-      const sig = ethers.Signature.from({
-        r: ethers.hexlify(updateSeal.signature.r),
-        yParityAndS: ethers.hexlify(updateSeal.signature.vs),
-      });
-      const digest = ethers.TypedDataEncoder.hash(
-        updateAuthorTyped.domain,
-        updateAuthorTyped.types,
-        updateAuthorTyped.message,
-      );
-      const isContractAuthor =
-        typeof this.chain.hasContractCode === 'function'
-          ? await this.chain.hasContractCode(effectiveAuthorAddress)
-          : false;
-      if (!isContractAuthor) {
-        const recovered = ethers.recoverAddress(digest, sig);
-        if (recovered.toLowerCase() !== effectiveAuthorAddress.toLowerCase()) {
-          throw new Error(
-            `precomputedUpdateAttestation signer mismatch: recovers ${recovered} but claims ${effectiveAuthorAddress}.`,
-          );
-        }
-      }
-    }
+    await assertValidPrecomputedUpdateAttestation(
+      this.chain,
+      kaId,
+      kcMerkleRoot,
+      updateSeal,
+    );
 
     // P-1 review (iter-2): `chain:writeahead:start` fires from inside
     // the V10 adapter via `onBroadcast` — i.e. AFTER allowance +

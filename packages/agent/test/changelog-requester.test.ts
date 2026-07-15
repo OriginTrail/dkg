@@ -7,7 +7,10 @@ import {
   encodeChangelogResponse, decodeChangelogRequest, decodeChangelogResponse,
   type ChangelogDeltaRecord, type ChangelogSyncRequest, type ChangelogSyncResponse,
 } from '../src/sync/changelog/wire.js';
-import { classifyDurableMetaGraph } from '../src/sync/durable-integrity.js';
+import {
+  DURABLE_INTEGRITY_META_PREDICATES,
+  classifyDurableMetaGraph,
+} from '../src/sync/durable-integrity.js';
 
 const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: 'p', object: `o${n}`, graph });
 
@@ -116,7 +119,9 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.advanceTo).toBe(1);
   });
 
-  it('does not acknowledge rejected V2 metadata when its merkle root is missing', () => {
+  it.each(DURABLE_INTEGRITY_META_PREDICATES.filter(
+    (predicate) => predicate !== 'http://dkg.io/ontology/merkleRoot',
+  ))('does not acknowledge rejected V2 metadata containing %s without a merkle root', (predicate) => {
     const topMeta = 'did:dkg:context-graph:cg/_meta';
     const subject = 'did:dkg:31337/0x00000000000000000000000000000000000000aa/7';
     const page = buildPage([
@@ -126,7 +131,7 @@ describe('planPageApply — verified-apply planner', () => {
         verified: 0,
         parsedQuads: [{
           subject,
-          predicate: 'http://dkg.io/ontology/contentScopeVersion',
+          predicate,
           object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
           graph: topMeta,
         }],
@@ -137,6 +142,18 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.ops).toEqual([]);
     expect(p.advanceTo).toBe(6);
   });
+
+  it.each(DURABLE_INTEGRITY_META_PREDICATES)(
+    'classifies %s as part of the durable integrity envelope',
+    (predicate) => {
+      expect(classifyDurableMetaGraph([{
+        subject: 'urn:ka',
+        predicate,
+        object: '"value"',
+        graph: 'urn:meta',
+      }]).hasIntegrityEnvelope).toBe(true);
+    },
+  );
 
   it('classifies ordinary CG metadata as non-integrity configuration', () => {
     const topMeta = 'did:dkg:context-graph:cg/_meta';

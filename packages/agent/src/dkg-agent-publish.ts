@@ -133,6 +133,7 @@ import {
   skolemizeKnowledgeAsset,
   skolemizeKnowledgeAssetParts,
   assertNoKnowledgeAssetPayloadNamedGraphs,
+  assertValidPrecomputedUpdateAttestation,
   isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
@@ -173,6 +174,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
+import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -441,8 +443,8 @@ export const SEAL_CAPABILITY_GAP_CODE = 'SEAL_CAPABILITY_GAP';
 const ROOTLESS_UPDATE_DKG_NS = 'http://dkg.io/ontology/';
 const ROOTLESS_UPDATE_XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
-function rootlessUpdateError(code: string, message: string): Error {
-  return Object.assign(new Error(message), { code });
+function rootlessUpdateError(code: RootlessUpdateErrorCode, message: string): Error {
+  return new RootlessUpdateError(code, message);
 }
 
 function distinctMetadataObjects(
@@ -1825,6 +1827,17 @@ export class PublishMethods extends DKGAgentBase {
           `update payload yielded ${ethers.hexlify(canonicalMerkleRoot)}.`,
       );
     }
+
+    // Authentication is a rejectable publisher precondition, so run the
+    // publisher-owned verifier before replacing either private content or the
+    // canonical SWM graph. The publisher repeats the same check immediately
+    // before chain submission as defense in depth.
+    await assertValidPrecomputedUpdateAttestation(
+      this.chain,
+      kaId,
+      canonicalMerkleRoot,
+      opts.precomputedUpdateAttestation,
+    );
 
     const updateScope = await resolveDirectRootlessUpdateScope(
       this,

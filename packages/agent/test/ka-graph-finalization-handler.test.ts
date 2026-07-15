@@ -314,6 +314,7 @@ describe('graph-scoped finalization handler', () => {
 
   it('repairs rootless metadata after VM content committed but metadata did not', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
+    if (!message.privateMerkleRoot) throw new Error('expected private commitment');
     const swmResult = await store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
     );
@@ -352,6 +353,8 @@ describe('graph-scoped finalization handler', () => {
         <${UAL}> <http://dkg.io/ontology/contentScopeVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> ;
           <http://dkg.io/ontology/assertionVersion> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
           <http://dkg.io/ontology/assertionGraph> <${vmGraph}> ;
+          <http://dkg.io/ontology/privateTripleCount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+          <http://dkg.io/ontology/privateMerkleRoot> "${Buffer.from(message.privateMerkleRoot).toString('hex')}" ;
           <http://dkg.io/ontology/status> "confirmed" ;
           <http://dkg.io/ontology/materializedVersion> "123:0" .
       } }`,

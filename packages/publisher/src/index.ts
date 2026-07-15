@@ -75,6 +75,7 @@ export {
   MultiRootPublishNotAtomicError,
   CuratorUnconfirmedError,
   CuratorRejectedError,
+  assertValidPrecomputedUpdateAttestation,
   type DKGPublisherConfig,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
