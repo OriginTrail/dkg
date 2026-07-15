@@ -408,11 +408,10 @@ describe('DkgDaemonClient', () => {
   // destructure, plus URL-encodes the assertion name.
   // ---------------------------------------------------------------------------
 
-  it('promoteAssertion hits /api/knowledge-assets/:name/swm/share with camelCase body', async () => {
+  it('promoteAssertion atomically shares without root selectors', async () => {
     fetchResponses.push(new Response(JSON.stringify({ swmShared: true, promotedCount: 1 }), { status: 200 }));
 
     await client.promoteAssertion('ctx', 'chat-turns', {
-      entities: ['urn:a', 'urn:b'],
       subGraphName: 'protocols',
     });
 
@@ -422,9 +421,18 @@ describe('DkgDaemonClient', () => {
     const body = JSON.parse(opts?.body as string);
     expect(body).toEqual({
       contextGraphId: 'ctx',
-      entities: ['urn:a', 'urn:b'],
       subGraphName: 'protocols',
     });
+  });
+
+  it('promoteAssertion rejects root selection before HTTP', async () => {
+    await expect(
+      client.promoteAssertion('ctx', 'chat-turns', { entities: ['urn:a'] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    await expect(
+      client.promoteAssertion('ctx', 'chat-turns', { entities: 'urn:not-all' as any }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(fetchCalls).toHaveLength(0);
   });
 
   it('promoteAssertion URL-encodes assertion names containing slashes or spaces', async () => {

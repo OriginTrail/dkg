@@ -561,19 +561,24 @@ export class DkgDaemonClient {
     });
   }
 
-  /**
-   * Promote a Working Memory assertion (or a subset of its root entities) to
-   * Shared Working Memory. `entities` defaults to `"all"` server-side when
-   * omitted; callers can pin specific root entity URIs via an array.
-   */
+  /** Atomically seal and share a complete Working Memory Knowledge Asset. */
   async promoteAssertion(
     contextGraphId: string,
     name: string,
-    opts?: { entities?: string[] | 'all'; subGraphName?: string },
+    opts?: { /** @deprecated Root selection is unsupported. */ entities?: string[] | 'all'; subGraphName?: string },
   ): Promise<Record<string, unknown>> {
+    if (Array.isArray(opts?.entities)) {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
+    if (opts?.entities !== undefined && opts.entities !== 'all') {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, {
       contextGraphId: normalizeContextGraphId(contextGraphId),
-      entities: opts?.entities,
       subGraphName: opts?.subGraphName,
     });
   }
@@ -1225,12 +1230,19 @@ export class DkgDaemonClient {
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;
-      // #1116: "wm" (default) seals the open WM draft; "swm" seals an asset
-      // already shared to SWM (recover-without-recreate).
+      /** @deprecated Only WM finalization is supported. `swm` fails read-only. */
       layer?: 'wm' | 'swm';
     },
   ): Promise<{ merkleRoot: string; eip712Digest: string }> {
     assertExclusiveAuthorFields(opts ?? {});
+    if (opts?.layer === 'swm') {
+      throw Object.assign(new Error('Legacy root-scoped Knowledge Assets are read-only'), {
+        code: 'LEGACY_KA_READ_ONLY',
+      });
+    }
+    if (opts?.layer !== undefined && opts.layer !== 'wm') {
+      throw new TypeError('Only Working Memory finalization is supported');
+    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts ?? {}),
@@ -1267,8 +1279,32 @@ export class DkgDaemonClient {
   async knowledgeAssetShare(
     contextGraphId: string,
     name: string,
-    opts?: { subGraphName?: string; entities?: string[] | 'all'; skipSeal?: boolean },
+    opts?: {
+      subGraphName?: string;
+      /** @deprecated Root selection is unsupported. */
+      entities?: string[] | 'all';
+      /** @deprecated Unsealed shares are unsupported. */
+      skipSeal?: boolean;
+    },
   ): Promise<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }> {
+    if (Array.isArray(opts?.entities)) {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
+    if (opts?.entities !== undefined && opts.entities !== 'all') {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
+    if (opts?.skipSeal === true) {
+      throw Object.assign(new Error('Knowledge Assets are always sealed before sharing'), {
+        code: 'UNSEALED_SHARE_BLOCKED',
+      });
+    }
+    if (opts?.skipSeal !== undefined && opts.skipSeal !== false) {
+      throw new TypeError('skipSeal must be false or omitted');
+    }
     // Only include the optional fields when actually set -- don't spread the whole
     // opts object (which would carry `entities: undefined` / `subGraphName:
     // undefined` keys). Parity with MCP's knowledgeAssetShare body construction.
@@ -1276,9 +1312,6 @@ export class DkgDaemonClient {
       contextGraphId: normalizeContextGraphId(contextGraphId),
     };
     if (opts?.subGraphName) body.subGraphName = opts.subGraphName;
-    if (opts?.entities !== undefined) body.entities = opts.entities;
-    // #1116: a full share SEALS BY DEFAULT; `skipSeal:true` shares unsealed.
-    if (opts?.skipSeal !== undefined) body.skipSeal = opts.skipSeal;
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, body);
   }
 
