@@ -966,6 +966,11 @@ export class FinalizationHandler {
     versionBlock: number;
     authorAddress?: string;
     subGraphName?: string;
+    trustedAssertionEvidence?: {
+      assertionVersion: string;
+      accessPolicy: GraphScopedAccessPolicy;
+      allowedPeers: string[];
+    };
   }, ctx: OperationContext): Promise<
     'promoted' | 'already-confirmed' | 'no-swm' | 'stale-target' | undefined
   > {
@@ -978,6 +983,7 @@ export class FinalizationHandler {
       versionBlock,
       authorAddress,
       subGraphName,
+      trustedAssertionEvidence,
     } = input;
     // Historical UAL shapes can be valid inputs to the legacy root-scoped
     // recovery code but cannot name a V2 per-KA graph. Do not let the strict
@@ -1008,7 +1014,10 @@ export class FinalizationHandler {
 
     let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     try {
-      scope = createGraphKnowledgeAssetScope(ual, head.assertionVersion);
+      scope = createGraphKnowledgeAssetScope(
+        ual,
+        trustedAssertionEvidence?.assertionVersion ?? head.assertionVersion,
+      );
     } catch (err) {
       this.log.warn(
         ctx,
@@ -1050,7 +1059,11 @@ export class FinalizationHandler {
     });
     if (vmVerification.status === 'verified') {
       const materializedVersion = { blockNumber: versionBlock, txIndex: 0 };
-      const access = resolveGraphScopedAccessEnvelope(head);
+      const access = resolveGraphScopedAccessEnvelope(
+        head,
+        trustedAssertionEvidence?.accessPolicy,
+        trustedAssertionEvidence?.allowedPeers,
+      );
       const metadataState = await this.graphScopedMetadataState({
         contextGraphId,
         scope,
@@ -1071,6 +1084,31 @@ export class FinalizationHandler {
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return 'already-confirmed';
       }
+      if (!trustedAssertionEvidence && access.accessPolicy !== 'ownerOnly') {
+        const failClosedMetadataState = await this.graphScopedMetadataState({
+          contextGraphId,
+          scope,
+          head,
+          merkleRoot,
+          batchId: kaId,
+          accessPolicy: 'ownerOnly',
+          allowedPeers: [],
+          authorAddress,
+          subGraphName,
+        });
+        if (failClosedMetadataState === 'matching') {
+          await this.advanceExactGraphScopedVersion({
+            contextGraphId,
+            scope,
+            materializedVersion,
+          });
+          this.log.info(
+            ctx,
+            `Chain-reconcile: ${ual} retains fail-closed access without assertion evidence`,
+          );
+          return 'already-confirmed';
+        }
+      }
       // A confirmed publish may have committed the exact VM graph before its
       // graph-scoped metadata survived a crash. Reapply only the metadata tail:
       // SWM writers use a different lock, so this recovery path must not delete
@@ -1088,6 +1126,8 @@ export class FinalizationHandler {
         batchId: kaId,
         authorAddress,
         materializedVersion,
+        accessPolicy: trustedAssertionEvidence?.accessPolicy,
+        allowedPeers: trustedAssertionEvidence?.allowedPeers,
         subGraphName,
         source: 'chain-reconcile',
         contentAlreadyMaterialized: true,
@@ -1151,6 +1191,8 @@ export class FinalizationHandler {
       batchId: kaId,
       authorAddress,
       materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+      accessPolicy: trustedAssertionEvidence?.accessPolicy,
+      allowedPeers: trustedAssertionEvidence?.allowedPeers,
       subGraphName,
       source: 'chain-reconcile',
       ctx,
@@ -1254,6 +1296,13 @@ export class FinalizationHandler {
         : undefined;
       const preserveConfirmedMetadata = confirmedAssertionVersion !== undefined
         && confirmedAssertionVersion !== scope.assertionVersion;
+      const metadataAccessPolicy = source === 'chain-reconcile'
+        && requestedAccessPolicy === undefined
+        ? 'ownerOnly'
+        : safeAccessPolicy;
+      const metadataAllowedPeers = metadataAccessPolicy === 'allowList'
+        ? effectiveAllowedPeers
+        : [];
       if (!contentAlreadyMaterialized) {
         const vmQuads = verifiedQuads.map((quad) => ({ ...quad, graph: vmGraph }));
         const replaced = await tryReplaceGraphAtomically(
@@ -1297,9 +1346,9 @@ export class FinalizationHandler {
           contextGraphId,
           merkleRoot: computedMerkleRoot,
           publisherPeerId: head.publisherPeerId,
-          accessPolicy: safeAccessPolicy,
-          ...(safeAccessPolicy === 'allowList'
-            ? { allowedPeers: effectiveAllowedPeers }
+          accessPolicy: metadataAccessPolicy,
+          ...(metadataAccessPolicy === 'allowList'
+            ? { allowedPeers: metadataAllowedPeers }
             : {}),
           timestamp: new Date(),
           subGraphName,
@@ -2015,12 +2064,18 @@ export class FinalizationHandler {
     authorAddress?: string;
     /** Optional sub-graph the publish targeted (defaults to root workspace). */
     subGraphName?: string;
+    /** Receipt/seal-validated assertion policy supplied only by named recovery. */
+    trustedAssertionEvidence?: {
+      assertionVersion: string;
+      accessPolicy: GraphScopedAccessPolicy;
+      allowedPeers: string[];
+    };
   }, ctx: OperationContext): Promise<
     'promoted' | 'already-confirmed' | 'no-swm' | 'unverified' | 'stale-target'
   > {
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
-      kaId, versionBlock, authorAddress, subGraphName,
+      kaId, versionBlock, authorAddress, subGraphName, trustedAssertionEvidence,
     } = input;
 
     const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
@@ -2049,6 +2104,7 @@ export class FinalizationHandler {
       versionBlock,
       authorAddress,
       subGraphName,
+      trustedAssertionEvidence,
     }, ctx);
     if (graphScopedOutcome !== undefined) return graphScopedOutcome;
     if (await this.hasGraphScopedMetadata(contextGraphId, ual)) {

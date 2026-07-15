@@ -825,6 +825,78 @@ describe('graph-scoped finalization handler', () => {
     expect(unpublishedPolicy).toMatchObject({ type: 'boolean', value: false });
   });
 
+  it('fails closed when metadata is absent behind a newer same-root public head', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await store.deleteByPattern({ graph: metaGraph, subject: UAL });
+
+    const staged = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    );
+    if (staged.type !== 'quads') throw new Error('expected staged SWM quads');
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'graph-finalization-absent-metadata-policy-update',
+      kaUal: UAL,
+      assertionVersion: '2',
+      quads: staged.quads,
+      privateMerkleRoot: message.privateMerkleRoot,
+      privateTripleCount: message.privateTripleCount,
+      publisherPeerId: '12D3KooWPublisher',
+      accessPolicy: 'public',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'graph-finalization-absent-metadata-policy-update',
+      kaUal: UAL,
+      assertionVersion: '2',
+    });
+
+    const internals = handler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    const reconcileInput = {
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    };
+    await expect(handler.handleChainReconciledKC(
+      reconcileInput,
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+    await expect(handler.handleChainReconciledKC(
+      reconcileInput,
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    const failClosedPolicy = await store.query(
+      `ASK { GRAPH <${metaGraph}> {
+        <${UAL}> <http://dkg.io/ontology/assertionVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+          <http://dkg.io/ontology/accessPolicy> "ownerOnly" ;
+          <http://dkg.io/ontology/status> "confirmed" .
+      } }`,
+    );
+    expect(failClosedPolicy).toMatchObject({ type: 'boolean', value: true });
+    const leakedPublicPolicy = await store.query(
+      `ASK { GRAPH <${metaGraph}> {
+        <${UAL}> <http://dkg.io/ontology/accessPolicy> "public" .
+      } }`,
+    );
+    expect(leakedPublicPolicy).toMatchObject({ type: 'boolean', value: false });
+  });
+
   it('does not let an older confirmed assertion mask reconciliation of a newer chain root', async () => {
     const first = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(first.message), CG);
