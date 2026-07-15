@@ -200,6 +200,32 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls[0].body).not.toHaveProperty('entities');
   });
 
+  it('keeps promoteAssertion as a deprecated alias for complete atomic sharing', async () => {
+    const { client, calls } = makeClient();
+    await client.promoteAssertion({
+      contextGraphId: 'cg-1', assertionName: 'legacy', subGraphName: 'sg', entities: 'all',
+    });
+    await client.promoteAssertion({ contextGraphId: 'cg-1', assertionName: 'legacy-default' });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({
+      url: expect.stringContaining('/api/knowledge-assets/legacy/swm/share'),
+      body: { contextGraphId: 'cg-1', subGraphName: 'sg' },
+    });
+    expect(calls[1]).toEqual({
+      url: expect.stringContaining('/api/knowledge-assets/legacy-default/swm/share'),
+      body: { contextGraphId: 'cg-1' },
+    });
+  });
+
+  it('makes legacy promoteAssertion subsets fail through the atomic share guard before HTTP', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.promoteAssertion({
+      contextGraphId: 'cg-1', assertionName: 'legacy', entities: ['urn:x'],
+    })).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(calls).toHaveLength(0);
+  });
+
   it('createKnowledgeAsset translates an alsoPublishVm options object', async () => {
     const { client, calls } = makeClient();
     await client.createKnowledgeAsset({

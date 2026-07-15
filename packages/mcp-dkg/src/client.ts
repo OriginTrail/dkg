@@ -665,6 +665,25 @@ export class DkgClient {
   }
 
   /**
+   * @deprecated Use {@link knowledgeAssetShare}. Knowledge Assets now share
+   * atomically; omitted/`"all"` scope remains a compatibility alias, while a
+   * legacy entity subset is rejected by the canonical share boundary.
+   */
+  async promoteAssertion(args: {
+    contextGraphId: string;
+    assertionName: string;
+    subGraphName?: string;
+    entities?: string[] | 'all';
+  }): Promise<void> {
+    await this.knowledgeAssetShare({
+      contextGraphId: args.contextGraphId,
+      name: args.assertionName,
+      ...(args.subGraphName ? { subGraphName: args.subGraphName } : {}),
+      ...(args.entities !== undefined ? { entities: args.entities } : {}),
+    });
+  }
+
+  /**
    * Create an empty Working Memory assertion graph (idempotent — duplicate
    * names land as `alreadyExists: true` rather than throwing). The
    * canonical write flow is `createAssertion` → `writeAssertion` →
