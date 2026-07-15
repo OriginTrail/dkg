@@ -82,6 +82,7 @@ export async function skolemizeKnowledgeAssetParts(
     ...privateQuads.map((quad) => ({ quad, partition: 'private' as const })),
   ];
   const blankNodes = new Set<string>();
+  let sawCanonicalSkolemTerm = false;
   for (const { quad } of allQuads) {
     rejectReservedSkolemTerm(quad.subject, options.allowCanonicalSkolemTerms === true);
     // RDFC skolemization can only generate resources in subject/object position.
@@ -92,6 +93,18 @@ export async function skolemizeKnowledgeAssetParts(
     if (quad.graph) rejectReservedSkolemTerm(quad.graph, false);
     if (isBlankNode(quad.subject)) blankNodes.add(quad.subject);
     if (isBlankNode(quad.object)) blankNodes.add(quad.object);
+    sawCanonicalSkolemTerm ||= isCanonicalSkolemTerm(quad.subject)
+      || (!quad.object.startsWith('"') && isCanonicalSkolemTerm(quad.object));
+  }
+  if (blankNodes.size > 0 && sawCanonicalSkolemTerm) {
+    // RDFC labels only the blank nodes and cannot see the existing skolem
+    // IRIs, so it may re-mint an already-used c14nN for a fresh blank node.
+    // The mapping would then conflate two distinct nodes and dedupe their
+    // triples, silently changing Merkle content — fail closed instead.
+    throw new Error(
+      'Knowledge Asset input mixes canonical skolem IRIs with blank nodes; ' +
+      'a retry payload must be either fully canonical or fully unlabelled',
+    );
   }
 
   const mapping = new Map<string, string>();
@@ -144,6 +157,10 @@ export async function skolemizeKnowledgeAssetParts(
     publicQuads: normalizePartition(publicQuads),
     privateQuads: normalizePartition(privateQuads),
   };
+}
+
+function isCanonicalSkolemTerm(term: string): boolean {
+  return CANONICAL_KA_SKOLEM_RE.test(unwrapIri(term));
 }
 
 function rejectReservedSkolemTerm(term: string, allowCanonical: boolean): void {

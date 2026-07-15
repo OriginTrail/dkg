@@ -81,6 +81,36 @@ describe('graph-scoped KA skolemization', () => {
     expect(first.publicQuads[0]?.subject).not.toBe(first.privateQuads[0]?.subject);
   });
 
+  it('rejects retry payloads that mix canonical skolem IRIs with blank nodes', async () => {
+    // RDFC labels only the blank nodes: with one existing c14n0 IRI already in
+    // the data, the single fresh blank node below would also be assigned c14n0,
+    // conflating two distinct nodes and changing Merkle content. Must fail closed.
+    const existing: Quad = {
+      subject: `${KNOWLEDGE_ASSET_SKOLEM_PREFIX}c14n0`,
+      predicate: 'urn:p',
+      object: '"kept"',
+      graph: '',
+    };
+    await expect(skolemizeKnowledgeAsset([
+      existing,
+      { subject: '_:fresh', predicate: 'urn:p', object: '"fresh"', graph: '' },
+    ], { allowCanonicalSkolemTerms: true }))
+      .rejects.toThrow(/mixes canonical skolem IRIs with blank nodes/);
+
+    // The guard spans partitions — the shared blank-node map must not be able
+    // to re-mint an identifier the other partition already carries.
+    await expect(skolemizeKnowledgeAssetParts(
+      [existing],
+      [{ subject: '_:fresh', predicate: 'urn:p', object: '"private"', graph: '' }],
+      { allowCanonicalSkolemTerms: true },
+    )).rejects.toThrow(/mixes canonical skolem IRIs with blank nodes/);
+
+    // Pure canonical retry input (no blank nodes) still round-trips unchanged.
+    await expect(skolemizeKnowledgeAsset([existing], {
+      allowCanonicalSkolemTerms: true,
+    })).resolves.toEqual([existing]);
+  });
+
   it('preserves an intentionally shared blank node across visibility partitions', async () => {
     const parts = await skolemizeKnowledgeAssetParts(
       [{ subject: 'urn:public', predicate: 'urn:links', object: '_:shared', graph: '' }],
