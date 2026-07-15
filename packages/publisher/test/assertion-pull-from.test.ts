@@ -10,6 +10,8 @@ import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphPrivateUri,
+  contextGraphSubGraphPrivateUri,
+  contextGraphSubGraphUri,
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
@@ -56,21 +58,23 @@ async function seedShared(
     privateQuads?: Quad[];
     name?: string;
     agentAddress?: string;
+    subGraphName?: string;
   } = {},
 ) {
   const name = options.name ?? NAME;
   const agentAddress = options.agentAddress ?? AGENT;
+  const subGraphName = options.subGraphName;
   const publicQuads = options.publicQuads ?? [
     q(ENTITY_1, SCHEMA, '"Alice"'),
     q(ENTITY_2, SCHEMA, '"Bob"'),
   ];
   const privateQuads = options.privateQuads ?? [];
-  await publisher.assertionCreate(CG, name, agentAddress);
+  await publisher.assertionCreate(CG, name, agentAddress, subGraphName);
   if (publicQuads.length > 0) {
-    await publisher.assertionWrite(CG, name, agentAddress, publicQuads);
+    await publisher.assertionWrite(CG, name, agentAddress, publicQuads, subGraphName);
   }
   if (privateQuads.length > 0) {
-    await publisher.assertionWritePrivate(CG, name, agentAddress, privateQuads);
+    await publisher.assertionWritePrivate(CG, name, agentAddress, privateQuads, subGraphName);
   }
   const finalized = await finalizeRootlessAssertionForTest({
     publisher,
@@ -78,9 +82,26 @@ async function seedShared(
     contextGraphId: CG,
     name,
     agentAddress,
+    subGraphName,
   });
-  await publisher.assertionPromote(CG, name, agentAddress);
+  await publisher.assertionPromote(CG, name, agentAddress, { subGraphName });
   return finalized;
+}
+
+async function registerSubGraph(store: OxigraphStore, subGraphName: string): Promise<void> {
+  const metaGraph = contextGraphMetaUri(CG);
+  const subGraphUri = contextGraphSubGraphUri(CG, subGraphName);
+  await store.createGraph(metaGraph);
+  await store.insert([
+    q(
+      subGraphUri,
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      'http://dkg.io/ontology/SubGraph',
+      metaGraph,
+    ),
+    q(subGraphUri, 'http://schema.org/name', `"${subGraphName}"`, metaGraph),
+    q(subGraphUri, `${DKG}createdBy`, 'did:dkg:agent:test-agent', metaGraph),
+  ]);
 }
 
 function legacySeal(rootEntities: string[]): Quad[] {
@@ -369,6 +390,58 @@ describe('rootless assertionPullFrom', () => {
     });
     expect(new Set((await publisher.assertionQuery(CG, NAME, AGENT)).map(key)))
       .toEqual(new Set(finalized.publicQuads.map(key)));
+  });
+
+  it('keeps a sub-graph recovery seal inside its private partition across pull and discard', async () => {
+    const { publisher, store } = await makePublisher();
+    const subGraphName = 'code';
+    await registerSubGraph(store, subGraphName);
+    const finalized = await seedShared(publisher, store, {
+      subGraphName,
+      publicQuads: [q(ENTITY_1, SCHEMA, '"Sub-graph content"')],
+    });
+
+    await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { subGraphName });
+    await publisher.assertionDiscard(CG, NAME, AGENT, subGraphName);
+    const reopened = await publisher.assertionPullFrom(
+      CG,
+      NAME,
+      AGENT,
+      'swm',
+      { subGraphName },
+    );
+
+    expect(reopened).toMatchObject({
+      kaUal: finalized.kaUal,
+      assertionVersion: finalized.assertionVersion,
+      seededPublic: finalized.publicQuads.length,
+    });
+    expect(new Set((await publisher.assertionQuery(CG, NAME, AGENT, subGraphName)).map(key)))
+      .toEqual(new Set(finalized.publicQuads.map(key)));
+
+    const sealSubject = contextGraphAssertionUri(CG, AGENT, NAME, subGraphName);
+    const recoverySubject = `${sealSubject}/_recovery_seal`;
+    const recoveryPredicate = ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT;
+    const subGraphPrivate = await store.query(
+      `ASK { GRAPH <${contextGraphSubGraphPrivateUri(CG, subGraphName)}> {
+        <${recoverySubject}> <${recoveryPredicate}> ?root
+      } }`,
+    );
+    expect(subGraphPrivate).toMatchObject({ type: 'boolean', value: true });
+
+    const leakedToRootPrivate = await store.query(
+      `ASK { GRAPH <${contextGraphPrivateUri(CG)}> {
+        <${recoverySubject}> <${recoveryPredicate}> ?root
+      } }`,
+    );
+    expect(leakedToRootPrivate).toMatchObject({ type: 'boolean', value: false });
+
+    const leakedToRootMeta = await store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG)}> {
+        <${recoverySubject}> <${recoveryPredicate}> ?root
+      } }`,
+    );
+    expect(leakedToRootMeta).toMatchObject({ type: 'boolean', value: false });
   });
 
   it('archives the source seal while leaving the active draft unlocked for re-finalization', async () => {

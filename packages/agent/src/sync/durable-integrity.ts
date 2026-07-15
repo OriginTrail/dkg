@@ -27,6 +27,44 @@ const ROOT_ENTITY = `${DKG_NS}rootEntity`;
 const PART_OF = `${DKG_NS}partOf`;
 const SKOLEM_SUFFIX = '/.well-known/genid/';
 
+/**
+ * Predicates that make a durable metadata record part of a KA integrity
+ * envelope. Keep this list beside the verifier that interprets the envelope:
+ * changelog cursor planning must fail closed when any one of these fields is
+ * present, even when a malformed record is missing its Merkle root.
+ */
+const DURABLE_INTEGRITY_META_PREDICATES: ReadonlySet<string> = new Set([
+  MERKLE_ROOT,
+  CONTENT_SCOPE_VERSION,
+  KA_UAL,
+  ASSERTION_VERSION,
+  ASSERTION_GRAPH,
+  PUBLIC_TRIPLE_COUNT,
+  PRIVATE_TRIPLE_COUNT,
+  PRIVATE_MERKLE_ROOT,
+]);
+
+export interface DurableMetaGraphClassification {
+  hasMerkleRoot: boolean;
+  hasIntegrityEnvelope: boolean;
+}
+
+/** Classify a parsed durable metadata record using the verifier's predicates. */
+export function classifyDurableMetaGraph(
+  quads: readonly Quad[],
+): DurableMetaGraphClassification {
+  let hasMerkleRoot = false;
+  let hasIntegrityEnvelope = false;
+  for (const quad of quads) {
+    if (quad.predicate === MERKLE_ROOT) hasMerkleRoot = true;
+    if (DURABLE_INTEGRITY_META_PREDICATES.has(quad.predicate)) {
+      hasIntegrityEnvelope = true;
+    }
+    if (hasMerkleRoot && hasIntegrityEnvelope) break;
+  }
+  return { hasMerkleRoot, hasIntegrityEnvelope };
+}
+
 export interface DurableIntegrityLogEntry {
   level: 'debug' | 'warn';
   message: string;

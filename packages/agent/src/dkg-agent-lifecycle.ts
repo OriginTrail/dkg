@@ -149,6 +149,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { classifyDurableMetaGraph } from './sync/durable-integrity.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -4079,18 +4080,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
   ): Promise<DurableSyncResult> {
-    // `did:dkg:*` public triples anchor a `dkg:merkleRoot` literal in their meta graph.
-    const MERKLE_ROOT_PREDICATE = 'http://dkg.io/ontology/merkleRoot';
-    const INTEGRITY_META_PREDICATES = new Set([
-      MERKLE_ROOT_PREDICATE,
-      'http://dkg.io/ontology/contentScopeVersion',
-      'http://dkg.io/ontology/kaUal',
-      'http://dkg.io/ontology/assertionVersion',
-      'http://dkg.io/ontology/assertionGraph',
-      'http://dkg.io/ontology/publicTripleCount',
-      'http://dkg.io/ontology/privateTripleCount',
-      'http://dkg.io/ontology/privateMerkleRoot',
-    ]);
     let insertedDataTriples = 0;
     let insertedMetaTriples = 0;
     let result = emptyDurableSyncResult(); // folds every resync's legacy DurableSyncResult
@@ -4155,14 +4144,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const { quads } = await worker.parseAndFilter(rec.quads ?? '', rec.graph, contextGraphId);
           metaQuads.push(...quads);
           recordQuadCountByGraph.set(rec.graph, quads.length);
-          // A meta graph can bind data only if it actually carries a merkle root.
-          if (quads.some((q) => q.predicate === MERKLE_ROOT_PREDICATE)) metaGraphsWithRoot.add(rec.graph);
-          // Any V2 integrity field makes the whole metadata record fail-closed.
+          const classification = classifyDurableMetaGraph(quads);
+          // A meta graph can bind data only if it actually carries a Merkle root.
+          if (classification.hasMerkleRoot) metaGraphsWithRoot.add(rec.graph);
+          // Any V2 integrity field makes the whole metadata record fail closed.
           // In particular, contentScopeVersion without merkleRoot is malformed,
           // not harmless configuration that the cursor may acknowledge.
-          if (quads.some((q) => INTEGRITY_META_PREDICATES.has(q.predicate))) {
-            integrityMetaGraphs.add(rec.graph);
-          }
+          if (classification.hasIntegrityEnvelope) integrityMetaGraphs.add(rec.graph);
         }
         // Merkle-verify data against meta (same worker path legacy sync uses).
         const processed = await this.processDurableBatchInWorker(dataQuads, metaQuads, ctx, acceptUnverified);
