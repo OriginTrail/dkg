@@ -672,8 +672,9 @@ DKG_ASSERTION_SHARE_SCHEMA = {
         "Share a knowledge asset (or selected root entities) from Working Memory into Shared "
         "Working Memory. A FULL share (omit `entities` or pass \"all\") SEALS BY DEFAULT and is "
         "then publish-ready -- follow with dkg_knowledge_asset_publish to mint it on-chain "
-        "(Verifiable Memory). skip_seal=true is retained only for compatibility; an unsealed SWM "
-        "share cannot be finalized because legacy SWM writes are read-only. If a default "
+        "(Verifiable Memory). skip_seal=true is retained only for compatibility and is rejected "
+        "by graph-scoped daemons; omit it or pass false to perform the required atomic sealed "
+        "full share. If a default "
         "(sealing) share cannot seal it fails CLOSED (409, Working Memory "
         "preserved) and returns a recovery hint. For CUSTOM finalize options "
         "such as author_agent_address / scheme_version, call dkg_knowledge_asset_finalize "
@@ -703,9 +704,8 @@ DKG_ASSERTION_SHARE_SCHEMA = {
             "skip_seal": {
                 "type": "boolean",
                 "description": (
-                    "Deprecated compatibility option. True shares to SWM without sealing, but "
-                    "legacy SWM is read-only and the result cannot be finalized. Default false "
-                    "atomically seals a full share."
+                    "Deprecated compatibility option. Graph-scoped daemons reject true; omit it "
+                    "or pass false to atomically seal and share the complete asset."
                 ),
             },
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},

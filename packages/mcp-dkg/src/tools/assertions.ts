@@ -515,9 +515,9 @@ export function registerAssertionTools(
         'Shared Working Memory so teammates see it. A FULL share (omit ' +
         '`entities` or pass "all") SEALS BY DEFAULT and is then publish-ready — ' +
         'follow it with dkg_knowledge_asset_publish to mint the asset on-chain ' +
-        '(Verifiable Memory). `skipSeal:true` is retained only for compatibility; ' +
-        'an unsealed SWM share cannot be finalized because legacy SWM writes are ' +
-        'read-only. If a default (sealing) share ' +
+        '(Verifiable Memory). `skipSeal:true` is retained only for compatibility ' +
+        'and is rejected by graph-scoped daemons; omit it or pass false to perform ' +
+        'the required atomic sealed full share. If a default (sealing) share ' +
         'cannot seal it fails CLOSED (409, Working Memory preserved) and returns ' +
         'a recovery hint. For custom finalize/attestation options — ' +
         'authorAgentAddress / schemeVersion — call dkg_knowledge_asset_finalize ' +
@@ -539,15 +539,14 @@ export function registerAssertionTools(
             'roots (seals by default + publish-ready). A subset (non-empty array) ' +
             'shares to SWM only and is NOT publishable to Verifiable Memory.',
           ),
-        // #1116: a full share SEALS BY DEFAULT. `skipSeal:true` opts out into an
-        // unsealed SWM share (not publish-ready until a later finalize).
+        // #1116: a full share SEALS BY DEFAULT. The field remains so old callers
+        // receive the daemon's explicit error for true instead of a schema error.
         skipSeal: z
           .boolean()
           .optional()
           .describe(
-            'Set true to share to SWM WITHOUT sealing (not publish-ready). ' +
-            'Default (false) seals a full share so it is immediately publish-ready. ' +
-            'Ignored for a subset share, which is never sealed.',
+            'Deprecated compatibility option. Graph-scoped daemons reject true; ' +
+            'omit it or pass false to atomically seal and share the complete asset.',
           ),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),

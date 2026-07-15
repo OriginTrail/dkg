@@ -143,21 +143,24 @@ def test_share_description_carries_subset_language(provider):
 
 def test_share_description_marks_unsealed_swm_read_only(provider):
     # #1116 — a full share now SEALS BY DEFAULT (publish-ready). skip_seal=true
-    # is retained only for compatibility and creates read-only SWM content; a
-    # default share that cannot seal fails CLOSED (409, WM preserved). Finalize
-    # stays the explicit WM path for custom options.
+    # is retained only so older callers receive the graph-scoped daemon's clear
+    # rejection; it must not be advertised as a working unsealed share mode.
     share = next(s for s in provider.get_tool_schemas()
                  if s["name"] == "dkg_knowledge_asset_share")
     desc = share["description"]
     assert "SEALS BY DEFAULT" in desc
     assert "skip_seal=true" in desc
     assert "retained only for compatibility" in desc
-    assert "legacy SWM writes are read-only" in desc
+    assert "rejected by graph-scoped daemons" in desc
+    assert "unsealed SWM share" not in desc
     assert "fails CLOSED" in desc and "409" in desc
     assert "dkg_knowledge_asset_finalize EXPLICITLY first" in desc
     assert "layer=\"swm\" works after" not in desc
     # custom finalize options note is preserved
     assert "author_agent_address" in desc and "scheme_version" in desc
+    skip_desc = share["parameters"]["properties"]["skip_seal"]["description"]
+    assert "reject true" in skip_desc
+    assert "without sealing" not in skip_desc
 
 
 def test_publish_description_ual_middle_segment_is_contract_not_author(provider):

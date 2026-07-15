@@ -97,6 +97,12 @@ describe("DkgNodePlugin", () => {
       expect(share.description).toContain('dkg_knowledge_asset_publish');
       // #1116: a full share now SEALS BY DEFAULT (was "auto-seal best-effort").
       expect(share.description).toMatch(/seals by default/i);
+      expect(share.description).toContain('skip_seal:true');
+      expect(share.description).toMatch(/rejected by graph-scoped daemons/i);
+      expect(share.description).not.toMatch(/unsealed SWM share/i);
+      const skipSealDescription = (share.parameters as any).properties.skip_seal.description as string;
+      expect(skipSealDescription).toMatch(/reject true/i);
+      expect(skipSealDescription).not.toMatch(/without sealing/i);
       // §5 subset-vs-full language must be present.
       expect(share.description).toMatch(/NOT publishable to Verifiable Memory/i);
     });

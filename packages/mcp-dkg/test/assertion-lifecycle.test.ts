@@ -752,6 +752,17 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
 
   // ── #1116 share seal: skipSeal forwarding + publishReady warning branch ──
 
+  it('advertises skipSeal:true as rejected compatibility input, not an unsealed share mode', () => {
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), client.asDkgClient(), makeConfig());
+    const share = localServer.get('dkg_knowledge_asset_share');
+    expect(share.config.description).toMatch(/skipSeal:true.*rejected by graph-scoped daemons/i);
+    expect(share.config.description).not.toMatch(/unsealed SWM share/i);
+    const skipSealDescription = share.config.inputSchema?.skipSeal?.description;
+    expect(skipSealDescription).toMatch(/reject true/i);
+    expect(skipSealDescription).not.toMatch(/without sealing/i);
+  });
+
   it('share forwards skipSeal:true to the client (#1116)', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
