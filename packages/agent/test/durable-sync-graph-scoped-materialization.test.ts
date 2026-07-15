@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
@@ -15,6 +15,7 @@ import {
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { readDurableDataPage } from '../src/sync/responder/graph-plan.js';
 import {
   authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
@@ -67,6 +68,20 @@ function page(phase: 'data' | 'meta', quads: Quad[]): SyncPageResult {
     checkpointKey: `${contextGraphId}:${phase}`,
     completed: true,
     timedOut: false,
+  };
+}
+
+function processDurableBatch(
+  data: Quad[],
+  meta: Quad[],
+  acceptUnverified: boolean,
+  mode: Parameters<typeof processDurableBatchForWire>[3],
+) {
+  const wire = processDurableBatchForWire(data, meta, acceptUnverified, mode);
+  return {
+    ...wire,
+    verifiedData: wire.verifiedDataIndexes.map((index) => data[index]!),
+    verifiedMeta: wire.verifiedMetaIndexes.map((index) => meta[index]!),
   };
 }
 
@@ -296,6 +311,192 @@ describe('durable graph-scoped KA materialization', () => {
       { blockNumber: 0, txIndex: 0 },
       1n,
     )).resolves.toBe(false);
+  });
+
+  it('does not persist unverified graph-scoped controls that can poison later deltas', async () => {
+    const store = new OxigraphStore();
+    const poisonedSubject = 'urn:poisoned-delta-control';
+    const poisonedMetadata: Quad[] = [
+      {
+        subject: poisonedSubject,
+        predicate: `${DKG}assertionGraph`,
+        object: assertionGraph,
+        graph: metaGraph,
+      },
+      {
+        subject: poisonedSubject,
+        predicate: `${DKG}batchId`,
+        object: '"999"',
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}batchId`,
+        object: '"999"',
+        graph: metaGraph,
+      },
+      {
+        subject: poisonedSubject,
+        predicate: `${DKG}assertionVersion`,
+        object: '"999"',
+        graph: metaGraph,
+      },
+    ];
+    await store.insert([
+      dataQuad(1),
+      {
+        subject: ual,
+        predicate: `${DKG}assertionGraph`,
+        object: assertionGraph,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}batchId`,
+        object: '"5"',
+        graph: metaGraph,
+      },
+    ]);
+
+    const readDelta = () => readDurableDataPage({
+      store,
+      graphList: [assertionGraph, metaGraph],
+      contextGraphId,
+      sinceBatchId: 100n,
+      offset: 0,
+      limit: 100,
+    });
+    await expect(readDelta()).resolves.toEqual([]);
+
+    await runDurableSync({
+      ctx,
+      remotePeerId: 'untrusted-peer',
+      contextGraphIds: [contextGraphId],
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data' ? page(phase, []) : page(phase, poisonedMetadata)
+      ),
+      processDurableBatchInWorker: async (data, meta, _ctx, acceptUnverified, mode) => (
+        processDurableBatch(data, meta, acceptUnverified, mode)
+      ),
+      storeInsert: (quads) => store.insert(quads),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    const persisted = await store.query(`ASK {
+      GRAPH <${metaGraph}> {
+        { <${poisonedSubject}> <${DKG}assertionGraph> <${assertionGraph}> }
+        UNION
+        { ?subject <${DKG}batchId> "999" }
+        UNION
+        { <${poisonedSubject}> <${DKG}assertionVersion> "999" }
+      }
+    }`);
+    expect(persisted).toEqual({ type: 'boolean', value: false });
+    await expect(readDelta()).resolves.toEqual([]);
+  });
+
+  it('does not infer legacy authentication for system-graph metadata', async () => {
+    const store = new OxigraphStore();
+    const systemContextGraphId = SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
+    const systemMetaGraph = `did:dkg:context-graph:${systemContextGraphId}/_meta`;
+    const poisonedSubject = 'urn:system-graph-poison';
+    const poisonedMetadata: Quad[] = [
+      {
+        subject: poisonedSubject,
+        predicate: `${DKG}merkleRoot`,
+        object: `"${'00'.repeat(32)}"`,
+        graph: systemMetaGraph,
+      },
+      {
+        subject: poisonedSubject,
+        predicate: `${DKG}batchId`,
+        object: '"999"',
+        graph: systemMetaGraph,
+      },
+    ];
+
+    await runDurableSync({
+      ctx,
+      remotePeerId: 'untrusted-system-peer',
+      contextGraphIds: [systemContextGraphId],
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data' ? page(phase, []) : page(phase, poisonedMetadata)
+      ),
+      processDurableBatchInWorker: async (data, meta, _ctx, acceptUnverified, mode) => (
+        processDurableBatch(data, meta, acceptUnverified, mode)
+      ),
+      storeInsert: (quads) => store.insert(quads),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    await expect(store.query(`ASK {
+      GRAPH <${systemMetaGraph}> { <${poisonedSubject}> <${DKG}batchId> "999" }
+    }`)).resolves.toEqual({ type: 'boolean', value: false });
+  });
+
+  it('preserves authenticated legacy batch metadata', async () => {
+    const store = new OxigraphStore();
+    const legacyGraph = `did:dkg:context-graph:${contextGraphId}`;
+    const legacyRoot = 'urn:legacy:batch-root';
+    const legacyData: Quad[] = [{
+      subject: legacyRoot,
+      predicate: 'http://example.com/value',
+      object: '"legacy"',
+      graph: legacyGraph,
+    }];
+    const legacyMeta: Quad[] = [
+      {
+        subject: ual,
+        predicate: `${DKG}merkleRoot`,
+        object: `"${toHex(computeFlatKCRootV10(legacyData, []))}"`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}rootEntity`,
+        object: legacyRoot,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}batchId`,
+        object: '"7"',
+        graph: metaGraph,
+      },
+    ];
+
+    await runDurableSync({
+      ctx,
+      remotePeerId: 'legacy-peer',
+      contextGraphIds: [contextGraphId],
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data' ? page(phase, legacyData) : page(phase, legacyMeta)
+      ),
+      processDurableBatchInWorker: async (data, meta, _ctx, acceptUnverified, mode) => (
+        processDurableBatch(data, meta, acceptUnverified, mode)
+      ),
+      storeInsert: (quads) => store.insert(quads),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    await expect(store.query(`ASK {
+      GRAPH <${metaGraph}> { <${ual}> <${DKG}batchId> "7" }
+    }`)).resolves.toEqual({ type: 'boolean', value: true });
   });
 
   it('does not let a stale durable page replace a newer local assertion', async () => {

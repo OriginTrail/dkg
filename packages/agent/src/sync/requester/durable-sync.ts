@@ -17,10 +17,13 @@ import type {
 } from './graph-scoped-materialization.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
+const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
+const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
 const BATCH_ID = `${DKG_NS}batchId`;
+const PART_OF = `${DKG_NS}partOf`;
 const MATERIALIZED_VERSION = `${DKG_NS}materializedVersion`;
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
@@ -383,6 +386,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         processed.verifiedData,
         processed.verifiedMeta,
         processed.verifiedGraphScopedDataGraphs ?? [],
+        isSystemContextGraph,
       );
       if (partitioned.assets.length > 0 && !storeGraphScopedAsset) {
         throw Object.assign(
@@ -485,6 +489,7 @@ function partitionVerifiedGraphScopedAssets(
   verifiedData: Quad[],
   verifiedMeta: Quad[],
   verifiedGraphs: readonly string[],
+  acceptUnverified: boolean,
 ): {
   assets: VerifiedGraphScopedAsset[];
   remainingData: Quad[];
@@ -501,7 +506,11 @@ function partitionVerifiedGraphScopedAssets(
     return {
       assets: [],
       remainingData: verifiedData,
-      remainingMeta: peerSafeMetadata.filter((quad) => quad.predicate !== ASSERTION_VERSION),
+      remainingMeta: selectRemainingVerifiedMetadata(
+        peerSafeMetadata,
+        new Set(),
+        acceptUnverified,
+      ),
     };
   }
 
@@ -600,10 +609,49 @@ function partitionVerifiedGraphScopedAssets(
   return {
     assets,
     remainingData,
-    remainingMeta: peerSafeMetadata.filter(
-      (quad) => !handledUals.has(quad.subject) && quad.predicate !== ASSERTION_VERSION,
+    remainingMeta: selectRemainingVerifiedMetadata(
+      peerSafeMetadata,
+      handledUals,
+      acceptUnverified,
     ),
   };
+}
+
+function selectRemainingVerifiedMetadata(
+  metadata: readonly Quad[],
+  handledGraphScopedUals: ReadonlySet<string>,
+  acceptUnverified: boolean,
+): Quad[] {
+  const graphScopedMarkerSubjects = new Set(
+    metadata
+      .filter((quad) => quad.predicate === CONTENT_SCOPE_VERSION)
+      .map((quad) => quad.subject),
+  );
+  const verifiedLegacyKcs = acceptUnverified
+    ? new Set<string>()
+    : new Set(
+        metadata
+          .filter((quad) => (
+            quad.predicate === MERKLE_ROOT
+            && !graphScopedMarkerSubjects.has(quad.subject)
+          ))
+          .map((quad) => quad.subject),
+      );
+  const verifiedLegacyBatchSubjects = new Set(verifiedLegacyKcs);
+  for (const quad of metadata) {
+    if (
+      quad.predicate === PART_OF
+      && verifiedLegacyKcs.has(stripLiteral(quad.object))
+    ) {
+      verifiedLegacyBatchSubjects.add(quad.subject);
+    }
+  }
+
+  return metadata.filter((quad) => {
+    if (handledGraphScopedUals.has(quad.subject)) return false;
+    if (quad.predicate === ASSERTION_GRAPH || quad.predicate === ASSERTION_VERSION) return false;
+    return quad.predicate !== BATCH_ID || verifiedLegacyBatchSubjects.has(quad.subject);
+  });
 }
 
 function stripLiteral(raw: string): string {
