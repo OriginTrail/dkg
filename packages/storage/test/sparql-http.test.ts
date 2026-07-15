@@ -195,7 +195,8 @@ describe('SparqlHttpStore (test server)', () => {
     expect(before.ackReservedSlots).toBeGreaterThan(0);
     const backgroundSlots = before.maxConcurrent
       - before.ackReservedSlots
-      - before.normalReservedSlots;
+      - (before.healthReservedSlots ?? 0)
+      - (before.normalReservedSlots ?? 0);
     const arrivals: Array<'listGraphs' | 'ack' | 'other'> = [];
     const heldListGraphResponses: ServerResponse[] = [];
     let listGraphRequests = 0;
@@ -337,6 +338,48 @@ describe('SparqlHttpStore (test server)', () => {
       signalController.abort(new Error('caller aborted'));
 
       await expect(query).rejects.toThrow(/caller aborted/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not return a timeout until the aborted server attempt has stopped', async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      if (calls > 1) {
+        active -= 1;
+        return new Response(JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          // Model an HTTP/server stack that needs cleanup time after receiving
+          // cancellation. The adapter must keep its admission slot and caller
+          // promise pending until that cleanup finishes.
+          setTimeout(() => {
+            active -= 1;
+            reject(init.signal?.reason);
+          }, 20);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 5 });
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
+      expect(active).toBe(0);
+
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
+        type: 'bindings',
+      });
+      expect(maxActive).toBe(1);
     } finally {
       globalThis.fetch = originalFetch;
     }

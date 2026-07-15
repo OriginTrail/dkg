@@ -33,7 +33,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, getMetrics, sparqlString, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   LEGACY_TRUST_LEVEL_PREDICATE,
@@ -94,7 +94,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, asChangelogReader, asGraphWriteGenSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -2546,39 +2546,42 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async runVmReconcileSweep(this: DKGAgent): Promise<void> {
     const dispatcher = this.vmReconcileDispatcher;
     if (!this.vmReconcileEnabled() || !dispatcher) return;
-    const eligible: string[] = [];
-    for (const [localCgId, sub] of this.subscribedContextGraphs) {
-      // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
-      // (subscribed BEFORE its first publish, so unbound) before the skip-gate
-      // below would pass it over. Shared with the live KACG nudge.
-      if (sub.subscribed && !sub.onChainId) {
-        await this.selfPrimeSubscriptionOnChainId(localCgId, sub);
+    if (this.vmReconcileSweepInFlight) return this.vmReconcileSweepInFlight;
+    const running = (async () => {
+      const eligible: string[] = [];
+      for (const [localCgId, sub] of this.subscribedContextGraphs) {
+        // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
+        // (subscribed BEFORE its first publish, so unbound) before the skip-gate
+        // below would pass it over. Shared with the live KACG nudge.
+        if (sub.subscribed && !sub.onChainId) {
+          await this.selfPrimeSubscriptionOnChainId(localCgId, sub);
+        }
+        // Member subscriptions AND Phase D core-hosted public CGs get swept.
+        if ((!sub.subscribed && !sub.coreHosted) || !sub.onChainId) continue;
+        eligible.push(localCgId);
       }
-      // Member subscriptions AND Phase D core-hosted public CGs get swept.
-      if ((!sub.subscribed && !sub.coreHosted) || !sub.onChainId) continue;
-      eligible.push(localCgId);
-    }
 
-    if (eligible.length === 0) {
-      this.vmReconcileSweepCursor = 0;
-      return;
-    }
-
-    // Admission is bounded, so retain the first rejected index as the next
-    // sweep's starting point. A stable Map order can therefore never refill
-    // the queue with the same prefix and permanently starve later CGs.
-    const start = this.vmReconcileSweepCursor % eligible.length;
-    for (let offset = 0; offset < eligible.length; offset += 1) {
-      const index = (start + offset) % eligible.length;
-      const localCgId = eligible[index]!;
-      if (!dispatcher.tryTriggerPeriodic(localCgId)) {
-        this.vmReconcileSweepCursor = index;
+      if (eligible.length === 0) {
+        this.vmReconcileSweepCursor = 0;
         return;
       }
+
+      // Per-CG coalescing alone still let a cold start enqueue one expensive
+      // scan per subscription. Admit and await periodic work one CG at a time;
+      // foreground live/manual work can still enter the unified dispatcher.
+      const start = this.vmReconcileSweepCursor % eligible.length;
+      for (let offset = 0; offset < eligible.length; offset += 1) {
+        const index = (start + offset) % eligible.length;
+        await dispatcher.dispatch(eligible[index]!, 'periodic').catch(() => undefined);
+      }
+      this.vmReconcileSweepCursor = (start + 1) % eligible.length;
+    })();
+    this.vmReconcileSweepInFlight = running;
+    try {
+      await running;
+    } finally {
+      if (this.vmReconcileSweepInFlight === running) this.vmReconcileSweepInFlight = null;
     }
-    // Rotate even when every CG coalesced/admitted so membership churn and
-    // concurrent foreground work do not repeatedly privilege index zero.
-    this.vmReconcileSweepCursor = (start + 1) % eligible.length;
   }
 
   /**
@@ -3181,6 +3184,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async readVmReconcileSwmGen(this: DKGAgent, candidateNamespaces: VmReconcileSwmNamespace[]): Promise<string | null> {
     if (candidateNamespaces.length === 0) return 'empty:0';
     try {
+      // The changelog cursor is a durable write generation: it survives daemon
+      // restart, advances at the store mutation choke point, and is O(1) after
+      // its one-time seed. It lets large (> fingerprint cap) stores reuse a
+      // proven negative without reconstructing or sampling their SWM content.
+      const changelog = asChangelogReader(this.store);
+      if (changelog) {
+        const head = await changelog.changelogHead({
+          priority: 'background',
+          source: 'agent.vmReconcile.negativeGeneration',
+        });
+        return `changelog:${head.era}:${head.seq}`;
+      }
       const parts: string[] = [];
       const digestRows = (rows: string[]) =>
         createHash('sha256').update(rows.join('\n'), 'utf8').digest('hex');
@@ -3241,6 +3256,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
           `privateRootHash:${digestRows(privateRoots)}`,
         ].join(';'));
       }
+      // Catch writes into a newly-created/unregistered namespace that the
+      // current namespace enumeration cannot yet name. This process-local term
+      // complements (rather than replaces) the content fingerprint: after a
+      // restart the fingerprint remains the correctness gate while the counter
+      // restarts harmlessly.
+      const rootDataGraph = candidateNamespaces[0]?.dataGraph ?? '';
+      const swmSuffix = rootDataGraph.indexOf('/_shared_memory');
+      const graphPrefix = swmSuffix >= 0 ? `${rootDataGraph.slice(0, swmSuffix)}/` : rootDataGraph;
+      const writeGen = asGraphWriteGenSource(this.store)?.getWriteGen(graphPrefix);
+      if (writeGen !== undefined) parts.push(`writeGen:${writeGen}`);
       return parts.join('|');
     } catch {
       // Probe failures are not a stable SWM generation. Callers must not cache
@@ -3277,12 +3302,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   deleteVmReconcileNegativeCacheEntry(this: DKGAgent, cacheKey: string): void {
     const existing = this.vmReconcileNegativeCache.get(cacheKey);
-    if (!existing) return;
-    this.vmReconcileNegativeCache.delete(cacheKey);
-    const keys = this.vmReconcileNegativeCacheKeysByCg.get(existing.localCgId);
-    if (!keys) return;
-    keys.delete(cacheKey);
-    if (keys.size === 0) this.vmReconcileNegativeCacheKeysByCg.delete(existing.localCgId);
+    this.vmReconcileNegativeCacheHydrated.add(cacheKey);
+    if (existing) {
+      this.vmReconcileNegativeCache.delete(cacheKey);
+      const keys = this.vmReconcileNegativeCacheKeysByCg.get(existing.localCgId);
+      if (keys) {
+        keys.delete(cacheKey);
+        if (keys.size === 0) this.vmReconcileNegativeCacheKeysByCg.delete(existing.localCgId);
+      }
+    }
+    void this.config.contextGraphSubscriptionStore?.deleteVmReconcileNegative?.(cacheKey).catch(() => {
+      // The in-memory invalidation remains authoritative for this process.
+    });
   }
 
   indexVmReconcileNegativeCacheEntry(this: DKGAgent, localCgId: string, cacheKey: string): void {
@@ -3298,7 +3329,39 @@ export class SwmHostModeMethods extends DKGAgentBase {
     cacheKey: string,
     localCgId: string,
   ): Promise<boolean> {
-    const cached = this.vmReconcileNegativeCache.get(cacheKey);
+    let cached = this.vmReconcileNegativeCache.get(cacheKey);
+    if (!cached && !this.vmReconcileNegativeCacheHydrated.has(cacheKey)) {
+      this.vmReconcileNegativeCacheHydrated.add(cacheKey);
+      try {
+        const durable = await this.config.contextGraphSubscriptionStore
+          ?.loadVmReconcileNegative?.(cacheKey);
+        if (
+          durable &&
+          durable.cacheKey === cacheKey &&
+          durable.localCgId === localCgId &&
+          Number.isInteger(durable.failures) && durable.failures > 0 &&
+          Number.isFinite(durable.nextRetryAt) &&
+          typeof durable.swmGen === 'string' &&
+          Array.isArray(durable.candidateNamespaces) &&
+          durable.candidateNamespaces.every((item) =>
+            typeof item?.metaGraph === 'string' && typeof item?.dataGraph === 'string') &&
+          typeof durable.peerTopologyKey === 'string'
+        ) {
+          cached = {
+            localCgId: durable.localCgId,
+            failures: durable.failures,
+            nextRetryAt: durable.nextRetryAt,
+            swmGen: durable.swmGen,
+            candidateNamespaces: durable.candidateNamespaces,
+            peerTopologyKey: durable.peerTopologyKey,
+          };
+          this.vmReconcileNegativeCache.set(cacheKey, cached);
+          this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
+        }
+      } catch {
+        // Persistence is an accelerator only. Fail open to an authoritative scan.
+      }
+    }
     if (!cached) return false;
     if (Date.now() >= cached.nextRetryAt) return false;
 
@@ -3360,28 +3423,51 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.deleteVmReconcileNegativeCacheEntry(cacheKey);
       return;
     }
-    // Existing SWM operations can be missing payload/private-root pieces; keep
-    // that retry path uncached instead of probing full data graphs here.
-    if (this.vmReconcileSwmGenHasOperations(state.swmGen)) {
-      return;
-    }
     this.pruneVmReconcileState();
     const previous = this.vmReconcileNegativeCache.get(cacheKey);
     const failures = (previous?.failures ?? 0) + 1;
-    const backoff = Math.min(
+    const exponentialBackoff = Math.min(
       DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
       DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1),
     );
-    if (previous) this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-    this.vmReconcileNegativeCache.set(cacheKey, {
+    const jitterSample = createHash('sha256')
+      .update(`${this.node.peerId.toString()}\0${cacheKey}\0${failures}`)
+      .digest()
+      .readUInt32BE(0) / 0x1_0000_0000;
+    const backoff = Math.min(
+      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+      Math.max(1, Math.round(exponentialBackoff * (0.8 + jitterSample * 0.4))),
+    );
+    getMetrics().storeRetryAttemptsTotal.add(1, {
+      scope: 'vm_reconcile',
+      reason: 'no_swm',
+      attempt: Math.min(failures, 16),
+    });
+    if (previous) {
+      // Replace in place without racing an asynchronous durable DELETE against
+      // the SAVE below. The record key/local CG are unchanged here.
+      this.vmReconcileNegativeCache.delete(cacheKey);
+      const keys = this.vmReconcileNegativeCacheKeysByCg.get(previous.localCgId);
+      keys?.delete(cacheKey);
+      if (keys?.size === 0) this.vmReconcileNegativeCacheKeysByCg.delete(previous.localCgId);
+    }
+    const record = {
       localCgId,
       failures,
       nextRetryAt: Date.now() + backoff,
       swmGen: state.swmGen,
       candidateNamespaces: state.candidateNamespaces,
       peerTopologyKey: state.peerTopologyKey,
-    });
+    };
+    this.vmReconcileNegativeCache.set(cacheKey, record);
+    this.vmReconcileNegativeCacheHydrated.add(cacheKey);
     this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
+    void this.config.contextGraphSubscriptionStore?.saveVmReconcileNegative?.({
+      cacheKey,
+      ...record,
+    }).catch(() => {
+      // Persistence is an accelerator only; the process-local gate still works.
+    });
     this.pruneVmReconcileState();
   }
 
@@ -3457,6 +3543,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
       }
     }
+    void this.config.contextGraphSubscriptionStore
+      ?.deleteVmReconcileNegativesForContextGraph?.(localCgId)
+      .catch(() => {
+        // Best-effort durable cleanup; generation checks still reject stale rows.
+      });
     this.reconcileCursors.delete(localCgId);
     this.vmReconcileFetchCooldownAt.delete(localCgId);
     this.vmReconcileCatchupPeerCursor.delete(localCgId);

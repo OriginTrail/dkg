@@ -360,16 +360,17 @@ function watchBoundedMetaPageQuery(store: OxigraphStore, metaGraph: string) {
   return { assertObserved: () => expect(observed).toBeGreaterThan(0) };
 }
 
-/** Assert the SWM-data fallback issued a bounded, EXISTS-filtered paged query. */
+/** Assert the SWM-data fallback issued a concrete-graph, mapped-root paged query. */
 function watchBoundedSwmDataPageQuery(store: OxigraphStore) {
   const originalQuery = store.query.bind(store);
   let observed = 0;
   store.query = (async (sparql: string) => {
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     if (
-      /^SELECT DISTINCT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes('FILTER EXISTS') &&
-      normalized.includes('ORDER BY ?g ?s ?p ?o') &&
+      /^SELECT DISTINCT \?s \?p \?o WHERE \{/.test(normalized) &&
+      normalized.includes('VALUES ?root') &&
+      normalized.includes('GRAPH <') &&
+      normalized.includes('ORDER BY ?s ?p ?o') &&
       /OFFSET \d+/.test(normalized) &&
       /LIMIT \d+/.test(normalized)
     ) {

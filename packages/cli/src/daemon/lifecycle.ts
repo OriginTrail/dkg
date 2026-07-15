@@ -1809,6 +1809,47 @@ export async function runDaemonInner(
       delete: async (contextGraphId) => {
         dashDb.deleteContextGraphSubscription(contextGraphId);
       },
+      loadVmReconcileNegative: async (cacheKey) => {
+        const row = dashDb.getVmReconcileNegative(cacheKey);
+        if (!row) return null;
+        try {
+          const candidateNamespaces = JSON.parse(row.candidate_namespaces) as Array<{
+            metaGraph: string;
+            dataGraph: string;
+          }>;
+          if (!Array.isArray(candidateNamespaces)) return null;
+          return {
+            cacheKey: row.cache_key,
+            localCgId: row.context_graph_id,
+            failures: row.failures,
+            nextRetryAt: row.next_retry_at,
+            swmGen: row.swm_gen,
+            candidateNamespaces,
+            peerTopologyKey: row.peer_topology_key,
+          };
+        } catch {
+          dashDb.deleteVmReconcileNegative(cacheKey);
+          return null;
+        }
+      },
+      saveVmReconcileNegative: async (record) => {
+        dashDb.upsertVmReconcileNegative({
+          cache_key: record.cacheKey,
+          context_graph_id: record.localCgId,
+          failures: record.failures,
+          next_retry_at: record.nextRetryAt,
+          swm_gen: record.swmGen,
+          candidate_namespaces: JSON.stringify(record.candidateNamespaces),
+          peer_topology_key: record.peerTopologyKey,
+          updated_at: Date.now(),
+        });
+      },
+      deleteVmReconcileNegative: async (cacheKey) => {
+        dashDb.deleteVmReconcileNegative(cacheKey);
+      },
+      deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
+        dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
+      },
     },
     contextGraphMembershipStore: {
       loadAll: async () => dashDb.listContextGraphMembers().map((row) => {

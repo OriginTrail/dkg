@@ -716,6 +716,21 @@ export interface ContextGraphSubscriptionStore {
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+  loadVmReconcileNegative?(cacheKey: string): Promise<VmReconcileNegativeRecord | null>;
+  saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
+  deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
+  deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
+}
+
+/** Restart-durable, generation-gated record of one authoritative no-match scan. */
+export interface VmReconcileNegativeRecord {
+  cacheKey: string;
+  localCgId: string;
+  failures: number;
+  nextRetryAt: number;
+  swmGen: string;
+  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  peerTopologyKey: string;
 }
 
 export interface ContextGraphSubscriptionRehydrationStatus {

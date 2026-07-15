@@ -14,6 +14,7 @@ import {
   contextGraphCatalogUri,
   canonicalKnowledgeAssetGraphIdentitySuffix,
   knowledgeAssetAgentAddressesEqual,
+  getMetrics,
   isSafeIri,
   assertSafeIri,
   sparqlString,
@@ -97,10 +98,42 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
   quadFilter?: (quad: Quad) => boolean;
+  /**
+   * Optional hard materialization budget for expensive SWM slices. When set,
+   * the store is read in bounded SELECT pages and the loader rejects before
+   * retaining more than `maxRows` or `maxBytesEstimate`. This is an explicit
+   * backpressure boundary: callers must retry/defer, never treat the error as an
+   * empty or complete snapshot.
+   */
+  resultBudget?: SharedMemoryResultBudget;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
     hadInput: boolean;
   }) => string;
+}
+
+export interface SharedMemoryResultBudget {
+  pageRows: number;
+  maxRows: number;
+  maxBytesEstimate: number;
+}
+
+export class SharedMemoryResultBudgetError extends Error {
+  readonly code = 'SHARED_MEMORY_RESULT_BUDGET' as const;
+  readonly retryable = true as const;
+
+  constructor(
+    readonly reason: 'rows' | 'bytes',
+    readonly rows: number,
+    readonly bytesEstimate: number,
+    readonly limit: number,
+  ) {
+    super(
+      `Shared-memory result exceeded ${reason} budget ` +
+      `(rows=${rows}, bytesEstimate=${bytesEstimate}, limit=${limit})`,
+    );
+    this.name = 'SharedMemoryResultBudgetError';
+  }
 }
 
 export interface LoadSelectedVerifiableMemoryQuadsOptions {
@@ -407,6 +440,7 @@ export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
   sources: SwmSliceSourceTags;
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>;
   queryOptions?: Omit<QueryOptions, 'source'>;
+  resultBudget?: SharedMemoryResultBudget;
 }
 
 /**
@@ -442,6 +476,7 @@ export function loadSharedMemorySliceWithKaBoundFallback(
   kaGraphBound: SwmKaGraphBound | undefined,
   sources: SwmSliceSourceTags,
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  loadOptions?: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'>,
 ): Promise<{ quads: Quad[]; accepted: Quad[] | null }>;
 export async function loadSharedMemorySliceWithKaBoundFallback(
   store: TripleStore,
@@ -450,15 +485,24 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
   kaGraphBound: SwmKaGraphBound | undefined,
   optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
   legacyCreateAccept?: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  legacyLoadOptions: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'> = {},
 ): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
-  const options = normalizeLoadSharedMemorySliceOptions(optionsOrSources, legacyCreateAccept);
-  const { sources, createAccept, queryOptions = {} } = options;
+  const options = normalizeLoadSharedMemorySliceOptions(
+    optionsOrSources,
+    legacyCreateAccept,
+    legacyLoadOptions,
+  );
+  const { sources, createAccept, queryOptions = {}, resultBudget } = options;
+  const loadOptions = { queryOptions, resultBudget };
   const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
-    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { queryOptions, querySource: source });
+    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, {
+      ...loadOptions,
+      querySource: source,
+    });
 
   let quads = kaGraphBound
     ? await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
-        queryOptions,
+        ...loadOptions,
         querySource: sources.bounded,
       })
     : await readComplete(sources.unbounded);
@@ -482,12 +526,17 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
 function normalizeLoadSharedMemorySliceOptions(
   optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
   legacyCreateAccept: (() => Promise<(quads: Quad[]) => Quad[] | null>) | undefined,
+  legacyLoadOptions: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'>,
 ): LoadSharedMemorySliceWithKaBoundFallbackOptions {
   if ('sources' in optionsOrSources) return optionsOrSources;
   if (!legacyCreateAccept) {
     throw new TypeError('loadSharedMemorySliceWithKaBoundFallback requires createAccept');
   }
-  return { sources: optionsOrSources, createAccept: legacyCreateAccept };
+  return {
+    sources: optionsOrSources,
+    createAccept: legacyCreateAccept,
+    ...legacyLoadOptions,
+  };
 }
 
 function sharedMemorySelectionGraphPattern(
@@ -552,12 +601,88 @@ async function loadSharedMemoryQuadsInternal(
     );
   }
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
+  if (options.resultBudget) {
+    return loadSharedMemoryQuadsPaged(
+      store,
+      graphValues,
+      innerGraphPattern,
+      queryOptions,
+      options,
+    );
+  }
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }
         GRAPH ?g { ${innerGraphPattern} }
       }`, queryOptions);
   if (result.type !== 'quads') return [];
   return options.quadFilter ? result.quads.filter(options.quadFilter) : result.quads;
+}
+
+function normalizePositiveInteger(value: number, fallback: number): number {
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function estimateQuadHeapBytes(quad: Quad): number {
+  // V8 strings are up to two bytes/code-unit. Include a fixed object/field
+  // allowance so the bound remains conservative without allocating a serialized
+  // N-Quads copy merely to measure it.
+  return 96 + 2 * (
+    quad.subject.length + quad.predicate.length + quad.object.length + quad.graph.length
+  );
+}
+
+async function loadSharedMemoryQuadsPaged(
+  store: TripleStore,
+  graphValues: string,
+  innerGraphPattern: string,
+  queryOptions: QueryOptions | undefined,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+): Promise<Quad[]> {
+  const configured = options.resultBudget!;
+  const pageRows = normalizePositiveInteger(configured.pageRows, 1_000);
+  const maxRows = normalizePositiveInteger(configured.maxRows, pageRows);
+  const maxBytesEstimate = normalizePositiveInteger(configured.maxBytesEstimate, 64 * 1024 * 1024);
+  const quads: Quad[] = [];
+  let rawRows = 0;
+  let bytesEstimate = 0;
+  const source = queryOptions?.source ?? 'unknown';
+  const observeMaterialization = () => {
+    getMetrics().storeQueryResultRows.record(rawRows, { source });
+    getMetrics().storeQueryResultBytesEstimate.record(bytesEstimate, { source });
+  };
+
+  for (let offset = 0; ; offset += pageRows) {
+    const result = await store.query(`SELECT DISTINCT ?s ?p ?o WHERE {
+      VALUES ?g { ${graphValues} }
+      GRAPH ?g { ${innerGraphPattern} }
+    }
+    ORDER BY ?s ?p ?o
+    OFFSET ${offset}
+    LIMIT ${pageRows}`, queryOptions);
+    if (result.type !== 'bindings' || result.bindings.length === 0) break;
+
+    for (const row of result.bindings) {
+      const subject = row['s'];
+      const predicate = row['p'];
+      const object = row['o'];
+      if (!subject || !predicate || !object) continue;
+      rawRows += 1;
+      if (rawRows > maxRows) {
+        observeMaterialization();
+        throw new SharedMemoryResultBudgetError('rows', rawRows, bytesEstimate, maxRows);
+      }
+      const quad: Quad = { subject, predicate, object, graph: '' };
+      bytesEstimate += estimateQuadHeapBytes(quad);
+      if (bytesEstimate > maxBytesEstimate) {
+        observeMaterialization();
+        throw new SharedMemoryResultBudgetError('bytes', rawRows, bytesEstimate, maxBytesEstimate);
+      }
+      if (!options.quadFilter || options.quadFilter(quad)) quads.push(quad);
+    }
+    if (result.bindings.length < pageRows) break;
+  }
+  observeMaterialization();
+  return quads;
 }
 
 /**

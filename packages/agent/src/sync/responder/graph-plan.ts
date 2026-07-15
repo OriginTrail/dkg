@@ -46,7 +46,6 @@ const PROV_GENERATED = 'http://www.w3.org/ns/prov#generated';
 const PROV_USED = 'http://www.w3.org/ns/prov#used';
 const DKG_JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS = 30_000;
-
 function syncResponderStoreOptions(signal: AbortSignal | undefined, source: string): QueryOptions {
   return { signal, priority: 'background', source };
 }
@@ -65,6 +64,25 @@ export interface SubGraphNameMemo {
     refreshGeneration?: string;
     signal?: AbortSignal;
   }): Promise<readonly string[]>;
+}
+
+interface FreshSwmDataGraphPlanEntry {
+  graph: string;
+  roots: readonly string[];
+  rowCount: number;
+}
+
+interface FreshSwmDataGraphPlan {
+  entries: readonly FreshSwmDataGraphPlanEntry[];
+  totalRows: number;
+}
+
+export interface FreshSwmDataGraphPlanMemo {
+  get(
+    key: string,
+    load: () => Promise<FreshSwmDataGraphPlan>,
+    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+  ): Promise<FreshSwmDataGraphPlan | null>;
 }
 
 interface RowListCache {
@@ -160,6 +178,54 @@ export function createResponderSubGraphRegistrationMemo(
     (contextGraphId) => readRegisteredSubGraphNames(store, contextGraphId),
     ttlMs,
   );
+}
+
+/**
+ * Session-scoped plan cache for oversized TTL-filtered SWM snapshots.
+ *
+ * The plan is tiny (graph IRIs, admitted root IRIs, and row counts), but it is
+ * expensive enough to compute that rebuilding it for every 64-row frame would
+ * dominate a large sync. Touch entries on every page so an actively progressing
+ * 1 GiB session remains live for the same ten-minute window as its responder
+ * token. Offset>0 requires the existing plan: silently rebuilding against a
+ * moving TTL cutoff would make the numeric offset skip or duplicate rows.
+ */
+export function createResponderFreshSwmDataGraphPlanMemo(
+  ttlMs = 10 * 60_000,
+  maxEntries = 32,
+): FreshSwmDataGraphPlanMemo {
+  const cached = new Map<string, { value: FreshSwmDataGraphPlan; cachedAt: number }>();
+  const inflight = new Map<string, Promise<FreshSwmDataGraphPlan>>();
+  const prune = (now = Date.now()) => {
+    for (const [key, entry] of cached) {
+      if (now - entry.cachedAt >= ttlMs) cached.delete(key);
+    }
+  };
+  return {
+    async get(key, load, options) {
+      throwIfAborted(options?.signal);
+      const now = Date.now();
+      prune(now);
+      const pending = inflight.get(key);
+      if (pending) return raceAgainstAbort(pending, options?.signal);
+      const existing = cached.get(key);
+      if (!options?.refresh && existing) {
+        cached.delete(key);
+        cached.set(key, { value: existing.value, cachedAt: now });
+        return existing.value;
+      }
+      if (options?.requireExisting) return null;
+      if (!existing && cached.size >= maxEntries) cached.delete(cached.keys().next().value!);
+      const pendingLoad = load()
+        .then((value) => {
+          cached.set(key, { value, cachedAt: Date.now() });
+          return value;
+        })
+        .finally(() => inflight.delete(key));
+      inflight.set(key, pendingLoad);
+      return raceAgainstAbort(pendingLoad, options?.signal);
+    },
+  };
 }
 
 function createSubGraphNameMemo(
@@ -311,6 +377,7 @@ export async function readSwmDataPage(params: {
   rowListCacheKey?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
+  freshGraphPlanMemo?: FreshSwmDataGraphPlanMemo;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
@@ -340,18 +407,36 @@ export async function readSwmDataPage(params: {
     );
   }
 
-  return readResponderRowsPage(
-    cache,
-    (offset, limit, signal) => readFreshSwmDataRowsPage(
+  const loadStoreBoundedPage: StorePageLoader = async (offset, limit, signal) => {
+    const loadPlan = () => buildFreshSwmDataGraphPlan(
       params.store,
       dataGraphs,
       graphSet,
       candidateGraphsFor,
       params.cutoffIso!,
+      signal,
+    );
+    const plan = params.freshGraphPlanMemo && params.rowListCacheKey
+      ? await params.freshGraphPlanMemo.get(params.rowListCacheKey, loadPlan, {
+        refresh: offset === 0 ? params.refreshRowList : false,
+        requireExisting: offset > 0,
+        signal,
+      })
+      : await loadPlan();
+    if (!plan) {
+      throw new Error('Shared-memory data sync session graph plan expired before page completion');
+    }
+    return readFreshSwmDataRowsPageFromPlan(
+      params.store,
+      plan,
       offset,
       limit,
       signal,
-    ),
+    );
+  };
+  return readResponderRowsPage(
+    cache,
+    loadStoreBoundedPage,
     params.offset,
     params.limit,
     params.signal,
@@ -1219,66 +1304,182 @@ async function readFreshSwmDataRows(
   return rows.sort(compareRows);
 }
 
+interface FreshSwmCandidateGraph {
+  graph: string;
+  metaGraph: string;
+}
+
+const FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK = 100;
+
+function chunkValues<T>(values: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let offset = 0; offset < values.length; offset += size) {
+    chunks.push(values.slice(offset, offset + size));
+  }
+  return chunks;
+}
+
+function parseSparqlInteger(value: string | undefined): number {
+  const match = String(value ?? '').match(/-?\d+/);
+  return match ? Math.max(0, Math.floor(Number(match[0]))) : 0;
+}
+
 /**
- * Store-bounded, page-safe equivalent of {@link readFreshSwmDataRows} used as the
- * oversized-snapshot fallback for TTL-cutoff shared-memory data. Fresh roots are
- * resolved per data-graph inside the store (`FILTER EXISTS`), so a page reads
- * only the requested rows instead of materializing every fresh root's data
- * across all candidate graphs.
+ * Build a tiny, stable pagination plan for an oversized TTL-filtered SWM phase.
  *
- * INVARIANT: this MUST return the same SET of rows as {@link readFreshSwmDataRows}
- * and MUST be edited together with it. Row ORDER may differ from `compareRows`;
- * that is safe within a single paginated session (see readDurableMetaRowsPage).
+ * The old fallback put all candidate graphs behind one `FILTER EXISTS` join for
+ * every page. Both Oxigraph and Blazegraph can legally choose a plan that scans
+ * the complete literal-heavy graph family before probing the small metadata
+ * graph; on a 1 GiB workspace that exceeded the 30s HTTP query timeout on every
+ * page. This planner inverts the work with backend-neutral SPARQL 1.1:
+ *
+ *  1. Join each concrete graph to its fresh metadata roots by the root subject
+ *     (an indexed lookup and a DKG workspace invariant: `rootEntity` names an
+ *     entity present in the shared payload).
+ *  2. Count the exact root closures per concrete graph without returning their
+ *     large literal values.
+ *  3. Cache only graph/root/count scalars for the responder session.
+ *
+ * Paging then touches one or two concrete graphs at a time with `VALUES ?root`,
+ * preserving the exact root/skolem filter used by {@link readFreshSwmDataRows}
+ * while avoiding a database-specific optimizer hint or graph-family scan.
  */
-async function readFreshSwmDataRowsPage(
+async function buildFreshSwmDataGraphPlan(
   store: TripleStore,
   dataGraphs: readonly string[],
   graphSet: ReadonlySet<string>,
   candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
-  offset: number,
-  limit: number,
   signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
+): Promise<FreshSwmDataGraphPlan> {
   const cutoffFilter =
     `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
-  const unions: string[] = [];
+  const candidates: FreshSwmCandidateGraph[] = [];
   for (const graph of dataGraphs) {
     const metaGraph = `${graph}_meta`;
     if (!graphSet.has(metaGraph)) continue;
-    const candidateValues = graphValues(candidateGraphsFor(graph));
-    if (!candidateValues) continue;
-    unions.push(`
+    for (const candidate of candidateGraphsFor(graph)) {
+      candidates.push({ graph: candidate, metaGraph });
+    }
+  }
+  const uniqueCandidates = [...new Map(
+    candidates.map((candidate) => [candidate.graph, candidate]),
+  ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
+  if (uniqueCandidates.length === 0) return { entries: [], totalRows: 0 };
+
+  const rootsByGraph = new Map<string, Set<string>>();
+  for (const chunk of chunkValues(uniqueCandidates, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+    const unions = chunk.map(({ graph, metaGraph }) => `
       {
-        VALUES ?g { ${candidateValues} }
-        GRAPH ?g { ?s ?p ?o }
-        FILTER EXISTS {
+        SELECT (<${assertSafeIri(graph)}> AS ?g) ?root WHERE {
           GRAPH <${assertSafeIri(metaGraph)}> {
             ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
                 <${DKG_PUBLISHED_AT}> ?ts ;
                 <${DKG_ROOT_ENTITY}> ?root .
             ${cutoffFilter}
           }
-          FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+          GRAPH <${assertSafeIri(graph)}> { ?root ?rootPredicate ?rootObject }
         }
       }`);
-  }
-  if (unions.length === 0) return [];
-  const res = await store.query(`
-    SELECT DISTINCT ?g ?s ?p ?o WHERE {
-      ${unions.join('\n      UNION')}
+    const rootResult = await store.query(`
+      SELECT DISTINCT ?g ?root WHERE {
+        ${unions.join('\n        UNION')}
+      }
+      ORDER BY ?g ?root
+    `, syncResponderStoreOptions(signal, 'sync.responder.planFreshSwmGraphRoots'));
+    if (rootResult.type !== 'bindings') continue;
+    for (const row of rootResult.bindings) {
+      const graph = row['g'];
+      const root = row['root'];
+      if (!graph || !root) continue;
+      const roots = rootsByGraph.get(graph) ?? new Set<string>();
+      roots.add(root);
+      rootsByGraph.set(graph, roots);
     }
-    ORDER BY ?g ?s ?p ?o
-    OFFSET ${safeOffset}
-    LIMIT ${safeLimit}
-  `, syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmDataRowsPage'));
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
-    .filter((row) => row.s && row.p && row.o && row.g);
+  }
+
+  const countsByGraph = new Map<string, number>();
+  const admitted = [...rootsByGraph.entries()]
+    .map(([graph, roots]) => ({ graph, roots: [...roots].sort(compareCodePoint) }))
+    .sort((a, b) => compareCodePoint(a.graph, b.graph));
+  for (const chunk of chunkValues(admitted, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+    const unions = chunk.map(({ graph, roots }) => `
+      {
+        SELECT (<${assertSafeIri(graph)}> AS ?g) (COUNT(*) AS ?count) WHERE {
+          {
+            SELECT DISTINCT ?s ?p ?o WHERE {
+              VALUES ?root { ${graphValues(roots)} }
+              GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+              FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+            }
+          }
+        }
+      }`);
+    const countResult = await store.query(`
+      SELECT ?g ?count WHERE {
+        ${unions.join('\n        UNION')}
+      }
+      ORDER BY ?g
+    `, syncResponderStoreOptions(signal, 'sync.responder.countFreshSwmGraphRows'));
+    if (countResult.type !== 'bindings') continue;
+    for (const row of countResult.bindings) {
+      const graph = row['g'];
+      if (graph) countsByGraph.set(graph, parseSparqlInteger(row['count']));
+    }
+  }
+
+  const entries = admitted
+    .map(({ graph, roots }) => ({ graph, roots, rowCount: countsByGraph.get(graph) ?? 0 }))
+    .filter((entry) => entry.rowCount > 0);
+  return {
+    entries,
+    totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
+  };
+}
+
+async function readFreshSwmDataRowsPageFromPlan(
+  store: TripleStore,
+  plan: FreshSwmDataGraphPlan,
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  let skip = Math.max(0, Math.floor(offset));
+  let remaining = Math.max(0, Math.floor(limit));
+  if (remaining === 0 || skip >= plan.totalRows) return [];
+  const rows: SyncRow[] = [];
+  for (const entry of plan.entries) {
+    if (skip >= entry.rowCount) {
+      skip -= entry.rowCount;
+      continue;
+    }
+    const result = await store.query(`
+      SELECT DISTINCT ?s ?p ?o WHERE {
+        VALUES ?root { ${graphValues(entry.roots)} }
+        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
+        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+      }
+      ORDER BY ?s ?p ?o
+      OFFSET ${skip}
+      LIMIT ${remaining}
+    `, syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmDataRowsPage'));
+    let added = 0;
+    if (result.type === 'bindings') {
+      for (const row of result.bindings) {
+        const s = row['s'];
+        const p = row['p'];
+        const o = row['o'];
+        if (s && p && o) {
+          rows.push({ s, p, o, g: entry.graph });
+          added += 1;
+        }
+      }
+    }
+    remaining -= added;
+    if (remaining <= 0) break;
+    skip = 0;
+  }
+  return rows;
 }
 
 async function readFreshSwmRoots(
