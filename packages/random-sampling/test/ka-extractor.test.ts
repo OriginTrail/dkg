@@ -145,10 +145,22 @@ describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
   const KA_ID = (BigInt(AUTHOR) << 96n) | KA_NUMBER;
   const UAL = `did:dkg:otp:20430/${AUTHOR}/${KA_NUMBER}`;
 
+  interface GraphScopedSeedOptions {
+    privateRoot?: Uint8Array;
+    privateRootLiteral?: string;
+    subGraphName?: string;
+    status?: string;
+    contentScopeLiteral?: string;
+    assertionVersionLiteral?: string;
+    publicCountLiteral?: string;
+    privateCountLiteral?: string;
+    omit?: 'assertionGraph';
+  }
+
   async function seedGraphScoped(
     store: OxigraphStore,
     publicTriples: Array<{ subject: string; predicate: string; object: string }>,
-    privateRoot?: Uint8Array,
+    options: GraphScopedSeedOptions = {},
   ): Promise<string> {
     await seedOntology(store, CG_NAME, CG_ID);
     const scope = createGraphKnowledgeAssetScope(UAL, '2');
@@ -156,21 +168,67 @@ describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
       CG_NAME,
       MemoryLayer.VerifiableMemory,
       scope,
+      options.subGraphName,
     );
     const metaGraph = contextGraphMetaUri(CG_NAME);
+    const privateRootLiteral = options.privateRootLiteral
+      ?? (options.privateRoot ? toHexNoPrefix(options.privateRoot) : undefined);
     const metadata: Quad[] = [
       { subject: UAL, predicate: `${DKG}batchId`, object: `"${KA_ID}"^^<${XSD}integer>`, graph: metaGraph },
-      { subject: UAL, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD}integer>`, graph: metaGraph },
-      { subject: UAL, predicate: `${DKG}assertionVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: metaGraph },
-      { subject: UAL, predicate: `${DKG}publicTripleCount`, object: `"${publicTriples.length}"^^<${XSD}integer>`, graph: metaGraph },
-      { subject: UAL, predicate: `${DKG}privateTripleCount`, object: `"${privateRoot ? 1 : 0}"^^<${XSD}integer>`, graph: metaGraph },
-      { subject: UAL, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: metaGraph },
+      {
+        subject: UAL,
+        predicate: `${DKG}contentScopeVersion`,
+        object: options.contentScopeLiteral
+          ?? `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD}integer>`,
+        graph: metaGraph,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}assertionVersion`,
+        object: options.assertionVersionLiteral ?? `"2"^^<${XSD}integer>`,
+        graph: metaGraph,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}publicTripleCount`,
+        object: options.publicCountLiteral ?? `"${publicTriples.length}"^^<${XSD}integer>`,
+        graph: metaGraph,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}privateTripleCount`,
+        object: options.privateCountLiteral
+          ?? `"${privateRootLiteral ? 1 : 0}"^^<${XSD}integer>`,
+        graph: metaGraph,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}status`,
+        object: `"${options.status ?? 'confirmed'}"`,
+        graph: metaGraph,
+      },
     ];
-    if (privateRoot) {
+    if (options.omit !== 'assertionGraph') {
+      metadata.push({
+        subject: UAL,
+        predicate: `${DKG}assertionGraph`,
+        object: vmGraph,
+        graph: metaGraph,
+      });
+    }
+    if (options.subGraphName) {
+      metadata.push({
+        subject: UAL,
+        predicate: `${DKG}subGraphName`,
+        object: `"${options.subGraphName}"`,
+        graph: metaGraph,
+      });
+    }
+    if (privateRootLiteral) {
       metadata.push({
         subject: UAL,
         predicate: `${DKG}privateMerkleRoot`,
-        object: `"${toHexNoPrefix(privateRoot)}"`,
+        object: `"${privateRootLiteral}"`,
         graph: metaGraph,
       });
     }
@@ -186,7 +244,7 @@ describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
       { subject: 'urn:any:one', predicate: 'urn:p:value', object: '"one"' },
       { subject: 'urn:unrelated:two', predicate: 'urn:p:value', object: '"two"' },
     ];
-    const vmGraph = await seedGraphScoped(store, triples, privateRoot);
+    const vmGraph = await seedGraphScoped(store, triples, { privateRoot });
 
     const result = await extractV10KCFromStore(store, CG_ID, KA_ID);
 
@@ -205,7 +263,7 @@ describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
   it('supports a fully private KA with an empty public VM graph', async () => {
     const store = new OxigraphStore();
     const privateRoot = new Uint8Array(32).fill(0x33);
-    const vmGraph = await seedGraphScoped(store, [], privateRoot);
+    const vmGraph = await seedGraphScoped(store, [], { privateRoot });
 
     const result = await extractV10KCFromStore(store, CG_ID, KA_ID);
 
@@ -213,6 +271,99 @@ describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
     expect(result.triples).toEqual([]);
     expect(result.rootEntities).toEqual([]);
     expect(result.leaves).toEqual([privateRoot]);
+  });
+
+  it('ignores tentative graph-scoped metadata instead of proving future VM leaves', async () => {
+    const store = new OxigraphStore();
+    await seedGraphScoped(store, [
+      { subject: 'urn:future', predicate: 'urn:p:value', object: '"future"' },
+    ], { status: 'tentative' });
+
+    await expect(extractV10KCFromStore(store, CG_ID, KA_ID))
+      .rejects.toBeInstanceOf(KCNotFoundError);
+  });
+
+  it('uses authoritative named-subgraph metadata and ignores a stale caller hint', async () => {
+    const store = new OxigraphStore();
+    const triples = [
+      { subject: 'urn:research:item', predicate: 'urn:p:value', object: '"paper"' },
+    ];
+    const vmGraph = await seedGraphScoped(store, triples, { subGraphName: 'research' });
+
+    const result = await extractV10KCFromStore(store, CG_ID, KA_ID, 'stale-hint');
+
+    expect(result.subGraphName).toBe('research');
+    expect(result.dataGraph).toBe(vmGraph);
+    expect(result.triples.map((triple) => triple.subject)).toEqual(['urn:research:item']);
+  });
+
+  it('excludes graph-scoped post-publish trust stamps from the proof leaves', async () => {
+    const store = new OxigraphStore();
+    const committed = {
+      subject: 'urn:asset:trusted',
+      predicate: 'urn:p:value',
+      object: '"committed"',
+    };
+    const vmGraph = await seedGraphScoped(store, [committed]);
+    await store.insert([{
+      subject: committed.subject,
+      predicate: `${DKG}trustLevel`,
+      object: '"self-attested"',
+      graph: vmGraph,
+    }]);
+
+    const result = await extractV10KCFromStore(store, CG_ID, KA_ID);
+
+    expect(result.triples).toHaveLength(1);
+    expect(result.triples[0]).toMatchObject(committed);
+    expect(result.leaves).toEqual([
+      hashTripleV10(committed.subject, committed.predicate, committed.object),
+    ]);
+  });
+
+  it('rejects partial and conflicting confirmed V2 envelopes without legacy fallback', async () => {
+    const partialStore = new OxigraphStore();
+    await seedGraphScoped(partialStore, [
+      { subject: 'urn:partial', predicate: 'urn:p:value', object: '"partial"' },
+    ], { omit: 'assertionGraph' });
+    await expect(extractV10KCFromStore(partialStore, CG_ID, KA_ID))
+      .rejects.toThrow(/assertionGraph must have exactly one value/);
+
+    const conflictingStore = new OxigraphStore();
+    await seedGraphScoped(conflictingStore, [
+      { subject: 'urn:conflict', predicate: 'urn:p:value', object: '"conflict"' },
+    ]);
+    await conflictingStore.insert([{
+      subject: UAL,
+      predicate: `${DKG}assertionVersion`,
+      object: `"3"^^<${XSD}integer>`,
+      graph: contextGraphMetaUri(CG_NAME),
+    }]);
+    await expect(extractV10KCFromStore(conflictingStore, CG_ID, KA_ID))
+      .rejects.toThrow(/assertionVersion must have exactly one value/);
+  });
+
+  it('rejects non-xsd integer envelopes and malformed private commitments', async () => {
+    const malformedScopeStore = new OxigraphStore();
+    await seedGraphScoped(malformedScopeStore, [
+      { subject: 'urn:scope', predicate: 'urn:p:value', object: '"scope"' },
+    ], { contentScopeLiteral: `"2e0"^^<${XSD}integer>` });
+    await expect(extractV10KCFromStore(malformedScopeStore, CG_ID, KA_ID))
+      .rejects.toThrow(/contentScopeVersion is not a valid xsd:integer/);
+
+    const malformedCountStore = new OxigraphStore();
+    await seedGraphScoped(malformedCountStore, [
+      { subject: 'urn:count', predicate: 'urn:p:value', object: '"count"' },
+    ], { publicCountLiteral: `"1e0"^^<${XSD}integer>` });
+    await expect(extractV10KCFromStore(malformedCountStore, CG_ID, KA_ID))
+      .rejects.toThrow(/publicTripleCount is not a valid xsd:integer/);
+
+    const malformedRootStore = new OxigraphStore();
+    await seedGraphScoped(malformedRootStore, [], {
+      privateRootLiteral: '0g'.repeat(32),
+    });
+    await expect(extractV10KCFromStore(malformedRootStore, CG_ID, KA_ID))
+      .rejects.toThrow(/Invalid graph-scoped private commitment/);
   });
 });
 

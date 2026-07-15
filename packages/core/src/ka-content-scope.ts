@@ -70,6 +70,7 @@ export class LegacyKnowledgeAssetReadOnlyError extends Error {
 }
 
 const DETERMINISTIC_KA_UAL_RE = /^did:dkg:([^/]+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)$/;
+const MAX_KA_NUMBER_EXCLUSIVE = 1n << 96n;
 
 /**
  * Parse and canonicalize the deterministic Option-1 UAL used as graph identity.
@@ -93,7 +94,13 @@ export function parseDeterministicKnowledgeAssetUal(
   const [, chainId, rawAgentAddress, rawKaNumber] = match;
   const agentAddress = canonicalKnowledgeAssetAgentAddress(rawAgentAddress);
   // BigInt canonicalisation prevents leading-zero aliases for one graph.
-  const kaNumber = BigInt(rawKaNumber).toString();
+  const parsedKaNumber = BigInt(rawKaNumber);
+  if (parsedKaNumber >= MAX_KA_NUMBER_EXCLUSIVE) {
+    throw new Error(
+      `Graph-scoped KA number must fit the uint96 on-chain identity field: ${rawKaNumber}`,
+    );
+  }
+  const kaNumber = parsedKaNumber.toString();
   return {
     ual: `did:dkg:${chainId}/${agentAddress}/${kaNumber}`,
     chainId,
