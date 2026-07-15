@@ -9,7 +9,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -161,6 +161,10 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-swm.js';
+import {
+  computeKnowledgeAssetVmPublishIntentKey,
+  type KnowledgeAssetVmPublishIntent,
+} from './knowledge-asset-vm-publish-intent.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -3886,6 +3890,7 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
+    contextGraphId = normalizePublishContextGraphId(contextGraphId);
     const agentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
@@ -4014,41 +4019,7 @@ export class PublishMethods extends DKGAgentBase {
     const publisherOverrideString = opts?.publisherNodeIdentityIdOverride !== undefined
       ? opts.publisherNodeIdentityIdOverride.toString() as `${bigint}`
       : undefined;
-    const canonicalIntent = {
-      contextGraphId,
-      name,
-      agentAddress,
-      subGraphName: opts?.subGraphName ?? null,
-      shareOperationId,
-      roots: [],
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: seal.kaUal,
-      assertionVersion: seal.assertionVersion,
-      publicTripleCount: seal.publicTripleCount,
-      privateMerkleRoot: seal.privateMerkleRoot
-        ? ethers.hexlify(seal.privateMerkleRoot).toLowerCase()
-        : null,
-      privateTripleCount: seal.privateTripleCount,
-      accessPolicy,
-      allowedPeers,
-      entityProofs: opts?.entityProofs ?? null,
-      sealMerkleRoot: sealMerkleRoot.toLowerCase(),
-      seal: queuedSeal,
-      sealChainId: seal.chainId.toString(),
-      sealKav10Address: ethers.getAddress(seal.kav10Address),
-      sealFinalizedAtIso: seal.finalizedAtIso,
-      wmCurrentAssertion: history.wmCurrentAssertion ?? null,
-      swmCurrentAssertion: history.swmCurrentAssertion ?? null,
-      vmCurrentAssertion: history.vmCurrentAssertion ?? null,
-      kaNumber: history.kaNumber ?? null,
-      reservedUal: history.reservedUal ?? null,
-      publishEpochs: opts?.publishEpochs ?? null,
-      clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? null,
-      publisherNodeIdentityIdOverride: publisherOverrideString ?? null,
-    };
-    const intentKey = `sha256:${createHash('sha256').update(JSON.stringify(canonicalIntent)).digest('hex')}`;
-
-    return {
+    const request: KnowledgeAssetVmPublishIntent = {
       contextGraphId,
       name,
       agentAddress,
@@ -4071,7 +4042,6 @@ export class PublishMethods extends DKGAgentBase {
       sealKav10Address: ethers.getAddress(seal.kav10Address) as `0x${string}`,
       sealFinalizedAtIso: seal.finalizedAtIso,
       sealMerkleRoot,
-      intentKey,
       ...(history.wmCurrentAssertion ? { wmCurrentAssertion: history.wmCurrentAssertion } : {}),
       ...(history.swmCurrentAssertion ? { swmCurrentAssertion: history.swmCurrentAssertion } : {}),
       ...(history.vmCurrentAssertion ? { vmCurrentAssertion: history.vmCurrentAssertion } : {}),
@@ -4080,6 +4050,10 @@ export class PublishMethods extends DKGAgentBase {
       ...(opts?.publishEpochs !== undefined ? { publishEpochs: opts.publishEpochs } : {}),
       ...(opts?.clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter: opts.clearSharedMemoryAfter } : {}),
       ...(publisherOverrideString !== undefined ? { publisherNodeIdentityIdOverride: publisherOverrideString } : {}),
+    };
+    return {
+      ...request,
+      intentKey: computeKnowledgeAssetVmPublishIntentKey(request),
     };
   }
 
