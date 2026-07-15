@@ -351,6 +351,65 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
     });
   });
 
+  describe('phase=meta (TTL on, graph-scoped heads)', () => {
+    it('serves an untimestamped rootless head when its selected operation is fresh', async () => {
+      const storeTtl = new OxigraphStore();
+      const freshIso = new Date(Date.now() - 1_000).toISOString();
+      const staleIso = new Date(Date.now() - 10_000).toISOString();
+      const freshUal = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7';
+      const staleUal = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/8';
+      const graphScopedRows = (ual: string, opId: string, timestamp: string) => {
+        const op = `urn:dkg:share:${CG_ID}:${opId}`;
+        const head = `${ual}#dkg-swm-head`;
+        return [
+          { graph: ROOT_SWM_META, subject: op, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}publishedAt`, object: `"${timestamp}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}shareOperationId`, object: `"${opId}"` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}kaUal`, object: ual },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}assertionVersion`, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}kaUal`, object: ual },
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}assertionVersion`, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}shareOperationId`, object: `"${opId}"` },
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}assertionGraph`, object: `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/${ual.endsWith('/7') ? '7' : '8'}` },
+        ];
+      };
+      await storeTtl.insert([
+        ...graphScopedRows(freshUal, 'fresh-rootless', freshIso),
+        ...graphScopedRows(staleUal, 'stale-rootless', staleIso),
+      ]);
+      const capTtl = captureHandler();
+      registerSyncHandler({
+        register: capTtl.register,
+        protocolSync: '/origintrail/dkg/sync/1.0.0',
+        syncDeniedResponse: 'sync-denied',
+        syncPageSize: 5000,
+        sharedMemoryTtlMs: 5_000,
+        store: storeTtl,
+        peerId: 'self-peer',
+        parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+        authorizeSyncRequest: async () => true,
+        logWarn: noopLog,
+        logDebug: noopLog,
+      });
+
+      const out = await capTtl.invoke({
+        contextGraphId: CG_ID,
+        offset: 0,
+        limit: 5000,
+        includeSharedMemory: true,
+        phase: 'meta',
+      });
+
+      expect(out).toContain(`${freshUal}#dkg-swm-head`);
+      expect(out).toContain('urn:dkg:share:devnet-test:fresh-rootless');
+      expect(out).not.toContain(`${staleUal}#dkg-swm-head`);
+      expect(out).not.toContain('urn:dkg:share:devnet-test:stale-rootless');
+      await storeTtl.close();
+    });
+  });
+
   // Codex review on #885 — URI shape alone is NOT a sufficient CG
   // boundary because `validateContextGraphId` permits `/` in the CG
   // ID (wallet-scoped IDs do, e.g. `0xabc/project`). For a request on

@@ -96,7 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
@@ -675,6 +675,7 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
   fetchSyncPages: RecoverContextGraphSwmOptions['fetchSyncPages'];
   processSharedMemoryBatch: RecoverContextGraphSwmOptions['processSharedMemoryBatch'];
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
   markMetaProjectionDirty: (quads: Quad[]) => void;
@@ -809,6 +810,7 @@ function mergeSharedMemorySyncResults(
 function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
   return {
     replacedRoots: 0,
+    replacedGraphs: 0,
     insertedDataQuads: 0,
     insertedMetaQuads: 0,
     droppedDataTriples: 0,
@@ -4448,10 +4450,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         store: this.store,
         listSubGraphs: (id) => this.listSubGraphs(id),
         createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),
-        fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline) =>
-          this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, undefined, undefined, undefined, true),
+        fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
+          this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
           this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
+        publicSnapshotStore: this.publicSnapshotStore,
         recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
         invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
         markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
@@ -4659,10 +4662,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           store: this.store,
           listSubGraphs: (id) => this.listSubGraphs(id),
           createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),
-          fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline) =>
-            this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, undefined, undefined, undefined, true),
+          fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
+            this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
+          publicSnapshotStore: this.publicSnapshotStore,
           recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
           invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
           markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
@@ -6729,6 +6733,7 @@ async function runRecoverContextGraphSwmFromPeer(
     // responder gates via the strict members-only `isMemberRecoveryAuthorized`).
     fetchSyncPages: dependencies.fetchSyncPages,
     processSharedMemoryBatch: dependencies.processSharedMemoryBatch,
+    publicSnapshotStore: dependencies.publicSnapshotStore,
     // SwmRecoveryStore: invalidate the list cache + mark the meta projection
     // dirty on insert (parity with runSharedMemorySync's
     // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
@@ -6748,6 +6753,24 @@ async function runRecoverContextGraphSwmFromPeer(
           dependencies.invalidateListContextGraphsCache();
           dependencies.markMetaProjectionDirty(inserted);
         }
+      },
+      replaceGraph: async (graph, quads) => {
+        const replaced = await tryReplaceGraphAtomically(
+          dependencies.store,
+          graph,
+          quads,
+          {
+            priority: 'background',
+            source: 'agent.swmRecovery.graphScopedReplace',
+          },
+        );
+        if (!replaced) {
+          throw Object.assign(
+            new Error('Graph-scoped SWM recovery requires atomic TripleStore.replaceGraph() support'),
+            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
+          );
+        }
+        dependencies.invalidateListContextGraphsCache();
       },
       deleteByPattern: (pattern) => dependencies.store.deleteByPattern(pattern, {
         priority: 'background',
@@ -6811,6 +6834,43 @@ async function runRecoverContextGraphSwmFromPeer(
               );
             }
           }
+        }
+      }
+    },
+    replaceMetaForGraphAssets: async (assets) => {
+      for (const asset of assets) {
+        const linkedOperations = await dependencies.store.query(
+          `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
+            `<${assertSafeIri(asset.headSubject)}> <http://dkg.io/ontology/shareOperationId> ?shareId . ` +
+            `?op <http://dkg.io/ontology/shareOperationId> ?shareId ; ` +
+            `<http://dkg.io/ontology/kaUal> <${assertSafeIri(asset.kaUal)}> . } }`,
+          {
+            priority: 'background',
+            source: 'agent.swmRecovery.replaceMetaForGraphAssets.findOperations',
+          },
+        );
+        const operationSubjects = new Set<string>([asset.operationSubject]);
+        if (linkedOperations.type === 'bindings') {
+          for (const row of linkedOperations.bindings) {
+            const operation = row['op'];
+            if (operation) operationSubjects.add(operation);
+          }
+        }
+        await dependencies.store.deleteByPattern(
+          { graph: asset.metaGraph, subject: asset.headSubject },
+          {
+            priority: 'background',
+            source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead',
+          },
+        );
+        for (const operationSubject of operationSubjects) {
+          await dependencies.store.deleteByPattern(
+            { graph: asset.metaGraph, subject: operationSubject },
+            {
+              priority: 'background',
+              source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation',
+            },
+          );
         }
       }
     },

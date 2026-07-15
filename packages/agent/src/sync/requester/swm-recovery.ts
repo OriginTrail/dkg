@@ -1,13 +1,24 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
+import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import {
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from './page-fetch.js';
+import type { SyncPhase } from '../auth/request-build.js';
 import { applySwmRecovery, type SwmRecoveryStore } from './swm-recovery-apply.js';
-import { sharedMemoryOwnershipKeyFromGraph } from './shared-memory-sync.js';
+import {
+  sharedMemoryOwnershipKeyFromGraph,
+  syncPublicSnapshotsForMeta,
+} from './shared-memory-sync.js';
 import { appendInPlace } from '../append-in-place.js';
+import {
+  discoverSwmRecoverySubGraphNames,
+  materializeGraphScopedSwmRecoveryAsset,
+  parseGraphScopedSwmRecoveryDescriptors,
+  type GraphScopedSwmRecoveryDescriptor,
+} from '../graph-scoped-swm-recovery.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -58,9 +69,10 @@ export interface RecoverContextGraphSwmDeps {
     remotePeerId: string,
     contextGraphId: string,
     includeSharedMemory: boolean,
-    phase: RecoverableSyncPhase,
+    phase: SyncPhase,
     graphUri: string,
     deadline: number,
+    snapshotRef?: string,
   ) => Promise<SyncPageResult>;
   readonly processSharedMemoryBatch: (
     wsDataQuads: Quad[],
@@ -70,6 +82,7 @@ export interface RecoverContextGraphSwmDeps {
     excludedSubGraphNames?: readonly string[],
   ) => Promise<ProcessedSwmBatch>;
   readonly store: SwmRecoveryStore;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
    * REPLACE (not append) the SWM meta for each recovered root, BEFORE the fresh
    * `verifiedMeta` is inserted. `applySwmRecovery` REPLACEs the root DATA, but
@@ -82,6 +95,10 @@ export interface RecoverContextGraphSwmDeps {
   readonly replaceMetaForRoots?: (
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
+  ) => Promise<void>;
+  /** Replace the active head/operation rows for each exact graph asset. */
+  readonly replaceMetaForGraphAssets?: (
+    assets: readonly GraphScopedSwmRecoveryDescriptor[],
   ) => Promise<void>;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
@@ -102,6 +119,7 @@ export interface RecoverContextGraphSwmDeps {
 
 export interface RecoverContextGraphSwmResult {
   readonly replacedRoots: number;
+  readonly replacedGraphs: number;
   readonly insertedDataQuads: number;
   readonly insertedMetaQuads: number;
   readonly droppedDataTriples: number;
@@ -168,6 +186,7 @@ export async function recoverContextGraphSwm(
     );
     return {
       replacedRoots: 0,
+      replacedGraphs: 0,
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,
@@ -181,9 +200,71 @@ export async function recoverContextGraphSwm(
   const excluded = deps.getExcludedSubGraphNames
     ? await deps.getExcludedSubGraphNames(deps.contextGraphId)
     : undefined;
+  const recoveryRegistered = [
+    ...new Set([
+      ...(registered ?? []),
+      ...discoverSwmRecoverySubGraphNames({
+        contextGraphId: deps.contextGraphId,
+        metaQuads: meta.quads,
+        excludedSubGraphNames: excluded,
+      }),
+    ]),
+  ];
+
+  const graphScopedDescriptors = parseGraphScopedSwmRecoveryDescriptors({
+    contextGraphId: deps.contextGraphId,
+    metaQuads: meta.quads,
+    registeredSubGraphNames: recoveryRegistered,
+    excludedSubGraphNames: excluded,
+  });
+  if (graphScopedDescriptors.length > 0) {
+    const activeGraphMeta = graphScopedDescriptors.flatMap((descriptor) => [
+      ...descriptor.metadataQuads,
+    ]);
+    const snapshotSync = await syncPublicSnapshotsForMeta({
+      ctx: deps.ctx,
+      remotePeerId: deps.remotePeerId,
+      contextGraphId: deps.contextGraphId,
+      deadline: deps.deadline,
+      metaQuads: activeGraphMeta,
+      publicSnapshotStore: deps.publicSnapshotStore,
+      fetchSyncPages: deps.fetchSyncPages,
+      deleteCheckpoint: deps.deleteCheckpoint,
+      setCheckpoint: deps.setCheckpoint,
+    });
+    if (!snapshotSync.completed) {
+      deps.logInfo?.(
+        deps.ctx,
+        `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+        'graph-scoped public snapshot fetch incomplete — skipped, will retry',
+      );
+      return {
+        replacedRoots: 0,
+        replacedGraphs: 0,
+        insertedDataQuads: 0,
+        insertedMetaQuads: 0,
+        droppedDataTriples: 0,
+        completed: false,
+      };
+    }
+  }
+
+  // Rootless exact graphs and graph-backed immutable snapshots are verified
+  // per KA below. Keep them out of the legacy rootEntity worker path so they
+  // are not counted as invalid root subjects or inserted by union.
+  const graphScopedTransportGraphs = new Set<string>();
+  for (const descriptor of graphScopedDescriptors) {
+    graphScopedTransportGraphs.add(descriptor.assertionGraph);
+    if (descriptor.publicSnapshotGraph) {
+      graphScopedTransportGraphs.add(descriptor.publicSnapshotGraph);
+    }
+  }
+  const legacyDataQuads = data.quads.filter(
+    (quad) => !graphScopedTransportGraphs.has(quad.graph),
+  );
 
   const processed = await deps.processSharedMemoryBatch(
-    data.quads, meta.quads, deps.contextGraphId, registered, excluded,
+    legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
   );
 
   await deps.ensureContextGraph(deps.contextGraphId);
@@ -194,6 +275,18 @@ export async function recoverContextGraphSwm(
     verifiedData: processed.verifiedData,
     roots: processed.entityCreators,
   });
+  let replacedGraphs = 0;
+  let insertedGraphQuads = 0;
+  for (const descriptor of graphScopedDescriptors) {
+    const asset = await materializeGraphScopedSwmRecoveryAsset({
+      descriptor,
+      fetchedDataQuads: data.quads,
+      publicSnapshotStore: deps.publicSnapshotStore,
+    });
+    await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
+    replacedGraphs += 1;
+    insertedGraphQuads += asset.quads.length;
+  }
   // Codex high: REPLACE the SWM meta for each recovered root (the data was
   // REPLACEd above; the meta must be too). Otherwise a stale WorkspaceOperation
   // pointing at the root survives and the TTL sweep later deletes the
@@ -202,6 +295,9 @@ export async function recoverContextGraphSwm(
   if (processed.entityCreators.length > 0) {
     const metaGraphs = [...new Set(processed.verifiedMeta.map((q) => q.graph))];
     await deps.replaceMetaForRoots?.(processed.entityCreators, metaGraphs);
+  }
+  if (graphScopedDescriptors.length > 0) {
+    await deps.replaceMetaForGraphAssets?.(graphScopedDescriptors);
   }
   if (processed.verifiedMeta.length > 0) {
     await deps.store.insert([...processed.verifiedMeta]);
@@ -226,12 +322,14 @@ export async function recoverContextGraphSwm(
   deps.logInfo?.(
     deps.ctx,
     `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: replaced ${applied.replacedRoots} roots, ` +
-    `${applied.insertedQuads} data + ${processed.verifiedMeta.length} meta triples`,
+    `${replacedGraphs} exact graphs, ${applied.insertedQuads + insertedGraphQuads} data + ` +
+    `${processed.verifiedMeta.length} meta triples`,
   );
 
   return {
     replacedRoots: applied.replacedRoots,
-    insertedDataQuads: applied.insertedQuads,
+    replacedGraphs,
+    insertedDataQuads: applied.insertedQuads + insertedGraphQuads,
     insertedMetaQuads: processed.verifiedMeta.length,
     droppedDataTriples: processed.droppedDataTriples,
     completed: true,

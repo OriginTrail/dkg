@@ -3,6 +3,7 @@ import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  parseDeterministicKnowledgeAssetUal,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
@@ -57,7 +58,10 @@ export function classifyDurableMetaGraph(
   let hasIntegrityEnvelope = false;
   for (const quad of quads) {
     if (quad.predicate === MERKLE_ROOT) hasMerkleRoot = true;
-    if (DURABLE_INTEGRITY_META_PREDICATES.has(quad.predicate)) {
+    if (
+      DURABLE_INTEGRITY_META_PREDICATES.has(quad.predicate)
+      && (quad.predicate === MERKLE_ROOT || isDeterministicKaMetadataSubject(quad.subject))
+    ) {
       hasIntegrityEnvelope = true;
     }
     if (hasMerkleRoot && hasIntegrityEnvelope) break;
@@ -139,7 +143,12 @@ export function selectVerifiedDurableSyncQuads(
   const markerSubjects = new Set<string>();
   for (const quad of metaQuads) {
     if (quad.predicate === MERKLE_ROOT) merkleSubjects.add(quad.subject);
-    if (quad.predicate === CONTENT_SCOPE_VERSION) markerSubjects.add(quad.subject);
+    if (
+      quad.predicate === CONTENT_SCOPE_VERSION
+      && isDeterministicKaMetadataSubject(quad.subject)
+    ) {
+      markerSubjects.add(quad.subject);
+    }
   }
 
   if (merkleSubjects.size === 0 && markerSubjects.size === 0) {
@@ -427,6 +436,27 @@ export function selectVerifiedDurableSyncQuads(
   }
 
   return { dataIndexes, metaIndexes, rejected, verifiedZeroPublicAssets, logs };
+}
+
+/**
+ * Durable V2 KA descriptors live on the deterministic UAL subject itself.
+ * Lifecycle, seal and SWM operation rows deliberately repeat scope fields on
+ * other subjects; treating those rows as KA descriptors makes an otherwise
+ * valid sync batch fail for lacking `dkg:merkleRoot`.
+ *
+ * Keep syntactically deterministic-but-noncanonical UALs in the candidate set
+ * so they still fail closed in `parseGraphScopedDescriptor` instead of being
+ * mistaken for harmless configuration metadata.
+ */
+function isDeterministicKaMetadataSubject(subject: string): boolean {
+  if (!/^did:dkg:[^/]+\/0x[0-9a-fA-F]{40}\/[0-9]+$/.test(subject)) return false;
+  try {
+    parseDeterministicKnowledgeAssetUal(subject);
+  } catch {
+    // Shape matched, so this is a malformed KA descriptor and must remain in
+    // the integrity envelope for the verifier to reject.
+  }
+  return true;
 }
 
 function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphScopedDescriptor {

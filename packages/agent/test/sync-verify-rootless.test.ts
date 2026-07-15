@@ -98,6 +98,24 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(meta.some((entry) => entry.predicate === `${DKG}rootEntity`)).toBe(false);
   });
 
+  it('does not mistake lifecycle scope rows for a second incomplete KA descriptor', () => {
+    const generated = fixture();
+    const lifecycle = `${UAL}/assertion/1`;
+    const lifecycleRows = [
+      quad(lifecycle, `${DKG}contentScopeVersion`, `"2"^^<${XSD_INTEGER}>`, META),
+      quad(lifecycle, `${DKG}kaUal`, UAL, META),
+      quad(lifecycle, `${DKG}assertionVersion`, `"1"^^<${XSD_INTEGER}>`, META),
+      quad(lifecycle, `${DKG}assertionGraph`, generated.assertionGraph, META),
+    ];
+
+    const result = verifyBoth(generated.payload, [...generated.meta, ...lifecycleRows]);
+
+    expect(result.rejected).toBe(0);
+    expect(result.data).toEqual(generated.payload);
+    expect(result.meta).toEqual([...generated.meta, ...lifecycleRows]);
+    expect(result.logs.some(({ message }) => message.includes('missing merkleRoot'))).toBe(false);
+  });
+
   it('rejects a Merkle mismatch by exact graph while retaining unrelated data', () => {
     const { payload, meta, assertionGraph } = fixture({
       merkleRoot: new Uint8Array(32).fill(9),
