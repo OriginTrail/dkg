@@ -51,10 +51,12 @@ describe('rootless KA graph scope wire contract', () => {
       publicTripleCount: 1_000,
       privateMerkleRoot: PRIVATE_ROOT,
       privateTripleCount: 11,
+      subGraphName: 'updates',
     }));
 
     expect(decoded.kaUal).toBe(UAL);
     expect(decoded.manifest).toEqual([]);
+    expect(decoded.subGraphName).toBe('updates');
     expectGraphScope(decoded);
   });
 
@@ -150,10 +152,12 @@ describe('rootless KA graph scope wire contract', () => {
       publicTripleCount: 1_000,
       privateMerkleRoot: PRIVATE_ROOT,
       privateTripleCount: 11,
+      subGraphName: 'updates',
     }));
 
     expect(decoded.kaUal).toBe(UAL);
     expect(decoded.manifest).toEqual([]);
+    expect(decoded.subGraphName).toBe('updates');
     expectGraphScope(decoded);
   });
 

@@ -1983,10 +1983,15 @@ export class DKGAgent extends DKGAgentBase {
           `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
         );
       }
-      if (!Number.isInteger(params.merkleLeafCount) || params.merkleLeafCount < 1) {
+      const allowsEmptyPublicTree = params.ackMode.kind === 'curated-catalog';
+      if (
+        !Number.isInteger(params.merkleLeafCount)
+        || params.merkleLeafCount < 0
+        || (params.merkleLeafCount === 0 && !allowsEmptyPublicTree)
+      ) {
         throw new Error(
-          `V10 ACK collection requires a positive integer merkleLeafCount; got ${params.merkleLeafCount}. ` +
-          'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
+          `V10 ACK collection requires a positive integer merkleLeafCount for public KAs ` +
+          `(zero is valid only for curated-catalog ACKs); got ${params.merkleLeafCount}.`,
         );
       }
 
@@ -2125,6 +2130,12 @@ export class DKGAgent extends DKGAgentBase {
       stagingQuads?: Uint8Array;
       swmGraphId?: string;
       subGraphName?: string;
+      contentScopeVersion?: number;
+      kaUal?: string;
+      assertionVersion?: string;
+      publicTripleCount?: number;
+      privateMerkleRoot?: Uint8Array;
+      privateTripleCount?: number;
     }): Promise<V10CoreNodeACK[]> => {
       // The TARGET cgId for the digest is the on-chain numeric id the
       // adapter resolved (`params.contextGraphId`). Reject non-numeric /
@@ -2143,9 +2154,15 @@ export class DKGAgent extends DKGAgentBase {
           `V10 UPDATE ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}.`,
         );
       }
-      if (!Number.isInteger(params.newMerkleLeafCount) || params.newMerkleLeafCount < 1) {
+      const allowsEmptyPublicTree = params.isEncryptedPayload === true;
+      if (
+        !Number.isInteger(params.newMerkleLeafCount)
+        || params.newMerkleLeafCount < 0
+        || (params.newMerkleLeafCount === 0 && !allowsEmptyPublicTree)
+      ) {
         throw new Error(
-          `V10 UPDATE ACK collection requires a positive integer newMerkleLeafCount; got ${params.newMerkleLeafCount}.`,
+          `V10 UPDATE ACK collection requires a positive integer newMerkleLeafCount for public KAs ` +
+          `(zero is valid only for curated encrypted updates); got ${params.newMerkleLeafCount}.`,
         );
       }
 
@@ -2198,6 +2215,12 @@ export class DKGAgent extends DKGAgentBase {
         // OT-RFC-49 / WS-D — stamp `UpdateIntent.isEncryptedPayload` for a
         // curated update so cores rebuild/verify/persist the inline catalog.
         isEncryptedPayload: params.isEncryptedPayload,
+        contentScopeVersion: params.contentScopeVersion,
+        kaUal: params.kaUal,
+        assertionVersion: params.assertionVersion,
+        publicTripleCount: params.publicTripleCount,
+        privateMerkleRoot: params.privateMerkleRoot,
+        privateTripleCount: params.privateTripleCount,
       });
       return result.acks;
     };

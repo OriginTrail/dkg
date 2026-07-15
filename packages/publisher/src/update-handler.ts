@@ -1,8 +1,24 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { GraphManager } from '@origintrail-official/dkg-storage';
-import type { EventBus } from '@origintrail-official/dkg-core';
+import { GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import type {
+  EventBus,
+  KAUpdateRequestMsg,
+  OperationContext,
+} from '@origintrail-official/dkg-core';
 import type { ChainAdapter, KAUpdateVerification } from '@origintrail-official/dkg-chain';
-import { Logger, createOperationContext, DKGEvent, sparqlInt, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import {
+  Logger,
+  createOperationContext,
+  DKGEvent,
+  sparqlInt,
+  contextGraphMetaUri,
+  contextGraphLayerUri,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  knowledgeAssetLayerGraphUri,
+  validateSubGraphName,
+} from '@origintrail-official/dkg-core';
 import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -11,7 +27,12 @@ import {
   promoteUpdatedKaToPerCgId,
   resolveUalByBatchId,
   restateLabelGraphForUpdate,
+  generateGraphKnowledgeAssetMetadata,
+  shouldApplyMaterialization,
+  withMaterializationLock,
+  writeMaterializedVersion,
   type MaterializedVersion,
+  type OnChainProvenance,
 } from './metadata.js';
 
 /**
@@ -23,6 +44,81 @@ export type ResolveOnChainCgId = (cgName: string) => Promise<string | null>;
 
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
+const DKG_NS = 'http://dkg.io/ontology/';
+const PROV_NS = 'http://www.w3.org/ns/prov#';
+
+interface GraphScopedUpdateRequest {
+  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  publicTripleCount: number;
+  privateTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  subGraphName?: string;
+}
+
+function resolveGraphScopedUpdateRequest(
+  request: KAUpdateRequestMsg,
+): GraphScopedUpdateRequest | undefined {
+  const privateMerkleRoot = request.privateMerkleRoot?.length
+    ? new Uint8Array(request.privateMerkleRoot)
+    : undefined;
+  const hasGraphField =
+    (request.contentScopeVersion ?? 0) !== 0
+    || Boolean(request.kaUal)
+    || Boolean(request.assertionVersion)
+    || (request.publicTripleCount ?? 0) > 0
+    || privateMerkleRoot !== undefined
+    || (request.privateTripleCount ?? 0) > 0
+    || Boolean(request.subGraphName);
+  if (!hasGraphField) return undefined;
+  if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(
+      `KA update graph scope requires contentScopeVersion=${GRAPH_KA_CONTENT_SCOPE_VERSION}`,
+    );
+  }
+  if (!request.kaUal || !request.assertionVersion) {
+    throw new Error('KA update graph scope requires kaUal and assertionVersion');
+  }
+  if (request.manifest.length !== 0) {
+    throw new Error('KA update graph scope must not carry a legacy root manifest');
+  }
+  const publicTripleCount = request.publicTripleCount ?? 0;
+  const privateTripleCount = request.privateTripleCount ?? 0;
+  if (
+    !Number.isSafeInteger(publicTripleCount)
+    || publicTripleCount < 0
+    || !Number.isSafeInteger(privateTripleCount)
+    || privateTripleCount < 0
+    || (publicTripleCount === 0 && privateTripleCount === 0)
+    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
+    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+  ) {
+    throw new Error('KA update has an invalid graph-scoped content envelope');
+  }
+  const scope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+  if (scope.ual !== request.kaUal) {
+    throw new Error(`KA update UAL is not canonical: ${request.kaUal}`);
+  }
+  const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+  if (packedKaId !== BigInt(request.batchId)) {
+    throw new Error(
+      `KA update UAL-derived kaId ${packedKaId} does not match batchId ${request.batchId}`,
+    );
+  }
+  const subGraphName = request.subGraphName || undefined;
+  if (subGraphName) {
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) {
+      throw new Error(`KA update has invalid subGraphName: ${validation.reason}`);
+    }
+  }
+  return {
+    scope,
+    publicTripleCount,
+    privateTripleCount,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+    ...(subGraphName ? { subGraphName } : {}),
+  };
+}
 
 interface AppliedUpdate {
   blockNumber: number;
@@ -87,6 +183,7 @@ export class UpdateHandler {
       if (request.operationId) {
         ctx = createOperationContext('ka-update', request.operationId);
       }
+      const graphUpdate = resolveGraphScopedUpdateRequest(request);
       const {
         contextGraphId: contextGraphId,
         batchId,
@@ -119,6 +216,7 @@ export class UpdateHandler {
       let verifiedMerkleRoot: Uint8Array | undefined;
       let verifiedBlockNumber: number | undefined;
       let verifiedTxIndex: number | undefined;
+      let verifiedMerkleRootCount: bigint | undefined;
 
       if (!this.chain.verifyKAUpdate) {
         if (this.chain.chainId !== 'none') {
@@ -134,6 +232,7 @@ export class UpdateHandler {
         verifiedMerkleRoot = verification.onChainMerkleRoot;
         verifiedBlockNumber = verification.blockNumber;
         verifiedTxIndex = verification.txIndex ?? 0;
+        verifiedMerkleRootCount = verification.merkleRootCount;
       }
 
       // Ordering: use canonical (blockNumber, txIndex) for deterministic state across nodes.
@@ -151,6 +250,20 @@ export class UpdateHandler {
             return;
           }
         }
+      }
+
+      if (graphUpdate) {
+        await this.applyGraphScopedUpdate({
+          request,
+          graphUpdate,
+          fromPeerId,
+          verifiedMerkleRoot,
+          verifiedBlockNumber,
+          verifiedTxIndex,
+          verifiedMerkleRootCount,
+          ctx,
+        });
+        return;
       }
 
       // Merkle root integrity: recompute from the received payload (flat mode).
@@ -377,6 +490,344 @@ export class UpdateHandler {
     }
   }
 
+  private async applyGraphScopedUpdate(input: {
+    request: KAUpdateRequestMsg;
+    graphUpdate: GraphScopedUpdateRequest;
+    fromPeerId: string;
+    verifiedMerkleRoot?: Uint8Array;
+    verifiedBlockNumber?: number;
+    verifiedTxIndex?: number;
+    verifiedMerkleRootCount?: bigint;
+    ctx: OperationContext;
+  }): Promise<void> {
+    const {
+      request,
+      graphUpdate,
+      fromPeerId,
+      verifiedMerkleRoot,
+      verifiedBlockNumber,
+      verifiedTxIndex,
+      verifiedMerkleRootCount,
+      ctx,
+    } = input;
+    const kaId = BigInt(request.batchId);
+    if (
+      this.chain.chainId !== 'none'
+      && graphUpdate.scope.chainId !== this.chain.chainId
+    ) {
+      this.log.warn(
+        ctx,
+        `KA update rejected: UAL chain namespace ${graphUpdate.scope.chainId} does not ` +
+          `match local chain ${this.chain.chainId}`,
+      );
+      return;
+    }
+    if (this.chain.chainId !== 'none') {
+      if (!this.chain.getKAContextGraphId || !this.resolveOnChainCgId) {
+        this.log.warn(
+          ctx,
+          'KA update rejected: graph-scoped chain/context-graph binding views are unavailable',
+        );
+        return;
+      }
+      try {
+        const [chainContextGraphId, requestedContextGraphId] = await Promise.all([
+          this.chain.getKAContextGraphId(kaId),
+          this.resolveOnChainCgId(request.contextGraphId),
+        ]);
+        if (
+          requestedContextGraphId === null
+          || BigInt(requestedContextGraphId) !== chainContextGraphId
+        ) {
+          this.log.warn(
+            ctx,
+            `KA update rejected: context graph ${request.contextGraphId} resolves to ` +
+              `${requestedContextGraphId ?? '(unknown)'}, but chain binds kaId=${kaId} to ` +
+              `${chainContextGraphId}`,
+          );
+          return;
+        }
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `KA update rejected: unable to verify chain/context-graph binding for kaId=${kaId}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+    }
+    if (
+      verifiedMerkleRootCount !== undefined
+      && BigInt(graphUpdate.scope.assertionVersion) !== verifiedMerkleRootCount
+    ) {
+      this.log.warn(
+        ctx,
+        `KA update rejected: assertionVersion=${graphUpdate.scope.assertionVersion} does not ` +
+          `match chain Merkle-root count ${verifiedMerkleRootCount} for kaId=${kaId}`,
+      );
+      return;
+    }
+
+    const parsed = parseSimpleNQuads(new TextDecoder().decode(request.nquads));
+    const publicQuads = parsed.map((quad) => ({ ...quad, graph: '' }));
+    if (publicQuads.length !== graphUpdate.publicTripleCount) {
+      this.log.warn(
+        ctx,
+        `KA update rejected: graph-scoped public triple count mismatch for kaId=${kaId} ` +
+          `(wire=${graphUpdate.publicTripleCount}, parsed=${publicQuads.length})`,
+      );
+      return;
+    }
+    const computedRoot = computeFlatKCRoot(
+      publicQuads,
+      graphUpdate.privateMerkleRoot ? [graphUpdate.privateMerkleRoot] : [],
+    );
+    const referenceRoot = verifiedMerkleRoot ?? request.newMerkleRoot;
+    if (!referenceRoot || referenceRoot.length !== EXPECTED_MERKLE_ROOT_LEN) {
+      this.log.warn(
+        ctx,
+        `KA update rejected: graph-scoped Merkle root missing or wrong length for kaId=${kaId}`,
+      );
+      return;
+    }
+    if (!buffersEqual(computedRoot, new Uint8Array(referenceRoot))) {
+      this.log.warn(
+        ctx,
+        `KA update rejected: graph-scoped Merkle root mismatch for kaId=${kaId}`,
+      );
+      return;
+    }
+
+    await this.graphManager.ensureContextGraph(request.contextGraphId);
+    if (graphUpdate.subGraphName) {
+      await this.graphManager.ensureSubGraph(request.contextGraphId, graphUpdate.subGraphName);
+    }
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      request.contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      graphUpdate.scope,
+      graphUpdate.subGraphName,
+    );
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      request.contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      graphUpdate.scope,
+      graphUpdate.subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(request.contextGraphId);
+    const prior = await this.readGraphScopedMetadata(
+      metaGraph,
+      graphUpdate.scope.ual,
+    );
+    // An update replaces content but must inherit access control, publisher,
+    // author, and sub-graph identity from the already-synced KA. Applying it
+    // without the V2 label row would invent those security attributes from
+    // gossip. Defer instead; normal durable sync supplies the authoritative
+    // metadata and current graph together.
+    if (
+      prior.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+      || prior.assertionVersion === undefined
+    ) {
+      this.log.warn(
+        ctx,
+        `KA update deferred: graph-scoped metadata for ${graphUpdate.scope.ual} is not synced`,
+      );
+      return;
+    }
+    if (
+      prior.subGraphName !== undefined
+      && prior.subGraphName !== graphUpdate.subGraphName
+    ) {
+      this.log.warn(
+        ctx,
+        `KA update rejected: subGraphName ${graphUpdate.subGraphName ?? '(root)'} conflicts with ` +
+          `existing ${prior.subGraphName} for ${graphUpdate.scope.ual}`,
+      );
+      return;
+    }
+    if (
+      verifiedMerkleRootCount === undefined
+      && prior.assertionVersion !== undefined
+      && BigInt(graphUpdate.scope.assertionVersion) !== prior.assertionVersion + 1n
+    ) {
+      this.log.warn(
+        ctx,
+        `KA update rejected: assertionVersion ${graphUpdate.scope.assertionVersion} does not ` +
+          `follow existing version ${prior.assertionVersion}`,
+      );
+      return;
+    }
+
+    const updateVersion: MaterializedVersion = {
+      blockNumber: verifiedBlockNumber ?? 0,
+      txIndex: verifiedTxIndex ?? 0,
+    };
+    const provenance: OnChainProvenance = {
+      txHash: request.txHash,
+      blockNumber: verifiedBlockNumber ?? Number(request.blockNumber),
+      blockTimestamp: Math.floor(Date.now() / 1000),
+      publisherAddress: request.publisherAddress,
+      batchId: kaId,
+      chainId: this.chain.chainId,
+    };
+    const accessPolicy = prior.accessPolicy
+      ?? (graphUpdate.privateTripleCount > 0 ? 'ownerOnly' : 'public');
+    const metadata = generateGraphKnowledgeAssetMetadata(
+      {
+        ual: graphUpdate.scope.ual,
+        contextGraphId: request.contextGraphId,
+        merkleRoot: computedRoot,
+        publisherPeerId: prior.publisherPeerId ?? request.publisherPeerId ?? fromPeerId,
+        accessPolicy,
+        ...(accessPolicy === 'allowList' && prior.allowedPeers.length > 0
+          ? { allowedPeers: prior.allowedPeers }
+          : {}),
+        timestamp: new Date(),
+        subGraphName: graphUpdate.subGraphName,
+        authorAddress: prior.authorAddress ?? graphUpdate.scope.agentAddress,
+        assertionVersion: graphUpdate.scope.assertionVersion,
+        publicTripleCount: graphUpdate.publicTripleCount,
+        privateTripleCount: graphUpdate.privateTripleCount,
+        ...(graphUpdate.privateMerkleRoot
+          ? { privateMerkleRoot: graphUpdate.privateMerkleRoot }
+          : {}),
+        assertionGraph: vmGraph,
+      },
+      'confirmed',
+      provenance,
+    );
+
+    const outcome = await withMaterializationLock(
+      metaGraph,
+      graphUpdate.scope.ual,
+      async () => {
+        if (!(await shouldApplyMaterialization(
+          this.store,
+          metaGraph,
+          graphUpdate.scope.ual,
+          updateVersion,
+        ))) {
+          return 'stale' as const;
+        }
+        const replaced = await tryReplaceGraphAtomically(
+          this.store,
+          vmGraph,
+          publicQuads.map((quad) => ({ ...quad, graph: vmGraph })),
+          { source: 'publisher.updateHandler.graphScopedReplace' },
+        );
+        if (!replaced) {
+          throw Object.assign(
+            new Error('Graph-scoped KA update requires atomic TripleStore.update() support'),
+            { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+          );
+        }
+        await this.store.deleteByPattern({ graph: metaGraph, subject: graphUpdate.scope.ual });
+        await this.store.insert(metadata);
+        await writeMaterializedVersion(
+          this.store,
+          metaGraph,
+          graphUpdate.scope.ual,
+          updateVersion,
+        );
+        await this.store.dropGraph(swmGraph);
+        return 'applied' as const;
+      },
+    );
+    if (outcome === 'stale') {
+      this.log.info(
+        ctx,
+        `KA update skipped: a newer graph-scoped assertion is already materialized for kaId=${kaId}`,
+      );
+      return;
+    }
+
+    if (verifiedBlockNumber !== undefined) {
+      this.appliedUpdates.set(`${request.contextGraphId}:${request.batchId}`, {
+        blockNumber: verifiedBlockNumber,
+        txIndex: verifiedTxIndex ?? 0,
+      });
+    }
+    this.log.info(
+      ctx,
+      `Applied graph-scoped KA update: ${publicQuads.length} public triples for kaId=${kaId}`,
+    );
+    this.eventBus.emit(DKGEvent.KA_UPDATED, {
+      contextGraphId: request.contextGraphId,
+      batchId: kaId,
+      rootEntities: [],
+      ual: graphUpdate.scope.ual,
+      assertionVersion: graphUpdate.scope.assertionVersion,
+      txHash: request.txHash,
+      fromPeerId,
+    });
+  }
+
+  private async readGraphScopedMetadata(
+    metaGraph: string,
+    ual: string,
+  ): Promise<{
+    accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+    allowedPeers: string[];
+    publisherPeerId?: string;
+    authorAddress?: string;
+    subGraphName?: string;
+    assertionVersion?: bigint;
+    contentScopeVersion?: number;
+  }> {
+    const result = await this.store.query(
+      `SELECT ?policy ?allowedPeer ?publisherPeerId ?attributedTo ?subGraphName ?version ?scopeVersion WHERE {
+         GRAPH <${metaGraph}> {
+           OPTIONAL { <${ual}> <${DKG_NS}accessPolicy> ?policy }
+           OPTIONAL { <${ual}> <${DKG_NS}allowedPeer> ?allowedPeer }
+           OPTIONAL { <${ual}> <${DKG_NS}publisherPeerId> ?publisherPeerId }
+           OPTIONAL { <${ual}> <${PROV_NS}wasAttributedTo> ?attributedTo }
+           OPTIONAL { <${ual}> <${DKG_NS}subGraphName> ?subGraphName }
+           OPTIONAL { <${ual}> <${DKG_NS}assertionVersion> ?version }
+           OPTIONAL { <${ual}> <${DKG_NS}contentScopeVersion> ?scopeVersion }
+         }
+       }`,
+    );
+    if (result.type !== 'bindings') return { allowedPeers: [] };
+    const allowedPeers = new Set<string>();
+    let accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined;
+    let publisherPeerId: string | undefined;
+    let authorAddress: string | undefined;
+    let subGraphName: string | undefined;
+    let assertionVersion: bigint | undefined;
+    let contentScopeVersion: number | undefined;
+    for (const row of result.bindings) {
+      const policy = stripRdfLiteral(row['policy']);
+      if (policy === 'public' || policy === 'ownerOnly' || policy === 'allowList') {
+        accessPolicy = policy;
+      }
+      const allowedPeer = stripRdfLiteral(row['allowedPeer']);
+      if (allowedPeer) allowedPeers.add(allowedPeer);
+      publisherPeerId ??= stripRdfLiteral(row['publisherPeerId']) || undefined;
+      subGraphName ??= stripRdfLiteral(row['subGraphName']) || undefined;
+      const attributedTo = row['attributedTo'] ?? '';
+      const authorMatch = /^did:dkg:agent:(0x[0-9a-f]{40})$/i.exec(attributedTo);
+      if (authorMatch) authorAddress ??= authorMatch[1];
+      const version = stripRdfLiteral(row['version']);
+      if (version && assertionVersion === undefined) {
+        try { assertionVersion = BigInt(version); } catch { /* malformed prior metadata */ }
+      }
+      const scopeVersion = stripRdfLiteral(row['scopeVersion']);
+      if (scopeVersion && contentScopeVersion === undefined) {
+        const parsed = Number(scopeVersion);
+        if (Number.isSafeInteger(parsed)) contentScopeVersion = parsed;
+      }
+    }
+    return {
+      accessPolicy,
+      allowedPeers: [...allowedPeers],
+      publisherPeerId,
+      authorAddress,
+      subGraphName,
+      assertionVersion,
+      contentScopeVersion,
+    };
+  }
+
   /**
    * Look up the context graph a batch was originally published on by querying local
    * KC metadata. Returns undefined if the batch is unknown to this node.
@@ -437,4 +888,14 @@ function buffersEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function stripRdfLiteral(value: string | undefined): string {
+  if (!value?.startsWith('"')) return value ?? '';
+  const typedIndex = value.indexOf('"^^');
+  if (typedIndex > 0) return value.slice(1, typedIndex);
+  const languageIndex = value.lastIndexOf('"@');
+  if (languageIndex > 0) return value.slice(1, languageIndex);
+  const lastQuote = value.lastIndexOf('"');
+  return value.slice(1, lastQuote > 0 ? lastQuote : undefined);
 }

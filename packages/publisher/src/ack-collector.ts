@@ -280,9 +280,20 @@ export class ACKCollector {
     } = ctx;
 
     const log = this.deps.log ?? (() => {});
-    if (!Number.isInteger(params.merkleLeafCount) || params.merkleLeafCount < 1) {
+    const ackMode = params.ackMode ?? { kind: 'public' as const };
+    // Curated KAs are challenged against their public catalog commitment,
+    // not the private assertion's public-leaf tree. The lifecycle contract
+    // consequently permits merkleLeafCount=0 for curated KAs while rejecting
+    // it for public KAs. Keep that distinction on the ACK wire too so a fully
+    // private curated KA does not need a synthetic public placeholder triple.
+    if (
+      !Number.isInteger(params.merkleLeafCount)
+      || params.merkleLeafCount < 0
+      || (params.merkleLeafCount === 0 && ackMode.kind !== 'curated-catalog')
+    ) {
       throw new Error(
-        `ACK collection failed: merkleLeafCount must be a positive integer, got ${params.merkleLeafCount}`,
+        `ACK collection failed: merkleLeafCount must be positive for public KAs ` +
+          `(zero is valid only for curated-catalog ACKs), got ${params.merkleLeafCount}`,
       );
     }
     if (params.kaCount !== 1) {
@@ -290,7 +301,6 @@ export class ACKCollector {
         `ACK collection failed: V10 publish requires exactly one Knowledge Asset (kaCount=1); got ${params.kaCount}`,
       );
     }
-    const ackMode = params.ackMode ?? { kind: 'public' as const };
     const privateMerkleRoots = ackMode.kind === 'folded-private'
       ? ackMode.privateMerkleRoots
       : [];
@@ -486,6 +496,12 @@ export class ACKCollector {
     stagingQuads?: Uint8Array;
     isEncryptedPayload?: boolean;
     ackProtocolVersion?: number;
+    contentScopeVersion?: number;
+    kaUal?: string;
+    assertionVersion?: string;
+    publicTripleCount?: number;
+    privateMerkleRoot?: Uint8Array;
+    privateTripleCount?: number;
   }): Promise<ACKCollectionResult> {
     const {
       kaId, contextGraphId, preUpdateMerkleRootCount, newMerkleRoot,
@@ -500,9 +516,17 @@ export class ACKCollector {
         `UPDATE ACK collection failed: newMerkleRoot must be 32 bytes, got ${newMerkleRoot.length}`,
       );
     }
-    if (!Number.isInteger(newMerkleLeafCount) || newMerkleLeafCount < 1) {
+    // The contract samples curated KAs through newCatalogLeafCount, so their
+    // private assertion may legitimately have zero public challenge leaves.
+    // Public updates must remain positive or the on-chain update reverts.
+    if (
+      !Number.isInteger(newMerkleLeafCount)
+      || newMerkleLeafCount < 0
+      || (newMerkleLeafCount === 0 && params.isEncryptedPayload !== true)
+    ) {
       throw new Error(
-        `UPDATE ACK collection failed: newMerkleLeafCount must be a positive integer, got ${newMerkleLeafCount}`,
+        `UPDATE ACK collection failed: newMerkleLeafCount must be positive for public KAs ` +
+          `(zero is valid only for curated encrypted updates), got ${newMerkleLeafCount}`,
       );
     }
 
@@ -530,6 +554,12 @@ export class ACKCollector {
       stagingQuads: params.stagingQuads,
       isEncryptedPayload: params.isEncryptedPayload === true ? true : undefined,
       ackProtocolVersion: params.ackProtocolVersion,
+      contentScopeVersion: params.contentScopeVersion,
+      kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion,
+      publicTripleCount: params.publicTripleCount,
+      privateMerkleRoot: params.privateMerkleRoot,
+      privateTripleCount: params.privateTripleCount,
     };
     const intentBytes = encodeUpdateIntent(p2pMsg);
 

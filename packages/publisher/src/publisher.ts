@@ -177,6 +177,13 @@ export type V10UpdateACKProvider = (params: {
   /** Source SWM graph id (defaults to contextGraphId). */
   swmGraphId?: string;
   subGraphName?: string;
+  /** Complete rootless-KA envelope; omitted together for legacy updates. */
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
 }) => Promise<V10CoreNodeACK[]>;
 
 /**

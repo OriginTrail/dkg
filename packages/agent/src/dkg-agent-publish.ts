@@ -48,6 +48,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
   createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
   computeWorkspaceAgentEncryptionKeyProofPayload,
@@ -1785,7 +1786,18 @@ export class PublishMethods extends DKGAgentBase {
     onPhase?.('broadcast', 'start');
     if (result.onChainResult && result.publicQuads) {
       try {
-        const dataGraph = `did:dkg:context-graph:${contextGraphId}`;
+        const isGraphUpdate = opts?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
+        const graphScope = isGraphUpdate
+          ? createGraphKnowledgeAssetScope(opts?.kaUal ?? '', opts?.assertionVersion ?? '')
+          : undefined;
+        const dataGraph = graphScope
+          ? knowledgeAssetLayerGraphUri(
+              contextGraphId,
+              MemoryLayer.VerifiableMemory,
+              graphScope,
+              opts?.subGraphName,
+            )
+          : `did:dkg:context-graph:${contextGraphId}`;
         const nquadsStr = result.publicQuads
           .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`)
           .join('\n');
@@ -1794,11 +1806,13 @@ export class PublishMethods extends DKGAgentBase {
           contextGraphId: contextGraphId,
           batchId: kaId,
           nquads: nquadsBytes,
-          manifest: result.kaManifest.map((m) => ({
-            rootEntity: m.rootEntity,
-            privateMerkleRoot: m.privateMerkleRoot,
-            privateTripleCount: m.privateTripleCount ?? 0,
-          })),
+          manifest: graphScope
+            ? []
+            : result.kaManifest.map((m) => ({
+                rootEntity: m.rootEntity,
+                privateMerkleRoot: m.privateMerkleRoot,
+                privateTripleCount: m.privateTripleCount ?? 0,
+              })),
           publisherPeerId: this.node.peerId.toString(),
           publisherAddress: result.onChainResult.publisherAddress,
           txHash: result.onChainResult.txHash,
@@ -1806,6 +1820,19 @@ export class PublishMethods extends DKGAgentBase {
           newMerkleRoot: result.merkleRoot,
           timestampMs: Date.now(),
           operationId: ctx.operationId,
+          ...(graphScope
+            ? {
+                contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+                kaUal: graphScope.ual,
+                assertionVersion: graphScope.assertionVersion,
+                publicTripleCount: opts?.publicTripleCount ?? 0,
+                ...(opts?.privateMerkleRoot
+                  ? { privateMerkleRoot: opts.privateMerkleRoot }
+                  : {}),
+                privateTripleCount: opts?.privateTripleCount ?? 0,
+                subGraphName: opts?.subGraphName,
+              }
+            : {}),
         });
         const topic = contextGraphUpdateTopic(contextGraphId);
         await this.gossip.publish(topic, message);

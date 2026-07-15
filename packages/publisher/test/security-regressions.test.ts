@@ -494,6 +494,16 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     });
     expect(updateResult.status).toBe('confirmed');
 
+    // Verify the first update only after a later root exists. The adapter must
+    // read history at the receipt block; a latest-state read would report
+    // count=3 and make an otherwise-valid delayed gossip message look like
+    // assertion version 3 instead of 2.
+    const laterUpdate = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:verify:root', 'http://schema.org/name', '"Later"')],
+    });
+    expect(laterUpdate.status).toBe('confirmed');
+
     const verification = await chain.verifyKAUpdate(
       updateResult.onChainResult!.txHash,
       original.kaId,
@@ -503,6 +513,7 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     expect(verification.verified).toBe(true);
     expect(verification.onChainMerkleRoot).toEqual(new Uint8Array(updateResult.merkleRoot));
     expect(verification.blockNumber).toBe(updateResult.onChainResult!.blockNumber);
+    expect(verification.merkleRootCount).toBe(2n);
   });
 
   it('rejects verification with wrong txHash', async () => {

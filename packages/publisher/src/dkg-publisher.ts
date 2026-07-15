@@ -12,6 +12,7 @@ import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
   assertTrustedCatalogTriplesAreGeneratedFloor,
   catalogTripleKey,
+  replaceCatalogPartitionWithGeneratedPrivateFloor,
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
@@ -1853,7 +1854,16 @@ export class DKGPublisher implements Publisher {
     // when only `chainCgId` is set — the target cgId is always
     // `ctxGraphId ?? chainCgId`.
     const targetCgId = ctxGraphId ?? chainCgId;
-    if (targetCgId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
+    // V2/rootless KAs remain in their exact per-KA VM graph. Random sampling
+    // resolves that graph from constant-size label metadata, so copying their
+    // triples into the legacy shared per-cgId partition would only duplicate
+    // storage and would make rootless updates impossible to replace safely.
+    if (
+      !graphPublish
+      && targetCgId
+      && publishResult.status === 'confirmed'
+      && publishResult.onChainResult
+    ) {
       // V10 publishDirect already registered the KC to the context graph
       // inside publishDirect, via a Hub-authorized internal call to
       // ContextGraphs.registerKnowledgeAsset (EOAs cannot call it directly),
@@ -3863,22 +3873,42 @@ export class DKGPublisher implements Publisher {
         kaNumber: BigInt(descriptor.scope.kaNumber),
       },
     };
-    const quads = await loadSharedMemoryQuadsForScope(
+    let quads = await loadSharedMemoryQuadsForScope(
       this.store,
       swmBucket,
       'all',
       scope,
       { quadFilter: (quad) => !isSwmMerkleExcludedQuad(quad) },
     );
-    if (quads.length === 0) {
+    const hasTrustedCatalogTriples =
+      trustedCatalogTripleKeySet(options.trustedNonManifestCatalogTriples).size > 0;
+    if (hasTrustedCatalogTriples) {
+      // Curated updates refresh the deterministic public catalog floor. The
+      // trusted entrypoint still sources all user content from the exact SWM
+      // graph; only the four validated protocol-owned catalog triples are
+      // replaced here, so callers cannot smuggle arbitrary RDF around that
+      // boundary. `update()` re-validates the exact key set below.
+      assertTrustedCatalogTriplesAreGeneratedFloor(
+        options.contextGraphId,
+        options.trustedNonManifestCatalogTriples,
+      );
+      quads = replaceCatalogPartitionWithGeneratedPrivateFloor(
+        options.contextGraphId,
+        quads,
+      ).quads;
+    }
+    if (quads.length === 0 && (options.privateQuads?.length ?? 0) === 0) {
       throw new Error(
-        `No quads in shared memory for graph-scoped KA ${descriptor.scope.ual}`,
+        `No public or private quads available for graph-scoped KA ${descriptor.scope.ual}`,
       );
     }
     return this.update(kaId, {
       ...options,
       quads: quads.map((quad) => ({ ...quad, graph: '' })),
       [INTERNAL_ORIGIN_TOKEN]: true,
+      ...(hasTrustedCatalogTriples
+        ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true as const }
+        : {}),
     } as InternalPublishOptions);
   }
 
@@ -4272,7 +4302,7 @@ export class DKGPublisher implements Publisher {
     const updateNquadsStr = allSkolemizedQuads
       .map(
         (q: { subject: string; predicate: string; object: string; graph?: string }) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || ''}> .`,
+          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || dataGraph}> .`,
       )
       .join('\n');
     const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
@@ -4536,6 +4566,16 @@ export class DKGPublisher implements Publisher {
           mintAmount: 0n,
           burnTokenIds: [],
         });
+        if (
+          graphUpdate
+          && BigInt(graphUpdate.scope.assertionVersion)
+            !== digestFields.preUpdateMerkleRootCount + 1n
+        ) {
+          throw new Error(
+            `Graph-scoped update assertionVersion ${graphUpdate.scope.assertionVersion} must equal ` +
+              `preUpdateMerkleRootCount + 1 (${digestFields.preUpdateMerkleRootCount + 1n})`,
+          );
+        }
         boundUpdateTokenAmount = digestFields.newTokenAmount;
         v10UpdateACKs = await v10UpdateACKProvider({
           kaId,
@@ -4570,6 +4610,19 @@ export class DKGPublisher implements Publisher {
           // falls back to verifying against its SWM copy. Selected above.
           stagingQuads: updateStagingQuads,
           swmGraphId: contextGraphId,
+          subGraphName: options.subGraphName,
+          ...(graphUpdate
+            ? {
+                contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+                kaUal: graphUpdate.scope.ual,
+                assertionVersion: graphUpdate.scope.assertionVersion,
+                publicTripleCount: graphUpdate.publicTripleCount,
+                ...(updatePrivateRoots[0]
+                  ? { privateMerkleRoot: updatePrivateRoots[0] }
+                  : {}),
+                privateTripleCount: graphUpdate.privateTripleCount,
+              }
+            : {}),
         });
         this.log.info(
           ctx,

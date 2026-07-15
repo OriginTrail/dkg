@@ -42,6 +42,7 @@ export const KAUpdateRequestSchema = new Type('KAUpdateRequest')
   .add(new Field('publicTripleCount', 15, 'uint32'))
   .add(new Field('privateMerkleRoot', 16, 'bytes'))
   .add(new Field('privateTripleCount', 17, 'uint32'))
+  .add(new Field('subGraphName', 18, 'string'))
   .add(KAUpdateManifestEntrySchema);
 
 type Long = { low: number; high: number; unsigned: boolean };
@@ -78,6 +79,8 @@ export interface KAUpdateRequestMsg {
   privateMerkleRoot?: Uint8Array;
   /** Number of private RDF triples committed by privateMerkleRoot. */
   privateTripleCount?: number;
+  /** Optional named sub-graph containing this KA. */
+  subGraphName?: string;
 }
 
 function toBigInt(v: string | number | bigint | Long | unknown): bigint {

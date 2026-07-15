@@ -12,6 +12,7 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   DKGPublisher,
   computePrivateRootV10,
+  generatedPrivateCatalogTripleKeys,
   skolemizeKnowledgeAsset,
 } from '../src/index.js';
 
@@ -169,6 +170,103 @@ describe('graph-scoped KA publish storage', () => {
     expect(replaced.type).toBe('bindings');
     if (replaced.type !== 'bindings') throw new Error('expected bindings');
     expect(replaced.bindings).toEqual([{ s: 'urn:version:two' }]);
+  });
+
+  it('updates a fully private KA from SWM without requiring a public placeholder', async () => {
+    const initialPrivate = [
+      quad('urn:private:only', 'urn:predicate:secret', '"one"'),
+    ];
+    const canonicalInitial = await skolemizeKnowledgeAsset(initialPrivate);
+    const initial = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [],
+      privateQuads: initialPrivate,
+      publisherPeerId: 'rootless-private-publisher',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 0,
+      privateTripleCount: canonicalInitial.length,
+      privateMerkleRoot: computePrivateRootV10(canonicalInitial),
+    });
+    const replacementPrivate = [
+      quad('urn:private:only', 'urn:predicate:secret', '"two"'),
+      quad('urn:private:second', 'urn:predicate:secret', '"three"'),
+    ];
+    const canonicalReplacement = await skolemizeKnowledgeAsset(replacementPrivate);
+
+    const updated = await publisher.updateKnowledgeAssetFromSharedMemory(initial.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      privateQuads: replacementPrivate,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 2,
+      publicTripleCount: 0,
+      privateTripleCount: canonicalReplacement.length,
+      privateMerkleRoot: computePrivateRootV10(canonicalReplacement),
+    });
+
+    expect(updated.status).toBe('tentative');
+    expect(updated.publicQuads).toEqual([]);
+    const privateStore = (publisher as unknown as {
+      privateStore: {
+        getKnowledgeAssetPrivateTriples: (
+          contextGraphId: string,
+          scope: ReturnType<typeof createGraphKnowledgeAssetScope>,
+        ) => Promise<Quad[]>;
+      };
+    }).privateStore;
+    expect(await privateStore.getKnowledgeAssetPrivateTriples(
+      CONTEXT_GRAPH,
+      createGraphKnowledgeAssetScope(UAL, 2),
+    )).toEqual(canonicalReplacement);
+  });
+
+  it('refreshes only the deterministic curated catalog floor on a trusted SWM update', async () => {
+    const initial = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:curated:data', 'urn:predicate:value', '"old"')],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+    });
+    const scope = createGraphKnowledgeAssetScope(UAL, 2);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+    );
+    await store.insert([{
+      ...quad('urn:curated:data', 'urn:predicate:value', '"new"'),
+      graph: swmGraph,
+    }]);
+
+    await publisher.updateKnowledgeAssetFromSharedMemory(initial.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 2,
+      publicTripleCount: 5,
+      privateTripleCount: 0,
+      trustedNonManifestCatalogTriples:
+        generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    });
+
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    expect(await store.countQuads(vmGraph)).toBe(5);
+    const catalogRows = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${vmGraph}> {
+         <did:dkg:context-graph:${CONTEXT_GRAPH}> ?p ?o
+       } }`,
+    );
+    expect(catalogRows.type).toBe('bindings');
+    if (catalogRows.type !== 'bindings') throw new Error('expected catalog bindings');
+    expect(catalogRows.bindings).toHaveLength(4);
   });
 
   it('rejects legacy and incomplete mutation envelopes before writing', async () => {
