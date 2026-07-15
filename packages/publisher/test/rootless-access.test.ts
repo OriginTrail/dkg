@@ -141,6 +141,65 @@ describe('rootless graph-scoped private access', () => {
     expect(Array.from(result.privateMerkleRoot ?? [])).toEqual(Array.from(privateRoot));
   });
 
+  it('denies token aliases for graph-scoped private access', async () => {
+    const { store } = await seedRootlessPrivateKA();
+
+    const response = await request(
+      new AccessHandler(store, new TypedEventBus()),
+      `${UAL}/999`,
+    );
+
+    expect(response.granted).toBe(false);
+    expect(response.rejectionReason).toContain('KA not found');
+    expect(new TextDecoder().decode(response.nquads)).not.toContain('urn:secret:alpha');
+  });
+
+  it('keeps token aliases readable for legacy private metadata', async () => {
+    const store = new OxigraphStore();
+    const legacyRoot = 'urn:legacy:token-alias';
+    await store.insert([
+      rootContextGraphRegistration(),
+      {
+        subject: `${UAL}/1`,
+        predicate: `${DKG}rootEntity`,
+        object: legacyRoot,
+        graph: META_GRAPH,
+      },
+      {
+        subject: `${UAL}/1`,
+        predicate: `${DKG}partOf`,
+        object: UAL,
+        graph: META_GRAPH,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}contextGraph`,
+        object: CONTEXT_GRAPH_URI,
+        graph: META_GRAPH,
+      },
+      {
+        subject: UAL,
+        predicate: `${DKG}accessPolicy`,
+        object: '"public"',
+        graph: META_GRAPH,
+      },
+      {
+        subject: legacyRoot,
+        predicate: 'urn:p',
+        object: '"legacy-token-data"',
+        graph: `${CONTEXT_GRAPH_URI}/_private`,
+      },
+    ]);
+
+    const response = await request(
+      new AccessHandler(store, new TypedEventBus()),
+      `${UAL}/1`,
+    );
+
+    expect(response.granted).toBe(true);
+    expect(new TextDecoder().decode(response.nquads)).toContain('legacy-token-data');
+  });
+
   it('denies private access when the metadata partition is also a registered legacy root', async () => {
     const { store } = await seedRootlessPrivateKA();
     await store.insert([{

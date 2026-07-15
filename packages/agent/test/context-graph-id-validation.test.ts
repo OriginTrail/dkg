@@ -49,6 +49,21 @@ describe('context graph ID validation', () => {
     expect(result.type === 'bindings' && result.bindings).toHaveLength(0);
   });
 
+  it('rejects fresh local bootstrap IDs before inserting registration metadata', async () => {
+    const store = new OxigraphStore();
+    agent = await makeAgent(store);
+
+    await expect(agent.ensureContextGraphLocal({
+      id: 'victim/_meta',
+      name: 'Namespace collision',
+    })).rejects.toThrow(/reserved storage partition/);
+
+    const result = await store.query(
+      'SELECT ?p WHERE { GRAPH ?g { <did:dkg:context-graph:victim/_meta> ?p ?o } }',
+    );
+    expect(result.type === 'bindings' && result.bindings).toHaveLength(0);
+  });
+
   it('rejects direct registration of a pre-existing reserved ID before chain access', async () => {
     const store = new OxigraphStore();
     const id = 'victim/_meta';

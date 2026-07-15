@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { QueryHandler } from '../src/query-handler.js';
 import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
@@ -11,6 +17,9 @@ const ENTITY_B = 'did:dkg:entity:bob';
 const SCHEMA_NAME = 'https://schema.org/name';
 const SCHEMA_PERSON = 'https://schema.org/Person';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const DKG = 'http://dkg.io/ontology/';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+const DKG_CONTEXT_GRAPH = 'https://dkg.network/ontology#ContextGraph';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -355,6 +364,40 @@ describe('QueryHandler', () => {
   });
 
   describe('ENTITY_BY_UAL lookup', () => {
+    it('serves graph-scoped assets through the graph-aware resolver', async () => {
+      const ual = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
+      const assertionVersion = '1';
+      const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+      const assertionGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const metadataGraph = `${GRAPH}/_meta`;
+      const payloadSubject = 'urn:asset:graph-aware';
+      await store.insert([
+        q(GRAPH, RDF_TYPE, DKG_CONTEXT_GRAPH, 'did:dkg:context-graph:ontology'),
+        q(payloadSubject, SCHEMA_NAME, '"Graph aware"', assertionGraph),
+        q(ual, `${DKG}contentScopeVersion`, `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, metadataGraph),
+        q(ual, `${DKG}kaUal`, ual, metadataGraph),
+        q(ual, `${DKG}assertionVersion`, `"${assertionVersion}"^^<${XSD_INTEGER}>`, metadataGraph),
+        q(ual, `${DKG}publicTripleCount`, `"1"^^<${XSD_INTEGER}>`, metadataGraph),
+        q(ual, `${DKG}privateTripleCount`, `"0"^^<${XSD_INTEGER}>`, metadataGraph),
+        q(ual, `${DKG}assertionGraph`, assertionGraph, metadataGraph),
+        q(ual, `${DKG}contextGraph`, GRAPH, metadataGraph),
+      ]);
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+
+      const response = await handler.handle(
+        makeRequest({ lookupType: 'ENTITY_BY_UAL', contextGraphId: undefined, ual }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('OK');
+      expect(response.resultCount).toBe(1);
+      expect(response.ntriples).toContain(payloadSubject);
+    });
+
     it('returns error when ual is missing', async () => {
       const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
 

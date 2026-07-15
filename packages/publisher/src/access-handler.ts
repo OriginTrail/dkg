@@ -297,6 +297,10 @@ export class AccessHandler {
       { source: 'publisher.access.metadata' },
     );
     if (resolved.kind === 'graph') {
+      // Numeric token suffixes are a legacy compatibility address only.
+      // A V2 asset has one canonical UAL; detect its marker above so an alias
+      // cannot fall through, but never serve graph-scoped data through it.
+      if (legacyAliasBase) return null;
       return this.graphScopedKAMeta(resolved.metadata);
     }
     return resolved.kind === 'legacy' ? resolved.metadata : null;
