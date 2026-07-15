@@ -33,7 +33,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-async function startStatusServer(query: () => Promise<unknown>): Promise<{
+async function startStatusServer(query: (...args: unknown[]) => Promise<unknown>): Promise<{
   server: Server;
   baseUrl: string;
 }> {
@@ -131,9 +131,9 @@ describe('/api/status external-store quad count', () => {
   it('returns a pending cold count without waiting for the store refresh', async () => {
     const countResult = deferred<unknown>();
     const queryStarted = deferred<void>();
-    let queryCalls = 0;
-    const { server, baseUrl } = await startStatusServer(async () => {
-      queryCalls += 1;
+    const queryCalls: unknown[][] = [];
+    const { server, baseUrl } = await startStatusServer(async (...args: unknown[]) => {
+      queryCalls.push(args);
       queryStarted.resolve();
       return countResult.promise;
     });
@@ -165,7 +165,11 @@ describe('/api/status external-store quad count', () => {
         status: 200,
         body: { storeQuads: null, storeQuadsStatus: 'pending' },
       });
-      expect(queryCalls).toBe(1);
+      expect(queryCalls).toHaveLength(1);
+      expect(queryCalls[0]?.[1]).toEqual({
+        priority: 'health',
+        source: 'daemon.status.storeQuads',
+      });
     } finally {
       countResult.resolve({ type: 'bindings', bindings: [] });
       await closeServer(server);
