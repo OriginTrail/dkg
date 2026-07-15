@@ -7,6 +7,7 @@ import {
   encodeChangelogResponse, decodeChangelogRequest, decodeChangelogResponse,
   type ChangelogDeltaRecord, type ChangelogSyncRequest, type ChangelogSyncResponse,
 } from '../src/sync/changelog/wire.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: 'p', object: `o${n}`, graph });
 
@@ -252,7 +253,7 @@ describe('planPageApply — verified-apply planner', () => {
 function loopHarness(
   responses: ChangelogSyncResponse[],
   applyPage: ChangelogSyncDeps['applyPage'],
-  resync: () => Promise<ResyncOutcome> = async () => ({ complete: true, insertedTriples: 0 }),
+  resync: (dropCandidates: readonly string[]) => Promise<ResyncOutcome> = async () => ({ complete: true, insertedTriples: 0 }),
 ) {
   let cursor: { era: string; seq: number } | undefined;
   const requests: ChangelogSyncRequest[] = [];
@@ -268,7 +269,7 @@ function loopHarness(
       return encodeChangelogResponse(r);
     },
     applyPage,
-    runResync: async () => { resyncs += 1; return resync(); },
+    runResync: async (dropCandidates) => { resyncs += 1; return resync(dropCandidates); },
     logWarn: () => {},
   };
   return { deps, requests, resyncs: () => resyncs, cursor: () => cursor };
@@ -347,6 +348,157 @@ describe('runChangelogSync — driver loop', () => {
     expect(out.kind).toBe('delta');
     expect(h.resyncs()).toBe(0);
     expect(h.cursor()).toEqual({ era: 'e1', seq: 4 });
+  });
+});
+
+describe('changelog drop resync reconciliation', () => {
+  it('removes only graphs absent from the complete verified snapshot before advancing the cursor', async () => {
+    const presentGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/8';
+    const staleGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/9';
+    const response = encodeChangelogResponse(delta(9, 9, [
+      { seq: 8, graph: presentGraph, op: 'drop' },
+      { seq: 9, graph: staleGraph, op: 'drop' },
+    ]));
+    let cursor: { era: string; seq: number } | undefined;
+    const dropped: string[] = [];
+    const forceFreshSessionFlags: boolean[] = [];
+    const agent = {
+      config: { syncAgentsMeta: true },
+      changelogCursors: {
+        get: () => cursor,
+        set: (_peer: string, _cg: string, era: string, seq: number) => { cursor = { era, seq }; },
+      },
+      messenger: { sendToPeer: async () => response },
+      node: { stopSignal: null },
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: string,
+        _graphUri: string,
+        _deadline: number,
+        _snapshotRef?: string,
+        _sinceBatchId?: string,
+        _signal?: AbortSignal,
+        _recovery?: boolean,
+        forceFreshSession?: boolean,
+      ) => {
+        forceFreshSessionFlags.push(forceFreshSession === true);
+        return {
+          quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0,
+          checkpointKey: `${contextGraphId}:${phase}`, completed: true, timedOut: false,
+        };
+      },
+      syncCheckpoints: new Map(),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      getOrCreateSyncVerifyWorker: () => ({
+        parseAndFilter: async () => ({ quads: [] }),
+      }),
+      processDurableBatchInWorker: async (
+        _data: Quad[], _meta: Quad[], _ctx: unknown, _accept: boolean,
+        mode: { kind: string },
+      ) => mode.kind === 'fullSnapshot'
+        ? {
+            verifiedData: [qd(presentGraph, 1)], verifiedMeta: [],
+            verifiedGraphScopedDataGraphs: [], totalFetchedDataQuads: 1,
+            totalFetchedMetaQuads: 0, rejectedKcs: 0, emptyResponses: 0,
+            metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+          }
+        : {
+            verifiedData: [], verifiedMeta: [], verifiedGraphScopedDataGraphs: [],
+            totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+            emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+          },
+      runLegacyDurableSyncForContextGraph:
+        LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph,
+      resolveCuratorPeerIdsForCg: async () => ({
+        peerIds: ['peer'], curatorIsLocal: false, legacyTripleResolved: false,
+      }),
+      store: { dropGraph: async (graph: string) => { dropped.push(graph); } },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await (LifecycleSyncMethods.prototype.runChangelogSyncForCg as any).call(
+      agent,
+      { kind: 'system', id: 'test', startedAt: 0 },
+      'peer',
+      'cg',
+    );
+
+    expect(dropped).toEqual([staleGraph]);
+    expect(forceFreshSessionFlags).toEqual([true, true]);
+    expect(cursor).toEqual({ era: 'e1', seq: 9 });
+  });
+
+  it('keeps the graph and cursor pending when the responder is not the unique structural curator', async () => {
+    const staleGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/9';
+    const response = encodeChangelogResponse(delta(9, 9, [
+      { seq: 9, graph: staleGraph, op: 'drop' },
+    ]));
+    let cursor: { era: string; seq: number } | undefined;
+    const dropped: string[] = [];
+    const forceFreshSessionFlags: boolean[] = [];
+    const agent = {
+      config: { syncAgentsMeta: true },
+      changelogCursors: {
+        get: () => cursor,
+        set: (_peer: string, _cg: string, era: string, seq: number) => { cursor = { era, seq }; },
+      },
+      messenger: { sendToPeer: async () => response },
+      node: { stopSignal: null },
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: string,
+        _graphUri: string,
+        _deadline: number,
+        _snapshotRef?: string,
+        _sinceBatchId?: string,
+        _signal?: AbortSignal,
+        _recovery?: boolean,
+        forceFreshSession?: boolean,
+      ) => {
+        forceFreshSessionFlags.push(forceFreshSession === true);
+        return {
+          quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0,
+          checkpointKey: `${contextGraphId}:${phase}`, completed: true, timedOut: false,
+        };
+      },
+      syncCheckpoints: new Map(),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      getOrCreateSyncVerifyWorker: () => ({ parseAndFilter: async () => ({ quads: [] }) }),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [], verifiedMeta: [], verifiedGraphScopedDataGraphs: [],
+        totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+        emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      runLegacyDurableSyncForContextGraph:
+        LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph,
+      resolveCuratorPeerIdsForCg: async () => ({
+        peerIds: ['different-peer'], curatorIsLocal: false, legacyTripleResolved: false,
+      }),
+      store: { dropGraph: async (graph: string) => { dropped.push(graph); } },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await (LifecycleSyncMethods.prototype.runChangelogSyncForCg as any).call(
+      agent,
+      { kind: 'system', id: 'test', startedAt: 0 },
+      'peer',
+      'cg',
+    );
+
+    expect(dropped).toEqual([]);
+    expect(forceFreshSessionFlags).toEqual([false, false]);
+    expect(cursor).toEqual({ era: 'e1', seq: 8 });
   });
 });
 

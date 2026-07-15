@@ -191,8 +191,12 @@ export interface ChangelogSyncDeps {
   applyPage(page: {
     era: string; headSeq: number; nextSeq: number; priorSeq: number; records: ChangelogDeltaRecord[];
   }): Promise<{ advanceTo: number; applied: number; deferred: boolean }>;
-  /** Bootstrap this CG via the legacy full/durable lane (resync fallback + stall backstop). */
-  runResync(): Promise<ResyncOutcome>;
+  /**
+   * Bootstrap this CG via the legacy full/durable lane (resync fallback + stall backstop).
+   * `dropCandidates` are exact in-scope graphs whose unauthenticated changelog markers
+   * caused the stall. The full snapshot must reconcile them before returning `complete`.
+   */
+  runResync(dropCandidates: readonly string[]): Promise<ResyncOutcome>;
   logWarn?(message: string): void;
 }
 
@@ -233,7 +237,7 @@ export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<Changel
     if (resp.kind === 'denied') return { kind: 'denied', applied };
 
     if (resp.kind === 'resync') {
-      const rr = await deps.runResync();
+      const rr = await deps.runResync([]);
       applied += rr.insertedTriples;
       // Only jump the cursor to headSeq if the resync verifiably fetched everything < headSeq;
       // otherwise leave it (still first-contact / behind) so the next cycle retries — no gap.
@@ -255,7 +259,9 @@ export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<Changel
       // genuinely-missing meta (or an in-lane-unverifiable graph) can't wedge the CG.
       if (++stalledRounds >= RESYNC_AFTER_STALLED_ROUNDS) {
         deps.logWarn?.(`changelog sync stalled ${stalledRounds} rounds at seq ${priorSeq}; resyncing`);
-        const rr = await deps.runResync();
+        const rr = await deps.runResync(
+          resp.records.filter((record) => record.op === 'drop').map((record) => record.graph),
+        );
         applied += rr.insertedTriples;
         if (rr.complete) deps.setCursor(resp.era, resp.headSeq);
         return { kind: 'resync', applied };
