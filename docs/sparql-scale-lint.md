@@ -72,14 +72,32 @@ deliberately a diffable code change: allowing a scan is a reviewed decision.
 
 ## Making it required
 
-The workflow alone reports; blocking needs the check in the branch
-protection / ruleset required list (it already runs on `merge_group`, so the
-merge queue will not stall):
+The workflow alone reports; blocking needs the check in `main`'s required
+list (it already runs on `merge_group`, so the merge queue will not stall).
+`main` is protected by a **ruleset** (`protect-main`), not classic branch
+protection, and ruleset updates are a full-object PUT — fetch, append the
+check, and write back:
 
 ```sh
-gh api repos/OriginTrail/dkg/branches/main/protection/required_status_checks/contexts \
-  -X POST -f "contexts[]=SPARQL scalability lint"
+gh api repos/OriginTrail/dkg/rulesets/14325863 > /tmp/ruleset.json
+python3 - <<'EOF'
+import json
+rs = json.load(open('/tmp/ruleset.json'))
+payload = {k: rs[k] for k in ('name', 'target', 'enforcement', 'conditions', 'rules') if k in rs}
+if 'bypass_actors' in rs: payload['bypass_actors'] = rs['bypass_actors']
+for rule in payload['rules']:
+    if rule['type'] == 'required_status_checks':
+        checks = rule['parameters']['required_status_checks']
+        if not any(c['context'] == 'SPARQL scalability lint' for c in checks):
+            checks.append({'context': 'SPARQL scalability lint', 'integration_id': 15368})
+json.dump(payload, open('/tmp/ruleset-update.json', 'w'))
+EOF
+gh api -X PUT repos/OriginTrail/dkg/rulesets/14325863 --input /tmp/ruleset-update.json
 ```
+
+Flip it only AFTER this workflow is merged to `main`: a required check that
+exists on no PR's merge commit shows as "Expected" forever and blocks
+everything.
 
 ## Current debt baseline
 
