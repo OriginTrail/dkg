@@ -9,7 +9,13 @@ import {
 import type { QueryOptions, TripleStore, ChangelogReader, ChangeOp } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
+import {
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+  SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+} from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
+import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 
@@ -273,14 +279,13 @@ export async function readSwmMetaPage(params: {
     : undefined;
   return readResponderRowsPage(
     cache,
-    () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso),
-    () => readSwmMetaRowsPage(
+    (offset, limit, signal) => readSwmMetaRowsPage(
       params.store,
       candidateGraphs,
       params.cutoffIso,
-      params.offset,
-      params.limit,
-      params.signal,
+      offset,
+      limit,
+      signal,
     ),
     params.offset,
     params.limit,
@@ -330,26 +335,17 @@ export async function readSwmDataPage(params: {
     );
   }
 
-  const loadRows = (signal?: AbortSignal) => readFreshSwmDataRows(
-    params.store,
-    dataGraphs,
-    graphSet,
-    candidateGraphsFor,
-    params.cutoffIso!,
-    signal,
-  );
   return readResponderRowsPage(
     cache,
-    () => loadRows(),
-    () => readFreshSwmDataRowsPage(
+    (offset, limit, signal) => readFreshSwmDataRowsPage(
       params.store,
       dataGraphs,
       graphSet,
       candidateGraphsFor,
       params.cutoffIso!,
-      params.offset,
-      params.limit,
-      params.signal,
+      offset,
+      limit,
+      signal,
     ),
     params.offset,
     params.limit,
@@ -369,8 +365,6 @@ export async function readDurableMetaPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
 }): Promise<SyncRow[]> {
-  const loadRows = (signal?: AbortSignal) =>
-    readDurableMetaRows(params.store, params.contextGraphId, params.registeredSubGraphNames, signal);
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
@@ -382,14 +376,13 @@ export async function readDurableMetaPage(params: {
     : undefined;
   return readResponderRowsPage(
     cache,
-    () => loadRows(),
-    () => readDurableMetaRowsPage(
+    (offset, limit, signal) => readDurableMetaRowsPage(
       params.store,
       params.contextGraphId,
       params.registeredSubGraphNames,
-      params.offset,
-      params.limit,
-      params.signal,
+      offset,
+      limit,
+      signal,
     ),
     params.offset,
     params.limit,
@@ -656,21 +649,19 @@ async function readPagedRowsAcrossGraphs(
   cache?: RowListCache,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
-  const loadSnapshot = async (): Promise<SyncRow[]> => {
-    const admittedGraphs: string[] = [];
-    for (const graph of graphs) {
-      if (!(await isAdmitted(graph))) continue;
-      admittedGraphs.push(graph);
-    }
-    return readRowsAcrossGraphs(store, admittedGraphs);
-  };
   return readResponderRowsPage(
     cache && {
       ...cache,
       expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
     },
-    loadSnapshot,
-    () => readPagedRowsAcrossGraphsStoreBounded(store, graphs, offset, limit, isAdmitted, signal),
+    (pageOffset, pageLimit, pageSignal) => readPagedRowsAcrossGraphsStoreBounded(
+      store,
+      graphs,
+      pageOffset,
+      pageLimit,
+      isAdmitted,
+      pageSignal,
+    ),
     offset,
     limit,
     signal,
@@ -709,8 +700,15 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
       ...cache,
       expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
     },
-    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
-    () => readDurableDeltaRowsPageAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, offset, limit, signal),
+    (pageOffset, pageLimit, pageSignal) => readDurableDeltaRowsPageAcrossGraphs(
+      store,
+      graphs,
+      metaGraphs,
+      sinceBatchId,
+      pageOffset,
+      pageLimit,
+      pageSignal,
+    ),
     offset,
     limit,
     signal,
@@ -747,10 +745,68 @@ function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudge
  * graph. The durable fix is a stable keyset/seek cursor for the fallback (page
  * on `(g,s,p,o) > lastKey` instead of `OFFSET`); see the PR follow-up list.
  */
+type StorePageLoader = (
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+) => Promise<SyncRow[]>;
+
+async function loadStorePagedSnapshot(
+  cache: RowListCache,
+  loadPage: StorePageLoader,
+): Promise<readonly SyncRow[]> {
+  const limits = cache.memo.snapshotLoadLimits ?? {
+    maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+    maxBytesEstimate: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+    pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  };
+  const rows: SyncRow[] = [];
+  let bytesEstimate = 0;
+  let offset = 0;
+  // Read at most one row beyond the configured row cap. Tiny-budget tests and
+  // operators therefore never receive a 500-row temporary page merely to learn
+  // that a one-row snapshot is oversized.
+  const pageRows = Math.max(
+    1,
+    Math.min(Math.floor(limits.pageRows), Math.floor(limits.maxRows) + 1),
+  );
+
+  while (true) {
+    // The shared snapshot load is owner-independent: an individual request
+    // abort must not cancel a load used by coalesced waiters.
+    const page = await loadPage(offset, pageRows, undefined);
+    for (const row of page) {
+      const nextRows = rows.length + 1;
+      const nextBytes = bytesEstimate + estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
+      if (nextRows > limits.maxRows) {
+        throw new SyncRowSnapshotBudgetError({
+          key: cache.key,
+          reason: 'snapshot_rows',
+          rows: nextRows,
+          bytesEstimate: nextBytes,
+          limit: limits.maxRows,
+        });
+      }
+      if (nextBytes > limits.maxBytesEstimate) {
+        throw new SyncRowSnapshotBudgetError({
+          key: cache.key,
+          reason: 'snapshot_bytes',
+          rows: nextRows,
+          bytesEstimate: nextBytes,
+          limit: limits.maxBytesEstimate,
+        });
+      }
+      rows.push(row);
+      bytesEstimate = nextBytes;
+    }
+    if (page.length < pageRows) return rows;
+    offset += page.length;
+  }
+}
+
 async function readResponderRowsPage(
   cache: RowListCache | undefined,
-  loadSnapshot: () => Promise<readonly SyncRow[]>,
-  loadStoreBoundedPage: () => Promise<SyncRow[]>,
+  loadStoreBoundedPage: StorePageLoader,
   offset: number,
   limit: number,
   signal?: AbortSignal,
@@ -758,12 +814,18 @@ async function readResponderRowsPage(
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
-  if (!cache) return loadStoreBoundedPage();
+  if (!cache) return loadStoreBoundedPage(safeOffset, safeLimit, signal);
   try {
-    return await readCachedRowsPage(cache, loadSnapshot, safeOffset, safeLimit, signal);
+    return await readCachedRowsPage(
+      cache,
+      () => loadStorePagedSnapshot(cache, loadStoreBoundedPage),
+      safeOffset,
+      safeLimit,
+      signal,
+    );
   } catch (error) {
     if (!isPerSnapshotBudgetError(error)) throw error;
-    return loadStoreBoundedPage();
+    return loadStoreBoundedPage(safeOffset, safeLimit, signal);
   }
 }
 

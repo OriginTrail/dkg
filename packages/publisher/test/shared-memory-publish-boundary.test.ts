@@ -819,23 +819,27 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
 });
 
 describe('SharedMemoryHandler lifecycle UAL derivation', () => {
-  it('does not block SWM apply when the log-only asset UAL resolver stalls', async () => {
+  it('uses the authoritative v2 UAL without waiting for the legacy resolver', async () => {
     const store = new OxigraphStore();
-    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
-      assetUalForKaIdentity: () => new Promise<string>(() => {}),
-    });
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
     const checksummedAuthor = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const kaUal = `did:dkg:base:8453/${checksummedAuthor.toLowerCase()}/7`;
     const msg = encodeWorkspacePublishRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
         `<urn:test:root:one> <http://schema.org/name> "value" <${CONTEXT_GRAPH_URI}> .`,
       ),
-      manifest: [{ rootEntity: 'urn:test:root:one', privateTripleCount: 0 }],
+      manifest: [],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'op-lifecycle-timeout',
       timestampMs: Date.now(),
       agentAddress: checksummedAuthor,
       kaNumber: '7',
+      contentScopeVersion: 2,
+      kaUal,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
     });
 
     const outcome = await Promise.race([

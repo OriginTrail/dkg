@@ -64,6 +64,8 @@ export interface KnowledgeAssetWorkspaceHead {
   readonly privateMerkleRoot?: string;
   readonly privateTripleCount: number;
   readonly shareOperationId: string;
+  /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
+  readonly publisherPeerId: string;
 }
 
 /**
@@ -86,7 +88,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   );
   const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
   const result = await params.store.query(
-    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?shareOperationId ?operation ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount WHERE {
+    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?shareOperationId ?operation ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId WHERE {
       GRAPH <${assertSafeIri(metaGraph)}> {
         <${assertSafeIri(subject)}> <${DKG}contentScopeVersion> ?scopeVersion ;
           <${DKG}kaUal> ?kaUal ;
@@ -98,7 +100,8 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
           <${DKG}assertionVersion> ?operationVersion ;
           <${DKG}publicQuadsDigest> ?digest ;
           <${DKG}publicQuadsCount> ?publicCount ;
-          <${DKG}privateTripleCount> ?privateCount .
+          <${DKG}privateTripleCount> ?privateCount ;
+          <${DKG}publisherPeerId> ?publisherPeerId .
         OPTIONAL { ?operation <${DKG}privateMerkleRoot> ?privateRoot }
       }
     } LIMIT 1`,
@@ -130,6 +133,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   const privateTripleCount = parseIntegerLiteral(row?.['privateCount']);
   const privateMerkleRoot = stripLiteral(row?.['privateRoot'])?.trim();
   const shareOperationId = stripLiteral(row?.['shareOperationId'])?.trim() ?? '';
+  const publisherPeerId = stripLiteral(row?.['publisherPeerId'])?.trim() ?? '';
   const expectedOperationSubject = shareOperationId
     ? workspaceOperationSubject(params.contextGraphId, shareOperationId)
     : '';
@@ -140,6 +144,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
     !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
     !shareOperationId ||
+    !publisherPeerId ||
     row?.['operation'] !== expectedOperationSubject ||
     operationUal !== actualScope.ual ||
     operationVersion.toString() !== actualScope.assertionVersion ||
@@ -157,6 +162,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     privateMerkleRoot,
     privateTripleCount,
     shareOperationId,
+    publisherPeerId,
   };
 }
 

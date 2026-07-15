@@ -470,7 +470,7 @@ describe('sync responder pagination interleaving', () => {
     expect(lineGraphsFromNquads(out)).toEqual(new Set([cgPrefix, fallbackGraph]));
   });
 
-  it('caches sorted durable-data rows instead of issuing ordered offset page queries', async () => {
+  it('builds a reusable durable-data snapshot only from ordered bounded store pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'single-query-durable-fallback';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -492,9 +492,9 @@ describe('sync responder pagination interleaving', () => {
         normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`)
       ) {
         globalRowLoads++;
-        expect(normalized).not.toContain('ORDER BY');
-        expect(normalized).not.toContain('OFFSET');
-        expect(normalized).not.toContain('LIMIT');
+        expect(normalized).toContain('ORDER BY ?g ?s ?p ?o');
+        expect(normalized).toContain('OFFSET 0');
+        expect(normalized).toMatch(/LIMIT \d+$/);
       }
       return originalQuery(sparql);
     }) as OxigraphStore['query'];

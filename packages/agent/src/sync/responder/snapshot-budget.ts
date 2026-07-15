@@ -65,6 +65,8 @@ export interface SyncResponderSnapshotBudget {
   release(id: symbol): void;
   remove(id: symbol, reason?: 'expired' | 'released' | 'replaced'): void;
   stats(): SyncResponderSnapshotBudgetStats;
+  /** Limits used to stop a snapshot while it is still being read in pages. */
+  limits(): Readonly<SyncResponderSnapshotBudgetOptions>;
 }
 
 /**
@@ -203,6 +205,9 @@ export function createSyncResponderSnapshotBudget(
     },
     stats() {
       return { snapshots: entries.size, rows, bytesEstimate };
+    },
+    limits() {
+      return { ...limits };
     },
   };
 }

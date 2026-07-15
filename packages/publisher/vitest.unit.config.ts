@@ -20,6 +20,7 @@ export default defineConfig({
       'test/promote-step-tag.test.ts',
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',
+      'test/ka-graph-workspace-receiver.test.ts',
       'test/ka-graph-finalization-storage.test.ts',
       'test/ka-graph-publish-storage.test.ts',
       'test/agents-meta-bound.test.ts',
