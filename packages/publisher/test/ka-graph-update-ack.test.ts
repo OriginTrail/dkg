@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import {
+  MockChainAdapter,
+  NoChainAdapter,
+  type TxResult,
+  type V10UpdateKAParams,
+} from '@origintrail-official/dkg-chain';
+import {
   computeCatalogRoot,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -10,11 +16,13 @@ import {
   createGraphKnowledgeAssetScope,
   decodeStorageACK,
   encodeUpdateIntent,
+  generateEd25519Keypair,
   isStorageACKDecline,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
+import { DKGPublisher } from '../src/dkg-publisher.js';
 import {
   StorageACKHandler,
   type StorageACKHandlerConfig,
@@ -23,13 +31,22 @@ import {
   computeFlatKCMerkleLeafCountV10,
   computeFlatKCRootV10,
 } from '../src/merkle.js';
+import { buildUpdateSeal, mockSealCtx } from './_helpers/seal.js';
 
 const TARGET_CG_ID = '42';
 const SOURCE_CG_ID = 'private-rootless-cg';
-const AUTHOR = '0x1111111111111111111111111111111111111111';
+const PRODUCER_WALLET = new ethers.Wallet(
+  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
+);
+const AUTHOR = PRODUCER_WALLET.address.toLowerCase();
 const UAL = `did:dkg:otp:20430/${AUTHOR}/7`;
 const KA_ID = (BigInt(AUTHOR) << 96n) | 7n;
 const SCOPE = createGraphKnowledgeAssetScope(UAL, 2);
+const EXACT_VM_GRAPH = knowledgeAssetLayerGraphUri(
+  SOURCE_CG_ID,
+  MemoryLayer.VerifiableMemory,
+  SCOPE,
+);
 const EXACT_SWM_GRAPH = knowledgeAssetLayerGraphUri(
   SOURCE_CG_ID,
   MemoryLayer.SharedWorkingMemory,
@@ -40,6 +57,36 @@ const PRIVATE_ROOT = ethers.getBytes(
   ethers.keccak256(ethers.toUtf8Bytes('rootless-private-update')),
 );
 const PEER = { toString: () => 'publisher-peer' };
+const UPDATE_TX_HASH = `0x${'42'.padStart(64, '0')}`;
+
+class ProducerUpdateChain extends MockChainAdapter {
+  constructor() {
+    super('mock:31337', AUTHOR);
+  }
+
+  async getUpdateAckDigestFields() {
+    return {
+      contextGraphId: BigInt(TARGET_CG_ID),
+      preUpdateMerkleRootCount: 1n,
+      newTokenAmount: 1000n,
+      mintAmount: 0n,
+      burnTokenIds: [],
+    };
+  }
+
+  override async updateKnowledgeCollectionV10(
+    params: V10UpdateKAParams,
+  ): Promise<TxResult> {
+    await params.onBroadcast?.({ txHash: UPDATE_TX_HASH });
+    return {
+      success: true,
+      hash: UPDATE_TX_HASH,
+      blockNumber: 2,
+      txIndex: 0,
+      publisherAddress: AUTHOR,
+    };
+  }
+}
 
 function config(wallet: ethers.Wallet, curated = false): StorageACKHandlerConfig {
   return {
@@ -102,6 +149,100 @@ function intent(
 }
 
 describe('StorageACKHandler graph-scoped updates', () => {
+  it('accepts the inline VM payload emitted by a public graph-update producer', async () => {
+    const store = new OxigraphStore();
+    const publisher = new DKGPublisher({
+      store,
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherAddress: AUTHOR,
+    });
+    const initial = await publisher.publish({
+      contextGraphId: SOURCE_CG_ID,
+      quads: [{
+        subject: 'urn:entity:producer',
+        predicate: 'urn:p:value',
+        object: '"v1"',
+        graph: 'urn:input:is-restamped',
+      }],
+      publisherPeerId: 'publisher-peer',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    });
+    expect(initial.kaId).toBe(KA_ID);
+
+    const updatedSWMQuad: Quad = {
+      subject: 'urn:entity:producer',
+      predicate: 'urn:p:value',
+      object: '"v2"',
+      graph: EXACT_SWM_GRAPH,
+    };
+    await store.insert([updatedSWMQuad]);
+
+    const chain = new ProducerUpdateChain();
+    chain.__registerKC({
+      kaId: KA_ID,
+      contextGraphId: BigInt(TARGET_CG_ID),
+      merkleRootHex: ethers.hexlify(initial.merkleRoot),
+      chunks: [],
+      merkleLeafCount: 1,
+      publisherAddress: AUTHOR,
+    });
+    (publisher as unknown as { chain: ProducerUpdateChain }).chain = chain;
+
+    const handler = new StorageACKHandler(
+      new OxigraphStore(),
+      config(ethers.Wallet.createRandom()),
+      new TypedEventBus(),
+    );
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async (_peerId, _protocol, data) => handler.updateHandler(data, PEER),
+      getConnectedCorePeers: () => ['core-1'],
+      verifyIdentity: async () => true,
+      log: () => {},
+    };
+    const collector = new ACKCollector(deps);
+    let producedStagingQuads: Uint8Array | undefined;
+    const updateSeal = await buildUpdateSeal({
+      kaId: KA_ID,
+      quads: [{ ...updatedSWMQuad, graph: '' }],
+      author: PRODUCER_WALLET,
+      ctx: mockSealCtx(),
+    });
+
+    const result = await publisher.updateKnowledgeAssetFromSharedMemory(KA_ID, {
+      contextGraphId: SOURCE_CG_ID,
+      publishContextGraphId: TARGET_CG_ID,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 2,
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      precomputedUpdateAttestation: updateSeal,
+      v10UpdateACKProvider: async (params) => {
+        producedStagingQuads = params.stagingQuads;
+        const collected = await collector.collectUpdate({
+          ...params,
+          contextGraphId: BigInt(params.contextGraphId),
+          chainId: 31337n,
+          kav10Address: '0x000000000000000000000000000000000000c10a',
+          publisherPeerId: 'publisher-peer',
+          requiredACKs: 1,
+        });
+        return collected.acks;
+      },
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(new TextDecoder().decode(producedStagingQuads)).toContain(`<${EXACT_VM_GRAPH}>`);
+    expect(new TextDecoder().decode(producedStagingQuads)).not.toContain(`<${EXACT_SWM_GRAPH}>`);
+  });
+
   it('verifies a public-plus-private update from only its exact per-KA SWM graph', async () => {
     const store = new OxigraphStore();
     const quads: Quad[] = [
