@@ -747,8 +747,36 @@ function resolveGraphScopedPublishDescriptor(
   if ((options.manifest?.length ?? 0) > 0) {
     throw new Error('Graph-scoped publish must not carry a root-entity manifest');
   }
+  const scope = createGraphKnowledgeAssetScope(options.kaUal, options.assertionVersion);
+  // Reject conflicting caller-supplied identity before planner, chain, or
+  // storage work. Discovering it only after mint would strand an on-chain KA
+  // that can never materialize under the requested UAL.
+  const suppliedReservedKaId =
+    options.reservedKaId ?? options.precomputedAttestation?.reservedKaId;
+  if (suppliedReservedKaId !== undefined) {
+    const expectedPackedKaId =
+      (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+    if (suppliedReservedKaId !== expectedPackedKaId) {
+      throw new Error(
+        `Graph-scoped publish carries reserved kaId ${suppliedReservedKaId}, but UAL ` +
+          `${scope.ual} derives packed kaId ${expectedPackedKaId}`,
+      );
+    }
+  }
+  const attestationAuthor =
+    options.precomputedAttestation?.authorAddress
+    ?? options.precomputedUpdateAttestation?.authorAddress;
+  if (
+    attestationAuthor !== undefined
+    && attestationAuthor.toLowerCase() !== scope.agentAddress
+  ) {
+    throw new Error(
+      `Graph-scoped publish attestation author ${attestationAuthor} does not match ` +
+        `the UAL author ${scope.agentAddress}`,
+    );
+  }
   return {
-    scope: createGraphKnowledgeAssetScope(options.kaUal, options.assertionVersion),
+    scope,
     publicTripleCount: options.publicTripleCount!,
     privateTripleCount,
     ...(options.privateMerkleRoot
@@ -2534,6 +2562,7 @@ export class DKGPublisher implements Publisher {
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
+    const graphPublish = resolveGraphScopedPublishDescriptor(options);
     const onChainContextGraphId = options.onChainContextGraphId ?? options.publishContextGraphId;
     let publisherContextGraphId: bigint | undefined;
     try {
@@ -2605,7 +2634,6 @@ export class DKGPublisher implements Publisher {
       onChainContextGraphId: publisherContextGraphId,
       internalCatalogOrigin: isTrustedCatalogInternalOrigin(options),
     });
-    const graphPublish = resolveGraphScopedPublishDescriptor(options);
     let canonical: ReturnType<typeof canonicalPublishPayload> | undefined;
     let canonicalPrivateQuads: Quad[] = [];
     let allSkolemizedQuads: Quad[];
@@ -3754,6 +3782,23 @@ export class DKGPublisher implements Publisher {
           // precomputedAttestation (the agent is the single allocation point).
           (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId,
         );
+        if (graphPublish && reservedKaId !== undefined) {
+          const expectedPackedKaId =
+            (BigInt(graphPublish.scope.agentAddress) << 96n)
+            | BigInt(graphPublish.scope.kaNumber);
+          if (reservedKaId !== expectedPackedKaId) {
+            throw new Error(
+              `Graph-scoped publish reserved kaId ${reservedKaId} does not derive from ` +
+                `UAL ${graphPublish.scope.ual} (expected ${expectedPackedKaId}); refusing to mint`,
+            );
+          }
+          if (graphPublish.scope.chainId !== this.chain.chainId) {
+            throw new Error(
+              `Graph-scoped publish UAL ${graphPublish.scope.ual} targets chain ` +
+                `${graphPublish.scope.chainId}, but this publisher mints on ${this.chain.chainId}`,
+            );
+          }
+        }
         await lifecycle.rememberAssetUal(reservedKaId);
         if (!lifecycle.identityAllocatedEmitted && reservedKaId !== undefined) {
           lifecycle.emit('identity', 'asset_ual_allocated', {
