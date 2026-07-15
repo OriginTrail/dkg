@@ -59,6 +59,11 @@ interface ProcessedSwmBatch {
   readonly droppedDataTriples: number;
 }
 
+interface GraphScopedSwmRecoveryStore extends SwmRecoveryStore {
+  /** Atomic complete-graph replacement required only by graph-scoped recovery. */
+  replaceGraph(graph: string, quads: Quad[]): Promise<unknown>;
+}
+
 export interface RecoverContextGraphSwmDeps {
   readonly ctx: OperationContext;
   readonly remotePeerId: string;
@@ -82,7 +87,7 @@ export interface RecoverContextGraphSwmDeps {
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
   ) => Promise<ProcessedSwmBatch>;
-  readonly store: SwmRecoveryStore;
+  readonly store: GraphScopedSwmRecoveryStore;
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
    * REPLACE (not append) the SWM meta for each recovered root, BEFORE the fresh
@@ -166,8 +171,13 @@ async function fetchGraphBackedSnapshotQuads(
   deps: RecoverContextGraphSwmDeps,
   descriptors: readonly GraphScopedSwmRecoveryDescriptor[],
   fetchedDataQuads: readonly Quad[],
-): Promise<{ quads: Quad[]; completed: boolean }> {
+): Promise<{
+  quads: Quad[];
+  completed: boolean;
+  explicitlyFetchedGraphs: ReadonlySet<string>;
+}> {
   const quads: Quad[] = [];
+  const explicitlyFetchedGraphs = new Set<string>();
   for (const descriptor of descriptors) {
     if (!descriptor.publicSnapshotGraph) continue;
     try {
@@ -181,8 +191,8 @@ async function fetchGraphBackedSnapshotQuads(
       });
       continue;
     } catch {
-      // Fetch the canonical graph explicitly and validate the combined plan
-      // before any store mutation.
+      // Fetch the canonical graph explicitly. The caller replaces, rather
+      // than combines, any rejected data-phase copy before validation.
     }
     const result = await deps.fetchSyncPages(
       deps.ctx,
@@ -199,13 +209,14 @@ async function fetchGraphBackedSnapshotQuads(
     // force the next attempt to verify the complete immutable graph from zero.
     deps.deleteCheckpoint(result.checkpointKey);
     if (!result.completed || result.resumedFromOffset > 0) {
-      return { quads: [], completed: false };
+      return { quads: [], completed: false, explicitlyFetchedGraphs };
     }
+    explicitlyFetchedGraphs.add(descriptor.publicSnapshotGraph);
     for (const quad of result.quads) {
       quads.push({ ...quad, graph: descriptor.publicSnapshotGraph });
     }
   }
-  return { quads, completed: true };
+  return { quads, completed: true, explicitlyFetchedGraphs };
 }
 
 export async function recoverContextGraphSwm(
@@ -247,7 +258,7 @@ export async function recoverContextGraphSwm(
   const excluded = deps.getExcludedSubGraphNames
     ? await deps.getExcludedSubGraphNames(deps.contextGraphId)
     : undefined;
-  const recoveryRegistered = [
+  const graphScopedRecoveryRegistered = [
     ...new Set([
       ...(registered ?? []),
       ...discoverSwmRecoverySubGraphNames({
@@ -261,7 +272,7 @@ export async function recoverContextGraphSwm(
   const graphScopedDescriptors = parseGraphScopedSwmRecoveryDescriptors({
     contextGraphId: deps.contextGraphId,
     metaQuads: meta.quads,
-    registeredSubGraphNames: recoveryRegistered,
+    registeredSubGraphNames: graphScopedRecoveryRegistered,
     excludedSubGraphNames: excluded,
   });
   if (graphScopedDescriptors.length > 0) {
@@ -332,14 +343,19 @@ export async function recoverContextGraphSwm(
   );
 
   const processed = await deps.processSharedMemoryBatch(
-    legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
+    legacyDataQuads, meta.quads, deps.contextGraphId, registered, excluded,
   );
 
   // Build the complete exact-graph apply plan before the first store mutation.
   // A corrupt graph-scoped snapshot must not leave already-replaced legacy
   // roots or an earlier exact graph behind.
   const graphScopedAssets: MaterializedGraphScopedSwmRecoveryAsset[] = [];
-  const graphSnapshotQuads = [...data.quads, ...graphBackedSnapshots.quads];
+  const graphSnapshotQuads = [
+    ...data.quads.filter(
+      (quad) => !graphBackedSnapshots.explicitlyFetchedGraphs.has(quad.graph),
+    ),
+    ...graphBackedSnapshots.quads,
+  ];
   for (const descriptor of graphScopedDescriptors) {
     graphScopedAssets.push(await materializeGraphScopedSwmRecoveryAsset({
       descriptor,

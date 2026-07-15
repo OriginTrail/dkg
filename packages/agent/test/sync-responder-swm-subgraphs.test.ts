@@ -421,7 +421,13 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
         graph: snapshotGraph,
         subject: 'urn:rootless:snapshot',
         predicate: 'http://schema.org/status',
-        object: '"graph-backed"',
+        object: '"graph-backed-a"',
+      },
+      {
+        graph: snapshotGraph,
+        subject: 'urn:rootless:snapshot-2',
+        predicate: 'http://schema.org/status',
+        object: '"graph-backed-b"',
       },
       {
         graph: unregisteredSubGraphSnapshot,
@@ -445,16 +451,29 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       logDebug: noopLog,
     });
 
-    const out = await capSnapshot.invoke({
+    const firstPage = await capSnapshot.invoke({
       contextGraphId: CG_ID,
       offset: 0,
-      limit: 5000,
+      limit: 1,
       includeSharedMemory: true,
       phase: 'snapshot',
       snapshotRef: snapshotGraph,
     });
-    expect(out).toContain('"graph-backed"');
-    expect(out).not.toContain(snapshotGraph);
+    const secondPage = await capSnapshot.invoke({
+      contextGraphId: CG_ID,
+      offset: 1,
+      limit: 1,
+      includeSharedMemory: true,
+      phase: 'snapshot',
+      snapshotRef: snapshotGraph,
+    });
+    expect(firstPage.trim().split('\n')).toHaveLength(1);
+    expect(secondPage.trim().split('\n')).toHaveLength(1);
+    expect(firstPage).not.toBe(secondPage);
+    expect(`${firstPage}\n${secondPage}`).toContain('"graph-backed-a"');
+    expect(`${firstPage}\n${secondPage}`).toContain('"graph-backed-b"');
+    expect(firstPage).not.toContain(snapshotGraph);
+    expect(secondPage).not.toContain(snapshotGraph);
 
     const denied = await capSnapshot.invoke({
       contextGraphId: CG_ID,

@@ -26,8 +26,6 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 /** The subset of the triple store this apply needs. */
 export interface SwmRecoveryStore {
   insert(quads: Quad[]): Promise<unknown>;
-  /** Atomic complete-graph replacement required by graph-scoped recovery. */
-  replaceGraph(graph: string, quads: Quad[]): Promise<unknown>;
   deleteByPattern(pattern: { graph: string; subject: string }): Promise<unknown>;
   deleteBySubjectPrefix(graph: string, prefix: string): Promise<unknown>;
 }

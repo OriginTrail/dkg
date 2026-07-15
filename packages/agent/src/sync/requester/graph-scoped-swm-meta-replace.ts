@@ -7,7 +7,7 @@ import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recov
  * verified graph-scoped recovery metadata. Keeping this beside the recovery
  * model makes data and metadata replacement one explicit store invariant.
  */
-export async function replaceGraphScopedSwmRecoveryMetadata(
+export async function deletePriorGraphScopedSwmRecoveryMetadata(
   store: TripleStore,
   assets: readonly GraphScopedSwmRecoveryDescriptor[],
 ): Promise<void> {

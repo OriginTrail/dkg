@@ -231,7 +231,7 @@ import {
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
-import { replaceGraphScopedSwmRecoveryMetadata } from './sync/requester/graph-scoped-swm-meta-replace.js';
+import { deletePriorGraphScopedSwmRecoveryMetadata } from './sync/requester/graph-scoped-swm-meta-replace.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import {
@@ -6839,7 +6839,7 @@ async function runRecoverContextGraphSwmFromPeer(
       }
     },
     replaceMetaForGraphAssets: (assets) =>
-      replaceGraphScopedSwmRecoveryMetadata(dependencies.store, assets),
+      deletePriorGraphScopedSwmRecoveryMetadata(dependencies.store, assets),
     ensureContextGraph: async (cgId) => {
       const graphManager = new GraphManager(dependencies.store);
       await graphManager.ensureContextGraph(cgId);

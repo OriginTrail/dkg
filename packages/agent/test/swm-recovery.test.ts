@@ -17,7 +17,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
-import { replaceGraphScopedSwmRecoveryMetadata } from '../src/sync/requester/graph-scoped-swm-meta-replace.js';
+import { deletePriorGraphScopedSwmRecoveryMetadata } from '../src/sync/requester/graph-scoped-swm-meta-replace.js';
 
 /**
  * integration. `recoverContextGraphSwm` fetches a CG's
@@ -221,7 +221,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       store,
       publicSnapshotStore: snapshotStore,
       replaceMetaForGraphAssets: (assets) =>
-        replaceGraphScopedSwmRecoveryMetadata(store, assets),
+        deletePriorGraphScopedSwmRecoveryMetadata(store, assets),
       ensureContextGraph: async () => {},
       setCheckpoint: () => {},
       deleteCheckpoint: () => {},
@@ -358,6 +358,135 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     });
     expect(dataCarried).toMatchObject({ completed: true, replacedGraphs: 1 });
     expect(redundantSnapshotFetches).toBe(0);
+
+    const fallbackStore = new OxigraphStore();
+    stores.push(fallbackStore);
+    let fallbackSnapshotFetches = 0;
+    const fallback = await recoverContextGraphSwm({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase) => {
+        if (phase === 'meta') return page(sourceMeta);
+        if (phase === 'data') {
+          return page([{
+            subject: payload[0].subject,
+            predicate: payload[0].predicate,
+            object: '"tampered-data-phase-copy"',
+            graph: snapshotGraph,
+          }]);
+        }
+        fallbackSnapshotFetches += 1;
+        return page(payload);
+      },
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
+        verifiedData: dataQuads,
+        verifiedMeta: metaQuads,
+        entityCreators: [],
+        droppedDataTriples: 0,
+      }),
+      store: fallbackStore,
+      replaceMetaForGraphAssets: async () => {},
+      ensureContextGraph: async () => {},
+      setCheckpoint: () => {},
+      deleteCheckpoint: () => {},
+    });
+    expect(fallback).toMatchObject({ completed: true, replacedGraphs: 1 });
+    expect(fallbackSnapshotFetches).toBe(1);
+    const fallbackRecovered = await fallbackStore.query(
+      `SELECT ?o WHERE { GRAPH <${assertionGraph}> { <urn:rootless:graph-backed> <${STATUS}> ?o } }`,
+    );
+    expect(fallbackRecovered.type === 'bindings'
+      ? fallbackRecovered.bindings.map((row) => row['o'])
+      : []).toEqual(['"recovered"']);
+  });
+
+  it('bootstraps graph-scoped subgraphs without admitting remote legacy lanes', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const subGraphName = 'ai-tools';
+    const subMetaGraph = `did:dkg:context-graph:${CG}/${subGraphName}/_shared_memory_meta`;
+    const subDataGraph = `did:dkg:context-graph:${CG}/${subGraphName}/_shared_memory`;
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const assertionGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+      subGraphName,
+    );
+    const operationId = 'rootless-subgraph-op';
+    const operationSubject = `urn:dkg:share:${CG}:${operationId}`;
+    const headSubject = `${UAL}#dkg-swm-head`;
+    const snapshotGraph =
+      `did:dkg:context-graph:${encodeURIComponent(CG)}/_shared_memory_snapshots/` +
+      `${encodeURIComponent(subGraphName)}/${encodeURIComponent(operationId)}/ka`;
+    const payload: Quad[] = [
+      { subject: 'urn:rootless:subgraph', predicate: STATUS, object: '"recovered"', graph: '' },
+    ];
+    const sourceMeta: Quad[] = [
+      ...generateKnowledgeAssetShareMetadata({
+        shareOperationId: operationId,
+        contextGraphId: CG,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: payload.length,
+        privateTripleCount: 0,
+        publisherPeerId: 'peer-source',
+        timestamp: new Date(0),
+        subGraphName,
+      }, subMetaGraph),
+      { subject: operationSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${workspacePublicQuadsDigest(payload)}"`, graph: subMetaGraph },
+      { subject: operationSubject, predicate: `${DKG}publicSnapshotGraph`, object: snapshotGraph, graph: subMetaGraph },
+      { subject: headSubject, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, graph: subMetaGraph },
+      { subject: headSubject, predicate: `${DKG}kaUal`, object: UAL, graph: subMetaGraph },
+      { subject: headSubject, predicate: `${DKG}assertionVersion`, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: subMetaGraph },
+      { subject: headSubject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: subMetaGraph },
+      { subject: headSubject, predicate: `${DKG}shareOperationId`, object: `"${operationId}"`, graph: subMetaGraph },
+    ];
+    let verifierRegistered: readonly string[] | undefined;
+
+    const result = await recoverContextGraphSwm({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase) => {
+        if (phase === 'meta') return page(sourceMeta);
+        if (phase === 'data') {
+          return page([{
+            subject: 'urn:remote:legacy',
+            predicate: STATUS,
+            object: '"must-not-be-admitted"',
+            graph: subDataGraph,
+          }]);
+        }
+        return page(payload);
+      },
+      processSharedMemoryBatch: async (_dataQuads, metaQuads, _cg, registered) => {
+        verifierRegistered = registered;
+        return {
+          verifiedData: [],
+          verifiedMeta: metaQuads,
+          entityCreators: [],
+          droppedDataTriples: 1,
+        };
+      },
+      store,
+      replaceMetaForGraphAssets: async () => {},
+      ensureContextGraph: async () => {},
+      setCheckpoint: () => {},
+      deleteCheckpoint: () => {},
+      getRegisteredSubGraphNames: async () => [],
+    });
+
+    expect(verifierRegistered).toEqual([]);
+    expect(result).toMatchObject({ completed: true, replacedGraphs: 1, droppedDataTriples: 1 });
+    const recovered = await store.query(
+      `SELECT ?o WHERE { GRAPH <${assertionGraph}> { <urn:rootless:subgraph> <${STATUS}> ?o } }`,
+    );
+    expect(recovered.type === 'bindings' ? recovered.bindings.map((row) => row['o']) : [])
+      .toEqual(['"recovered"']);
   });
 
   it('rejects a corrupt rootless snapshot before replacing the existing exact graph', async () => {
