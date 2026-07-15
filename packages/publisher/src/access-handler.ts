@@ -5,10 +5,14 @@ import {
   encodeAccessResponse,
   ed25519Verify,
   assertSafeIri,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  validateSubGraphName,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
+import { resolveKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 
@@ -32,6 +36,7 @@ interface KAMeta {
   hasInvalidExplicitPolicy?: boolean;
   publisherPeerId?: string;
   allowedPeers?: string[];
+  graphScope?: ReturnType<typeof createGraphKnowledgeAssetScope>;
 }
 
 /**
@@ -90,15 +95,25 @@ export class AccessHandler {
       // Single-root KAs (and legacy `<ual>/<n>` requests, inherently 1:1)
       // are unchanged.
       let servedRootEntity = meta.rootEntity;
+      let privateQuads: Quad[] | undefined;
       let hasPrivate = false;
-      for (const root of meta.rootEntities) {
-        if (
-          this.privateStore.hasPrivateTriples(meta.contextGraphId, root, meta.subGraphName) ||
-          (await this.privateStore.hasPrivateTriplesInStore(meta.contextGraphId, root, meta.subGraphName))
-        ) {
-          servedRootEntity = root;
-          hasPrivate = true;
-          break;
+      if (meta.graphScope) {
+        privateQuads = await this.privateStore.getKnowledgeAssetPrivateTriples(
+          meta.contextGraphId,
+          meta.graphScope,
+          meta.subGraphName,
+        );
+        hasPrivate = privateQuads.length > 0;
+      } else {
+        for (const root of meta.rootEntities) {
+          if (
+            this.privateStore.hasPrivateTriples(meta.contextGraphId, root, meta.subGraphName) ||
+            (await this.privateStore.hasPrivateTriplesInStore(meta.contextGraphId, root, meta.subGraphName))
+          ) {
+            servedRootEntity = root;
+            hasPrivate = true;
+            break;
+          }
         }
       }
 
@@ -157,16 +172,27 @@ export class AccessHandler {
         }
       }
 
-      const privateQuads = await this.privateStore.getPrivateTriples(
+      privateQuads ??= await this.privateStore.getPrivateTriples(
         meta.contextGraphId,
         servedRootEntity,
         meta.subGraphName,
       );
 
+      if (meta.graphScope && meta.privateMerkleRoot) {
+        const actualPrivateRoot = computePrivateRoot(privateQuads);
+        if (
+          !actualPrivateRoot
+          || toHex(actualPrivateRoot) !== toHex(meta.privateMerkleRoot)
+        ) {
+          return this.deny('Private content does not match the durable KA commitment');
+        }
+      }
+
       const nquads = privateQuads
         .map(
-          (q) =>
-            `<${q.subject}> <${q.predicate}> ${q.object} <${q.graph}> .`,
+          (q) => q.graph
+            ? `<${q.subject}> <${q.predicate}> ${q.object} <${q.graph}> .`
+            : `<${q.subject}> <${q.predicate}> ${q.object} .`,
         )
         .join('\n');
 
@@ -199,6 +225,8 @@ export class AccessHandler {
   }
 
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
+    const graphScoped = await this.queryGraphScopedKAMeta(kaUal);
+    if (graphScoped) return graphScoped;
     const direct = await this.queryKAMeta(kaUal);
     if (direct) return direct;
     // Read-both (RFC ka-metadata-trim P3.1): older requesters address private
@@ -210,6 +238,78 @@ export class AccessHandler {
       return this.queryKAMeta(legacyToken[1]);
     }
     return null;
+  }
+
+  /** Resolve V2 metadata through the durable StorageACK head, never VM wire rows. */
+  private async queryGraphScopedKAMeta(kaUal: string): Promise<KAMeta | null> {
+    const safeUal = assertSafeIri(kaUal);
+    const candidates = await this.store.query(
+      `SELECT ?contextGraphId ?assertionVersion ?subGraphName WHERE {
+        GRAPH ?g {
+          ?head <${DKG_NS}contentScopeVersion> "${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+            <${DKG_NS}kaUal> <${safeUal}> ;
+            <${DKG_NS}assertionVersion> ?assertionVersion ;
+            <${DKG_NS}shareOperationId> ?shareOperationId .
+          ?operation <${DKG_NS}shareOperationId> ?shareOperationId ;
+            <${DKG_NS}contextGraphId> ?contextGraphId .
+          OPTIONAL { ?operation <${DKG_NS}subGraphName> ?subGraphName }
+        }
+      }`,
+    );
+    if (candidates.type !== 'bindings' || candidates.bindings.length === 0) return null;
+
+    const distinct = new Map<string, { contextGraphId: string; assertionVersion: string; subGraphName?: string }>();
+    for (const binding of candidates.bindings) {
+      const contextGraphId = stripLiteral(binding['contextGraphId'] ?? '').trim();
+      const assertionVersion = stripLiteral(binding['assertionVersion'] ?? '').trim();
+      const subGraphName = binding['subGraphName']
+        ? stripLiteral(binding['subGraphName']).trim()
+        : undefined;
+      if (!contextGraphId || !/^[1-9][0-9]*$/.test(assertionVersion)) {
+        throw new Error('Corrupt graph-scoped access metadata');
+      }
+      if (subGraphName && !validateSubGraphName(subGraphName).valid) {
+        throw new Error('Corrupt graph-scoped access sub-graph metadata');
+      }
+      distinct.set(`${contextGraphId}\0${assertionVersion}\0${subGraphName ?? ''}`, {
+        contextGraphId,
+        assertionVersion,
+        ...(subGraphName ? { subGraphName } : {}),
+      });
+    }
+    if (distinct.size !== 1) {
+      throw new Error('Ambiguous graph-scoped access metadata');
+    }
+    const candidate = [...distinct.values()][0];
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId: candidate.contextGraphId,
+      kaUal,
+      subGraphName: candidate.subGraphName,
+    });
+    if (
+      !head
+      || head.assertionVersion !== candidate.assertionVersion
+      || head.privateTripleCount <= 0
+      || !head.privateMerkleRoot
+      || !head.accessPolicy
+    ) {
+      throw new Error('Incomplete graph-scoped access metadata');
+    }
+    const graphScope = createGraphKnowledgeAssetScope(kaUal, head.assertionVersion);
+    return {
+      rootEntity: '',
+      rootEntities: [],
+      contextGraphId: candidate.contextGraphId,
+      subGraphName: candidate.subGraphName,
+      graphScope,
+      privateMerkleRoot: hexToBytes(head.privateMerkleRoot),
+      privateTripleCount: head.privateTripleCount,
+      accessPolicy: head.accessPolicy,
+      publisherPeerId: head.publisherPeerId,
+      allowedPeers: head.allowedPeers,
+    };
   }
 
   private async queryKAMeta(kaUal: string): Promise<KAMeta | null> {
@@ -355,6 +455,12 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+function hexToBytes(value: string): Uint8Array {
+  const hex = value.replace(/^0x/, '');
+  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('Invalid private Merkle root');
+  return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
 }
 
 function stripLiteral(s: string): string {

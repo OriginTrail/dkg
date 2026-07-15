@@ -47,7 +47,10 @@ describe('graph-scoped finalization handler', () => {
     });
   });
 
-  async function stageGraph(): Promise<{
+  async function stageGraph(durableAccess?: {
+    accessPolicy: 'ownerOnly' | 'allowList';
+    allowedPeers?: string[];
+  }): Promise<{
     message: FinalizationMessageMsg;
     swmGraph: string;
     vmGraph: string;
@@ -95,6 +98,8 @@ describe('graph-scoped finalization handler', () => {
       privateMerkleRoot,
       privateTripleCount: privateQuads.length,
       publisherPeerId: '12D3KooWPublisher',
+      accessPolicy: durableAccess?.accessPolicy,
+      allowedPeers: durableAccess?.allowedPeers,
     });
     await storeKnowledgeAssetWorkspaceHead({
       store,
@@ -254,6 +259,31 @@ describe('graph-scoped finalization handler', () => {
       } }`,
     );
     expect(metadata).toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('ignores an access envelope supplied by a relay that is not the durable owner', async () => {
+    const { message } = await stageGraph({ accessPolicy: 'ownerOnly' });
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ...message,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWAttacker'],
+    }), CG, '12D3KooWUntrustedRelay');
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    const policy = await store.query(
+      `SELECT ?policy WHERE { GRAPH <${metaGraph}> { <${UAL}> ` +
+        `<http://dkg.io/ontology/accessPolicy> ?policy } }`,
+    );
+    expect(policy).toMatchObject({
+      type: 'bindings',
+      bindings: [{ policy: '"ownerOnly"' }],
+    });
+    const attacker = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> ` +
+        `<http://dkg.io/ontology/allowedPeer> "12D3KooWAttacker" } }`,
+    );
+    expect(attacker).toMatchObject({ type: 'boolean', value: false });
   });
 
   it('keeps the old VM graph and remains retryable when the atomic swap fails', async () => {

@@ -851,8 +851,8 @@ export class StorageACKHandler {
    * StorageACK durability is not satisfied by the data graph alone: without
    * the head, a core that does not subscribe to the CG's live publish topic
    * cannot bind those triples back to the UAL after the chain event lands.
-   * The operation id is content-derived, so ACK retries replace the same
-   * metadata rows instead of growing one record per attempt.
+   * The operation id binds asset identity, version, and content, so ACK retries
+   * replace the same metadata rows without aliasing identical-content KAs.
    */
   private async persistGraphScopedWorkspaceOrDecline(
     cgId: string,
@@ -867,7 +867,11 @@ export class StorageACKHandler {
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
     assertPersistQuadTermsSafe(parsed);
     const normalized = parsed.map((quad) => ({ ...quad, graph: swmGraphUri }));
-    const operationId = `storage-ack-${ethers.hexlify(merkleRoot).slice(2)}`;
+    const operationId = `storage-ack-${ethers.keccak256(ethers.toUtf8Bytes([
+      graphPublish.scope.ual,
+      graphPublish.scope.assertionVersion,
+      ethers.hexlify(merkleRoot),
+    ].join('\0'))).slice(2)}`;
     const metaGraph = this.graphManager.sharedMemoryMetaUri(
       swmGraphId,
       graphPublish.subGraphName,
