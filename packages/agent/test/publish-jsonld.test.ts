@@ -4,9 +4,27 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
-import { OxigraphStore, SharedMemoryLiteralBlobStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncLiftPublisher, type LiftJob, type LiftRequest } from '@origintrail-official/dkg-publisher';
-import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, buildAuthorAttestationTypedData, contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
+import {
+  GraphManager,
+  OxigraphStore,
+  PrivateContentStore,
+  SharedMemoryLiteralBlobStore,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import {
+  TripleStoreAsyncLiftPublisher,
+  type KnowledgeAssetVmPublishRequest,
+  type LiftJob,
+} from '@origintrail-official/dkg-publisher';
+import {
+  DKG_ONTOLOGY,
+  MemoryLayer,
+  SYSTEM_CONTEXT_GRAPHS,
+  buildAuthorAttestationTypedData,
+  contextGraphDataGraphUri,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
@@ -65,12 +83,12 @@ afterEach(async () => {
   }
 });
 
-function expectRawLiftRequest(job: LiftJob | null): LiftRequest {
-  expect(job?.request.jobType).toBe('lift');
-  if (!job || job.request.jobType !== 'lift') {
-    throw new Error('Expected a raw lift job');
+function expectQueuedKaRequest(job: LiftJob | null): KnowledgeAssetVmPublishRequest {
+  expect(job?.request.jobType).toBe('knowledge-asset-vm-publish');
+  if (!job || job.request.jobType !== 'knowledge-asset-vm-publish') {
+    throw new Error('Expected a graph-scoped Knowledge Asset VM publish job');
   }
-  return job.request.lift;
+  return job.request.knowledgeAssetVmPublish;
 }
 
 describe('publishJsonLd', () => {
@@ -263,7 +281,7 @@ describe('publishJsonLd', () => {
     expect(result.status).toBe('confirmed');
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async private-only JSON-LD anchors the real private root and enqueues a Lift job', async () => {
+  it('async private-only JSON-LD enqueues one rootless KA and no root anchor', async () => {
     const { agent, store } = await createAgent('AsyncPrivateOnlyBot');
     await agent.createContextGraph({ id: 'async-priv-only', name: 'AsyncPrivateOnly', description: '' });
     await agent.registerContextGraph('async-priv-only');
@@ -284,33 +302,45 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const request = expectRawLiftRequest(job);
-    expect(request.roots).toEqual([root]);
+    const request = expectQueuedKaRequest(job);
+    expect(request.roots).toEqual([]);
+    expect(request.contentScopeVersion).toBe(2);
+    expect(request.kaUal).toMatch(/^did:dkg:[^/]+\/0x[0-9a-f]{40}\/\d+$/);
     expect(request.accessPolicy).toBe('allowList');
     expect(request.allowedPeers).toEqual(['peer-a']);
     // Keep this resilient to control-plane tuning (defaults changed in main).
     expect(job?.retries.maxRetries).toBeGreaterThan(0);
 
+    const scope = createGraphKnowledgeAssetScope(request.kaUal!, request.assertionVersion!);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      'async-priv-only',
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+    );
     const publicAnchor = await store.query(
-      `ASK { GRAPH <did:dkg:context-graph:async-priv-only/_shared_memory> { <${root}> <http://dkg.io/ontology/privateDataAnchor> "true" } }`,
+      `ASK { GRAPH <${swmGraph}> { <${root}> <http://dkg.io/ontology/privateDataAnchor> "true" } }`,
     );
     expect(publicAnchor.type).toBe('boolean');
-    if (publicAnchor.type === 'boolean') expect(publicAnchor.value).toBe(true);
+    if (publicAnchor.type === 'boolean') expect(publicAnchor.value).toBe(false);
 
     const publicPayload = await store.query(
-      `ASK { GRAPH <did:dkg:context-graph:async-priv-only/_shared_memory> { <${root}> <http://schema.org/name> "Private Async" } }`,
+      `ASK { GRAPH <${swmGraph}> { <${root}> <http://schema.org/name> "Private Async" } }`,
     );
     expect(publicPayload.type).toBe('boolean');
     if (publicPayload.type === 'boolean') expect(publicPayload.value).toBe(false);
 
-    const privatePayload = await store.query(
-      `ASK { GRAPH <did:dkg:context-graph:async-priv-only/_private> { <${root}> <http://schema.org/name> "Private Async" } }`,
-    );
-    expect(privatePayload.type).toBe('boolean');
-    if (privatePayload.type === 'boolean') expect(privatePayload.value).toBe(false);
+    const privatePayload = await new PrivateContentStore(
+      store,
+      new GraphManager(store),
+    ).getKnowledgeAssetPrivateTriples('async-priv-only', scope);
+    expect(privatePayload.some(
+      (quad) => quad.subject === root
+        && quad.predicate === 'http://schema.org/name'
+        && quad.object === '"Private Async"',
+    )).toBe(true);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async bare JSON-LD writes only an anchor in shared/private graphs before lift', async () => {
+  it('async bare JSON-LD keeps private data in the exact KA private graph', async () => {
     const { agent, store } = await createAgent('AsyncBarePrivateBot');
     await agent.createContextGraph({ id: 'async-bare-private', name: 'AsyncBarePrivate', description: '' });
     await agent.registerContextGraph('async-bare-private');
@@ -329,29 +359,38 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const request = expectRawLiftRequest(job);
-    expect(request.roots).toEqual([root]);
+    const request = expectQueuedKaRequest(job);
+    expect(request.roots).toEqual([]);
+    expect(request.contentScopeVersion).toBe(2);
     expect(request.accessPolicy).toBe('ownerOnly');
 
+    const scope = createGraphKnowledgeAssetScope(request.kaUal!, request.assertionVersion!);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      'async-bare-private',
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+    );
     const publicAnchor = await store.query(
-      `ASK { GRAPH <did:dkg:context-graph:async-bare-private/_shared_memory> { <${root}> <http://dkg.io/ontology/privateDataAnchor> "true" } }`,
+      `ASK { GRAPH <${swmGraph}> { <${root}> <http://dkg.io/ontology/privateDataAnchor> "true" } }`,
     );
     expect(publicAnchor.type).toBe('boolean');
-    if (publicAnchor.type === 'boolean') expect(publicAnchor.value).toBe(true);
+    if (publicAnchor.type === 'boolean') expect(publicAnchor.value).toBe(false);
 
     const publicPayload = await store.query(
-      `ASK { GRAPH <did:dkg:context-graph:async-bare-private/_shared_memory> { <${root}> <http://schema.org/name> "Bare Async Private" } }`,
+      `ASK { GRAPH <${swmGraph}> { <${root}> <http://schema.org/name> "Bare Async Private" } }`,
     );
     expect(publicPayload.type).toBe('boolean');
     if (publicPayload.type === 'boolean') expect(publicPayload.value).toBe(false);
 
-    // Async lift stages private quads by operation; they are not materialized in
-    // `_private` until the lift pipeline executes.
-    const privatePayload = await store.query(
-      `ASK { GRAPH <did:dkg:context-graph:async-bare-private/_private> { <${root}> <http://schema.org/name> "Bare Async Private" } }`,
-    );
-    expect(privatePayload.type).toBe('boolean');
-    if (privatePayload.type === 'boolean') expect(privatePayload.value).toBe(false);
+    const privatePayload = await new PrivateContentStore(
+      store,
+      new GraphManager(store),
+    ).getKnowledgeAssetPrivateTriples('async-bare-private', scope);
+    expect(privatePayload.some(
+      (quad) => quad.subject === root
+        && quad.predicate === 'http://schema.org/name'
+        && quad.object === '"Bare Async Private"',
+    )).toBe(true);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the async-lift seal now allocates + binds the per-author
@@ -384,18 +423,12 @@ describe('publishJsonLd', () => {
       },
     );
 
-    // Manually drive the same pipeline the publisher-runner runs in
-    // production: claim → validate → publish. We borrow the agent's
-    // own internal publisher so the chain adapter + wallets match
-    // what processed the request.
-    const internalPublisher = (agent as unknown as {
-      publisher: {
-        publish: (opts: unknown) => Promise<{ status: string; onChainResult?: { batchId: bigint } }>;
-      };
-    }).publisher;
+    // Manually drive the same named-KA queue handler used by the daemon.
     const runner = new TripleStoreAsyncLiftPublisher(store, {
-      publishExecutor: async ({ publishOptions }) => {
-        return internalPublisher.publish(publishOptions) as Promise<any>;
+      knowledgeAssetVmPublishHandler: {
+        preflight: ({ request }) => agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+        execute: ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
       },
     });
     const finalized = await runner.processNext(publisherAddress);
@@ -450,7 +483,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const seal = expectRawLiftRequest(job).seal;
+    const seal = expectQueuedKaRequest(job).seal;
     expect(seal).toBeDefined();
     expect(seal?.authorAddress.toLowerCase()).toBe(tenant.agentAddress.toLowerCase());
     expect(seal?.authorAddress.toLowerCase()).not.toBe(
@@ -559,7 +592,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const seal = expectRawLiftRequest(job).seal;
+    const seal = expectQueuedKaRequest(job).seal;
     expect(seal).toBeDefined();
     expect(seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
     expect(seal?.authorAddress).toMatch(/^0x[0-9a-f]{40}$/i);
@@ -574,82 +607,68 @@ describe('publishJsonLd', () => {
     );
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish on a non-V10 chain enqueues without a seal (no on-chain publish to seal for)', async () => {
-    // Seal only built when chain is V10-ready AND CG has on-chain id. Non-V10 → publisher takes tentative-only path.
+  it('async publish fails closed on a non-V10 chain before enqueuing', async () => {
     const { agent, store } = await createAgent('AsyncSealNonV10Bot');
     await agent.createContextGraph({ id: 'async-seal-non-v10', name: 'AsyncSealNonV10', description: '' });
     await agent.registerContextGraph('async-seal-non-v10');
 
     (agent as unknown as { chain: { isV10Ready: () => boolean } }).chain.isV10Ready = () => false;
 
-    const { captureID } = await agent.publishAsync(
-      'did:dkg:context-graph:async-seal-non-v10',
-      {
-        public: {
-          '@context': 'http://schema.org/',
-          '@id': 'http://example.org/NonV10Entity',
-          '@type': 'Thing',
-          'name': 'Non-V10 Async',
+    await expect(
+      agent.publishAsync(
+        'did:dkg:context-graph:async-seal-non-v10',
+        {
+          public: {
+            '@context': 'http://schema.org/',
+            '@id': 'http://example.org/NonV10Entity',
+            '@type': 'Thing',
+            'name': 'Non-V10 Async',
+          },
         },
-      },
-      { localOnly: true },
-    );
+        { localOnly: true },
+      ),
+    ).rejects.toThrow(/requires a V10-capable chain/);
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
-    const job = await asyncPublisher.getStatus(captureID);
-    expect(expectRawLiftRequest(job).seal).toBeUndefined();
+    expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  // OT-RFC-43 §F2 — backstop: the WM/SWM write is committed BEFORE seal-building and
-  // publishAsync has no outer rollback, so an unexpected throw inside buildAsyncLiftSeal
-  // (transient store read, slice/validation race, signer failure) must degrade to a
-  // SEALLESS lift — never orphan the staged capture or swallow the captureID.
-  it('async publish degrades to sealless (no orphaned write) when seal-building throws', async () => {
+  it('async publish fails closed without enqueuing when finalization throws', async () => {
     const { agent, store } = await createAgent('AsyncSealThrowBot');
     await agent.createContextGraph({ id: 'async-seal-throw', name: 'AsyncSealThrow', description: '' });
     await agent.registerContextGraph('async-seal-throw');
 
-    // Force the seal pipeline to throw, simulating a transient failure after the
-    // (already-committed) workspace write.
-    (agent as unknown as { buildAsyncLiftSeal: () => Promise<undefined> }).buildAsyncLiftSeal =
+    (agent as unknown as { assertionFinalize: (...args: unknown[]) => Promise<never> }).assertionFinalize =
       async () => {
-        throw new Error('simulated transient seal-build failure');
+        throw new Error('simulated finalization failure');
       };
 
-    const { captureID } = await agent.publishAsync(
-      'did:dkg:context-graph:async-seal-throw',
-      {
-        public: {
-          '@context': 'http://schema.org/',
-          '@id': 'http://example.org/ThrowEntity',
-          '@type': 'Thing',
-          'name': 'Throw',
+    await expect(
+      agent.publishAsync(
+        'did:dkg:context-graph:async-seal-throw',
+        {
+          public: {
+            '@context': 'http://schema.org/',
+            '@id': 'http://example.org/ThrowEntity',
+            '@type': 'Thing',
+            'name': 'Throw',
+          },
         },
-      },
-      { localOnly: true },
-    );
-    // The capture was still enqueued (NOT orphaned) and returned a usable captureID.
-    expect(captureID).toBeTruthy();
+        { localOnly: true },
+      ),
+    ).rejects.toThrow(/simulated finalization failure/);
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
-    const job = await asyncPublisher.getStatus(captureID);
-    expect(job).not.toBeNull();
-    // Sealless: the lift carries no seal, so the publisher stages WM/SWM without an
-    // on-chain VM anchor (exactly the prior always-sealless async behaviour).
-    expect(expectRawLiftRequest(job).seal).toBeUndefined();
+    expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  // OT-RFC-43 §F2 — the sealless backstop is ONLY for the implicit machine-capture
-  // path. An EXPLICIT authorship request (custodial authorAgentAddress / self-sovereign
-  // callback) that fails to seal must surface — silently enqueuing an unauthored job
-  // and reporting success would hide that the requested attestation never happened.
-  it('async publish re-throws (does not silently go sealless) when an EXPLICIT author seal-build fails', async () => {
-    const { agent } = await createAgent('AsyncSealExplicitThrowBot');
+  it('async publish does not enqueue when an explicit-author finalization fails', async () => {
+    const { agent, store } = await createAgent('AsyncSealExplicitThrowBot');
     await agent.createContextGraph({ id: 'async-seal-explicit-throw', name: 'AsyncSealExplicitThrow', description: '' });
     await agent.registerContextGraph('async-seal-explicit-throw');
     const tenant = await agent.registerAgent('ExplicitTenant');
 
-    (agent as unknown as { buildAsyncLiftSeal: () => Promise<undefined> }).buildAsyncLiftSeal =
+    (agent as unknown as { assertionFinalize: (...args: unknown[]) => Promise<never> }).assertionFinalize =
       async () => {
         throw new Error('simulated signer failure');
       };
@@ -668,6 +687,9 @@ describe('publishJsonLd', () => {
         { localOnly: true, authorAgentAddress: tenant.agentAddress },
       ),
     ).rejects.toThrow(/simulated signer failure/);
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
+    expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — V10-ready + on-chain CG ⇒ the agent signs the canonical merkle
@@ -694,7 +716,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const request = expectRawLiftRequest(job);
+    const request = expectQueuedKaRequest(job);
     expect(request.seal).toBeDefined();
     expect(request.seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
   }, CHAIN_JSONLD_TIMEOUT_MS);
@@ -720,7 +742,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(expectRawLiftRequest(job).seal).toBeDefined();
+    expect(expectQueuedKaRequest(job).seal).toBeDefined();
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — disk-externalized public snapshots still resolve into the seal's
@@ -764,18 +786,18 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const request = expectRawLiftRequest(job);
+    const request = expectQueuedKaRequest(job);
     expect(request.seal).toBeDefined();
     expect(request.seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish accepts preSignedAuthorAttestation and threads it byte-for-byte into LiftRequest.seal', async () => {
-    // Sync parity: caller pre-signs off-node, agent threads bytes verbatim. Publisher preflight validates at processNext.
+  it('async publish rejects a pre-signed attestation for a different canonical payload', async () => {
     const { agent, store } = await createAgent('AsyncSealPreSignedBot');
     await agent.createContextGraph({ id: 'async-seal-presigned', name: 'AsyncSealPreSigned', description: '' });
     await agent.registerContextGraph('async-seal-presigned');
 
-    // Arbitrary bytes — this test is passthrough wiring, not seal validity.
+    // A caller cannot enqueue arbitrary signature bytes against an unrelated
+    // merkle root: finalization binds the attestation to the canonical KA graph.
     const expectedMerkleRoot = new Uint8Array(32).fill(0xab);
     // Valid EIP-55 address (publishAsync getAddress-validates the attested author).
     const customAuthor = ethers.getAddress('0x' + 'ab'.repeat(20));
@@ -785,39 +807,32 @@ describe('publishJsonLd', () => {
     // (high 160 bits == author); publishAsync rejects it otherwise.
     const presignedReservedKaId = (BigInt(customAuthor) << 96n) | 7n;
 
-    const { captureID } = await agent.publishAsync(
-      'did:dkg:context-graph:async-seal-presigned',
-      {
-        public: {
-          '@context': 'http://schema.org/',
-          '@id': 'http://example.org/PreSignedEntity',
-          '@type': 'Thing',
-          'name': 'PreSigned',
+    await expect(
+      agent.publishAsync(
+        'did:dkg:context-graph:async-seal-presigned',
+        {
+          public: {
+            '@context': 'http://schema.org/',
+            '@id': 'http://example.org/PreSignedEntity',
+            '@type': 'Thing',
+            'name': 'PreSigned',
+          },
         },
-      },
-      {
-        localOnly: true,
-        preSignedAuthorAttestation: {
-          expectedMerkleRoot,
-          authorAddress: customAuthor,
-          signature: { r: sigR, vs: sigVs },
-          schemeVersion: 1,
-          reservedKaId: presignedReservedKaId,
+        {
+          localOnly: true,
+          preSignedAuthorAttestation: {
+            expectedMerkleRoot,
+            authorAddress: customAuthor,
+            signature: { r: sigR, vs: sigVs },
+            schemeVersion: 1,
+            reservedKaId: presignedReservedKaId,
+          },
         },
-      },
-    );
+      ),
+    ).rejects.toThrow(/expectedMerkleRoot mismatch/);
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
-    const job = await asyncPublisher.getStatus(captureID);
-    const seal = expectRawLiftRequest(job).seal;
-    expect(seal).toBeDefined();
-    expect(seal?.merkleRoot).toBe('0x' + 'ab'.repeat(32));
-    expect(seal?.authorAddress.toLowerCase()).toBe(customAuthor.toLowerCase());
-    expect(seal?.signature.r).toBe('0x' + 'bb'.repeat(32));
-    expect(seal?.signature.vs).toBe('0x' + 'cc'.repeat(32));
-    expect(seal?.schemeVersion).toBe(1);
-    // §F2 — the attested reservedKaId is threaded byte-for-byte onto the seal.
-    expect(seal?.reservedKaId).toBe(`${presignedReservedKaId}`);
+    expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish rejects preSignedAuthorAttestation + authorAgentAddress as mutually exclusive', async () => {
@@ -906,7 +921,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const seal = expectRawLiftRequest(job).seal;
+    const seal = expectQueuedKaRequest(job).seal;
     expect(seal).toBeDefined();
     expect(seal?.authorAddress.toLowerCase()).toBe(selfSov.agentAddress.toLowerCase());
     // §F2 — reservedKaId is allocated in the self-sovereign author's namespace and
@@ -1017,16 +1032,12 @@ describe('publishJsonLd', () => {
       },
     );
 
-    // Drive processNext with the agent's own internal publisher so
-    // wallets + chain adapter match what enqueued the job.
-    const internalPublisher = (agent as unknown as {
-      publisher: {
-        publish: (opts: unknown) => Promise<{ status: string; onChainResult?: { batchId: bigint } }>;
-      };
-    }).publisher;
+    // Drive processNext through the same named-KA handler as production.
     const runner = new TripleStoreAsyncLiftPublisher(store, {
-      publishExecutor: async ({ publishOptions }) => {
-        return internalPublisher.publish(publishOptions) as Promise<any>;
+      knowledgeAssetVmPublishHandler: {
+        preflight: ({ request }) => agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+        execute: ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
       },
     });
     const finalized = await runner.processNext(publisherAddress);
@@ -1046,34 +1057,43 @@ describe('publishJsonLd', () => {
     expect(onChainAuthor.toLowerCase()).not.toBe(publisherAddress.toLowerCase());
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish threads opts.priorVersion into LiftRequest.priorVersion', async () => {
-    // `priorVersion` threads through enqueue unchanged for MUTATE/REVOKE transitions.
+  it('async publish rejects legacy transition metadata before enqueuing', async () => {
     const { agent, store } = await createAgent('AsyncPriorVerBot');
     await agent.createContextGraph({ id: 'async-priorver', name: 'AsyncPriorVer', description: '' });
     await agent.registerContextGraph('async-priorver');
 
-    const { captureID } = await agent.publishAsync(
-      'did:dkg:context-graph:async-priorver',
-      {
-        public: {
-          '@context': 'http://schema.org/',
-          '@id': 'http://example.org/PriorVerEntity',
-          '@type': 'Thing',
-          'name': 'PriorVer',
+    const content = {
+      public: {
+        '@context': 'http://schema.org/',
+        '@id': 'http://example.org/PriorVerEntity',
+        '@type': 'Thing',
+        'name': 'PriorVer',
+      },
+    };
+    await expect(
+      agent.publishAsync(
+        'did:dkg:context-graph:async-priorver',
+        content,
+        {
+          localOnly: true,
+          transitionType: 'MUTATE',
         },
-      },
-      {
-        localOnly: true,
-        transitionType: 'MUTATE',
-        priorVersion: 'did:dkg:mock:31337/0xabc/7',
-      },
-    );
+      ),
+    ).rejects.toThrow(/use the KA update API/);
+    await expect(
+      agent.publishAsync(
+        'did:dkg:context-graph:async-priorver',
+        content,
+        {
+          localOnly: true,
+          transitionType: 'CREATE',
+          priorVersion: 'did:dkg:mock:31337/0xabc/7',
+        },
+      ),
+    ).rejects.toThrow(/priorVersion is only valid for the legacy root-lift path/);
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
-    const job = await asyncPublisher.getStatus(captureID);
-    const request = expectRawLiftRequest(job);
-    expect(request.priorVersion).toBe('did:dkg:mock:31337/0xabc/7');
-    expect(request.transitionType).toBe('MUTATE');
+    expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish threads opts.entityProofs into LiftRequest.entityProofs', async () => {
@@ -1100,7 +1120,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(expectRawLiftRequest(job).entityProofs).toBe(true);
+    expect(expectQueuedKaRequest(job).entityProofs).toBe(true);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish threads opts.publisherNodeIdentityIdOverride (bigint) into LiftRequest (stringified)', async () => {
@@ -1127,7 +1147,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(expectRawLiftRequest(job).publisherNodeIdentityIdOverride).toBe('42');
+    expect(expectQueuedKaRequest(job).publisherNodeIdentityIdOverride).toBe('42');
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish preserves publisherNodeIdentityIdOverride === 0n (mode d "no attribution")', async () => {
@@ -1154,11 +1174,10 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(expectRawLiftRequest(job).publisherNodeIdentityIdOverride).toBe('0');
+    expect(expectQueuedKaRequest(job).publisherNodeIdentityIdOverride).toBe('0');
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish enqueues sealless when no signer is available (sync parity)', async () => {
-    // Chain-prereq failures downgrade to sealless enqueue. Publisher decides at processNext.
+  it('async publish fails closed without enqueuing when no signer is available', async () => {
     const { agent, store } = await createAgent('AsyncSealNoSigner');
     await agent.createContextGraph({ id: 'async-no-signer', name: 'AsyncNoSigner', description: '' });
     await agent.registerContextGraph('async-no-signer');
@@ -1168,22 +1187,23 @@ describe('publishJsonLd', () => {
     publisher.publisherFallbackAuthorAddress = async () => undefined;
 
     try {
-      const { captureID } = await agent.publishAsync(
-        'did:dkg:context-graph:async-no-signer',
-        {
-          public: {
-            '@context': 'http://schema.org/',
-            '@id': 'http://example.org/NoSignerEntity',
-            '@type': 'Thing',
-            'name': 'NoSigner',
+      await expect(
+        agent.publishAsync(
+          'did:dkg:context-graph:async-no-signer',
+          {
+            public: {
+              '@context': 'http://schema.org/',
+              '@id': 'http://example.org/NoSignerEntity',
+              '@type': 'Thing',
+              'name': 'NoSigner',
+            },
           },
-        },
-        { localOnly: true },
-      );
+          { localOnly: true },
+        ),
+      ).rejects.toThrow(/no author signer is available/);
 
       const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
-      const job = await asyncPublisher.getStatus(captureID);
-      expect(expectRawLiftRequest(job).seal).toBeUndefined();
+      expect(await asyncPublisher.list()).toEqual([]);
     } finally {
       publisher.publisherFallbackAuthorAddress = original;
     }
@@ -1241,8 +1261,7 @@ describe('publishJsonLd', () => {
     }
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish enqueues sealless when CG is not registered on-chain (sync parity)', async () => {
-    // CG without on-chain id → no seal, publisher goes tentative (matches sync `agent.publish`).
+  it('async publish seals a rootless KA even when its CG is not registered on-chain yet', async () => {
     const { agent, store } = await createAgent('AsyncNoOnChainBot');
     await agent.createContextGraph({ id: 'async-no-onchain', name: 'AsyncNoOnChain', description: '' });
     // Intentionally skip registerContextGraph so the CG has no on-chain id.
@@ -1262,12 +1281,13 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(expectRawLiftRequest(job).seal).toBeUndefined();
+    const request = expectQueuedKaRequest(job);
+    expect(request.seal).toBeDefined();
+    expect(request.contentScopeVersion).toBe(2);
+    expect(request.roots).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async publish seal reflects subtracted set when canonical root already confirmed (codex PR #455 #3)', async () => {
-    // Agent must mirror publisher's `subtractFinalizedExactQuads` so both compute the same merkle.
-    // Pre-populate confirmed state matching the canonical root; publishAsync same root → full overlap → seal undefined.
+  it('async publish does not subtract a new atomic KA against legacy root metadata', async () => {
     const { agent, store } = await createAgent('AsyncSubtractObserve');
     await agent.createContextGraph({ id: 'async-subtract-observe', name: 'AsyncSubtractObs', description: '' });
     await agent.registerContextGraph('async-subtract-observe');
@@ -1289,7 +1309,8 @@ describe('publishJsonLd', () => {
       { subject: canonical, predicate: 'http://example.org/p', object: '"hello"', graph: dataGraph },
     ]);
 
-    // publishAsync the same root/triple — full overlap → seal undefined.
+    // The submitted graph is a new KA even if an older root-addressed asset
+    // happens to contain an identical triple.
     const { captureID } = await agent.publishAsync(
       'async-subtract-observe',
       {
@@ -1301,11 +1322,10 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    // Full overlap with confirmed state → buildAsyncLiftSeal returns
-    // undefined (short-circuit at `dkg-agent.ts` post-subtraction).
-    // If subtraction is removed from the agent pipeline, the seal
-    // would be present here.
-    expect(expectRawLiftRequest(job).seal).toBeUndefined();
+    const request = expectQueuedKaRequest(job);
+    expect(request.seal).toBeDefined();
+    expect(request.contentScopeVersion).toBe(2);
+    expect(request.roots).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish records and resolves subGraphName for staged public and private data', async () => {
@@ -1336,8 +1356,10 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const request = expectRawLiftRequest(job);
+    const request = expectQueuedKaRequest(job);
     expect(request.subGraphName).toBe('research');
-    expect(request.roots).toContain(root);
+    expect(request.contentScopeVersion).toBe(2);
+    expect(request.roots).toEqual([]);
+    expect(request.accessPolicy).toBe('ownerOnly');
   }, CHAIN_JSONLD_TIMEOUT_MS);
 });

@@ -58,6 +58,12 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly privateMerkleRoot?: LiftJobHex;
   /** Exact private triple count committed by privateMerkleRoot. */
   readonly privateTripleCount?: number;
+  /** Immutable access policy captured with the queued SWM snapshot. */
+  readonly accessPolicy?: LiftAccessPolicy;
+  /** Canonical peer allow-list when accessPolicy is allowList. */
+  readonly allowedPeers?: readonly string[];
+  /** V10 selective-disclosure mode captured at enqueue. */
+  readonly entityProofs?: boolean;
   /** Author seal captured with the queued SWM share snapshot. */
   readonly seal: LiftRequestAuthorSeal;
   readonly sealChainId: LiftJobBigInt;

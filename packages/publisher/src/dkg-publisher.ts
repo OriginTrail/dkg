@@ -6738,6 +6738,11 @@ export class DKGPublisher implements Publisher {
       subGraphName?: string;
       publisherPeerId?: string;
       senderAgentAddress?: string;
+      /** Do not encrypt or emit a network-ready payload for a local capture. */
+      localOnly?: boolean;
+      /** Immutable access envelope persisted with the graph-scoped share. */
+      accessPolicy?: PublishOptions['accessPolicy'];
+      allowedPeers?: readonly string[];
       trustedNonManifestCatalogTriples?: PublishOptions['trustedNonManifestCatalogTriples'];
       onChainContextGraphId?: string | bigint;
       /**
@@ -6977,6 +6982,17 @@ export class DKGPublisher implements Publisher {
     );
     const normalizedQuads = normalizedParts.publicQuads;
     const normalizedPrivateQuads = normalizedParts.privateQuads;
+    const accessPolicy = opts?.accessPolicy
+      ?? (normalizedPrivateQuads.length > 0 ? 'ownerOnly' : 'public');
+    const allowedPeers = [...new Set(
+      (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )];
+    if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+      throw new Error('Graph-scoped assertion allowList policy requires allowedPeers');
+    }
+    if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
+      throw new Error('Graph-scoped assertion allowedPeers requires allowList policy');
+    }
     if (normalizedQuads.length !== seal.publicTripleCount) {
       throw new Error(
         `Graph-scoped assertion triple-count mismatch: seal=${seal.publicTripleCount}, ` +
@@ -7048,6 +7064,8 @@ export class DKGPublisher implements Publisher {
         publicTripleCount: normalizedQuads.length,
         ...(promotedPrivateRoot ? { privateMerkleRoot: promotedPrivateRoot } : {}),
         privateTripleCount: normalizedPrivateQuads.length,
+        accessPolicy,
+        allowedPeers,
       });
 
       // Wrap the plaintext publish-request in the encrypted envelope
@@ -7061,7 +7079,7 @@ export class DKGPublisher implements Publisher {
         contextGraphId,
         encoded,
         {
-          localOnly: false,
+          localOnly: opts?.localOnly === true,
           senderAgentAddress: opts.senderAgentAddress,
           operationId,
           shareOperationId: operationId,
@@ -7172,6 +7190,8 @@ export class DKGPublisher implements Publisher {
       ...(promotedPrivateRoot ? { privateMerkleRoot: promotedPrivateRoot } : {}),
       privateTripleCount: normalizedPrivateQuads.length,
       publisherPeerId: opts?.publisherPeerId,
+      accessPolicy,
+      allowedPeers,
       agentAddress: contentScope.agentAddress,
       subGraphName: opts?.subGraphName,
       timestamp: new Date(),

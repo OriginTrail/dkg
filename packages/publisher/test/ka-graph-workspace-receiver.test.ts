@@ -81,9 +81,12 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     );
     expect(meta.type).toBe('quads');
     if (meta.type !== 'quads') throw new Error('expected metadata quads');
-    expect(meta.quads).toHaveLength(18);
+    expect(meta.quads).toHaveLength(19);
     expect(meta.quads.some((quad) => quad.predicate.endsWith('rootEntity'))).toBe(false);
     expect(meta.quads.some((quad) => quad.predicate.endsWith('workspaceOwner'))).toBe(false);
+    expect(meta.quads.some(
+      (quad) => quad.predicate.endsWith('accessPolicy') && quad.object === '"public"',
+    )).toBe(true);
     // The current-head fence points at the immutable operation, so the digest
     // and private commitment are stored only once.
     expect(meta.quads.filter((quad) => quad.predicate.endsWith('publicQuadsDigest'))).toHaveLength(1);
@@ -146,6 +149,45 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(stillCurrent.type).toBe('bindings');
     if (stillCurrent.type !== 'bindings') throw new Error('expected bindings');
     expect(stillCurrent.bindings).toEqual([{ s: 'urn:entity:2', o: '"two"' }]);
+  });
+
+  it('persists the access envelope and rejects same-version policy drift after restart', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const request = v2Request({
+      accessPolicy: 'allowList',
+      allowedPeers: [' peer-b ', 'peer-a', 'peer-b'],
+    });
+    expect((await handler.handle(request, PEER_ID)).applied).toBe(true);
+
+    const metaGraph = new GraphManager(store).sharedMemoryMetaUri(CONTEXT_GRAPH);
+    const envelope = await store.query(
+      `SELECT ?policy ?peer WHERE { GRAPH <${metaGraph}> {
+        ?operation <http://dkg.io/ontology/shareOperationId> "rootless-op-1" ;
+          <http://dkg.io/ontology/accessPolicy> ?policy .
+        OPTIONAL { ?operation <http://dkg.io/ontology/allowedPeer> ?peer }
+      } } ORDER BY ?peer`,
+    );
+    expect(envelope.type).toBe('bindings');
+    if (envelope.type !== 'bindings') throw new Error('expected access-envelope bindings');
+    expect(envelope.bindings).toEqual([
+      { policy: '"allowList"', peer: '"peer-a"' },
+      { policy: '"allowList"', peer: '"peer-b"' },
+    ]);
+
+    const restarted = new SharedMemoryHandler(store, new TypedEventBus());
+    expect((await restarted.handle(v2Request({
+      accessPolicy: 'allowList',
+      allowedPeers: ['peer-a', 'peer-b'],
+    }), PEER_ID)).applied).toBe(true);
+
+    const drift = await restarted.handle(v2Request({
+      accessPolicy: 'ownerOnly',
+      allowedPeers: [],
+    }), PEER_ID);
+    expect(drift).toMatchObject({ applied: false, retryable: false });
+    if (drift.applied) throw new Error('expected policy-drift rejection');
+    expect(drift.reason).toContain('CONFLICTING_KA_ASSERTION_VERSION');
   });
 
   it('keeps one KA-level transport owner across assertion versions', async () => {

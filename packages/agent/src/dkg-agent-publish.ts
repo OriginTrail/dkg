@@ -382,9 +382,7 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
   signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -1082,118 +1080,176 @@ export class PublishMethods extends DKGAgentBase {
     rejectOversizedRdfLiterals(publicQuads, 'publishAsync.publicQuads');
     rejectOversizedRdfLiterals(privateQuads, 'publishAsync.privateQuads');
 
-    const partitioned = partitionPublishAsyncQuads(publicQuads, privateQuads);
-    const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
-    const { shareOperationId, message } = await this.publisher.writeToWorkspace(
+    if (opts?.transitionType !== undefined && opts.transitionType !== 'CREATE') {
+      throw new InvalidContentError(
+        'publishAsync creates one new atomic Knowledge Asset; use the KA update API for MUTATE or REVOKE',
+      );
+    }
+    if (opts?.priorVersion !== undefined) {
+      throw new InvalidContentError('publishAsync priorVersion is only valid for the legacy root-lift path');
+    }
+    if (opts?.namespace !== undefined || opts?.scope !== undefined || opts?.authority !== undefined) {
+      throw new InvalidContentError(
+        'publishAsync no longer accepts legacy root-lift namespace, scope, or authority metadata',
+      );
+    }
+    if (
+      this.chain.isV10Ready?.() !== true
+      || typeof this.chain.getEvmChainId !== 'function'
+      || typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function'
+    ) {
+      throw Object.assign(
+        new Error('publishAsync requires a V10-capable chain so every queued KA has a sealed UAL identity'),
+        { code: SEAL_CAPABILITY_GAP_CODE },
+      );
+    }
+
+    const accessPolicy = opts?.accessPolicy
+      ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
+    const allowedPeers = [...new Set(
+      (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )];
+    if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+      throw new InvalidContentError('publishAsync allowList policy requires allowedPeers');
+    }
+    if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
+      throw new InvalidContentError('publishAsync allowedPeers requires allowList policy');
+    }
+
+    const fallbackAuthor = opts?.preSignedAuthorAttestation === undefined
+      && opts?.authorAgentAddress === undefined
+      ? await this.publisher.publisherFallbackAuthorAddress()
+      : undefined;
+    const lifecycleAgentAddress = ethers.getAddress(
+      opts?.preSignedAuthorAttestation?.authorAddress
+        ?? opts?.authorAgentAddress
+        ?? fallbackAuthor
+        ?? (() => {
+          throw Object.assign(
+            new Error('publishAsync cannot create a rootless KA because no author signer is available'),
+            { code: SEAL_CAPABILITY_GAP_CODE },
+          );
+        })(),
+    );
+    const assertionName = `async-${randomUUID()}`;
+
+    // Reuse the named-KA lifecycle rather than maintaining a second async
+    // content model. Finalize canonicalizes the complete RDF set once, assigns
+    // the UAL, and materializes the exact WM graph; promote moves that graph to
+    // SWM and persists the immutable operation snapshot consumed by the queue.
+    await this.publisher.assertionCreate(
       contextGraphId,
-      partitioned.publicQuads,
+      assertionName,
+      lifecycleAgentAddress,
+      opts?.subGraphName,
+    );
+    if (publicQuads.length > 0) {
+      await this.publisher.assertionWrite(
+        contextGraphId,
+        assertionName,
+        lifecycleAgentAddress,
+        publicQuads,
+        opts?.subGraphName,
+      );
+    }
+    if (privateQuads.length > 0) {
+      await this.publisher.assertionWritePrivate(
+        contextGraphId,
+        assertionName,
+        lifecycleAgentAddress,
+        privateQuads,
+        opts?.subGraphName,
+      );
+    }
+
+    await this.assertionFinalize(
+      contextGraphId,
+      assertionName,
+      lifecycleAgentAddress,
       {
-        publisherPeerId: this.peerId,
-        operationCtx: ctx,
         subGraphName: opts?.subGraphName,
-        localOnly: opts?.localOnly,
-        senderAgentAddress: gossipSigner?.agentAddress,
+        ...(opts?.preSignedAuthorAttestation
+          ? {
+              preSignedAuthorAttestation: {
+                address: opts.preSignedAuthorAttestation.authorAddress,
+                expectedMerkleRoot: opts.preSignedAuthorAttestation.expectedMerkleRoot,
+                reservedKaId: opts.preSignedAuthorAttestation.reservedKaId,
+                signature: opts.preSignedAuthorAttestation.signature,
+              },
+              schemeVersion: opts.preSignedAuthorAttestation.schemeVersion,
+            }
+          : {}),
+        ...(opts?.authorAgentAddress
+          ? { authorAgentAddress: opts.authorAgentAddress }
+          : {}),
+        ...(opts?.authorSignTypedData
+          ? { authorSignTypedData: opts.authorSignTypedData }
+          : {}),
       },
     );
 
-    if (partitioned.privateQuadsByRoot.size > 0) {
-      const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
-      for (const [rootEntity, rootPrivateQuads] of partitioned.privateQuadsByRoot) {
-        await privateStore.storePrivateTriplesForOperation(
-          contextGraphId,
-          shareOperationId,
-          rootEntity,
-          rootPrivateQuads,
-          opts?.subGraphName,
-        );
-      }
-    }
-
-    const liftRequestDraft = {
-      swmId: shareOperationId,
-      shareOperationId,
-      roots: partitioned.roots,
+    const gossipSigner = opts?.localOnly
+      ? null
+      : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
+    const confirmBeforeCommit = opts?.localOnly
+      ? undefined
+      : await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, {}, ctx);
+    const onChainContextGraphId = await this.getContextGraphOnChainId(contextGraphId) ?? undefined;
+    const trustedNonManifestCatalogTriples = await this.isPrivateContextGraph(contextGraphId)
+      ? generatedPrivateCatalogTripleKeys(contextGraphId)
+      : undefined;
+    const promoted = await this.publisher.assertionPromote(
       contextGraphId,
-      namespace: opts?.namespace ?? 'async-publish',
-      scope: opts?.scope ?? 'context-graph',
-      transitionType: opts?.transitionType ?? 'CREATE',
-      authority: opts?.authority ?? { type: 'owner', proofRef: `urn:dkg:publish-async:${shareOperationId}` },
-      priorVersion: opts?.priorVersion,
-      subGraphName: opts?.subGraphName,
-      accessPolicy: opts?.accessPolicy,
-      allowedPeers: opts?.allowedPeers,
-      entityProofs: opts?.entityProofs,
-      publishEpochs: opts?.publishEpochs,
-      // Stringify bigint for JSON-safe persistence; preserve `0n` (mode d).
-      publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride !== undefined
-        ? (opts.publisherNodeIdentityIdOverride.toString() as `${bigint}`)
-        : undefined,
-    } as const;
-
-    // OT-RFC-43 §F2 — bind the per-author reservedKaId into the async-lift seal so
-    // EPCIS/Kafka and other direct async-capture writers earn a real on-chain VM
-    // anchor (not just WM/SWM). Two sources:
-    //   • a caller-supplied preSignedAuthorAttestation carries its own attestation
-    //     and the slot it signed over — honour it, persisting its reservedKaId
-    //     (after a namespace sanity check so we never store a seal the mint would
-    //     reject with KaIdNamespaceMismatch);
-    //   • otherwise build the seal here via `buildAsyncLiftSeal`, which
-    //     allocates-before-signing in the resolved author's namespace.
-    // `buildAsyncLiftSeal` returns undefined (⇒ sealless lift, WM/SWM unaffected,
-    // on-chain anchor simply skipped) on non-V10 chains, off-chain CGs, noops, or
-    // when no allocator/author is available — preserving the prior graceful path.
-    // (A caller-supplied preSignedAuthorAttestation was namespace-checked up front,
-    // before workspace staging, so it can be threaded onto the seal as-is here.)
-    let seal: LiftRequestAuthorSeal | undefined;
-    if (opts?.preSignedAuthorAttestation) {
-      seal = preSignedAttestationToLiftSeal(opts.preSignedAuthorAttestation);
-    } else {
-      // `buildAsyncLiftSeal` degrades to `undefined` (sealless) for the expected
-      // non-mintable conditions (non-V10 / off-chain CG / noop / no allocator / no
-      // signer) and for an allocate failure. A *thrown* error is different and is
-      // handled by caller intent:
-      //   • IMPLICIT machine-capture path (no explicit author → publisher-fallback
-      //     signer; the EPCIS/Kafka shape): the WM/SWM write above is already
-      //     committed with no outer rollback, and the caller asked for a best-effort
-      //     capture, not a specific author's attestation. Degrade to a SEALLESS lift
-      //     (WM/SWM kept, on-chain anchor skipped) rather than orphan the staged
-      //     write — identical to the prior always-sealless async behaviour.
-      //   • EXPLICIT authorship request (custodial authorAgentAddress or a
-      //     self-sovereign authorSignTypedData callback): the caller specifically
-      //     asked for THAT author's attestation. Silently enqueuing an unauthored
-      //     sealless job and returning a captureID would report success without the
-      //     attestation ever being produced — so surface the failure instead.
-      const explicitAuthorshipRequested =
-        opts?.authorAgentAddress != null || opts?.authorSignTypedData != null;
-      try {
-        seal = await this.buildAsyncLiftSeal(
-          liftRequestDraft,
-          opts?.authorAgentAddress,
-          opts?.authorSignTypedData,
-        );
-      } catch (err) {
-        if (explicitAuthorshipRequested) throw err;
-        this.log.warn(
-          ctx,
-          `Async-lift seal build failed; lift stays sealless (WM/SWM committed, ` +
-            `on-chain VM anchor deferred): ${err instanceof Error ? err.message : String(err)}`,
-        );
-        seal = undefined;
-      }
+      assertionName,
+      lifecycleAgentAddress,
+      {
+        subGraphName: opts?.subGraphName,
+        publisherPeerId: this.node.peerId.toString(),
+        senderAgentAddress: gossipSigner?.agentAddress,
+        localOnly: opts?.localOnly === true,
+        accessPolicy,
+        allowedPeers,
+        trustedNonManifestCatalogTriples,
+        onChainContextGraphId,
+        confirmBeforeCommit,
+      },
+    );
+    if (!promoted.shareOperationId) {
+      throw new Error(`publishAsync did not produce an immutable SWM snapshot for ${assertionName}`);
     }
+    if (!opts?.localOnly && promoted.gossipMessage) {
+      await this.publishWorkspaceGossip(
+        contextGraphId,
+        promoted.gossipMessage,
+        ctx,
+        gossipSigner,
+        promoted.shareOperationId,
+      );
+    }
+    await this._stampSwmPointer(
+      contextGraphId,
+      assertionName,
+      lifecycleAgentAddress,
+      opts?.subGraphName,
+    );
 
+    const intent = await this.resolveFinalizedAssertionVmPublishIntent(
+      contextGraphId,
+      assertionName,
+      {
+        agentAddress: lifecycleAgentAddress,
+        subGraphName: opts?.subGraphName,
+        publishEpochs: opts?.publishEpochs,
+        accessPolicy,
+        allowedPeers,
+        entityProofs: opts?.entityProofs,
+        publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
+      },
+    );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(this.store, {
       publicSnapshotStore: this.publicSnapshotStore,
     });
-    const captureID = await asyncPublisher.lift({
-      ...liftRequestDraft,
-      ...(seal !== undefined ? { seal } : {}),
-    });
-
-    if (!opts?.localOnly) {
-      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner);
-    }
-
+    const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     return { captureID };
   }
 
@@ -2189,6 +2245,9 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName?: string;
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+      authorSignTypedData?: (
+        typedData: AuthorAttestationTypedData,
+      ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
       schemeVersion?: number;
     },
   ): Promise<{
@@ -2211,12 +2270,15 @@ export class PublishMethods extends DKGAgentBase {
     eip712Digest: string;
   }> {
     if (
-      opts?.authorAgentAddress != null &&
       opts?.preSignedAuthorAttestation != null
+      && (opts.authorAgentAddress != null || opts.authorSignTypedData != null)
     ) {
       throw new Error(
-        'assertionFinalize: authorAgentAddress and preSignedAuthorAttestation are mutually exclusive',
+        'assertionFinalize: preSignedAuthorAttestation is mutually exclusive with authorAgentAddress / authorSignTypedData',
       );
+    }
+    if (opts?.authorSignTypedData != null && opts.authorAgentAddress == null) {
+      throw new Error('assertionFinalize: authorSignTypedData requires authorAgentAddress');
     }
 
     // 1. Resolve URIs.
@@ -2399,6 +2461,20 @@ export class PublishMethods extends DKGAgentBase {
       privateMerkleRoot ? [privateMerkleRoot] : [],
     );
     const publicTripleCount = normalizedKnowledgeAssetQuads.length;
+    const callerExpectedMerkleRoot = opts?.preSignedAuthorAttestation?.expectedMerkleRoot;
+    if (
+      callerExpectedMerkleRoot !== undefined
+      && (
+        callerExpectedMerkleRoot.length !== merkleRoot.length
+        || !callerExpectedMerkleRoot.every((byte, index) => byte === merkleRoot[index])
+      )
+    ) {
+      throw new Error(
+        `assertionFinalize: preSignedAuthorAttestation expectedMerkleRoot mismatch — ` +
+          `caller=${ethers.hexlify(callerExpectedMerkleRoot)}, ` +
+          `canonical=${ethers.hexlify(merkleRoot)}.`,
+      );
+    }
 
     // 4. Idempotency: if a seal already exists for this assertion,
     //    return it as-is when the merkleRoot matches. Mismatch means
@@ -2566,6 +2642,10 @@ export class PublishMethods extends DKGAgentBase {
     if (opts?.preSignedAuthorAttestation != null) {
       preSigned = opts.preSignedAuthorAttestation;
       authorAddress = preSigned.address;
+    } else if (opts?.authorSignTypedData != null) {
+      // Self-sovereign callback: the daemon builds the exact typed data after
+      // canonicalization and allocation, while the caller retains its key.
+      authorAddress = ethers.getAddress(opts.authorAgentAddress!);
     } else if (opts?.authorAgentAddress != null) {
       const mode = this.getLocalAgentMode(opts.authorAgentAddress);
       if (mode === undefined) {
@@ -2843,6 +2923,27 @@ export class PublishMethods extends DKGAgentBase {
       }
       r = preSigned.signature.r;
       vs = preSigned.signature.vs;
+    } else if (opts?.authorSignTypedData != null) {
+      const compact = await opts.authorSignTypedData(typedData);
+      const sig = ethers.Signature.from({
+        r: ethers.hexlify(compact.r),
+        yParityAndS: ethers.hexlify(compact.vs),
+      });
+      const isContractAuthor =
+        typeof this.chain.hasContractCode === 'function'
+          ? await this.chain.hasContractCode(authorAddress)
+          : false;
+      if (!isContractAuthor) {
+        const recovered = ethers.recoverAddress(eip712Digest, sig);
+        if (recovered.toLowerCase() !== authorAddress.toLowerCase()) {
+          throw new Error(
+            `assertionFinalize: authorSignTypedData signer mismatch — ` +
+              `signature recovers ${recovered} but address claims ${authorAddress}.`,
+          );
+        }
+      }
+      r = ethers.getBytes(sig.r);
+      vs = ethers.getBytes(sig.yParityAndS);
     } else if (signerPrivateKey) {
       const wallet = new ethers.Wallet(
         signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
@@ -3755,6 +3856,9 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress?: string;
       publishEpochs?: number;
       clearSharedMemoryAfter?: boolean;
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      allowedPeers?: readonly string[];
+      entityProofs?: boolean;
       publisherNodeIdentityIdOverride?: bigint | `${bigint}`;
       publisherOverride?: DKGPublisher;
     },
@@ -3806,6 +3910,17 @@ export class PublishMethods extends DKGAgentBase {
       || seal.privateTripleCount === undefined
     ) {
       throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
+    }
+    const accessPolicy = opts?.accessPolicy
+      ?? (seal.privateTripleCount > 0 ? 'ownerOnly' : 'public');
+    const allowedPeers = [...new Set(
+      (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+    )];
+    if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+      throw new Error('Queued Knowledge Asset allowList policy requires allowedPeers');
+    }
+    if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
+      throw new Error('Queued Knowledge Asset allowedPeers requires allowList policy');
     }
     const latestPromote = [...history.events]
       .reverse()
@@ -3860,6 +3975,9 @@ export class PublishMethods extends DKGAgentBase {
         ? ethers.hexlify(seal.privateMerkleRoot).toLowerCase()
         : null,
       privateTripleCount: seal.privateTripleCount,
+      accessPolicy,
+      allowedPeers,
+      entityProofs: opts?.entityProofs ?? null,
       sealMerkleRoot: sealMerkleRoot.toLowerCase(),
       seal: queuedSeal,
       sealChainId: seal.chainId.toString(),
@@ -3891,6 +4009,9 @@ export class PublishMethods extends DKGAgentBase {
         ? { privateMerkleRoot: ethers.hexlify(seal.privateMerkleRoot) as `0x${string}` }
         : {}),
       privateTripleCount: seal.privateTripleCount,
+      accessPolicy,
+      ...(allowedPeers.length > 0 ? { allowedPeers } : {}),
+      ...(opts?.entityProofs !== undefined ? { entityProofs: opts.entityProofs } : {}),
       seal: queuedSeal,
       sealChainId: seal.chainId.toString() as `${bigint}`,
       sealKav10Address: ethers.getAddress(seal.kav10Address) as `0x${string}`,

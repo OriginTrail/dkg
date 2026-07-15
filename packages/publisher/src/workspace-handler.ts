@@ -1107,6 +1107,8 @@ export class SharedMemoryHandler {
         publicTripleCount,
         privateMerkleRoot,
         privateTripleCount,
+        accessPolicy: wireAccessPolicy,
+        allowedPeers: wireAllowedPeers,
       } = request;
       const shareOperationId = request.shareOperationId?.trim();
       const requestLifecycleFields: SharedMemoryLifecycleFields = {
@@ -1179,6 +1181,8 @@ export class SharedMemoryHandler {
       }
 
       let contentScope;
+      let graphAccessPolicy: 'public' | 'ownerOnly' | 'allowList';
+      let graphAllowedPeers: string[];
       try {
         contentScope = createGraphKnowledgeAssetScope(
           kaUal ?? '',
@@ -1222,6 +1226,23 @@ export class SharedMemoryHandler {
           throw new Error(
             'privateMerkleRoot requires a positive privateTripleCount',
           );
+        }
+        const normalizedWirePolicy = String(wireAccessPolicy ?? '').trim();
+        graphAccessPolicy = normalizedWirePolicy === ''
+          ? (privateCount > 0 ? 'ownerOnly' : 'public')
+          : normalizedWirePolicy === 'public'
+            || normalizedWirePolicy === 'ownerOnly'
+            || normalizedWirePolicy === 'allowList'
+            ? normalizedWirePolicy
+            : (() => { throw new Error(`invalid accessPolicy "${normalizedWirePolicy}"`); })();
+        graphAllowedPeers = [...new Set(
+          (wireAllowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+        )].sort();
+        if (graphAccessPolicy === 'allowList' && graphAllowedPeers.length === 0) {
+          throw new Error('allowList accessPolicy requires allowedPeers');
+        }
+        if (graphAccessPolicy !== 'allowList' && graphAllowedPeers.length > 0) {
+          throw new Error('allowedPeers requires allowList accessPolicy');
         }
       } catch (error) {
         const reason = `INVALID_KA_CONTENT_SCOPE: ${error instanceof Error ? error.message : String(error)}`;
@@ -1354,7 +1375,10 @@ export class SharedMemoryHandler {
               currentHead.publicTripleCount === (publicTripleCount ?? 0) &&
               currentHead.privateTripleCount === (privateTripleCount ?? 0) &&
               currentHead.privateMerkleRoot?.toLowerCase() === incomingPrivateRootHex &&
-              currentHead.assertionGraph === swmGraph;
+              currentHead.assertionGraph === swmGraph &&
+              (currentHead.accessPolicy
+                ?? (currentHead.privateTripleCount > 0 ? 'ownerOnly' : 'public')) === graphAccessPolicy &&
+              currentHead.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
             if (sameAssertion) {
               // Exact replay: acknowledge idempotently without churning the
               // graph or immutable operation snapshot.
@@ -1436,6 +1460,8 @@ export class SharedMemoryHandler {
           privateMerkleRoot,
           privateTripleCount: privateTripleCount ?? 0,
           publisherPeerId,
+          accessPolicy: graphAccessPolicy,
+          allowedPeers: graphAllowedPeers,
           agentAddress: senderAgentAddress ?? contentScope.agentAddress,
           subGraphName,
           timestamp: operationTimestamp,

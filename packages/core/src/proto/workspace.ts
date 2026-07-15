@@ -48,6 +48,8 @@ export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
   .add(new Field('publicTripleCount', 15, 'uint32'))
   .add(new Field('privateMerkleRoot', 16, 'bytes'))
   .add(new Field('privateTripleCount', 17, 'uint32'))
+  .add(new Field('accessPolicy', 18, 'string'))
+  .add(new Field('allowedPeers', 19, 'string', 'repeated'))
   .add(WorkspaceManifestEntrySchema)
   .add(WorkspaceCASConditionSchema);
 
@@ -95,6 +97,10 @@ export interface WorkspacePublishRequestMsg {
   privateMerkleRoot?: Uint8Array;
   /** Number of private RDF triples committed by privateMerkleRoot. */
   privateTripleCount?: number;
+  /** Immutable graph-scoped access policy. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Canonical peer allow-list when accessPolicy is allowList. */
+  allowedPeers?: string[];
 }
 
 export function encodeWorkspacePublishRequest(msg: WorkspacePublishRequestMsg): Uint8Array {

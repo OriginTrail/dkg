@@ -2632,6 +2632,9 @@ export class DKGAgent extends DKGAgentBase {
           agentAddress?: string;
           authorAgentAddress?: string;
           preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+          authorSignTypedData?: (
+            typedData: AuthorAttestationTypedData,
+          ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
           schemeVersion?: number;
           /**
            * #1116 — which layer holds the content to seal. `"wm"` (default)
@@ -2670,6 +2673,7 @@ export class DKGAgent extends DKGAgentBase {
             subGraphName: opts?.subGraphName,
             authorAgentAddress: opts?.authorAgentAddress,
             preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+            authorSignTypedData: opts?.authorSignTypedData,
             schemeVersion: opts?.schemeVersion,
           });
         }

@@ -71,6 +71,8 @@ import type {
  */
 export type PreSignedAuthorAttestation = {
   address: string;
+  /** Optional caller commitment checked against the canonicalized KA before sealing. */
+  expectedMerkleRoot?: Uint8Array;
   /**
    * OT-RFC-43 §F2 — the packed reservedKaId the self-sovereign author signed the
    * AuthorAttestation over `(uint160(address)<<96)|uint96(number)`. Required: the

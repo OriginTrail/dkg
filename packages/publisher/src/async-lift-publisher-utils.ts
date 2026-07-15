@@ -84,6 +84,15 @@ export function createKnowledgeAssetVmPublishSnapshotRequest(
     ...(request.privateTripleCount !== undefined
       ? { privateTripleCount: request.privateTripleCount }
       : {}),
+    ...(request.accessPolicy !== undefined
+      ? { accessPolicy: request.accessPolicy }
+      : {}),
+    ...(request.allowedPeers !== undefined
+      ? { allowedPeers: [...request.allowedPeers] }
+      : {}),
+    ...(request.entityProofs !== undefined
+      ? { entityProofs: request.entityProofs }
+      : {}),
     ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
     ...(request.publisherNodeIdentityIdOverride !== undefined
@@ -245,6 +254,9 @@ function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): Know
     ...optionalNumberField(record, 'publicTripleCount', path),
     ...optionalHexStringField(record, 'privateMerkleRoot', path),
     ...optionalNumberField(record, 'privateTripleCount', path),
+    ...optionalAccessPolicyField(record, 'accessPolicy', path),
+    ...optionalStringArrayField(record, 'allowedPeers', path),
+    ...optionalBooleanField(record, 'entityProofs', path),
     seal: parseSeal(record.seal, `${path}.seal`),
     sealChainId: expectBigIntString(record, 'sealChainId', path),
     sealKav10Address: expectHexString(record, 'sealKav10Address', path),

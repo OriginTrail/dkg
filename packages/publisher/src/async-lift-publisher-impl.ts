@@ -119,6 +119,17 @@ function assertGraphScopedLiftSnapshot(request: LiftPublishSnapshotRequest): voi
   if (request.privateTripleCount === 0 && request.privateMerkleRoot !== undefined) {
     throw new Error('Graph-scoped async publish privateMerkleRoot requires private content');
   }
+  const accessPolicy = request.accessPolicy
+    ?? (request.privateTripleCount > 0 ? 'ownerOnly' : 'public');
+  const allowedPeers = [...new Set(
+    (request.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+  )];
+  if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+    throw new Error('Graph-scoped async publish allowList policy requires allowedPeers');
+  }
+  if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
+    throw new Error('Graph-scoped async publish allowedPeers requires allowList policy');
+  }
 }
 
 function resolveKnowledgeAssetVmPublishHandler(
