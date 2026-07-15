@@ -16,6 +16,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ChallengeNoLongerActiveError,
+  MerkleRootMismatchError,
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
   type ChainAdapter,
@@ -259,7 +260,10 @@ describe('RandomSamplingProver — mid-period update (content pinning)', () => {
     const dataGraph = contextGraphDataUri(`cg-${fixture.cgId}`, fixture.cgId.toString());
 
     let submitCalls = 0;
-    const submitProof = vi.fn(async () => {
+    const submitProof = vi.fn(async (
+      _content: Uint8Array,
+      _proof: Uint8Array[],
+    ) => {
       submitCalls += 1;
       if (submitCalls === 1) throw new Error('transient submit failure');
       return { hash: '0xretry', blockNumber: 1002, success: true };
@@ -307,6 +311,75 @@ describe('RandomSamplingProver — mid-period update (content pinning)', () => {
     const outcome = await prover.tick();
     expect(outcome).toMatchObject({ kind: 'submitted', txHash: '0xretry' });
     expect(submitProof).toHaveBeenCalledTimes(2);
+    const [firstContent, firstProof] = submitProof.mock.calls[0]!;
+    const [retryContent, retryProof] = submitProof.mock.calls[1]!;
+    expect(retryContent).toEqual(firstContent);
+    expect(retryProof).toEqual(firstProof);
+    expect(new TextDecoder().decode(retryContent)).not.toContain('MUTATED');
+    await prover.close();
+  });
+
+  it('does not reuse material after the chain deterministically rejects it', async () => {
+    const fixture: KCFixture = {
+      cgId: 12n,
+      kaId: 8n,
+      ual: 'did:dkg:hardhat:31337/0xpub/8',
+      rootEntities: ['urn:e:1', 'urn:e:2', 'urn:e:3'],
+      publicTriples: [
+        { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' },
+        { subject: 'urn:e:2', predicate: 'urn:p:k', object: '"b"' },
+        { subject: 'urn:e:3', predicate: 'urn:p:k', object: '"c"' },
+      ],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+    const dataGraph = contextGraphDataUri(`cg-${fixture.cgId}`, fixture.cgId.toString());
+    const submitProof = vi.fn(async (
+      _content: Uint8Array,
+      _proof: Uint8Array[],
+    ) => {
+      throw new MerkleRootMismatchError('0xbad', '0xexpected');
+    });
+    const challenge = makeChallenge({
+      knowledgeAssetId: fixture.kaId,
+      chunkId: 1n,
+      challengeRoot: root,
+      challengeLeafCount: BigInt(leafCount),
+      activeProofPeriodStartBlock: 1000n,
+      solved: false,
+    });
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: challenge,
+      createChallenge: async () => ({
+        challenge,
+        contextGraphId: fixture.cgId,
+        hash: '0xchallenge',
+        blockNumber: 1000,
+        success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'data-corrupted',
+      reason: 'root-mismatch',
+    });
+    await store.delete([
+      { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"', graph: dataGraph },
+    ]);
+    await store.insert([
+      { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"MUTATED"', graph: dataGraph },
+    ]);
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'data-corrupted',
+      reason: 'root-mismatch',
+    });
+    expect(submitProof).toHaveBeenCalledTimes(1);
     await prover.close();
   });
 });

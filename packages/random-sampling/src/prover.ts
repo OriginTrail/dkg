@@ -572,6 +572,7 @@ export class RandomSamplingProver {
       txResult = await this.chain.submitProof(material.content, material.proof);
     } catch (err) {
       if (err instanceof ChallengeNoLongerActiveError) {
+        this.pinnedProofMaterial = undefined;
         this.log.warn('rs.tick.submit-stale', {
           kaId: kaId.toString(),
           cgId: cgId.toString(),
@@ -588,6 +589,11 @@ export class RandomSamplingProver {
         return { kind: 'submit-stale' };
       }
       if (err instanceof MerkleRootMismatchError) {
+        // This material was deterministically rejected by the on-chain
+        // verifier. Never retain it for the exception-path retry fallback: a
+        // later live-content mismatch must not resubmit proof bytes the chain
+        // already proved invalid.
+        this.pinnedProofMaterial = undefined;
         // The chain says the root we built does not match the on-chain
         // commitment. We already verified it locally, so this is
         // either (a) a race against an UPDATE that flipped the root,
