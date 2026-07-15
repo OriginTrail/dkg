@@ -11,6 +11,7 @@ import {
   DURABLE_INTEGRITY_META_PREDICATES,
   classifyDurableMetaGraph,
 } from '../src/sync/durable-integrity.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: 'p', object: `o${n}`, graph });
 

@@ -61,7 +61,7 @@ const UPDATE_TX_HASH = `0x${'42'.padStart(64, '0')}`;
 
 class ProducerUpdateChain extends MockChainAdapter {
   constructor() {
-    super('mock:31337', AUTHOR);
+    super('otp:20430', AUTHOR);
   }
 
   async getUpdateAckDigestFields() {
@@ -164,7 +164,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
         subject: 'urn:entity:producer',
         predicate: 'urn:p:value',
         object: '"v1"',
-        graph: 'urn:input:is-restamped',
+        graph: '',
       }],
       publisherPeerId: 'publisher-peer',
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
