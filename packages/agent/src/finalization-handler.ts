@@ -34,6 +34,7 @@ import {
   generatedPrivateCatalogTripleKeys,
   generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata,
   readGraphKnowledgeAssetMetadataState,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad,
   insertBoundedAgentRegistryMeta,
   generateSubGraphRegistration,
@@ -976,6 +977,78 @@ export class FinalizationHandler {
     return { status: 'verified', graphUri, quads, merkleRoot };
   }
 
+  /** Recognize exact confirmed Verifiable Memory state from surviving immutable metadata. */
+  private async reconcileConfirmedGraphScopedVmWithoutWorkspaceHead(input: {
+    contextGraphId: string;
+    ual: string;
+    merkleRoot: Uint8Array;
+    kaId: bigint;
+    versionBlock: number;
+    subGraphName?: string;
+  }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
+    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+      contextGraphId: input.contextGraphId,
+      ual: input.ual,
+    });
+    if (stored.state === 'absent') return undefined;
+    if (stored.state === 'invalid') {
+      this.log.warn(ctx, `Chain-reconcile: invalid confirmed graph-scoped metadata for ${input.ual}`);
+      return 'no-swm';
+    }
+
+    const { envelope } = stored;
+    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    try {
+      scope = createGraphKnowledgeAssetScope(input.ual, envelope.assertionVersion);
+    } catch {
+      return 'no-swm';
+    }
+    const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+    if (
+      scope.ual !== input.ual
+      || packedKaId !== input.kaId
+      || envelope.batchId !== input.kaId
+      || !equalBytes(envelope.merkleRoot, input.merkleRoot)
+      || (input.subGraphName !== undefined && input.subGraphName !== envelope.subGraphName)
+    ) {
+      this.log.warn(
+        ctx,
+        `Chain-reconcile: confirmed graph-scoped metadata does not match chain identity for ${input.ual}`,
+      );
+      return 'no-swm';
+    }
+
+    const verification = await this.verifyExactGraphScopedLayer({
+      contextGraphId: input.contextGraphId,
+      scope,
+      layer: MemoryLayer.VerifiableMemory,
+      publicTripleCount: envelope.publicTripleCount,
+      ...(envelope.privateMerkleRoot
+        ? { privateMerkleRoot: envelope.privateMerkleRoot }
+        : {}),
+      expectedMerkleRoot: input.merkleRoot,
+      ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
+    });
+    if (verification.status !== 'verified') {
+      this.log.warn(
+        ctx,
+        `Chain-reconcile: confirmed metadata exists but exact Verifiable Memory content is invalid for ${input.ual}`,
+      );
+      return 'no-swm';
+    }
+
+    await this.advanceExactGraphScopedVersion({
+      contextGraphId: input.contextGraphId,
+      scope,
+      materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
+    });
+    this.log.info(
+      ctx,
+      `Chain-reconcile: exact confirmed Verifiable Memory state survives without a workspace head for ${input.ual}`,
+    );
+    return 'already-confirmed';
+  }
+
   /**
    * Resolve and promote the exact graph-scoped SWM assertion for a chain-known
    * KA. `undefined` means no V2 head exists and the caller may try the legacy
@@ -1041,7 +1114,16 @@ export class FinalizationHandler {
       // lifecycle pointers before stamping, because a torn head cannot prove
       // whether a newer named assertion exists.
     }
-    if (!workspaceHead && !trustedAssertionEvidence) return undefined;
+    if (!workspaceHead && !trustedAssertionEvidence) {
+      return this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
+        contextGraphId,
+        ual,
+        merkleRoot,
+        kaId,
+        versionBlock,
+        ...(subGraphName ? { subGraphName } : {}),
+      }, ctx);
+    }
 
     let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     try {

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  DKGEvent,
   MemoryLayer,
+  TypedEventBus,
   createOperationContext,
   createGraphKnowledgeAssetScope,
   encodeFinalizationMessage,
@@ -33,12 +35,14 @@ const PACKED_KA_ID = (BigInt(AUTHOR) << 96n) | 7n;
 describe('graph-scoped finalization handler', () => {
   let store: OxigraphStore;
   let graphManager: GraphManager;
+  let eventBus: TypedEventBus;
   let handler: FinalizationHandler;
 
   beforeEach(() => {
     store = new OxigraphStore();
     graphManager = new GraphManager(store);
-    handler = new FinalizationHandler(store, undefined);
+    eventBus = new TypedEventBus();
+    handler = new FinalizationHandler(store, undefined, eventBus);
     (handler as unknown as {
       verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
     }).verifyOnChain = async () => ({
@@ -200,6 +204,7 @@ describe('graph-scoped finalization handler', () => {
 
   it('atomically replaces the exact VM graph and emits constant-size rootless metadata', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
+    const emit = vi.spyOn(eventBus, 'emit');
 
     await handler.handleFinalizationMessage(encodeFinalizationMessage({
       ...message,
@@ -248,6 +253,15 @@ describe('graph-scoped finalization handler', () => {
       `ASK { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/rootEntity> ?root } }`,
     );
     expect(legacyRoots).toMatchObject({ type: 'boolean', value: false });
+    expect(emit).toHaveBeenCalledWith(
+      DKGEvent.MEMORY_GRAPH_CHANGED,
+      expect.objectContaining({
+        contextGraphId: CG,
+        layers: ['vm'],
+        operation: 'verifiable_memory_finalized',
+        source: 'finalization',
+      }),
+    );
   });
 
   it('finalizes a fully private KA without requiring a public root or placeholder triple', async () => {
@@ -459,6 +473,79 @@ describe('graph-scoped finalization handler', () => {
     expect(bindingVerified).toBe(true);
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(2);
+  });
+
+  it('recognizes only exact confirmed Verifiable Memory metadata after the workspace head is lost', async () => {
+    const { message, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toBeUndefined();
+
+    const internals = handler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+
+    const query = store.query.bind(store);
+    store.query = async (sparql, options) => {
+      if (sparql.includes('SELECT ?predicate ?object')) {
+        throw new Error('injected confirmed metadata outage');
+      }
+      return query(sparql, options);
+    };
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 125,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).rejects.toThrow('injected confirmed metadata outage');
+    store.query = query;
+
+    const vmResult = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+    );
+    if (vmResult.type !== 'quads') throw new Error('expected finalized VM quads');
+    await store.dropGraph(vmGraph);
+    await store.insert(vmResult.quads.map((quad, index) => index === 0
+      ? { ...quad, object: '"same-count-corruption"', graph: vmGraph }
+      : { ...quad, graph: vmGraph }));
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 126,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('no-swm');
   });
 
   it('advances sweep ordering without rewriting an exact VM graph', async () => {

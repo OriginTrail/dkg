@@ -15,6 +15,7 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import type { AssertionState } from '@origintrail-official/dkg-core';
 
@@ -372,6 +373,23 @@ export type GraphKnowledgeAssetMetadataExpectation = Omit<
 
 export type GraphKnowledgeAssetMetadataState = 'matching' | 'different' | 'absent';
 
+export interface ConfirmedGraphKnowledgeAssetMetadataEnvelope {
+  assertionVersion: string;
+  publicTripleCount: number;
+  privateTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  assertionGraph: string;
+  subGraphName?: string;
+  merkleRoot: Uint8Array;
+  transactionHash: string;
+  batchId: bigint;
+}
+
+export type ConfirmedGraphKnowledgeAssetMetadataRead =
+  | { state: 'absent' }
+  | { state: 'invalid' }
+  | { state: 'confirmed'; envelope: ConfirmedGraphKnowledgeAssetMetadataEnvelope };
+
 function rdfLiteralLexicalValue(value: string): string | undefined {
   const match = /^("(?:\\.|[^"\\])*")/.exec(value);
   if (!match) return undefined;
@@ -407,6 +425,169 @@ function metadataObjectsByPredicate(
   return objects;
 }
 
+async function readGraphKnowledgeAssetMetadataObjects(
+  store: TripleStore,
+  contextGraphId: string,
+  ual: string,
+): Promise<Map<string, string[]> | undefined> {
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  assertSafeGraphIriForSparql(metaGraph);
+  assertSafeGraphIriForSparql(ual);
+  const result = await store.query(
+    `SELECT ?predicate ?object WHERE {
+      GRAPH <${metaGraph}> { <${ual}> ?predicate ?object }
+    }`,
+  );
+  if (result.type !== 'bindings') {
+    throw new Error('Graph-scoped metadata SELECT expected a bindings result');
+  }
+  if (result.bindings.length === 0) return undefined;
+  if (result.bindings.some((row) =>
+    row['predicate'] === undefined || row['object'] === undefined)) {
+    throw new Error('Graph-scoped metadata SELECT returned an incomplete binding');
+  }
+  const rows = result.bindings.map((row) => ({
+    predicate: row['predicate']!,
+    object: row['object']!,
+  }));
+  const objects = metadataObjectsByPredicate(rows);
+  return (objects.get(`${DKG}contentScopeVersion`) ?? []).length > 0
+    ? objects
+    : undefined;
+}
+
+function singleMetadataObject(
+  objects: Map<string, string[]>,
+  predicate: string,
+): string | undefined {
+  const values = objects.get(predicate) ?? [];
+  return values.length === 1 ? values[0] : undefined;
+}
+
+function unsignedIntegerLiteral(value: string | undefined): bigint | undefined {
+  const lexical = value === undefined ? undefined : rdfLiteralLexicalValue(value);
+  if (lexical === undefined || !/^(0|[1-9]\d*)$/.test(lexical)) return undefined;
+  try {
+    return BigInt(lexical);
+  } catch {
+    return undefined;
+  }
+}
+
+function bytes32Literal(value: string | undefined): Uint8Array | undefined {
+  const lexical = value === undefined ? undefined : rdfLiteralLexicalValue(value);
+  const hex = lexical?.replace(/^0x/i, '');
+  if (hex === undefined || !/^[0-9a-fA-F]{64}$/.test(hex)) return undefined;
+  return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
+}
+
+/**
+ * Read the immutable subset needed to recognize an exact, already-confirmed
+ * graph-scoped Verifiable Memory assertion after its mutable workspace head has been lost.
+ * Structural drift is reported separately from absence; store failures throw.
+ */
+export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
+  store: TripleStore,
+  input: { contextGraphId: string; ual: string },
+): Promise<ConfirmedGraphKnowledgeAssetMetadataRead> {
+  const objects = await readGraphKnowledgeAssetMetadataObjects(
+    store,
+    input.contextGraphId,
+    input.ual,
+  );
+  if (!objects) return { state: 'absent' };
+
+  const scopeVersion = unsignedIntegerLiteral(singleMetadataObject(
+    objects,
+    `${DKG}contentScopeVersion`,
+  ));
+  const assertionVersion = unsignedIntegerLiteral(singleMetadataObject(
+    objects,
+    `${DKG}assertionVersion`,
+  ));
+  const publicTripleCount = unsignedIntegerLiteral(singleMetadataObject(
+    objects,
+    `${DKG}publicTripleCount`,
+  ));
+  const privateTripleCount = unsignedIntegerLiteral(singleMetadataObject(
+    objects,
+    `${DKG}privateTripleCount`,
+  ));
+  const batchId = unsignedIntegerLiteral(singleMetadataObject(objects, `${DKG}batchId`));
+  const merkleRoot = bytes32Literal(singleMetadataObject(objects, `${DKG}merkleRoot`));
+  const privateRootValues = objects.get(`${DKG}privateMerkleRoot`) ?? [];
+  const privateMerkleRoot = privateRootValues.length === 1
+    ? bytes32Literal(privateRootValues[0])
+    : undefined;
+  const assertionGraph = singleMetadataObject(objects, `${DKG}assertionGraph`);
+  const kaUal = singleMetadataObject(objects, `${DKG}kaUal`);
+  const status = rdfLiteralLexicalValue(
+    singleMetadataObject(objects, `${DKG}status`) ?? '',
+  );
+  const transactionHash = rdfLiteralLexicalValue(
+    singleMetadataObject(objects, `${DKG}transactionHash`) ?? '',
+  )?.trim();
+  const subGraphValues = objects.get(`${DKG}subGraphName`) ?? [];
+  const subGraphName = subGraphValues.length === 1
+    ? rdfLiteralLexicalValue(subGraphValues[0])
+    : undefined;
+
+  if (
+    scopeVersion !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)
+    || assertionVersion === undefined
+    || publicTripleCount === undefined
+    || publicTripleCount > BigInt(Number.MAX_SAFE_INTEGER)
+    || privateTripleCount === undefined
+    || privateTripleCount > BigInt(Number.MAX_SAFE_INTEGER)
+    || batchId === undefined
+    || merkleRoot === undefined
+    || assertionGraph === undefined
+    || kaUal !== input.ual
+    || status !== 'confirmed'
+    || transactionHash === undefined
+    || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)
+    || privateRootValues.length > 1
+    || (privateRootValues.length === 1 && privateMerkleRoot === undefined)
+    || (privateTripleCount > 0n) !== (privateMerkleRoot !== undefined)
+    || (publicTripleCount === 0n && privateTripleCount === 0n)
+    || subGraphValues.length > 1
+    || (subGraphValues.length === 1 && subGraphName === undefined)
+  ) {
+    return { state: 'invalid' };
+  }
+
+  let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  try {
+    if (subGraphName !== undefined) assertSafeSubGraphNameForSparql(subGraphName);
+    scope = createGraphKnowledgeAssetScope(input.ual, assertionVersion);
+    assertSafeGraphIriForSparql(assertionGraph);
+  } catch {
+    return { state: 'invalid' };
+  }
+  const expectedAssertionGraph = knowledgeAssetLayerGraphUri(
+    input.contextGraphId,
+    MemoryLayer.VerifiableMemory,
+    scope,
+    subGraphName,
+  );
+  if (assertionGraph !== expectedAssertionGraph) return { state: 'invalid' };
+
+  return {
+    state: 'confirmed',
+    envelope: {
+      assertionVersion: assertionVersion.toString(),
+      publicTripleCount: Number(publicTripleCount),
+      privateTripleCount: Number(privateTripleCount),
+      ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+      assertionGraph,
+      ...(subGraphName ? { subGraphName } : {}),
+      merkleRoot,
+      transactionHash,
+      batchId,
+    },
+  };
+}
+
 /**
  * Compare one stored graph-scoped metadata envelope with the canonical writer
  * contract. Extra legacy predicates are tolerated; canonical predicates are
@@ -420,22 +601,12 @@ export async function readGraphKnowledgeAssetMetadataState(
     expectation.ual,
     expectation.assertionVersion,
   );
-  const metaGraph = `did:dkg:context-graph:${expectation.contextGraphId}/_meta`;
-  assertSafeGraphIriForSparql(metaGraph);
-  assertSafeGraphIriForSparql(scope.ual);
-  const result = await store.query(
-    `SELECT ?predicate ?object WHERE {
-      GRAPH <${metaGraph}> { <${scope.ual}> ?predicate ?object }
-    }`,
+  const actual = await readGraphKnowledgeAssetMetadataObjects(
+    store,
+    expectation.contextGraphId,
+    scope.ual,
   );
-  if (result.type !== 'bindings' || result.bindings.length === 0) return 'absent';
-
-  const actualRows = result.bindings
-    .filter((row): row is Record<'predicate' | 'object', string> =>
-      row['predicate'] !== undefined && row['object'] !== undefined)
-    .map((row) => ({ predicate: row['predicate'], object: row['object'] }));
-  const actual = metadataObjectsByPredicate(actualRows);
-  if ((actual.get(`${DKG}contentScopeVersion`) ?? []).length === 0) return 'absent';
+  if (!actual) return 'absent';
 
   const {
     batchId,

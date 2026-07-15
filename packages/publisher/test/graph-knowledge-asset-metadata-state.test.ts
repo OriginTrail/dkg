@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   generateGraphKnowledgeAssetMetadata,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   readGraphKnowledgeAssetMetadataState,
   writeMaterializedVersion,
 } from '../src/metadata.js';
@@ -55,6 +56,20 @@ describe('readGraphKnowledgeAssetMetadataState', () => {
       expectedTxHash: TX_HASH,
       materializedVersion: { blockNumber: 100, txIndex: 0 },
     })).resolves.toBe('matching');
+    await expect(readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
+      contextGraphId: CONTEXT_GRAPH,
+      ual: UAL,
+    })).resolves.toMatchObject({
+      state: 'confirmed',
+      envelope: {
+        assertionVersion: '1',
+        publicTripleCount: 2,
+        privateTripleCount: 0,
+        assertionGraph: ASSERTION_GRAPH,
+        transactionHash: TX_HASH,
+        batchId: 7n,
+      },
+    });
   });
 
   it('reports absent without the graph-scoped discriminator', async () => {
@@ -71,6 +86,10 @@ describe('readGraphKnowledgeAssetMetadataState', () => {
       batchId: 7n,
       expectedTxHash: TX_HASH,
     })).resolves.toBe('absent');
+    await expect(readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
+      contextGraphId: CONTEXT_GRAPH,
+      ual: UAL,
+    })).resolves.toEqual({ state: 'absent' });
   });
 
   it('matches canonical provenance without requiring an ordering stamp', async () => {
@@ -87,18 +106,26 @@ describe('readGraphKnowledgeAssetMetadataState', () => {
     })).resolves.toBe('matching');
   });
 
-  it('rejects an empty transaction hash when exact provenance is unavailable', async () => {
-    const store = new OxigraphStore();
-    await store.insert(generateGraphKnowledgeAssetMetadata(
-      { ...metadata, timestamp: new Date('2026-01-01T00:00:00Z') },
-      'confirmed',
-      { ...provenance, txHash: '' },
-    ));
+  it('rejects missing or malformed transaction provenance', async () => {
+    for (const txHash of ['', '0x1']) {
+      const store = new OxigraphStore();
+      await store.insert(generateGraphKnowledgeAssetMetadata(
+        { ...metadata, timestamp: new Date('2026-01-01T00:00:00Z') },
+        'confirmed',
+        { ...provenance, txHash },
+      ));
 
-    await expect(readGraphKnowledgeAssetMetadataState(store, {
-      ...metadata,
-      batchId: 7n,
-    })).resolves.toBe('different');
+      if (txHash === '') {
+        await expect(readGraphKnowledgeAssetMetadataState(store, {
+          ...metadata,
+          batchId: 7n,
+        })).resolves.toBe('different');
+      }
+      await expect(readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
+        contextGraphId: CONTEXT_GRAPH,
+        ual: UAL,
+      })).resolves.toEqual({ state: 'invalid' });
+    }
   });
 
   it('propagates metadata-store read failures instead of classifying them as drift', async () => {
@@ -112,6 +139,16 @@ describe('readGraphKnowledgeAssetMetadataState', () => {
       batchId: 7n,
       expectedTxHash: TX_HASH,
     })).rejects.toThrow('injected metadata read outage');
+    await expect(readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
+      contextGraphId: CONTEXT_GRAPH,
+      ual: UAL,
+    })).rejects.toThrow('injected metadata read outage');
+
+    store.query = async () => ({ type: 'boolean', value: false });
+    await expect(readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
+      contextGraphId: CONTEXT_GRAPH,
+      ual: UAL,
+    })).rejects.toThrow('expected a bindings result');
   });
 
   it('rejects a different or duplicated canonical field', async () => {
