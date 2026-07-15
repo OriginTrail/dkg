@@ -87,7 +87,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: e5f8165fdc246ed5458849256ce886b776c56320
+          ref: aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -138,6 +138,10 @@ jobs:
             --sample-key "${SAMPLE_KEY}" \
             --github-output "${GITHUB_OUTPUT}" \
             --summary "${GITHUB_STEP_SUMMARY}"
+          if ! grep -Eq '^abi_freshness=(true|false)$' "${GITHUB_OUTPUT}"; then
+            echo "::error::Trusted CI controller did not emit abi_freshness"
+            exit 1
+          fi
       # Package README files are documentation for routing purposes, but they
       # are also npm metadata. Candidate code runs only after the trusted plan
       # has finalized its outputs, so it cannot influence test selection.
@@ -1398,7 +1402,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: e5f8165fdc246ed5458849256ce886b776c56320
+          ref: aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |

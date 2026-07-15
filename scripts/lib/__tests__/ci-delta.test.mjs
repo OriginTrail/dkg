@@ -23,7 +23,7 @@ import {
 } from '../ci-results.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const TRUSTED_CI_CONTROLLER_SHA = 'e5f8165fdc246ed5458849256ce886b776c56320';
+const TRUSTED_CI_CONTROLLER_SHA = 'aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d';
 const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 
 function change(filePath, status = 'M') {
@@ -453,6 +453,11 @@ test('workflows execute the planner and aggregate gates from one immutable trust
   }
 
   const primaryWorkflow = workflows.get('primary');
+  assert.match(
+    primaryWorkflow,
+    /grep -Eq '\^abi_freshness=\(true\|false\)\$'/,
+    'the primary planner must fail closed when the pinned controller omits abi_freshness',
+  );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
       > primaryWorkflow.indexOf('node trusted-ci/scripts/ci/plan-ci.mjs'),
@@ -627,6 +632,12 @@ test('GitHub outputs are booleans plus compact JSON matrices', () => {
   assert.equal('solidityRelevant' in gatePlan, false);
   assert.equal('changedFiles' in gatePlan, false);
   assert.equal('reasons' in gatePlan, false);
+
+  const abiOnlyOutputs = githubOutputsForPlan(pullRequestPlan([
+    change('packages/evm-module/abi/KnowledgeAssets.json'),
+  ]));
+  assert.equal(abiOnlyOutputs.abi_freshness, 'true');
+  assert.equal(abiOnlyOutputs.contracts, 'false');
 });
 
 test('aggregate gates reject failed or accidentally skipped selected jobs', () => {
