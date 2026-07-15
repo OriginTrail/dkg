@@ -1,9 +1,103 @@
 import { describe, expect, it } from 'vitest';
+import {
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
+import {
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
+} from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 
+const CONTEXT_GRAPH_ID = 'worker-wire-multi-ka';
+const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`;
+const META_GRAPH = `${CONTEXT_GRAPH_URI}/_meta`;
+const UAL_A = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/19';
+const UAL_B = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000cd/23';
+
+function graphScopedAsset(ual: string, name: string) {
+  const assertionVersion = '1';
+  const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+  const assertionGraph = knowledgeAssetLayerGraphUri(
+    CONTEXT_GRAPH_ID,
+    MemoryLayer.VerifiableMemory,
+    scope,
+  );
+  const payload: Quad[] = [{
+    subject: `urn:worker-wire:${name}`,
+    predicate: 'http://schema.org/name',
+    object: `"${name}"`,
+    graph: assertionGraph,
+  }];
+  const meta = generateGraphKnowledgeAssetMetadata(
+    {
+      ual,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      merkleRoot: computeFlatKCRootV10(payload, []),
+      publisherPeerId: 'publisher-peer',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion,
+      publicTripleCount: payload.length,
+      privateTripleCount: 0,
+      assertionGraph,
+    },
+    'tentative',
+  );
+  return { assertionGraph, payload, meta };
+}
+
 describe('durable sync worker result transport', () => {
+  it('carries changelog graph targets and verified bindings across the real worker boundary', async () => {
+    const unchanged = graphScopedAsset(UAL_A, 'unchanged');
+    const changed = graphScopedAsset(UAL_B, 'changed');
+    const fullMetadataSnapshot = [...unchanged.meta, ...changed.meta];
+    const worker = new SyncVerifyWorker();
+
+    try {
+      const result = await worker.processDurableBatch(
+        changed.payload,
+        fullMetadataSnapshot,
+        false,
+        [changed.assertionGraph],
+      );
+
+      expect(result.rejectedKcs).toBe(0);
+      expect(result.verifiedData).toEqual(changed.payload);
+      expect(result.verifiedData[0]).toBe(changed.payload[0]);
+      expect(result.verifiedMeta).toEqual(fullMetadataSnapshot);
+      expect(result.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
+      expect(result.integrityMetadataGraphs).toEqual([META_GRAPH]);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('keeps full snapshot verification strict across the real worker boundary', async () => {
+    const missing = graphScopedAsset(UAL_A, 'missing');
+    const present = graphScopedAsset(UAL_B, 'present');
+    const fullMetadataSnapshot = [...missing.meta, ...present.meta];
+    const worker = new SyncVerifyWorker();
+
+    try {
+      const result = await worker.processDurableBatch(
+        present.payload,
+        fullMetadataSnapshot,
+        false,
+      );
+
+      expect(result.rejectedKcs).toBe(1);
+      expect(result.verifiedData).toEqual([]);
+      expect(result.verifiedMeta).toEqual([]);
+      expect(result.integrityMetadataGraphs).toEqual([META_GRAPH]);
+    } finally {
+      await worker.close();
+    }
+  });
+
   it('reuses caller-owned quads instead of structured-cloning verified payloads back', async () => {
     const worker = new SyncVerifyWorker();
     const dataQuads: Quad[] = [

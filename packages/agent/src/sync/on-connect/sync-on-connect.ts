@@ -5,6 +5,7 @@ interface SyncProgressSummary {
   insertedDataTriples?: number;
   insertedMetaTriples?: number;
   metaOnlyResponses?: number;
+  verifiedPrivateOnlyResponses?: number;
   dataRejectedMissingMeta?: number;
   rejectedKcs?: number;
   completedPhases?: number;
@@ -138,11 +139,23 @@ function insertedDataTriplesForProgress(result: SyncProgressSummary): number {
 }
 
 function metadataOnlySync(result: SyncProgressSummary): boolean {
+  if (hasCleanVerifiedPrivateOnlyCompletion(result)) return false;
   const insertedDataTriples = result.insertedDataTriples ?? 0;
   return insertedDataTriples === 0 && (
     (result.metaOnlyResponses ?? 0) > 0 ||
     ((result.insertedMetaTriples ?? 0) > 0 && result.insertedTriples > 0)
   );
+}
+
+function hasCleanVerifiedPrivateOnlyCompletion(result: SyncProgressSummary): boolean {
+  return (result.verifiedPrivateOnlyResponses ?? 0) > 0
+    && (result.metaOnlyResponses ?? 0) === 0
+    && (result.completedPhases ?? 0) > 0
+    && (result.timedOutPhases ?? 0) === 0
+    && (result.failedPeers ?? 0) === 0
+    && (result.failedPhases ?? 0) === 0
+    && (result.deniedPhases ?? 0) === 0
+    && !hadIntegrityRejection(result);
 }
 
 export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {

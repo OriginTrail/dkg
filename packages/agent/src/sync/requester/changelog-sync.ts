@@ -32,9 +32,10 @@ export interface PageApplyPlan {
  * The cursor advances only along a CONTIGUOUS verified prefix (iteration stops at the FIRST
  * unresolved record), so the durable cursor never passes a change that was not applied.
  * An empty-content upsert is a resolved NO-OP — never a REPLACE — so it can never delete a
- * local graph (genuine deletions arrive only via `drop` records). Store writes commit
- * BEFORE the caller persists the cursor; upsert=REPLACE and drop are idempotent, so a crash
- * between commit and cursor-persist re-fetches and re-applies harmlessly.
+ * local graph. Peer-supplied drops defer to authoritative resync because the changelog
+ * marker is not itself a deletion proof. Store writes commit BEFORE the caller persists
+ * the cursor; upsert=REPLACE is idempotent, so a crash between commit and cursor-persist
+ * re-fetches and reapplies harmlessly.
  */
 export function planPageApply(params: {
   records: ChangelogDeltaRecord[]; // ascending by seq (wire decoder guarantees)
@@ -48,7 +49,9 @@ export function planPageApply(params: {
   /** Legacy sibling meta-graph URIs present in-page that carry a `dkg:merkleRoot`. */
   metaGraphsWithRoot: Set<string>;
   /** Exact V2 assertion graphs bound by verified graph-scoped metadata in THIS page. */
-  merkleBoundDataGraphs: Set<string>;
+  verifiedGraphScopedDataGraphs: Set<string>;
+  /** Meta graphs containing KA integrity markers, including malformed V2 descriptors. */
+  integrityMetadataGraphs: Set<string>;
   /** processDurableBatch rejected nothing this page (rejectedKcs===0 && dataRejectedMissingMeta===0). */
   batchVerifiedCleanly: boolean;
 }): PageApplyPlan {
@@ -60,7 +63,7 @@ export function planPageApply(params: {
   const dataGraphTrusted = (dataGraph: string): boolean => {
     if (!params.batchVerifiedCleanly) return false; // any KC in the page failed merkle ⇒ trust nothing
     const legacySiblingBound = params.metaGraphsWithRoot.has(`${dataGraph}/_meta`);
-    const graphScopeBound = params.merkleBoundDataGraphs.has(dataGraph);
+    const graphScopeBound = params.verifiedGraphScopedDataGraphs.has(dataGraph);
     if (!legacySiblingBound && !graphScopeBound) return false;
     const parsedCount = params.recordQuadCountByGraph.get(dataGraph);
     if (parsedCount === undefined || parsedCount === 0) return false; // absent/empty ⇒ nothing merkle-checkable
@@ -74,9 +77,13 @@ export function planPageApply(params: {
       continue;
     }
     if (rec.op === 'drop') {
-      ops.push({ seq: rec.seq, graph: rec.graph, op: 'drop', quads: [] });
-      applied += 1;
-      continue;
+      // A remote changelog marker is not an authenticated deletion proof. Stop
+      // before it and let the driver's bounded stall fallback reconcile through
+      // the authoritative durable lane; never hand an arbitrary peer a direct
+      // dropGraph primitive.
+      deferred = true;
+      earliestUnresolvedSeq = Math.min(earliestUnresolvedSeq, rec.seq);
+      break;
     }
     // Empty-content upsert (parsed to zero quads) carries nothing to verify or apply — a
     // resolved NO-OP. It must NEVER become a REPLACE (drop): that would silently delete a
@@ -87,22 +94,22 @@ export function planPageApply(params: {
     if (rec.graph.endsWith('/_meta')) {
       const parsedCount = params.recordQuadCountByGraph.get(rec.graph) ?? 0;
       const verifiedCount = params.verifiedByGraph.get(rec.graph)?.length ?? 0;
-      // A merkle-bearing metadata snapshot is shared by every KA in the CG.
-      // Never REPLACE it with the verifier's partial subset: that would erase
-      // rejected KA metadata and then advance beyond it. Plain CG config
-      // metadata (no merkle roots) retains the established trusted-anchor path.
+      // Replacing a shared metadata graph is deletion-equivalent: a peer can
+      // omit every live KA descriptor and leave one harmless config row. Only
+      // an integrity-bearing snapshot that survived verification may replace
+      // the graph; markerless metadata reconciles through the authoritative
+      // durable lane instead.
       if (
-        params.metaGraphsWithRoot.has(rec.graph)
-        && (!params.batchVerifiedCleanly || verifiedCount !== parsedCount)
+        !params.integrityMetadataGraphs.has(rec.graph)
+        || !params.batchVerifiedCleanly
+        || verifiedCount !== parsedCount
       ) {
         deferred = true;
         earliestUnresolvedSeq = Math.min(earliestUnresolvedSeq, rec.seq);
         break;
       }
-      // META graphs are trusted ANCHORS, exactly like legacy sync: the served meta is
-      // applied as-is (rejected-KC rows already dropped from verifiedMeta), and DATA is
-      // what gets merkle-verified against it. This is what lets the top-level `_meta`
-      // graph (whose data sibling is often empty) converge instead of deferring forever.
+      // Integrity-bearing META graphs are trusted anchors: rejected-KC rows
+      // have already been removed and the full record survived verification.
       ops.push({ seq: rec.seq, graph: rec.graph, op: 'upsert', quads: params.verifiedByGraph.get(rec.graph) ?? [] });
       applied += 1;
       continue;

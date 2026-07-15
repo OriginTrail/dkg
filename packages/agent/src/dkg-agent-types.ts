@@ -930,6 +930,8 @@ export interface DurableSyncDiagnostics {
   checkpointAdvances: number;
   emptyResponses: number;
   metaOnlyResponses: number;
+  /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
+  verifiedPrivateOnlyResponses?: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
