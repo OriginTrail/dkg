@@ -82,6 +82,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       checkpointAdvances: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
       rejectedKcs: 0,
       failedPeers: 0,
@@ -156,6 +157,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     checkpointAdvances: 0,
     emptyResponses: 0,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
     rejectedKcs: 0,
     failedPeers: 1,
@@ -211,6 +213,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.checkpointAdvances += durable.checkpointAdvances ?? 0;
     diagnostics.durable.emptyResponses += durable.emptyResponses;
     diagnostics.durable.metaOnlyResponses += durable.metaOnlyResponses;
+    diagnostics.durable.verifiedPrivateOnlyResponses =
+      (diagnostics.durable.verifiedPrivateOnlyResponses ?? 0) +
+      (durable.verifiedPrivateOnlyResponses ?? 0);
     diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
     diagnostics.durable.rejectedKcs += durable.rejectedKcs;
     diagnostics.durable.failedPeers += durable.failedPeers;
@@ -224,6 +229,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     if (catchupPlaneCompletedWithoutFailure(durable)) {
       if ((durable.insertedDataTriples ?? 0) > 0) {
         cleanPlaneCompletions.durable.verifiedDataPeers += 1;
+      }
+      if ((durable.verifiedPrivateOnlyResponses ?? 0) > 0) {
+        cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers =
+          (cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers ?? 0) + 1;
       }
       if ((durable.emptyResponses ?? 0) > 0) {
         cleanPlaneCompletions.durable.emptyPeers += 1;

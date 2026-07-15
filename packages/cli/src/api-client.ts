@@ -1414,6 +1414,7 @@ export class ApiClient {
             checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
+            verifiedPrivateOnlyResponses?: number;
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
@@ -1486,6 +1487,7 @@ export class ApiClient {
             checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
+            verifiedPrivateOnlyResponses?: number;
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
@@ -1554,6 +1556,7 @@ export class ApiClient {
           checkpointAdvances: number;
           emptyResponses: number;
           metaOnlyResponses: number;
+          verifiedPrivateOnlyResponses?: number;
           dataRejectedMissingMeta: number;
           rejectedKcs: number;
           failedPeers: number;

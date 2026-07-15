@@ -247,6 +247,35 @@ describe('PROJECT_SYNCED readiness provenance', () => {
     });
   });
 
+  it('persists verified private-only durable proof across restart migration', async () => {
+    const f = fixture({ confirmedMeta: true, privateGraph: true, chainAccessPolicy: 1 });
+
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent,
+      store: f.store,
+      contextGraphId: f.contextGraphId,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+      verifiedPrivateOnlyResponses: 1,
+    })).resolves.toBe(true);
+
+    expect(f.getProvenance()).toMatchObject({
+      durableVerified: true,
+      sharedMemoryVerified: false,
+    });
+
+    f.markContextGraphSubscriptionState.mockClear();
+    await migrateLegacyContextGraphReadiness({
+      agent: f.agent,
+      store: f.store,
+      log: vi.fn(),
+    });
+
+    expect(f.markContextGraphSubscriptionState).not.toHaveBeenCalled();
+    expect(f.subscriptions.get(f.contextGraphId)).toMatchObject({ synced: true });
+    expect(f.getProvenance()).toMatchObject({ durableVerified: true });
+  });
+
   it('does not persist an unconfirmed or empty PROJECT_SYNCED event', async () => {
     const unconfirmed = fixture({ confirmedMeta: false });
 

@@ -21,6 +21,7 @@ export interface DurableSyncSummary {
   deniedPhases: number;
   emptyResponses: number;
   metaOnlyResponses: number;
+  verifiedPrivateOnlyResponses: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
@@ -73,6 +74,7 @@ interface DurableSyncContext {
     rejectedKcs: number;
     emptyResponses: number;
     metaOnlyResponses: number;
+    verifiedPrivateOnlyResponses?: number;
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (quads: Quad[]) => Promise<void>;
@@ -118,6 +120,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     deniedPhases: 0,
     emptyResponses: 0,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
     rejectedKcs: 0,
     failedPeers: 0,
@@ -228,6 +231,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
       summary.emptyResponses += processed.emptyResponses;
       summary.metaOnlyResponses += processed.metaOnlyResponses;
+      summary.verifiedPrivateOnlyResponses += processed.verifiedPrivateOnlyResponses ?? 0;
       summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
 
       // A rejected KA means this page cannot be acknowledged safely. We may

@@ -42,6 +42,8 @@ export interface CatchupJobResult {
   cleanPlaneCompletions?: {
     durable: {
       verifiedDataPeers: number;
+      /** Peers that cleanly verified one or more V2 KAs with no public triples. */
+      verifiedPrivateOnlyPeers?: number;
       emptyPeers: number;
     };
     sharedMemory: {
@@ -63,6 +65,8 @@ export interface CatchupJobResult {
       checkpointAdvances: number;
       emptyResponses: number;
       metaOnlyResponses: number;
+      /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
+      verifiedPrivateOnlyResponses?: number;
       dataRejectedMissingMeta: number;
       rejectedKcs: number;
       failedPeers: number;
@@ -108,8 +112,18 @@ export interface CatchupPhaseProgress {
   metaOnlyResponses?: number;
   bytesReceived?: number;
   emptyResponses?: number;
+  rejectedKcs?: number;
+  dataRejectedMissingMeta?: number;
+  verifiedPrivateOnlyResponses?: number;
   deferredBackpressure?: number;
   deniedPhases?: number;
+}
+
+function catchupPhaseHasIntegrityRejection(
+  progress: CatchupPhaseProgress | null | undefined,
+): boolean {
+  return (progress?.rejectedKcs ?? 0) > 0 ||
+    (progress?.dataRejectedMissingMeta ?? 0) > 0;
 }
 
 export function catchupPlaneCompletedWithoutFailure(
@@ -120,6 +134,7 @@ export function catchupPlaneCompletedWithoutFailure(
     && (progress.timedOutPhases ?? 0) === 0
     && (progress.failedPeers ?? 0) === 0
     && (progress.failedPhases ?? 0) === 0
+    && !catchupPhaseHasIntegrityRejection(progress)
     && (progress.deferredBackpressure ?? 0) === 0
     && (progress.deniedPhases ?? 0) === 0;
 }
@@ -135,7 +150,9 @@ export function catchupPeerSucceeded(
   if (peerTransportFailed) return false;
   const peerPhaseFailed = (durable.failedPhases ?? 0) > 0 || (shared ? (shared.failedPhases ?? 0) > 0 : false);
   if (peerPhaseFailed) return false;
+  if (catchupPhaseHasIntegrityRejection(durable) || catchupPhaseHasIntegrityRejection(shared)) return false;
   const durableProgress = (durable.insertedDataTriples ?? durable.insertedTriples ?? 0) > 0
+    || (durable.verifiedPrivateOnlyResponses ?? 0) > 0
     || (durable.checkpointAdvances ?? 0) > 0
     || ((durable.completedPhases ?? 0) > 0 && (durable.resumedPhases ?? 0) > 0);
   const sharedProgress = shared

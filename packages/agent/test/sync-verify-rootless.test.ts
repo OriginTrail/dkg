@@ -17,6 +17,7 @@ import {
   processDurableBatchForWire,
   verifySyncedData as verifyWorker,
 } from '../src/sync-verify-worker-impl.js';
+import { planPageApply } from '../src/sync/requester/changelog-sync.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
@@ -24,11 +25,17 @@ const CONTEXT_GRAPH = 'sync-verify-rootless';
 const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META = `${CONTEXT_GRAPH_URI}/_meta`;
 const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/19';
+const UAL_B = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000cd/23';
+const LEGACY_UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ef/29';
 const ctx: OperationContext = { operationId: 'rootless-test', operationName: 'sync' };
 const log = new Logger('sync-verify-rootless.test');
 
 function quad(subject: string, predicate: string, object: string, graph: string): Quad {
   return { subject, predicate, object, graph };
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function verifyBoth(dataQuads: Quad[], metaQuads: Quad[], acceptUnverified = false) {
@@ -49,9 +56,11 @@ function fixture(options: {
   assertionGraph?: string;
   assertionVersion?: string;
   subGraphName?: string;
+  ual?: string;
 } = {}) {
+  const ual = options.ual ?? UAL;
   const assertionVersion = options.assertionVersion ?? '1';
-  const scope = createGraphKnowledgeAssetScope(UAL, assertionVersion);
+  const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
   const assertionGraph = options.assertionGraph ?? knowledgeAssetLayerGraphUri(
     CONTEXT_GRAPH,
     MemoryLayer.VerifiableMemory,
@@ -67,7 +76,7 @@ function fixture(options: {
   const merkleRoot = options.merkleRoot ?? computeFlatKCRootV10(payload, privateRoots);
   const meta = generateGraphKnowledgeAssetMetadata(
     {
-      ual: UAL,
+      ual,
       contextGraphId: CONTEXT_GRAPH,
       merkleRoot,
       publisherPeerId: 'publisher-peer',
@@ -82,7 +91,7 @@ function fixture(options: {
     },
     'tentative',
   );
-  return { payload, meta, assertionGraph };
+  return { payload, meta, assertionGraph, ual };
 }
 
 describe('verifySyncedData — rootless graph scope', () => {
@@ -116,7 +125,7 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(result.logs.some(({ message }) => message.includes('missing merkleRoot'))).toBe(false);
   });
 
-  it('rejects a Merkle mismatch by exact graph while retaining unrelated data', () => {
+  it('fails the whole mixed batch on an exact-graph Merkle mismatch', () => {
     const { payload, meta, assertionGraph } = fixture({
       merkleRoot: new Uint8Array(32).fill(9),
     });
@@ -129,9 +138,37 @@ describe('verifySyncedData — rootless graph scope', () => {
     );
 
     expect(result.rejected).toBe(1);
-    expect(result.data).toEqual([unrelatedData]);
+    expect(result.data).toEqual([]);
     expect(result.data.some((entry) => entry.graph === assertionGraph)).toBe(false);
-    expect(result.meta).toEqual([unrelatedMeta]);
+    expect(result.meta).toEqual([]);
+  });
+
+  it('fails closed when a valid V2 batch contains unbound normal-CG data', () => {
+    const generated = fixture();
+    const unbound = quad(
+      'urn:unbound:subject',
+      'urn:p',
+      '"must-not-pass"',
+      `${CONTEXT_GRAPH_URI}/attacker`,
+    );
+
+    const result = verifyBoth([...generated.payload, unbound], generated.meta);
+
+    expect(result.rejected).toBe(1);
+    expect(result.data).toEqual([]);
+    expect(result.meta).toEqual([]);
+    expect(result.logs.some(({ message }) => message.includes('not bound to a verified KA'))).toBe(true);
+  });
+
+  it('preserves the explicit system-graph override for otherwise-unbound data', () => {
+    const generated = fixture();
+    const unbound = quad('urn:system:extra', 'urn:p', '"accepted"', CONTEXT_GRAPH_URI);
+
+    const result = verifyBoth([...generated.payload, unbound], generated.meta, true);
+
+    expect(result.rejected).toBe(0);
+    expect(result.data).toEqual([...generated.payload, unbound]);
+    expect(result.meta).toEqual(generated.meta);
   });
 
   it('fails the whole batch when the exact graph is incomplete', () => {
@@ -190,6 +227,7 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(processed.metaOnlyResponses).toBe(0);
     expect(processed.verifiedDataIndexes).toEqual([]);
     expect(processed.verifiedMetaIndexes).toEqual(meta.map((_, index) => index));
+    expect(processed.verifiedPrivateOnlyResponses).toBe(1);
   });
 
   it('rejects a private count whose required commitment is missing', () => {
@@ -234,6 +272,121 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(result.data).toEqual([]);
     expect(result.meta).toEqual([]);
     expect(result.logs.some(({ message }) => message.includes('legacy root bindings'))).toBe(true);
+  });
+
+  it('rejects token-level legacy ownership bindings that point to a V2 KA', () => {
+    const generated = fixture();
+    const tokenSubject = `${UAL}/1`;
+    const meta = [
+      ...generated.meta,
+      quad(tokenSubject, `${DKG}partOf`, UAL, META),
+      quad(tokenSubject, `${DKG}rootEntity`, 'urn:legacy:token-root', META),
+    ];
+
+    const result = verifyBoth(generated.payload, meta);
+
+    expect(result.rejected).toBe(1);
+    expect(result.data).toEqual([]);
+    expect(result.meta).toEqual([]);
+    expect(result.logs.some(({ message }) => message.includes('token-level legacy ownership binding'))).toBe(true);
+  });
+
+  it('verifies only changed V2 graphs in a multi-KA changelog page and exposes the planner binding', () => {
+    const unchanged = fixture();
+    const changed = fixture({ ual: UAL_B });
+    const meta = [...unchanged.meta, ...changed.meta];
+
+    const processed = processDurableBatchForWire(
+      changed.payload,
+      meta,
+      false,
+      [changed.assertionGraph],
+    );
+
+    expect(processed.rejectedKcs).toBe(0);
+    expect(processed.verifiedDataIndexes).toEqual(changed.payload.map((_, index) => index));
+    expect(processed.verifiedMetaIndexes).toEqual(meta.map((_, index) => index));
+    expect(processed.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
+    expect(processed.integrityMetadataGraphs).toEqual([META]);
+
+    const verifiedByGraph = new Map<string, Quad[]>();
+    for (const q of [
+      ...processed.verifiedDataIndexes.map((index) => changed.payload[index]!),
+      ...processed.verifiedMetaIndexes.map((index) => meta[index]!),
+    ]) {
+      const rows = verifiedByGraph.get(q.graph);
+      if (rows) rows.push(q);
+      else verifiedByGraph.set(q.graph, [q]);
+    }
+    const plan = planPageApply({
+      records: [
+        { seq: 2, graph: changed.assertionGraph, op: 'upsert', quads: 'changed' },
+        { seq: 3, graph: META, op: 'upsert', quads: 'metadata' },
+      ],
+      nextSeq: 3,
+      priorSeq: 1,
+      isForeignGraph: () => false,
+      verifiedByGraph,
+      recordQuadCountByGraph: new Map([
+        [changed.assertionGraph, changed.payload.length],
+        [META, meta.length],
+      ]),
+      metaGraphsWithRoot: new Set([META]),
+      verifiedGraphScopedDataGraphs: new Set(processed.verifiedGraphScopedDataGraphs),
+      integrityMetadataGraphs: new Set(processed.integrityMetadataGraphs),
+      batchVerifiedCleanly: true,
+    });
+
+    expect(plan).toMatchObject({ deferred: false, advanceTo: 3, applied: 2 });
+    expect(plan.ops.map((operation) => operation.graph)).toEqual([
+      changed.assertionGraph,
+      META,
+    ]);
+  });
+
+  it('keeps full durable snapshots strict when a multi-KA graph is absent', () => {
+    const missing = fixture();
+    const present = fixture({ ual: UAL_B });
+    const meta = [...missing.meta, ...present.meta];
+
+    const processed = processDurableBatchForWire(present.payload, meta, false);
+
+    expect(processed.rejectedKcs).toBe(1);
+    expect(processed.verifiedDataIndexes).toEqual([]);
+    expect(processed.verifiedMetaIndexes).toEqual([]);
+  });
+
+  it('scopes a V2 changelog delta past unchanged legacy metadata while full sync stays strict', () => {
+    const legacyRoot = 'urn:legacy:mixed-page-root';
+    const legacyPayload = [
+      quad(legacyRoot, 'urn:p:name', '"Legacy"', CONTEXT_GRAPH_URI),
+    ];
+    const legacyMeta = [
+      quad(
+        LEGACY_UAL,
+        `${DKG}merkleRoot`,
+        `"${toHex(computeFlatKCRootV10(legacyPayload, []))}"`,
+        META,
+      ),
+      quad(LEGACY_UAL, `${DKG}rootEntity`, legacyRoot, META),
+    ];
+    const changed = fixture({ ual: UAL_B });
+    const meta = [...legacyMeta, ...changed.meta];
+
+    const page = processDurableBatchForWire(
+      changed.payload,
+      meta,
+      false,
+      [changed.assertionGraph],
+    );
+
+    expect(page.rejectedKcs).toBe(0);
+    expect(page.verifiedDataIndexes).toEqual(changed.payload.map((_, index) => index));
+    expect(page.verifiedMetaIndexes).toEqual(meta.map((_, index) => index));
+    expect(page.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
+
+    const fullSnapshot = processDurableBatchForWire(changed.payload, meta, false);
+    expect(fullSnapshot.rejectedKcs).toBe(1);
   });
 
   it('rejects even non-scope UAL metadata placed outside the CG meta graph', () => {

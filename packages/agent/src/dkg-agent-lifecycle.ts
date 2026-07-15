@@ -722,6 +722,7 @@ function emptyDurableSyncResult(): DurableSyncResult {
     checkpointAdvances: 0,
     emptyResponses: 0,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
     rejectedKcs: 0,
     failedPeers: 0,
@@ -747,6 +748,8 @@ function mergeDurableSyncResults(a: DurableSyncResult, b: DurableSyncResult): Du
     checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
     emptyResponses: a.emptyResponses + b.emptyResponses,
     metaOnlyResponses: a.metaOnlyResponses + b.metaOnlyResponses,
+    verifiedPrivateOnlyResponses:
+      (a.verifiedPrivateOnlyResponses ?? 0) + (b.verifiedPrivateOnlyResponses ?? 0),
     dataRejectedMissingMeta: a.dataRejectedMissingMeta + b.dataRejectedMissingMeta,
     rejectedKcs: a.rejectedKcs + b.rejectedKcs,
     // This is peer cardinality, not a per-CG failure count. Both inputs belong
@@ -4170,28 +4173,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           if (classification.hasIntegrityEnvelope) integrityMetaGraphs.add(rec.graph);
         }
         // Merkle-verify data against meta (same worker path legacy sync uses).
-        const processed = await this.processDurableBatchInWorker(dataQuads, metaQuads, ctx, acceptUnverified);
+        const processed = await this.processDurableBatchInWorker(
+          dataQuads,
+          metaQuads,
+          ctx,
+          acceptUnverified,
+          dataRecs.map((record) => record.graph),
+        );
         const verifiedByGraph = new Map<string, Quad[]>();
         for (const q of [...processed.verifiedData, ...processed.verifiedMeta]) {
           const arr = verifiedByGraph.get(q.graph);
           if (arr) arr.push(q); else verifiedByGraph.set(q.graph, [q]);
         }
-        const graphScopedSubjects = new Set(
-          processed.verifiedMeta
-            .filter((q) => (
-              q.predicate === 'http://dkg.io/ontology/contentScopeVersion'
-              && stripLiteral(q.object) === String(GRAPH_KA_CONTENT_SCOPE_VERSION)
-            ))
-            .map((q) => q.subject),
+        const verifiedGraphScopedDataGraphs = new Set(
+          processed.verifiedGraphScopedDataGraphs,
         );
-        const merkleBoundDataGraphs = new Set(
-          processed.verifiedMeta
-            .filter((q) => (
-              graphScopedSubjects.has(q.subject)
-              && q.predicate === 'http://dkg.io/ontology/assertionGraph'
-            ))
-            .map((q) => stripLiteral(q.object)),
-        );
+        const integrityMetadataGraphs = new Set(processed.integrityMetadataGraphs);
         result.rejectedKcs += processed.rejectedKcs;
         result.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
         const plan = planPageApply({
@@ -4202,13 +4199,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           verifiedByGraph,
           recordQuadCountByGraph,
           metaGraphsWithRoot,
-          integrityMetaGraphs,
-          merkleBoundDataGraphs,
+          verifiedGraphScopedDataGraphs,
+          integrityMetadataGraphs,
           batchVerifiedCleanly: processed.rejectedKcs === 0 && processed.dataRejectedMissingMeta === 0,
         });
         // Apply REPLACE per graph and COMMIT before the driver persists the cursor
-        // (crash-safe: upsert=drop+insert and drop are idempotent, so a crash between
-        // commit and cursor-persist re-fetches and re-applies harmlessly). Never dropGraph
+        // (crash-safe: upsert=drop+insert is idempotent, so a crash between commit and
+        // cursor-persist re-fetches and re-applies harmlessly). Never dropGraph
         // for a zero-quad upsert — planPageApply never emits one, but guard defensively so a
         // future change cannot reintroduce the silent-delete vector.
         for (const op of plan.ops) {
@@ -4221,6 +4218,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             if (op.graph.endsWith('/_meta')) insertedMetaTriples += op.quads.length;
             else insertedDataTriples += op.quads.length;
           }
+        }
+        if (!plan.deferred && processed.rejectedKcs === 0) {
+          result.verifiedPrivateOnlyResponses =
+            (result.verifiedPrivateOnlyResponses ?? 0)
+            + (processed.verifiedPrivateOnlyResponses ?? 0);
         }
         return { advanceTo: plan.advanceTo, applied: plan.applied, deferred: plan.deferred };
       },
@@ -4945,6 +4947,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         checkpointAdvances: 0,
         emptyResponses: 0,
         metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
         rejectedKcs: 0,
         failedPeers: 0,
@@ -5021,6 +5024,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       checkpointAdvances: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
       rejectedKcs: 0,
       failedPeers: 1,
@@ -5068,6 +5072,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     let accessDeniedPeers = 0;
     let cleanDurableDataSynced = 0;
+    let cleanDurablePrivateOnlyCompletions = 0;
     let cleanSharedMemoryDataSynced = 0;
     let peersSucceeded = 0;
     for (const r of results) {
@@ -5086,6 +5091,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peerDeniedRound = (r.durable.deniedPhases ?? 0) > 0
         || (r.shared ? (r.shared.deniedPhases ?? 0) > 0 : false);
       const durableProgress = r.durable.insertedDataTriples > 0
+        || (r.durable.verifiedPrivateOnlyResponses ?? 0) > 0
         || r.durable.checkpointAdvances > 0
         || (r.durable.completedPhases > 0 && r.durable.resumedPhases > 0);
       const sharedProgress = r.shared
@@ -5125,7 +5131,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // against promoting a partially inserted, subsequently timed-out round.
       // A plane deferred by local admission pressure did not complete, so it
       // cannot stand as readiness evidence either.
-      const durableCompletedCleanly = r.durable.insertedDataTriples > 0
+      const durableCompletedCleanly = (
+        r.durable.insertedDataTriples > 0
+        || (r.durable.verifiedPrivateOnlyResponses ?? 0) > 0
+      )
         && r.durable.completedPhases > 0
         && r.durable.timedOutPhases === 0
         && (r.durable.failedPhases ?? 0) === 0
@@ -5143,6 +5152,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         && (r.shared.deniedPhases ?? 0) === 0;
       if (durableCompletedCleanly) {
         cleanDurableDataSynced += r.durable.insertedDataTriples;
+        cleanDurablePrivateOnlyCompletions +=
+          (r.durable.verifiedPrivateOnlyResponses ?? 0) > 0 ? 1 : 0;
       }
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
@@ -5177,6 +5188,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.checkpointAdvances += r.durable.checkpointAdvances;
       diagnostics.durable.emptyResponses += r.durable.emptyResponses;
       diagnostics.durable.metaOnlyResponses += r.durable.metaOnlyResponses;
+      diagnostics.durable.verifiedPrivateOnlyResponses =
+        (diagnostics.durable.verifiedPrivateOnlyResponses ?? 0)
+        + (r.durable.verifiedPrivateOnlyResponses ?? 0);
       diagnostics.durable.dataRejectedMissingMeta += r.durable.dataRejectedMissingMeta;
       diagnostics.durable.rejectedKcs += r.durable.rejectedKcs;
       diagnostics.durable.failedPeers += r.durable.failedPeers;
@@ -5224,7 +5238,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // were deferred by local admission pressure, so a deferred peer cannot
     // promote readiness — and cannot erase a clean snapshot another peer did
     // deliver.
-    const durableCompletedCleanly = cleanDurableDataSynced > 0;
+    const durableCompletedCleanly =
+      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0;
     const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
       this.markContextGraphSubscriptionState(contextGraphId, {
@@ -5238,6 +5253,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphId,
         dataSynced: cleanDurableDataSynced,
         sharedMemorySynced: cleanSharedMemoryDataSynced,
+        verifiedPrivateOnlyResponses: cleanDurablePrivateOnlyCompletions,
       });
     }
 
@@ -6561,9 +6577,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     metaQuads: Quad[],
     ctx: OperationContext,
     acceptUnverified = false,
+    graphScopedDataGraphsToVerify?: readonly string[],
   ): Promise<import('./sync-verify-worker.js').DurableBatchProcessResult> {
     const worker = this.getOrCreateSyncVerifyWorker();
-    const result = await worker.processDurableBatch(dataQuads, metaQuads, acceptUnverified);
+    const result = await worker.processDurableBatch(
+      dataQuads,
+      metaQuads,
+      acceptUnverified,
+      graphScopedDataGraphsToVerify,
+    );
     for (const entry of result.logs) {
       if (entry.level === 'warn') this.log.warn(ctx, entry.message);
       else this.log.debug(ctx, entry.message);

@@ -30,8 +30,18 @@ parentPort?.on('message', async (message: { id: number; method: string; args: un
       return;
     }
     if (message.method === 'processDurableBatch') {
-      const [dataQuads, metaQuads, acceptUnverified] = message.args as [Quad[], Quad[], boolean];
-      const result = processDurableBatchForWire(dataQuads, metaQuads, acceptUnverified);
+      const [dataQuads, metaQuads, acceptUnverified, graphScopedDataGraphsToVerify] = message.args as [
+        Quad[],
+        Quad[],
+        boolean,
+        string[] | undefined,
+      ];
+      const result = processDurableBatchForWire(
+        dataQuads,
+        metaQuads,
+        acceptUnverified,
+        graphScopedDataGraphsToVerify,
+      );
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -62,27 +72,33 @@ export function verifySyncedData(
   return verifySyncedDataImpl(dataQuads, metaQuads, acceptUnverified);
 }
 
-type VerifiedSelectionIndexes = {
+type VerifiedSelectionDetails = {
   data: number[];
   meta: number[];
   verifiedZeroPublicAssets: number;
+  verifiedGraphScopedDataGraphs: string[];
+  integrityMetadataGraphs: string[];
 };
 
 function verifySyncedDataImpl(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified = false,
-  recordSelection?: (indexes: VerifiedSelectionIndexes) => void,
+  recordSelection?: (selection: VerifiedSelectionDetails) => void,
+  graphScopedDataGraphsToVerify?: ReadonlySet<string>,
 ): SyncVerifyResult {
   const selection = selectVerifiedDurableSyncQuads(
     dataQuads,
     metaQuads,
     acceptUnverified,
+    graphScopedDataGraphsToVerify,
   );
   recordSelection?.({
     data: selection.dataIndexes,
     meta: selection.metaIndexes,
     verifiedZeroPublicAssets: selection.verifiedZeroPublicAssets,
+    verifiedGraphScopedDataGraphs: selection.verifiedGraphScopedDataGraphs,
+    integrityMetadataGraphs: selection.integrityMetadataGraphs,
   });
   return {
     data: selection.dataIndexes.map((index) => dataQuads[index]!),
@@ -292,6 +308,7 @@ function processDurableBatch(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
+  graphScopedDataGraphsToVerify?: readonly string[],
 ): DurableBatchSelectionResult {
   const logs: SyncVerifyLogEntry[] = [];
   const totalFetchedDataQuads = dataQuads.length;
@@ -303,6 +320,9 @@ function processDurableBatch(
       verifiedMeta: [],
       verifiedDataIndexes: [],
       verifiedMetaIndexes: [],
+      verifiedGraphScopedDataGraphs: [],
+      integrityMetadataGraphs: [],
+      verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -323,6 +343,9 @@ function processDurableBatch(
       verifiedMeta: [],
       verifiedDataIndexes: [],
       verifiedMetaIndexes: [],
+      verifiedGraphScopedDataGraphs: [],
+      integrityMetadataGraphs: [],
+      verifiedPrivateOnlyResponses: 0,
       totalFetchedDataQuads,
       totalFetchedMetaQuads,
       rejectedKcs: 0,
@@ -333,12 +356,21 @@ function processDurableBatch(
     };
   }
 
-  let verifiedIndexes: VerifiedSelectionIndexes = { data: [], meta: [], verifiedZeroPublicAssets: 0 };
+  let verifiedSelection: VerifiedSelectionDetails = {
+    data: [],
+    meta: [],
+    verifiedZeroPublicAssets: 0,
+    verifiedGraphScopedDataGraphs: [],
+    integrityMetadataGraphs: [],
+  };
   const verified = verifySyncedDataImpl(
     dataQuads,
     metaQuads,
     acceptUnverified,
-    (indexes) => { verifiedIndexes = indexes; },
+    (selection) => { verifiedSelection = selection; },
+    graphScopedDataGraphsToVerify === undefined
+      ? undefined
+      : new Set(graphScopedDataGraphsToVerify),
   );
   // A fully-private V2 KA legitimately has an empty public assertion graph.
   // Its metadata commits the private root and declares publicTripleCount=0,
@@ -346,7 +378,7 @@ function processDurableBatch(
   // treating every other meta-without-data response as potentially pruned.
   const verifiedFullyPrivateResponse = totalFetchedDataQuads === 0
     && verified.rejected === 0
-    && verifiedIndexes.verifiedZeroPublicAssets > 0;
+    && verifiedSelection.verifiedZeroPublicAssets > 0;
   const metaOnlyResponses = !acceptUnverified
     && totalFetchedMetaQuads > 0
     && totalFetchedDataQuads === 0
@@ -362,8 +394,11 @@ function processDurableBatch(
   return {
     verifiedData: verified.data,
     verifiedMeta: verified.meta,
-    verifiedDataIndexes: verifiedIndexes.data,
-    verifiedMetaIndexes: verifiedIndexes.meta,
+    verifiedDataIndexes: verifiedSelection.data,
+    verifiedMetaIndexes: verifiedSelection.meta,
+    verifiedGraphScopedDataGraphs: verifiedSelection.verifiedGraphScopedDataGraphs,
+    integrityMetadataGraphs: verifiedSelection.integrityMetadataGraphs,
+    verifiedPrivateOnlyResponses: verifiedFullyPrivateResponse ? 1 : 0,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs: verified.rejected,
@@ -378,11 +413,20 @@ export function processDurableBatchForWire(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified: boolean,
+  graphScopedDataGraphsToVerify?: readonly string[],
 ): DurableBatchProcessWireResult {
-  const result = processDurableBatch(dataQuads, metaQuads, acceptUnverified);
+  const result = processDurableBatch(
+    dataQuads,
+    metaQuads,
+    acceptUnverified,
+    graphScopedDataGraphsToVerify,
+  );
   const {
     verifiedDataIndexes,
     verifiedMetaIndexes,
+    verifiedGraphScopedDataGraphs,
+    integrityMetadataGraphs,
+    verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs,
@@ -396,6 +440,9 @@ export function processDurableBatchForWire(
   return {
     verifiedDataIndexes,
     verifiedMetaIndexes,
+    verifiedGraphScopedDataGraphs,
+    integrityMetadataGraphs,
+    verifiedPrivateOnlyResponses,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     rejectedKcs,
