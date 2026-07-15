@@ -57,7 +57,11 @@ import {
   type KAMetadata,
   type OnChainProvenance,
 } from './metadata.js';
-import { storeKnowledgeAssetOperationPublicQuads, storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
+import {
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+  storeWorkspaceOperationPublicQuads,
+} from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
 import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
@@ -7089,6 +7093,19 @@ export class DKGPublisher implements Publisher {
       subGraphName: opts?.subGraphName,
       timestamp: new Date(),
       publicSnapshotStore: this.publicSnapshotStore,
+    });
+    // The originator does not receive its own GossipSub message, so it must
+    // persist the same monotonic KA head the receiver writes. Without this,
+    // a delayed older peer replay could look like the first version locally
+    // and replace the freshly promoted graph.
+    await storeKnowledgeAssetWorkspaceHead({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId,
+      shareOperationId: operationId,
+      kaUal: contentScope.ual,
+      assertionVersion: contentScope.assertionVersion,
+      subGraphName: opts?.subGraphName,
     });
 
     return {

@@ -8,22 +8,39 @@ import {
   type EventBus,
   type FinalizationMessageMsg,
   type OperationContext,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, loadSelectedSharedMemoryQuads, loadSharedMemorySliceWithKaBoundFallback, asGraphWriteGenSource, type GraphWriteGenSource, type SwmKaGraphBound, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  loadSelectedSharedMemoryQuads,
+  loadSharedMemorySliceWithKaBoundFallback,
+  asGraphWriteGenSource,
+  tryReplaceGraphAtomically,
+  type GraphWriteGenSource,
+  type SwmKaGraphBound,
+  type TripleStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
-  generateConfirmedFullMetadata, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad,
+  generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata,
+  buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad,
   insertBoundedAgentRegistryMeta,
   generateSubGraphRegistration,
   splitTrustedGeneratedCatalogRootMap,
   shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock,
+  resolveKnowledgeAssetWorkspaceHead,
   type MaterializedVersion,
+  type KnowledgeAssetWorkspaceHead,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -119,6 +136,11 @@ function sameBigIntLiteral(left: string | bigint | null | undefined, right: stri
   } catch {
     return false;
   }
+}
+
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length
+    && left.every((byte, index) => byte === right[index]);
 }
 
 /**
@@ -229,8 +251,20 @@ export class FinalizationHandler {
         return;
       }
 
-      if (!msg.ual || !msg.txHash || msg.rootEntities.length === 0) {
-        this.log.warn(ctx, `Finalization: incomplete message (ual=${msg.ual}, txHash=${msg.txHash}, roots=${msg.rootEntities.length}), ignoring`);
+      const isGraphScoped = msg.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
+      if (
+        msg.contentScopeVersion !== undefined
+        && msg.contentScopeVersion !== 0
+        && !isGraphScoped
+      ) {
+        this.log.warn(
+          ctx,
+          `Finalization: unsupported content scope version ${msg.contentScopeVersion}, ignoring`,
+        );
+        return;
+      }
+      if (!msg.ual || !msg.txHash || (!isGraphScoped && msg.rootEntities.length === 0)) {
+        this.log.warn(ctx, `Finalization: incomplete message (ual=${msg.ual}, txHash=${msg.txHash}, roots=${msg.rootEntities.length}, scope=${msg.contentScopeVersion ?? 0}), ignoring`);
         return;
       }
 
@@ -314,6 +348,20 @@ export class FinalizationHandler {
       const targetMetaGraph = ctxGraphId
         ? contextGraphMetaUri(contextGraphId, ctxGraphId)
         : `did:dkg:context-graph:${contextGraphId}/_meta`;
+      if (isGraphScoped) {
+        const graphOutcome = await this.handleGraphScopedFinalization({
+          msg,
+          contextGraphId,
+          ctxGraphId,
+          subGraphName,
+          blockNumber,
+          ctx,
+        });
+        if (graphOutcome === 'applied' || graphOutcome === 'already-confirmed') {
+          this.markProcessed(dedupeKey);
+        }
+        return;
+      }
       const alreadyPromoted = await this.isAlreadyConfirmed(
         msg.ual, targetMetaGraph, `did:dkg:context-graph:${contextGraphId}/_meta`,
       );
@@ -547,11 +595,575 @@ export class FinalizationHandler {
     }
   }
 
+  /**
+   * Apply a V2 finalization without rediscovering RDF roots. The wire carries
+   * only the canonical UAL, assertion version, counts, and one private
+   * commitment; the physical SWM/VM graph names are derived locally.
+   */
+  private async handleGraphScopedFinalization(input: {
+    msg: FinalizationMessageMsg;
+    contextGraphId: string;
+    ctxGraphId?: string;
+    subGraphName?: string;
+    blockNumber: number;
+    ctx: OperationContext;
+  }): Promise<'applied' | 'already-confirmed' | 'deferred'> {
+    const {
+      msg,
+      contextGraphId,
+      ctxGraphId,
+      subGraphName,
+      blockNumber,
+      ctx,
+    } = input;
+    if (msg.rootEntities.length !== 0) {
+      this.log.warn(ctx, `Finalization: graph-scoped message for ${msg.ual} carries legacy root entities, ignoring`);
+      return 'deferred';
+    }
+    const assertionVersion = String(msg.assertionVersion ?? '').trim();
+    if (!assertionVersion) {
+      this.log.warn(ctx, `Finalization: graph-scoped message for ${msg.ual} is missing assertionVersion`);
+      return 'deferred';
+    }
+    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    try {
+      scope = createGraphKnowledgeAssetScope(msg.ual, assertionVersion);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Finalization: invalid graph-scoped identity: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 'deferred';
+    }
+    if (scope.ual !== msg.ual) {
+      this.log.warn(ctx, `Finalization: non-canonical graph-scoped UAL ${msg.ual}, ignoring`);
+      return 'deferred';
+    }
+
+    const publicTripleCount = Number(msg.publicTripleCount ?? 0);
+    const privateTripleCount = Number(msg.privateTripleCount ?? 0);
+    const privateMerkleRoot = msg.privateMerkleRoot?.length
+      ? new Uint8Array(msg.privateMerkleRoot)
+      : undefined;
+    if (
+      !Number.isSafeInteger(publicTripleCount)
+      || publicTripleCount < 0
+      || !Number.isSafeInteger(privateTripleCount)
+      || privateTripleCount < 0
+      || (publicTripleCount === 0 && privateTripleCount === 0)
+      || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
+      || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+    ) {
+      this.log.warn(ctx, `Finalization: invalid graph-scoped content envelope for ${scope.ual}, ignoring`);
+      return 'deferred';
+    }
+
+    const packedKaId =
+      (BigInt(scope.agentAddress) << 96n)
+      | BigInt(scope.kaNumber);
+    let startKAId: bigint;
+    let endKAId: bigint;
+    let batchId: bigint;
+    try {
+      startKAId = protoToBigInt(msg.startKAId);
+      endKAId = protoToBigInt(msg.endKAId);
+      batchId = protoToBigInt(msg.batchId);
+    } catch {
+      this.log.warn(ctx, `Finalization: invalid on-chain identifiers for graph-scoped KA ${scope.ual}`);
+      return 'deferred';
+    }
+    if (startKAId !== packedKaId || endKAId !== packedKaId) {
+      this.log.warn(
+        ctx,
+        `Finalization: UAL-derived kaId ${packedKaId} does not match wire range ${startKAId}..${endKAId}`,
+      );
+      return 'deferred';
+    }
+
+    const graphManager = new GraphManager(this.store);
+    await graphManager.ensureContextGraph(contextGraphId);
+    if (subGraphName) await graphManager.ensureSubGraph(contextGraphId, subGraphName);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+      subGraphName,
+    );
+    if (
+      await this.graphScopedConfirmationState(
+        contextGraphId,
+        scope.ual,
+        msg.kcMerkleRoot,
+        subGraphName,
+      ) === 'matching'
+    ) {
+      // A prior attempt may have crashed after VM+metadata but before SWM
+      // cleanup. Complete that final idempotent step here.
+      await this.store.dropGraph(swmGraph);
+      this.log.info(ctx, `Finalization: graph-scoped KA ${scope.ual} is already confirmed`);
+      return 'already-confirmed';
+    }
+
+    let head;
+    try {
+      head = await resolveKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager,
+        contextGraphId,
+        kaUal: scope.ual,
+        subGraphName,
+      });
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Finalization: corrupt graph-scoped SWM head for ${scope.ual}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 'deferred';
+    }
+    if (
+      !head
+      || head.assertionVersion !== scope.assertionVersion
+      || head.publicTripleCount !== publicTripleCount
+      || head.privateTripleCount !== privateTripleCount
+      || (head.privateMerkleRoot?.toLowerCase() ?? undefined)
+        !== (privateMerkleRoot ? ethers.hexlify(privateMerkleRoot).toLowerCase() : undefined)
+    ) {
+      this.log.warn(ctx, `Finalization: no matching graph-scoped SWM head for ${scope.ual}`);
+      return 'deferred';
+    }
+
+    const swmResult = await this.store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(swmGraph)}> { ?s ?p ?o } }`,
+    );
+    const swmQuads = swmResult.type === 'quads'
+      ? swmResult.quads.map((quad) => ({ ...quad, graph: '' }))
+      : [];
+    if (swmQuads.length !== publicTripleCount) {
+      this.log.warn(
+        ctx,
+        `Finalization: graph-scoped SWM count mismatch for ${scope.ual}: `
+          + `wire=${publicTripleCount}, store=${swmQuads.length}`,
+      );
+      return 'deferred';
+    }
+    const computedMerkleRoot = computeFlatKCRoot(
+      swmQuads,
+      privateMerkleRoot ? [privateMerkleRoot] : [],
+    );
+    if (!equalBytes(computedMerkleRoot, msg.kcMerkleRoot)) {
+      this.log.warn(ctx, `Finalization: graph-scoped Merkle mismatch for ${scope.ual}`);
+      return 'deferred';
+    }
+
+    const verified = await this.verifyOnChain(
+      msg.txHash,
+      blockNumber,
+      msg.kcMerkleRoot,
+      msg.publisherAddress,
+      startKAId,
+      endKAId,
+      ctx,
+      ctxGraphId,
+      batchId,
+    );
+    if (!verified.verified) {
+      this.log.info(ctx, `Finalization: on-chain verification pending for graph-scoped KA ${scope.ual}`);
+      return 'deferred';
+    }
+
+    const outcome = await this.applyVerifiedGraphScopedFinalization({
+      contextGraphId,
+      scope,
+      swmQuads,
+      head,
+      privateMerkleRoot,
+      computedMerkleRoot,
+      publisherAddress: msg.publisherAddress,
+      txHash: msg.txHash,
+      blockNumber,
+      batchId,
+      authorAddress: verified.authorAddress,
+      materializedVersion: {
+        blockNumber,
+        txIndex: verified.txIndex ?? 0,
+      },
+      subGraphName,
+      source: 'finalization',
+      ctx,
+    });
+    if (outcome === 'stale') {
+      this.log.info(ctx, `Finalization: newer graph-scoped assertion already materialized for ${scope.ual}`);
+      return 'already-confirmed';
+    }
+
+    this.log.info(
+      ctx,
+      `Finalization: promoted graph-scoped KA ${scope.ual} (${publicTripleCount} public, ${privateTripleCount} private)`,
+    );
+    return 'applied';
+  }
+
+  /**
+   * Resolve and promote the exact graph-scoped SWM assertion for a chain-known
+   * KA. `undefined` means no V2 head exists and the caller may try the legacy
+   * root-operation recovery path; every other result is authoritative for V2.
+   */
+  private async reconcileGraphScopedKC(input: {
+    contextGraphId: string;
+    ual: string;
+    merkleRoot: Uint8Array;
+    publisherAddress: string;
+    kaId: bigint;
+    versionBlock: number;
+    authorAddress?: string;
+    subGraphName?: string;
+  }, ctx: OperationContext): Promise<
+    'promoted' | 'already-confirmed' | 'no-swm' | 'stale-target' | undefined
+  > {
+    const {
+      contextGraphId,
+      ual,
+      merkleRoot,
+      publisherAddress,
+      kaId,
+      versionBlock,
+      authorAddress,
+      subGraphName,
+    } = input;
+    // Historical UAL shapes can be valid inputs to the legacy root-scoped
+    // recovery code but cannot name a V2 per-KA graph. Do not let the strict
+    // V2 parser turn those into a terminal "corrupt head" result.
+    try {
+      createGraphKnowledgeAssetScope(ual, 1);
+    } catch {
+      return undefined;
+    }
+    if (
+      await this.graphScopedConfirmationState(
+        contextGraphId,
+        ual,
+        merkleRoot,
+        subGraphName,
+      ) === 'matching'
+    ) {
+      return 'already-confirmed';
+    }
+    const graphManager = new GraphManager(this.store);
+    let head: KnowledgeAssetWorkspaceHead | undefined;
+    try {
+      head = await resolveKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager,
+        contextGraphId,
+        kaUal: ual,
+        subGraphName,
+      });
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Chain-reconcile: corrupt graph-scoped SWM head for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 'no-swm';
+    }
+    if (!head) return undefined;
+
+    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    try {
+      scope = createGraphKnowledgeAssetScope(ual, head.assertionVersion);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Chain-reconcile: invalid graph-scoped identity for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 'no-swm';
+    }
+    const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+    if (scope.ual !== ual || packedKaId !== kaId) {
+      this.log.warn(
+        ctx,
+        `Chain-reconcile: UAL-derived kaId ${packedKaId} does not match chain kaId ${kaId} for ${ual}`,
+      );
+      return 'no-swm';
+    }
+    if (head.publicTripleCount === 0 && head.privateTripleCount === 0) {
+      this.log.warn(ctx, `Chain-reconcile: empty graph-scoped content envelope for ${ual}`);
+      return 'no-swm';
+    }
+
+    let privateMerkleRoot: Uint8Array | undefined;
+    try {
+      privateMerkleRoot = head.privateMerkleRoot
+        ? ethers.getBytes(head.privateMerkleRoot)
+        : undefined;
+    } catch {
+      this.log.warn(ctx, `Chain-reconcile: invalid private commitment for graph-scoped KA ${ual}`);
+      return 'no-swm';
+    }
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+      subGraphName,
+    );
+    const swmResult = await this.store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(swmGraph)}> { ?s ?p ?o } }`,
+    );
+    const swmQuads = swmResult.type === 'quads'
+      ? swmResult.quads.map((quad) => ({ ...quad, graph: '' }))
+      : [];
+    if (swmQuads.length !== head.publicTripleCount) {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: graph-scoped SWM count mismatch for ${ual}: head=${head.publicTripleCount}, store=${swmQuads.length}`,
+      );
+      return 'no-swm';
+    }
+    const computedMerkleRoot = computeFlatKCRoot(
+      swmQuads,
+      privateMerkleRoot ? [privateMerkleRoot] : [],
+    );
+    if (!equalBytes(computedMerkleRoot, merkleRoot)) {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: exact graph-scoped SWM assertion does not match the chain root for ${ual}`,
+      );
+      return 'no-swm';
+    }
+
+    const outcome = await this.applyVerifiedGraphScopedFinalization({
+      contextGraphId,
+      scope,
+      swmQuads,
+      head,
+      privateMerkleRoot,
+      computedMerkleRoot,
+      publisherAddress,
+      txHash: '',
+      blockNumber: versionBlock,
+      batchId: kaId,
+      authorAddress,
+      materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+      subGraphName,
+      source: 'chain-reconcile',
+      ctx,
+    });
+    if (outcome === 'stale') return 'stale-target';
+    this.log.info(
+      ctx,
+      `Chain-reconcile: promoted exact graph-scoped SWM assertion to VM for ${ual} (ka=${kaId})`,
+    );
+    return 'promoted';
+  }
+
+  /**
+   * Materialize a graph-scoped assertion after its content and chain binding
+   * have been verified. Gossip finalization and chain reconciliation deliberately
+   * share this atomic SWM→VM transition so a late joiner cannot produce a
+   * different storage shape from a node that saw the live finalization message.
+   */
+  private async applyVerifiedGraphScopedFinalization(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    swmQuads: Quad[];
+    head: KnowledgeAssetWorkspaceHead;
+    privateMerkleRoot?: Uint8Array;
+    computedMerkleRoot: Uint8Array;
+    publisherAddress: string;
+    txHash: string;
+    blockNumber: number;
+    batchId: bigint;
+    authorAddress?: string;
+    materializedVersion: MaterializedVersion;
+    subGraphName?: string;
+    source: 'finalization' | 'chain-reconcile';
+    ctx: OperationContext;
+  }): Promise<'applied' | 'stale'> {
+    const {
+      contextGraphId,
+      scope,
+      swmQuads,
+      head,
+      privateMerkleRoot,
+      computedMerkleRoot,
+      publisherAddress,
+      txHash,
+      blockNumber,
+      batchId,
+      authorAddress,
+      materializedVersion,
+      subGraphName,
+      source,
+      ctx,
+    } = input;
+    const publicTripleCount = head.publicTripleCount;
+    const privateTripleCount = head.privateTripleCount;
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+      subGraphName,
+    );
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      scope,
+      subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+
+    const outcome = await withMaterializationLock(metaGraph, scope.ual, async () => {
+      if (!(await shouldApplyMaterialization(
+        this.store,
+        metaGraph,
+        scope.ual,
+        materializedVersion,
+      ))) {
+        return 'stale' as const;
+      }
+      const vmQuads = swmQuads.map((quad) => ({ ...quad, graph: vmGraph }));
+      const replaced = await tryReplaceGraphAtomically(
+        this.store,
+        vmGraph,
+        vmQuads,
+        { source: 'agent.finalization.graphScopedReplace' },
+      );
+      if (!replaced) {
+        throw Object.assign(
+          new Error('Graph-scoped VM finalization requires atomic TripleStore.update() support'),
+          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+        );
+      }
+
+      let blockTimestamp = Math.floor(Date.now() / 1000);
+      if (this.chain && typeof (this.chain as any).getBlockTimestamp === 'function') {
+        try {
+          blockTimestamp = await (this.chain as any).getBlockTimestamp(blockNumber);
+        } catch {
+          this.log.info(ctx, `Could not fetch block timestamp for block ${blockNumber}, using local time`);
+        }
+      }
+      const provenance: OnChainProvenance = {
+        txHash,
+        blockNumber,
+        blockTimestamp,
+        publisherAddress,
+        batchId,
+        chainId: this.chain?.chainId ?? 'unknown',
+      };
+      const metadata = generateGraphKnowledgeAssetMetadata(
+        {
+          ual: scope.ual,
+          contextGraphId,
+          merkleRoot: computedMerkleRoot,
+          publisherPeerId: head.publisherPeerId,
+          accessPolicy: privateTripleCount > 0 ? 'ownerOnly' : 'public',
+          timestamp: new Date(),
+          subGraphName,
+          ...(authorAddress ? { authorAddress } : {}),
+          assertionVersion: scope.assertionVersion,
+          publicTripleCount,
+          ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+          privateTripleCount,
+          assertionGraph: vmGraph,
+        },
+        'confirmed',
+        provenance,
+      );
+      await this.store.deleteByPattern({ graph: metaGraph, subject: scope.ual });
+      await this.store.insert(metadata);
+      await writeMaterializedVersion(
+        this.store,
+        metaGraph,
+        scope.ual,
+        materializedVersion,
+      );
+      await this.store.dropGraph(swmGraph);
+      return 'applied' as const;
+    });
+    if (outcome === 'stale') return outcome;
+
+    this.eventBus?.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
+      contextGraphId,
+      layers: ['swm', 'vm'],
+      subGraphName,
+      operation: 'verifiable_memory_finalized',
+      source,
+      counts: { roots: 0, triples: publicTripleCount },
+    });
+    return 'applied';
+  }
+
   private markProcessed(dedupeKey: string): void {
     this.processedUals.add(dedupeKey);
     if (this.processedUals.size > 10_000) {
       const first = this.processedUals.values().next().value;
       if (first) this.processedUals.delete(first);
+    }
+  }
+
+  /**
+   * Distinguish an exact confirmed V2 assertion from an older/different V2
+   * assertion. A plain `dkg:status confirmed` check is insufficient once one
+   * UAL can advance through assertion versions: it would incorrectly suppress
+   * reconciliation of the latest chain root after an update.
+   */
+  private async graphScopedConfirmationState(
+    contextGraphId: string,
+    ual: string,
+    merkleRoot: Uint8Array,
+    subGraphName?: string,
+  ): Promise<'matching' | 'different' | 'absent'> {
+    let metaGraph: string;
+    let safeUal: string;
+    try {
+      metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
+      safeUal = assertSafeIri(ual);
+    } catch {
+      return 'absent';
+    }
+    const result = await this.store.query(
+      `SELECT ?scope ?version ?root ?assertionGraph ?publicCount ?status WHERE {
+        GRAPH <${metaGraph}> {
+          <${safeUal}> <${DKG_NS}contentScopeVersion> ?scope .
+          OPTIONAL { <${safeUal}> <${DKG_NS}assertionVersion> ?version }
+          OPTIONAL { <${safeUal}> <${DKG_NS}merkleRoot> ?root }
+          OPTIONAL { <${safeUal}> <${DKG_NS}assertionGraph> ?assertionGraph }
+          OPTIONAL { <${safeUal}> <${DKG_NS}publicTripleCount> ?publicCount }
+          OPTIONAL { <${safeUal}> <${DKG_NS}status> ?status }
+        }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return 'absent';
+    const row = result.bindings[0];
+    const scopeVersion = Number(stripOptionalLiteral(row['scope']));
+    if (scopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) return 'different';
+
+    try {
+      const assertionVersion = stripOptionalLiteral(row['version']) ?? '';
+      const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+      const expectedGraph = knowledgeAssetLayerGraphUri(
+        contextGraphId,
+        MemoryLayer.VerifiableMemory,
+        scope,
+        subGraphName,
+      );
+      const publicTripleCount = Number(stripOptionalLiteral(row['publicCount']));
+      const storedRoot = stripOptionalLiteral(row['root'])?.toLowerCase();
+      const status = stripOptionalLiteral(row['status']);
+      if (
+        row['assertionGraph'] !== expectedGraph
+        || !Number.isSafeInteger(publicTripleCount)
+        || publicTripleCount < 0
+        || storedRoot !== ethers.hexlify(merkleRoot).toLowerCase()
+        || status !== 'confirmed'
+      ) {
+        return 'different';
+      }
+      return await this.store.countQuads(expectedGraph) === publicTripleCount
+        ? 'matching'
+        : 'different';
+    } catch {
+      return 'different';
     }
   }
 
@@ -1013,11 +1625,28 @@ export class FinalizationHandler {
       ? contextGraphMetaUri(contextGraphId, ctxGraphId)
       : `did:dkg:context-graph:${contextGraphId}/_meta`;
 
-    // Idempotency — VM may already hold this (gossip beat the chain path, or a
-    // prior sweep promoted it). Treat as success so the cursor can advance.
-    // Read-both (review F5): the minimal per-cgId partition shape carries no
-    // `dkg:status` row — the status lives in the label `_meta` graph.
-    if (await this.isAlreadyConfirmed(ual, targetMetaGraph, `did:dkg:context-graph:${contextGraphId}/_meta`)) {
+    // V2 idempotency is assertion-specific. A bare confirmed status may refer
+    // to an older assertion of the same UAL and must not hide the latest chain
+    // root. Legacy metadata has no content-scope marker, so it keeps the prior
+    // read-both status behavior unchanged.
+    const graphConfirmation = await this.graphScopedConfirmationState(
+      contextGraphId,
+      ual,
+      merkleRoot,
+      subGraphName,
+    );
+    if (graphConfirmation === 'matching') {
+      this.log.info(ctx, `Chain-reconcile: ${ual} already confirmed in VM, skipping`);
+      return 'already-confirmed';
+    }
+    if (
+      graphConfirmation === 'absent'
+      && await this.isAlreadyConfirmed(
+        ual,
+        targetMetaGraph,
+        `did:dkg:context-graph:${contextGraphId}/_meta`,
+      )
+    ) {
       this.log.info(ctx, `Chain-reconcile: ${ual} already confirmed in VM, skipping`);
       return 'already-confirmed';
     }
@@ -1028,6 +1657,29 @@ export class FinalizationHandler {
     if (!(await this.verifyChainCgBinding(kaId, onChainCgId, ctx))) {
       this.log.info(ctx, `Chain-reconcile: chain CG binding for ${ual} (ka=${kaId}) not confirmed against cg ${onChainCgId}; deferring to sweep retry`);
       return 'unverified';
+    }
+
+    // V2 recovery is O(1) in the number of prior workspace operations: the
+    // durable per-KA head names one exact assertion graph and carries its
+    // constant-size commitment envelope. Only when no V2 head exists do we
+    // enter the legacy root-operation scan below.
+    const graphScopedOutcome = await this.reconcileGraphScopedKC({
+      contextGraphId,
+      ual,
+      merkleRoot,
+      publisherAddress,
+      kaId,
+      versionBlock,
+      authorAddress,
+      subGraphName,
+    }, ctx);
+    if (graphScopedOutcome !== undefined) return graphScopedOutcome;
+    if (graphConfirmation === 'different') {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: graph-scoped metadata exists for ${ual} but no exact SWM head matches the latest chain root`,
+      );
+      return 'no-swm';
     }
 
     // Recover the published roots from the local SWM snapshot. The gossip path

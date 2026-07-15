@@ -4594,6 +4594,11 @@ export class PublishMethods extends DKGAgentBase {
         targetContextGraphId: result.contextGraphError ? undefined : broadcastCgId,
         subGraphName: request.subGraphName,
         keepRootCopyOnLabel,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        assertionVersion: graphScope.assertionVersion,
+        publicTripleCount: seal.publicTripleCount,
+        ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
+        privateTripleCount: seal.privateTripleCount,
       };
       const topic = contextGraphFinalizationTopic(request.contextGraphId);
       try {
@@ -5698,6 +5703,17 @@ export class PublishMethods extends DKGAgentBase {
         targetContextGraphId: result.contextGraphError ? undefined : broadcastCgId,
         subGraphName: options?.subGraphName,
         keepRootCopyOnLabel,
+        ...(options?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+          ? {
+              contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+              assertionVersion: String(options.assertionVersion),
+              publicTripleCount: options.publicTripleCount ?? 0,
+              ...(options.privateMerkleRoot
+                ? { privateMerkleRoot: options.privateMerkleRoot }
+                : {}),
+              privateTripleCount: options.privateTripleCount ?? 0,
+            }
+          : {}),
       };
 
       const topic = contextGraphFinalizationTopic(contextGraphId);
