@@ -499,6 +499,59 @@ describe('rootless graph-scoped private access', () => {
     expect(new TextDecoder().decode(response.nquads)).not.toContain('must-not-leak');
   });
 
+  it('quarantines aliased private rows behind a marker-only V2 envelope', async () => {
+    const store = new OxigraphStore();
+    const legacyRoot = 'urn:legacy:marker-only-alias-poison';
+    const aliasedUal = UAL.replace(
+      '0x70997970c51812dc3a010c7d01b50e0d17dc79c8',
+      '0x70997970C51812DC3A010C7D01B50E0D17DC79C8',
+    );
+    await store.insert([
+      rootContextGraphRegistration(),
+      {
+        subject: UAL,
+        predicate: `${DKG}contentScopeVersion`,
+        object: `"2"^^<${XSD_INTEGER}>`,
+        graph: META_GRAPH,
+      },
+      {
+        subject: aliasedUal,
+        predicate: `${DKG}rootEntity`,
+        object: legacyRoot,
+        graph: META_GRAPH,
+      },
+      {
+        subject: aliasedUal,
+        predicate: `${DKG}contextGraph`,
+        object: CONTEXT_GRAPH_URI,
+        graph: META_GRAPH,
+      },
+      {
+        subject: aliasedUal,
+        predicate: `${DKG}accessPolicy`,
+        object: '"public"',
+        graph: META_GRAPH,
+      },
+      {
+        subject: legacyRoot,
+        predicate: 'urn:p',
+        object: '"must-not-leak-through-marker-only-alias"',
+        graph: `${CONTEXT_GRAPH_URI}/_private`,
+      },
+    ]);
+
+    const response = await request(
+      new AccessHandler(store, new TypedEventBus()),
+      aliasedUal,
+    );
+
+    expect(response.granted).toBe(false);
+    expect(response.rejectionReason).toContain('missing kaUal metadata');
+    expect(new TextDecoder().decode(response.nquads)).not.toContain(
+      'must-not-leak-through-marker-only-alias',
+    );
+  });
+
   it('canonicalizes and rechecks a legacy token alias before serving stale private data', async () => {
     const store = new OxigraphStore();
     const legacyRoot = 'urn:legacy:alias-poison';

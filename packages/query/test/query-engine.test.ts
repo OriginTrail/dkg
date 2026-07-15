@@ -277,6 +277,28 @@ describe('DKGQueryEngine', () => {
       ]);
     });
 
+    it('quarantines aliased legacy rows behind a marker-only V2 envelope', async () => {
+      const canonicalUal = 'did:dkg:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/9';
+      const aliasedUal = canonicalUal.replace(
+        '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+        '0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD',
+      );
+      await store.insert([
+        q(
+          canonicalUal,
+          `${DKG}contentScopeVersion`,
+          `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
+          META,
+        ),
+        q(aliasedUal, `${DKG}rootEntity`, ENTITY, META),
+        q(aliasedUal, `${DKG}contextGraph`, GRAPH, META),
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(aliasedUal)).rejects.toThrow(
+        /missing kaUal metadata/,
+      );
+    });
+
     it('ignores scope markers stored in another KA payload graph', async () => {
       const scope = createGraphKnowledgeAssetScope(UAL, '1');
       const vmGraph = knowledgeAssetLayerGraphUri(
