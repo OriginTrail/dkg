@@ -227,6 +227,28 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(result.meta).toEqual([]);
   });
 
+  it('rejects data accompanied only by a version-1 scope marker', () => {
+    const data = [quad(
+      'urn:unbound:legacy-marker',
+      'urn:p',
+      '"must-not-pass"',
+      CONTEXT_GRAPH_URI,
+    )];
+    const meta = [quad(
+      UAL,
+      `${DKG}contentScopeVersion`,
+      `"1"^^<${XSD_INTEGER}>`,
+      META,
+    )];
+
+    const result = verifyBoth(data, meta);
+
+    expect(result.rejected).toBeGreaterThan(0);
+    expect(result.data).toEqual([]);
+    expect(result.meta).toEqual([]);
+    expect(result.logs.some(({ message }) => message.includes('missing merkleRoot metadata'))).toBe(true);
+  });
+
   it('rejects graph-scoped metadata outside the context graph meta partition', () => {
     const generated = fixture();
     const poisonedMeta = generated.meta.map((entry) => ({
@@ -273,23 +295,24 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(result.logs.some(({ message }) => message.includes('token-level legacy ownership binding'))).toBe(true);
   });
 
-  it('verifies only changed V2 graphs in a multi-KA changelog page and exposes the planner binding', () => {
-    const unchanged = fixture();
+  it('bridges a verified V2 changelog graph but defers unsafe shared metadata replacement', () => {
     const changed = fixture({ ual: UAL_B });
-    const meta = [...unchanged.meta, ...changed.meta];
+    const meta = changed.meta;
 
     const processed = processDurableBatchForWire(
       changed.payload,
       meta,
       false,
-      [changed.assertionGraph],
+      {
+        kind: 'changelogPage',
+        changedDataGraphs: [changed.assertionGraph],
+      },
     );
 
     expect(processed.rejectedKcs).toBe(0);
     expect(processed.verifiedDataIndexes).toEqual(changed.payload.map((_, index) => index));
     expect(processed.verifiedMetaIndexes).toEqual(meta.map((_, index) => index));
     expect(processed.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
-    expect(processed.integrityMetadataGraphs).toEqual([META]);
 
     const verifiedByGraph = new Map<string, Quad[]>();
     for (const q of [
@@ -315,15 +338,71 @@ describe('verifySyncedData — rootless graph scope', () => {
       ]),
       metaGraphsWithRoot: new Set([META]),
       verifiedGraphScopedDataGraphs: new Set(processed.verifiedGraphScopedDataGraphs),
-      integrityMetadataGraphs: new Set(processed.integrityMetadataGraphs),
       batchVerifiedCleanly: true,
     });
 
-    expect(plan).toMatchObject({ deferred: false, advanceTo: 3, applied: 2 });
-    expect(plan.ops.map((operation) => operation.graph)).toEqual([
-      changed.assertionGraph,
-      META,
-    ]);
+    expect(plan).toMatchObject({ deferred: true, advanceTo: 1, applied: 0 });
+    expect(plan.ops).toEqual([]);
+  });
+
+  it('defers a shared metadata replacement containing unverified rows for an unchanged KA', () => {
+    const unchanged = fixture();
+    const changed = fixture({ ual: UAL_B });
+    const poisonedUnchangedMeta = unchanged.meta.map((entry) => (
+      entry.predicate === `${DKG}accessPolicy`
+        ? { ...entry, object: '"attackerOnly"' }
+        : entry
+    ));
+    const meta = [...poisonedUnchangedMeta, ...changed.meta];
+
+    const processed = processDurableBatchForWire(
+      changed.payload,
+      meta,
+      false,
+      {
+        kind: 'changelogPage',
+        changedDataGraphs: [changed.assertionGraph],
+      },
+    );
+
+    expect(processed.rejectedKcs).toBe(0);
+    expect(processed.verifiedDataIndexes).toEqual(changed.payload.map((_, index) => index));
+    expect(processed.verifiedMetaIndexes).toEqual(
+      changed.meta.map((_, index) => poisonedUnchangedMeta.length + index),
+    );
+
+    const verifiedByGraph = new Map<string, Quad[]>();
+    for (const quadIndex of processed.verifiedDataIndexes) {
+      const entry = changed.payload[quadIndex]!;
+      const rows = verifiedByGraph.get(entry.graph);
+      if (rows) rows.push(entry); else verifiedByGraph.set(entry.graph, [entry]);
+    }
+    for (const quadIndex of processed.verifiedMetaIndexes) {
+      const entry = meta[quadIndex]!;
+      const rows = verifiedByGraph.get(entry.graph);
+      if (rows) rows.push(entry); else verifiedByGraph.set(entry.graph, [entry]);
+    }
+
+    const plan = planPageApply({
+      records: [
+        { seq: 2, graph: changed.assertionGraph, op: 'upsert', quads: 'changed' },
+        { seq: 3, graph: META, op: 'upsert', quads: 'metadata' },
+      ],
+      nextSeq: 3,
+      priorSeq: 1,
+      isForeignGraph: () => false,
+      verifiedByGraph,
+      recordQuadCountByGraph: new Map([
+        [changed.assertionGraph, changed.payload.length],
+        [META, meta.length],
+      ]),
+      metaGraphsWithRoot: new Set([META]),
+      verifiedGraphScopedDataGraphs: new Set(processed.verifiedGraphScopedDataGraphs),
+      batchVerifiedCleanly: true,
+    });
+
+    expect(plan).toMatchObject({ deferred: true, advanceTo: 1, applied: 0 });
+    expect(plan.ops).toEqual([]);
   });
 
   it('keeps full durable snapshots strict when a multi-KA graph is absent', () => {
@@ -359,12 +438,17 @@ describe('verifySyncedData — rootless graph scope', () => {
       changed.payload,
       meta,
       false,
-      [changed.assertionGraph],
+      {
+        kind: 'changelogPage',
+        changedDataGraphs: [changed.assertionGraph],
+      },
     );
 
     expect(page.rejectedKcs).toBe(0);
     expect(page.verifiedDataIndexes).toEqual(changed.payload.map((_, index) => index));
-    expect(page.verifiedMetaIndexes).toEqual(meta.map((_, index) => index));
+    expect(page.verifiedMetaIndexes).toEqual(
+      changed.meta.map((_, index) => legacyMeta.length + index),
+    );
     expect(page.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
 
     const fullSnapshot = processDurableBatchForWire(changed.payload, meta, false);

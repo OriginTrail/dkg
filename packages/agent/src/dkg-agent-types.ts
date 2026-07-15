@@ -931,7 +931,7 @@ export interface DurableSyncDiagnostics {
   emptyResponses: number;
   metaOnlyResponses: number;
   /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
-  verifiedPrivateOnlyResponses?: number;
+  verifiedPrivateOnlyResponses: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;

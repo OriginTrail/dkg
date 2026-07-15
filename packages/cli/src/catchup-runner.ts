@@ -1,7 +1,11 @@
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import {
+  classifyDurableProgress,
+  type DKGAgent,
+  type DurableProgressSummary,
+} from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
@@ -43,7 +47,7 @@ export interface CatchupJobResult {
     durable: {
       verifiedDataPeers: number;
       /** Peers that cleanly verified one or more V2 KAs with no public triples. */
-      verifiedPrivateOnlyPeers?: number;
+      verifiedPrivateOnlyPeers: number;
       emptyPeers: number;
     };
     sharedMemory: {
@@ -66,7 +70,7 @@ export interface CatchupJobResult {
       emptyResponses: number;
       metaOnlyResponses: number;
       /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
-      verifiedPrivateOnlyResponses?: number;
+      verifiedPrivateOnlyResponses: number;
       dataRejectedMissingMeta: number;
       rejectedKcs: number;
       failedPeers: number;
@@ -99,44 +103,15 @@ export interface CatchupRunRequest {
   includeSharedMemory: boolean;
 }
 
-export interface CatchupPhaseProgress {
-  timedOutPhases?: number;
-  resumedPhases?: number;
-  completedPhases?: number;
-  checkpointAdvances?: number;
-  failedPeers?: number;
-  failedPhases?: number;
-  insertedTriples?: number;
-  insertedDataTriples?: number;
-  insertedMetaTriples?: number;
-  metaOnlyResponses?: number;
+export interface CatchupPhaseProgress extends DurableProgressSummary {
   bytesReceived?: number;
   emptyResponses?: number;
-  rejectedKcs?: number;
-  dataRejectedMissingMeta?: number;
-  verifiedPrivateOnlyResponses?: number;
-  deferredBackpressure?: number;
-  deniedPhases?: number;
-}
-
-function catchupPhaseHasIntegrityRejection(
-  progress: CatchupPhaseProgress | null | undefined,
-): boolean {
-  return (progress?.rejectedKcs ?? 0) > 0 ||
-    (progress?.dataRejectedMissingMeta ?? 0) > 0;
 }
 
 export function catchupPlaneCompletedWithoutFailure(
   progress: CatchupPhaseProgress | null | undefined,
 ): boolean {
-  return progress != null
-    && (progress.completedPhases ?? 0) > 0
-    && (progress.timedOutPhases ?? 0) === 0
-    && (progress.failedPeers ?? 0) === 0
-    && (progress.failedPhases ?? 0) === 0
-    && !catchupPhaseHasIntegrityRejection(progress)
-    && (progress.deferredBackpressure ?? 0) === 0
-    && (progress.deniedPhases ?? 0) === 0;
+  return classifyDurableProgress(progress).completedWithoutFailure;
 }
 
 export function catchupPeerSucceeded(
@@ -144,29 +119,25 @@ export function catchupPeerSucceeded(
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
 ): boolean {
-  if (!catchupPeerResponded(durable, shared) || peerDenied) return false;
-  if ((durable.deferredBackpressure ?? 0) > 0 || (shared?.deferredBackpressure ?? 0) > 0) return false;
-  const peerTransportFailed = (durable.failedPeers ?? 0) > 0 || (shared ? (shared.failedPeers ?? 0) > 0 : false);
+  const durableProgress = classifyDurableProgress(durable);
+  const sharedProgress = shared ? classifyDurableProgress(shared) : null;
+  if (
+    !catchupPeerResponded(durable, shared)
+    || peerDenied
+    || durableProgress.denied
+    || Boolean(sharedProgress?.denied)
+  ) return false;
+  if (durableProgress.deferredByBackpressure || sharedProgress?.deferredByBackpressure) return false;
+  const peerTransportFailed = durableProgress.transportFailed || Boolean(sharedProgress?.transportFailed);
   if (peerTransportFailed) return false;
-  const peerPhaseFailed = (durable.failedPhases ?? 0) > 0 || (shared ? (shared.failedPhases ?? 0) > 0 : false);
+  const peerPhaseFailed = durableProgress.phaseFailed || Boolean(sharedProgress?.phaseFailed);
   if (peerPhaseFailed) return false;
-  if (catchupPhaseHasIntegrityRejection(durable) || catchupPhaseHasIntegrityRejection(shared)) return false;
-  const durableProgress = (durable.insertedDataTriples ?? durable.insertedTriples ?? 0) > 0
-    || (durable.verifiedPrivateOnlyResponses ?? 0) > 0
-    || (durable.checkpointAdvances ?? 0) > 0
-    || ((durable.completedPhases ?? 0) > 0 && (durable.resumedPhases ?? 0) > 0);
-  const sharedProgress = shared
-    ? (shared.insertedDataTriples ?? shared.insertedTriples ?? 0) > 0
-      || (shared.checkpointAdvances ?? 0) > 0
-      || ((shared.completedPhases ?? 0) > 0 && (shared.resumedPhases ?? 0) > 0)
-    : false;
-  const peerMadeProgress = durableProgress || sharedProgress;
-  const peerMetadataOnly = !peerMadeProgress && (
-    (durable.insertedMetaTriples ?? 0) > 0
-    || (durable.metaOnlyResponses ?? 0) > 0
-    || (shared ? (shared.insertedMetaTriples ?? 0) > 0 : false)
-  );
-  const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);
+  if (durableProgress.integrityRejected || sharedProgress?.integrityRejected) return false;
+  const peerMadeProgress = durableProgress.madeReadinessProgress
+    || Boolean(sharedProgress?.madeReadinessProgress);
+  const peerMetadataOnly = !peerMadeProgress
+    && (durableProgress.hasMetadataEvidence || Boolean(sharedProgress?.hasMetadataEvidence));
+  const peerTimedOut = durableProgress.timedOut || Boolean(sharedProgress?.timedOut);
   return !peerTimedOut && (peerMadeProgress || !peerMetadataOnly);
 }
 
@@ -175,8 +146,9 @@ export function catchupPeerResponded(
   shared: CatchupPhaseProgress | null | undefined,
 ): boolean {
   const phaseResponded = (phase: CatchupPhaseProgress): boolean => {
-    if ((phase.failedPeers ?? 0) > 0) return false;
-    if ((phase.deferredBackpressure ?? 0) === 0) return true;
+    const progress = classifyDurableProgress(phase);
+    if (progress.transportFailed) return false;
+    if (!progress.deferredByBackpressure) return true;
     return (phase.bytesReceived ?? 0) > 0
       || (phase.completedPhases ?? 0) > 0
       || (phase.emptyResponses ?? 0) > 0
