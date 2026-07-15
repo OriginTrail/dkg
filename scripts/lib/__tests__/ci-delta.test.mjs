@@ -22,7 +22,7 @@ import {
 } from '../ci-results.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const TRUSTED_CI_CONTROLLER_SHA = '29158635894980100917e2a3fd2233ac45e7d16f';
+const TRUSTED_CI_CONTROLLER_SHA = '342e811260dd320f96140cc10f128ee4a54732a3';
 const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 
 function change(filePath, status = 'M') {
@@ -505,14 +505,9 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
   assert.ok(
     workflow.includes(
-      "if: github.event_name == 'pull_request' && needs.changes.outputs.contracts == 'true'",
+      "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
     ),
-    'the sharded Solidity suite must run only on contract-relevant pull requests',
-  );
-  assert.equal(
-    workflow.includes("github.event_name == 'merge_group') && needs.changes.outputs.contracts"),
-    false,
-    'merge queue must not duplicate the Solidity suite already run on the pull request',
+    'the sharded Solidity suite must protect contract PRs and exact merge candidates',
   );
   assert.ok(
     workflow.includes('run: node candidate/scripts/check-npm-metadata.mjs'),

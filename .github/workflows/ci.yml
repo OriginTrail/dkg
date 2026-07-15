@@ -3,7 +3,7 @@ name: CI
 # Trigger rules:
 #   * pull_request : fail-closed delta plan for fast iteration. Label changes
 #                    retrigger the workflow so `ci:full` is an override.
-#   * merge_group : every Node/EVM lane against the exact pre-merge candidate.
+#   * merge_group : full CI against the exact pre-merge candidate.
 #   * protected push / manual dispatch : full CI safety net.
 #   * No `push` trigger on feature branches (e.g. `test/**`). When a PR
 #     is open, the `pull_request` event already covers every new commit;
@@ -42,9 +42,10 @@ jobs:
   # ------------------------------------------------------------------
   # Produce one fail-closed test plan for every workflow in this repository.
   # PRs run the affected package lane plus declared downstream consumers.
-  # Protected pushes and manual runs select every lane. Merge queue candidates,
-  # global/unknown changes, package manifests, large changes, and `ci:full` run
-  # every Node/EVM lane; Solidity retains its independent PR path gate.
+  # Protected pushes, manual runs, and merge queue candidates select every
+  # lane. Global/unknown changes, package manifests, large changes, and
+  # `ci:full` run every Node/EVM lane; Solidity retains its independent PR
+  # path gate.
   # ------------------------------------------------------------------
   changes:
     name: Plan CI delta
@@ -85,7 +86,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 29158635894980100917e2a3fd2233ac45e7d16f
+          ref: 342e811260dd320f96140cc10f128ee4a54732a3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -1017,8 +1018,8 @@ jobs:
   #   - PR + contract changes    : 4-way sharded hardhat test, no
   #                                coverage (~5-6 min per shard in
   #                                parallel; previously ~20 min single).
-  #   - merge queue candidate    : no duplicate Solidity run; contract PRs
-  #                                already ran this suite before entering it.
+  #   - merge queue candidate    : same sharded suite against the exact
+  #                                combined commit that is about to land.
   #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
   #                                single job (coverage reports don't
   #                                compose across shards, so we keep
@@ -1029,9 +1030,9 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # PR lane only — sharded 4 ways. Protected pushes and manual runs use the
-    # separate coverage+ratchet job below; merge queue does not duplicate it.
-    if: github.event_name == 'pull_request' && needs.changes.outputs.contracts == 'true'
+    # Candidate lane — sharded 4 ways. Protected pushes and manual runs use the
+    # separate coverage+ratchet job below.
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1395,7 +1396,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 29158635894980100917e2a3fd2233ac45e7d16f
+          ref: 342e811260dd320f96140cc10f128ee4a54732a3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
