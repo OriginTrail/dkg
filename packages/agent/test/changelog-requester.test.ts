@@ -301,7 +301,7 @@ describe('runChangelogSync — driver loop', () => {
       async () => ({ complete: true, insertedTriples: 42 }),
     );
     const out = await runChangelogSync(h.deps);
-    expect(out).toEqual({ kind: 'resync', applied: 42 });
+    expect(out).toEqual({ kind: 'resync', applied: 42, complete: true });
     expect(h.resyncs()).toBe(1);
     expect(h.cursor()).toEqual({ era: 'e2', seq: 9 });
   });
@@ -313,7 +313,7 @@ describe('runChangelogSync — driver loop', () => {
       async () => ({ complete: false, insertedTriples: 5 }),
     );
     const out = await runChangelogSync(h.deps);
-    expect(out).toEqual({ kind: 'resync', applied: 5 });
+    expect(out).toEqual({ kind: 'resync', applied: 5, complete: false });
     expect(h.cursor()).toBeUndefined(); // cursor left untouched — next cycle retries the resync
   });
 
@@ -467,7 +467,7 @@ describe('changelog drop resync reconciliation', () => {
       ) => {
         forceFreshSessionFlags.push(forceFreshSession === true);
         return {
-          quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0,
+          quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 1,
           checkpointKey: `${contextGraphId}:${phase}`, completed: true, timedOut: false,
         };
       },
@@ -475,9 +475,10 @@ describe('changelog drop resync reconciliation', () => {
       insertSyncedQuadsAndInvalidateListCache: async () => {},
       getOrCreateSyncVerifyWorker: () => ({ parseAndFilter: async () => ({ quads: [] }) }),
       processDurableBatchInWorker: async () => ({
-        verifiedData: [], verifiedMeta: [], verifiedGraphScopedDataGraphs: [],
-        totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
-        emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+        verifiedData: [qd('did:dkg:context-graph:cg/_verifiable_memory/0xabc/8', 1)],
+        verifiedMeta: [], verifiedGraphScopedDataGraphs: [],
+        totalFetchedDataQuads: 1, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+        emptyResponses: 0, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
       }),
       runLegacyDurableSyncForContextGraph:
@@ -489,7 +490,7 @@ describe('changelog drop resync reconciliation', () => {
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
 
-    await (LifecycleSyncMethods.prototype.runChangelogSyncForCg as any).call(
+    const result = await (LifecycleSyncMethods.prototype.runChangelogSyncForCg as any).call(
       agent,
       { kind: 'system', id: 'test', startedAt: 0 },
       'peer',
@@ -499,6 +500,8 @@ describe('changelog drop resync reconciliation', () => {
     expect(dropped).toEqual([]);
     expect(forceFreshSessionFlags).toEqual([false, false]);
     expect(cursor).toEqual({ era: 'e1', seq: 8 });
+    expect(result.insertedDataTriples).toBe(1);
+    expect(result.completedPhases).toBe(0);
   });
 });
 
