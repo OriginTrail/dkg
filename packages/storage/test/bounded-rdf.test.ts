@@ -358,4 +358,31 @@ describe('bounded HTTP query responses', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it.each([
+    ['SPARQL HTTP', 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', () => new SparqlHttpStore({ queryEndpoint: 'http://store.test/query' })],
+    ['SPARQL HTTP', 'DESCRIBE <urn:test:subject>', () => new SparqlHttpStore({ queryEndpoint: 'http://store.test/query' })],
+    ['Blazegraph', 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', () => new BlazegraphStore('http://store.test/query')],
+    ['Blazegraph', 'DESCRIBE <urn:test:subject>', () => new BlazegraphStore('http://store.test/query')],
+  ])('rejects an oversized %s N-Quads response for %s before parsing', async (_name, sparql, makeStore) => {
+    const originalFetch = globalThis.fetch;
+    // Deliberately malformed: parsing before enforcing the byte limit would
+    // surface an RDF parser error instead of STORE_RESPONSE_TOO_LARGE.
+    const body = `<urn:test:s> <urn:test:p> "unterminated-${'x'.repeat(256)}`;
+    globalThis.fetch = (async () => new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/n-quads' },
+    })) as typeof fetch;
+
+    try {
+      const store = makeStore();
+      await expect(store.query(sparql, { maxResponseBytes: 64 }))
+        .rejects.toMatchObject({
+          code: 'STORE_RESPONSE_TOO_LARGE',
+          maxBytes: 64,
+        });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

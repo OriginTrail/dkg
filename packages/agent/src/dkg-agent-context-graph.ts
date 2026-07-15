@@ -92,7 +92,6 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
-  validateNewContextGraphId,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -431,10 +430,8 @@ export class ContextGraphMethods extends DKGAgentBase {
     callerAgentAddress?: string;
   }): Promise<void> {
     const ctx = createOperationContext('system');
-    const idValidation = validateNewContextGraphId(opts.id);
-    if (!idValidation.valid) {
-      throw new Error(`Invalid context graph ID: ${idValidation.reason}`);
-    }
+    const gm = new GraphManager(this.store);
+    gm.assertNewContextGraphId(opts.id);
     // OT-RFC-56 §4.6: name/description land as raw literals in a
     // network-replicated graph — enforce the protocol limit before ANY
     // side effect (see ensureContextGraphLocal for the incident context).
@@ -446,7 +443,6 @@ export class ContextGraphMethods extends DKGAgentBase {
         label: 'contextGraph.description', subject: opts.id, predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
       });
     }
-    const gm = new GraphManager(this.store);
     const contextGraphUri = `did:dkg:context-graph:${opts.id}`;
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
@@ -684,7 +680,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     await this.store.insert(quads);
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
-    await gm.ensureContextGraph(opts.id);
+    await gm.ensureNewContextGraph(opts.id);
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
     // Without this, a daemon crash within 50ms of the insert would lose the
@@ -881,10 +877,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     strictEoaCuratorMatch?: boolean;
   }): Promise<{ onChainId: string; txHash?: string }> {
     const ctx = createOperationContext('system');
-    const idValidation = validateNewContextGraphId(id);
-    if (!idValidation.valid) {
-      throw new Error(`Invalid context graph ID: ${idValidation.reason}`);
-    }
+    new GraphManager(this.store).assertNewContextGraphId(id);
 
     if (opts?.revealOnChain === true) {
       this.log.warn(

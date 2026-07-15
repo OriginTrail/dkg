@@ -128,7 +128,7 @@ export type GraphKnowledgeAssetMetadataParseResult =
  * roots keep the same declaration in their own control-plane metadata graph.
  * Payload and named-subgraph graphs are deliberately excluded.
  */
-export function buildTrustedRootContextGraphRegistrationFilter(
+function buildTrustedRootContextGraphRegistrationFilter(
   contextGraphVariable: string,
   metadataGraphVariable: string,
 ): string {
@@ -228,6 +228,57 @@ export function buildGraphKnowledgeAssetMetadataQuery(ual: string): string {
     }
     FILTER(STR(?g) = CONCAT(STR(?_contextGraph), "/_meta"))
     ${buildTrustedRootContextGraphRegistrationFilter('?_contextGraph', '?g')}
+  }`;
+}
+
+/** Build the complete trusted legacy metadata lookup used by query reads. */
+export function buildLegacyKnowledgeAssetMetadataQuery(ual: string): string {
+  const safeUal = assertSafeIri(ual);
+  return `SELECT ?ka ?rootEntity ?ctxGraph ?sgName WHERE {
+    GRAPH ?g {
+      {
+        ?ka <${DKG}rootEntity> ?rootEntity .
+        ?ka <${DKG}partOf> <${safeUal}> .
+      }
+      UNION
+      {
+        <${safeUal}> <${DKG}rootEntity> ?rootEntity .
+        BIND(<${safeUal}> AS ?ka)
+      }
+      <${safeUal}> <${DKG}contextGraph> ?ctxGraph .
+      OPTIONAL { <${safeUal}> <${DKG}subGraphName> ?sgName }
+      BIND(CONCAT(STR(?ctxGraph), "/_meta") AS ?expectedMetaGraph)
+      FILTER(STR(?g) = ?expectedMetaGraph)
+    }
+    ${buildTrustedRootContextGraphRegistrationFilter('?ctxGraph', '?g')}
+  } ORDER BY ?ka`;
+}
+
+/** Build the complete trusted legacy metadata lookup used by private access. */
+export function buildLegacyKnowledgeAssetAccessMetadataQuery(ual: string): string {
+  const safeUal = assertSafeIri(ual);
+  return `SELECT ?rootEntity ?contextGraph ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo ?sgName WHERE {
+    GRAPH ?g {
+      {
+        <${safeUal}> <${DKG}rootEntity> ?rootEntity .
+        <${safeUal}> <${DKG}partOf> ?kc .
+      }
+      UNION
+      {
+        <${safeUal}> <${DKG}rootEntity> ?rootEntity .
+        BIND(<${safeUal}> AS ?kc)
+      }
+      ?kc <${DKG}contextGraph> ?contextGraph .
+      OPTIONAL { <${safeUal}> <${DKG}privateMerkleRoot> ?privateMerkleRoot }
+      OPTIONAL { <${safeUal}> <${DKG}privateTripleCount> ?privateTripleCount }
+      OPTIONAL { ?kc <${DKG}accessPolicy> ?accessPolicy }
+      OPTIONAL { ?kc <${DKG}publisherPeerId> ?publisherPeerId }
+      OPTIONAL { ?kc <${PROV}wasAttributedTo> ?attributedTo }
+      OPTIONAL { ?kc <${DKG}subGraphName> ?sgName }
+      BIND(CONCAT(STR(?contextGraph), "/_meta") AS ?expectedMetaGraph)
+      FILTER(STR(?g) = ?expectedMetaGraph)
+    }
+    ${buildTrustedRootContextGraphRegistrationFilter('?contextGraph', '?g')}
   }`;
 }
 

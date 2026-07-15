@@ -6,14 +6,13 @@ import type {
 import {
   DKGEvent,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  buildGraphKnowledgeAssetMetadataQuery,
-  buildTrustedRootContextGraphRegistrationFilter,
+  buildLegacyKnowledgeAssetAccessMetadataQuery,
   decodeAccessRequest,
   encodeAccessResponse,
   ed25519Verify,
   assertSafeIri,
   parseDeterministicKnowledgeAssetUal,
-  parseGraphKnowledgeAssetMetadataBindings,
+  type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
@@ -21,6 +20,7 @@ import {
   GraphManager,
   PrivateContentStore,
   quadsToNQuads,
+  resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
 import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 
@@ -283,35 +283,29 @@ export class AccessHandler {
     const canonicalUal = legacyAliasBase ?? kaUal;
     // A token-form legacy alias must not bypass a V2 marker on the canonical
     // bare UAL. Resolve the canonical control plane before either legacy path.
-    const graphScoped = await this.queryGraphScopedKAMeta(canonicalUal);
-    if (graphScoped) return graphScoped;
-
-    const direct = await this.queryLegacyKAMeta(kaUal);
-    if (direct) return direct;
-    // Read-both (RFC ka-metadata-trim P3.1): older requesters address private
-    // content by the legacy token row `<ual>/<n>`; the collapsed shape keys
-    // everything on the bare UAL. Strip a numeric suffix and retry once so
-    // old-client requests keep resolving against new-shape stores.
-    if (legacyAliasBase) {
-      return this.queryLegacyKAMeta(legacyAliasBase);
+    const resolved = await resolveGraphScopedOrLegacyMetadata(
+      this.store,
+      canonicalUal,
+      async () => {
+        const direct = await this.queryLegacyKAMeta(kaUal);
+        if (direct) return direct;
+        // Read-both (RFC ka-metadata-trim P3.1): older requesters address
+        // private content by `<ual>/<n>`. Retry the canonical bare UAL once.
+        return legacyAliasBase
+          ? this.queryLegacyKAMeta(legacyAliasBase)
+          : null;
+      },
+      { source: 'publisher.access.metadata' },
+    );
+    if (resolved.kind === 'graph') {
+      return this.graphScopedKAMeta(resolved.metadata);
     }
-    return null;
+    return resolved.kind === 'legacy' ? resolved.metadata : null;
   }
 
-  private async queryGraphScopedKAMeta(
-    kaUal: string,
-  ): Promise<GraphScopedKAMeta | null> {
-    const safeUal = assertSafeIri(kaUal);
-    const result = await this.store.query(
-      buildGraphKnowledgeAssetMetadataQuery(safeUal),
-    );
-    const parsed = parseGraphKnowledgeAssetMetadataBindings(
-      safeUal,
-      result.type === 'bindings' ? result.bindings : [],
-    );
-    if (parsed.kind !== 'graph') return null;
-    const metadata = parsed.metadata;
-
+  private graphScopedKAMeta(
+    metadata: ParsedGraphKnowledgeAssetMetadata,
+  ): GraphScopedKAMeta {
     return {
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       scope: metadata.scope,
@@ -335,29 +329,7 @@ export class AccessHandler {
     // keeps legacy `<ual>/<n>` lookups (old clients / old-shape replica rows)
     // resolving.
     const result = await this.store.query(
-      `SELECT ?rootEntity ?contextGraph ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo ?sgName WHERE {
-        GRAPH ?g {
-          {
-            <${safeUal}> <${DKG_NS}rootEntity> ?rootEntity .
-            <${safeUal}> <${DKG_NS}partOf> ?kc .
-          }
-          UNION
-          {
-            <${safeUal}> <${DKG_NS}rootEntity> ?rootEntity .
-            BIND(<${safeUal}> AS ?kc)
-          }
-          ?kc <${DKG_NS}contextGraph> ?contextGraph .
-          OPTIONAL { <${safeUal}> <${DKG_NS}privateMerkleRoot> ?privateMerkleRoot }
-          OPTIONAL { <${safeUal}> <${DKG_NS}privateTripleCount> ?privateTripleCount }
-          OPTIONAL { ?kc <${DKG_NS}accessPolicy> ?accessPolicy }
-          OPTIONAL { ?kc <${DKG_NS}publisherPeerId> ?publisherPeerId }
-          OPTIONAL { ?kc <http://www.w3.org/ns/prov#wasAttributedTo> ?attributedTo }
-          OPTIONAL { ?kc <${DKG_NS}subGraphName> ?sgName }
-          BIND(CONCAT(STR(?contextGraph), '/_meta') AS ?expectedMetaGraph)
-          FILTER(STR(?g) = ?expectedMetaGraph)
-        }
-        ${buildTrustedRootContextGraphRegistrationFilter('?contextGraph', '?g')}
-      }`,
+      buildLegacyKnowledgeAssetAccessMetadataQuery(safeUal),
     );
 
     if (result.type !== 'bindings' || result.bindings.length === 0) {
