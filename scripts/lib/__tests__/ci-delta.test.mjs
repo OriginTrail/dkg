@@ -23,7 +23,7 @@ import {
 } from '../ci-results.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const TRUSTED_CI_CONTROLLER_SHA = '342e811260dd320f96140cc10f128ee4a54732a3';
+const TRUSTED_CI_CONTROLLER_SHA = 'e5f8165fdc246ed5458849256ce886b776c56320';
 const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 
 function change(filePath, status = 'M') {
