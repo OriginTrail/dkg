@@ -7,9 +7,14 @@ import {
   assertionLifecycleUri,
   contextGraphMetaUri,
   createOperationContext,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { KA_ID_PRED, VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
+import {
+  KA_ID_PRED,
+  VM_CURRENT_ASSERTION_PRED,
+  computeFlatKCRootV10,
+} from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   namedSharedMemoryScopeForFinalizedLifecycle,
@@ -22,8 +27,39 @@ const NAME = 'asset';
 const DEFAULT_AGENT = `0x${'11'.repeat(20)}`;
 const AGENT_B = `0x${'22'.repeat(20)}`;
 const ROOT = 'urn:test:agent-b-root';
-const MERKLE = new Uint8Array(32).fill(7);
 const RESERVED_KA_ID = (BigInt(AGENT_B) << 96n) | 1n;
+const KA_UAL = `did:dkg:hardhat:31337/${AGENT_B}/1`;
+const PUBLIC_QUAD: Quad = {
+  subject: ROOT,
+  predicate: 'http://schema.org/name',
+  object: '"B lane"',
+  graph: '',
+};
+const MERKLE = computeFlatKCRootV10([PUBLIC_QUAD], []);
+
+function buildGraphSeal(
+  assertionUri: string,
+  reservedKaId: bigint = RESERVED_KA_ID,
+): Quad[] {
+  return buildAssertionSealQuads({
+    assertionUri,
+    metaGraph: contextGraphMetaUri(CG),
+    merkleRoot: MERKLE,
+    authorAddress: AGENT_B,
+    authorAttestationR: new Uint8Array(32).fill(1),
+    authorAttestationVS: new Uint8Array(32).fill(2),
+    authorSchemeVersion: 1,
+    chainId: 31337n,
+    kav10Address: AGENT_B,
+    reservedKaId,
+    finalizedAtIso: '2026-01-01T00:00:00.000Z',
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: KA_UAL,
+    assertionVersion: 1,
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+  }) as Quad[];
+}
 
 function makeLog() {
   return {
@@ -113,21 +149,11 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
   it('reads finalized assertions from the explicitly selected non-default agent lane', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
-
-    await store.insert(buildAssertionSealQuads({
-      assertionUri,
-      metaGraph: contextGraphMetaUri(CG),
-      merkleRoot: MERKLE,
-      authorAddress: AGENT_B,
-      authorAttestationR: new Uint8Array(32).fill(1),
-      authorAttestationVS: new Uint8Array(32).fill(2),
-      authorSchemeVersion: 1,
-      chainId: 31337n,
-      kav10Address: AGENT_B,
-      reservedKaId: RESERVED_KA_ID,
-      finalizedAtIso: '2026-01-01T00:00:00.000Z',
-      rootEntities: [ROOT],
-    }) as Quad[]);
+    const exactGraph = `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`;
+    await store.insert([
+      ...buildGraphSeal(assertionUri),
+      { ...PUBLIC_QUAD, graph: exactGraph },
+    ]);
 
     const markerCalls: Array<{
       contextGraphId: string;
@@ -137,7 +163,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     }> = [];
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
     const remainingClearCalls: any[][] = [];
-    const ensureCalls: any[] = [];
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -157,20 +182,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       ) => {
         markerCalls.push({ contextGraphId, name, agentAddress, subGraphName });
         return agentAddress === AGENT_B;
-      },
-      ensureFinalizedLifecycleSwmPlacement: async (descriptor: any) => {
-        ensureCalls.push(descriptor);
-        await store.insert([{
-          subject: ROOT,
-          predicate: 'http://schema.org/name',
-          object: '"B lane"',
-          graph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
-        }]);
-        return {
-          sourceEmpty: false,
-          migratedLegacyQuadCount: 0,
-          targetGraph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
-        };
       },
       clearSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async (...args: any[]) => { remainingClearCalls.push(args); },
@@ -201,23 +212,18 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       agentAddress: AGENT_B,
       subGraphName: undefined,
     }]);
-    expect(ensureCalls).toEqual([{
-      lifecycle: {
-        contextGraphId: CG,
-        assertionName: NAME,
-        assertionLifecycleAgentAddress: AGENT_B,
-        subGraphName: undefined,
-      },
-      sealAuthorScope: { agentAddress: AGENT_B, kaNumber: 1n },
-      rootEntities: [ROOT],
-    }]);
     expect(publishCalls).toHaveLength(1);
     expect(publishCalls[0]).toMatchObject({
       contextGraphId: CG,
-      selection: { rootEntities: [ROOT] },
+      selection: 'all',
     });
     expect(publishCalls[0]?.opts).toMatchObject({
       reservedKaId: RESERVED_KA_ID,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: KA_UAL,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
       sharedMemoryScope: {
         kind: 'named-lifecycle',
         identity: { agentAddress: AGENT_B, kaNumber: 1n },
@@ -235,23 +241,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(result.status).toBe('confirmed');
   });
 
-  it('maps an explicit source-empty placement result to the mint no-data precondition', async () => {
+  it('maps an empty exact KA graph to the mint no-data precondition', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
-    await store.insert(buildAssertionSealQuads({
-      assertionUri,
-      metaGraph: contextGraphMetaUri(CG),
-      merkleRoot: MERKLE,
-      authorAddress: AGENT_B,
-      authorAttestationR: new Uint8Array(32).fill(1),
-      authorAttestationVS: new Uint8Array(32).fill(2),
-      authorSchemeVersion: 1,
-      chainId: 31337n,
-      kav10Address: AGENT_B,
-      reservedKaId: RESERVED_KA_ID,
-      finalizedAtIso: '2026-01-01T00:00:00.000Z',
-      rootEntities: [ROOT],
-    }) as Quad[]);
+    await store.insert(buildGraphSeal(assertionUri));
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -261,11 +254,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.log = makeLog();
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      ensureFinalizedLifecycleSwmPlacement: async () => ({
-        sourceEmpty: true,
-        migratedLegacyQuadCount: 0,
-        targetGraph: `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`,
-      }),
     };
     agent.publishFromSharedMemory = async () => {
       throw new Error('publish should not be called for an empty source');
@@ -281,11 +269,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(thrown?.code).not.toBe('SWM_MIGRATION_SOURCE_EMPTY');
   });
 
-  it('explicitly migrates an older finalized legacy-bucket share before minting', async () => {
+  it('keeps an older finalized legacy-bucket share read-only', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
     const swmGraph = contextGraphSharedMemoryUri(CG);
-    const namedGraph = `${swmGraph}/${AGENT_B}/1`;
     const legacyQuad: Quad = {
       subject: ROOT,
       predicate: 'http://schema.org/name',
@@ -310,8 +297,8 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       legacyQuad,
     ]);
 
-    const ensureCalls: any[] = [];
-    const publishCalls: any[][] = [];
+    let migrationCalls = 0;
+    let publishCalls = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
     agent.chain = {};
@@ -320,52 +307,23 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.log = makeLog();
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      ensureFinalizedLifecycleSwmPlacement: async (descriptor: any) => {
-        ensureCalls.push(descriptor);
-        await store.insert([{ ...legacyQuad, graph: namedGraph }]);
-        return {
-          sourceEmpty: false,
-          migratedLegacyQuadCount: 1,
-          targetGraph: namedGraph,
-        };
+      ensureFinalizedLifecycleSwmPlacement: async () => {
+        migrationCalls += 1;
+        throw new Error('legacy migration must not run');
       },
-      clearSwmShareComplete: async () => {},
     };
-    agent.publishFromSharedMemory = async (...args: any[]) => {
-      publishCalls.push(args);
-      return {
-        kaId: RESERVED_KA_ID,
-        ual: 'did:dkg:test/legacy-finalized/1',
-        merkleRoot: MERKLE,
-        kaManifest: [],
-        status: 'confirmed',
-        publicQuads: [],
-      };
+    agent.publishFromSharedMemory = async () => {
+      publishCalls += 1;
+      throw new Error('legacy publish must not run');
     };
 
-    const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
-
-    expect(result.status).toBe('confirmed');
-    expect(ensureCalls).toEqual([{
-      lifecycle: {
-        contextGraphId: CG,
-        assertionName: NAME,
-        assertionLifecycleAgentAddress: AGENT_B,
-        subGraphName: undefined,
-      },
-      sealAuthorScope: { agentAddress: AGENT_B, kaNumber: 1n },
-      rootEntities: [ROOT],
-    }]);
-    expect(publishCalls).toHaveLength(1);
-    expect(publishCalls[0][1]).toEqual({ rootEntities: [ROOT] });
-    expect(publishCalls[0][2].sharedMemoryScope).toEqual({
-      kind: 'named-lifecycle',
-      identity: { agentAddress: AGENT_B, kaNumber: 1n },
-    });
+    await expect(
+      agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B }),
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(migrationCalls).toBe(0);
+    expect(publishCalls).toBe(0);
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
-    const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
     expect(legacy).toMatchObject({ type: 'boolean', value: true });
-    expect(canonical).toMatchObject({ type: 'boolean', value: true });
   });
 
   it('cleans only the finalized named lifecycle after a confirmed update', async () => {
@@ -375,34 +333,21 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const lifecycleUri = assertionLifecycleUri(CG, AGENT_B, NAME);
     const swmGraph = contextGraphSharedMemoryUri(CG);
     const namedGraph = `${swmGraph}/${AGENT_B}/1`;
-    const legacyQuad: Quad = {
+    const unrelatedLegacyQuad: Quad = {
       subject: ROOT,
       predicate: 'http://schema.org/name',
-      object: '"updated"',
+      object: '"unrelated legacy bucket"',
       graph: swmGraph,
     };
     await store.insert([
-      ...buildAssertionSealQuads({
-        assertionUri,
-        metaGraph,
-        merkleRoot: MERKLE,
-        authorAddress: AGENT_B,
-        authorAttestationR: new Uint8Array(32).fill(1),
-        authorAttestationVS: new Uint8Array(32).fill(2),
-        authorSchemeVersion: 1,
-        chainId: 31337n,
-        kav10Address: AGENT_B,
-        reservedKaId: RESERVED_KA_ID,
-        finalizedAtIso: '2026-01-01T00:00:00.000Z',
-        rootEntities: [ROOT],
-      }) as Quad[],
+      ...buildGraphSeal(assertionUri),
       { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, object: '"prior"', graph: metaGraph },
       { subject: lifecycleUri, predicate: KA_ID_PRED, object: '"1"', graph: metaGraph },
-      legacyQuad,
+      { ...PUBLIC_QUAD, graph: namedGraph },
+      unrelatedLegacyQuad,
     ]);
 
     const cleanupCalls: any[][] = [];
-    const ensureCalls: any[] = [];
     const updateCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -412,18 +357,11 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.log = makeLog();
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      ensureFinalizedLifecycleSwmPlacement: async (descriptor: any) => {
-        ensureCalls.push(descriptor);
-        const canonicalQuad = { ...legacyQuad, graph: namedGraph };
-        await store.insert([canonicalQuad]);
-        return {
-          sourceEmpty: false,
-          migratedLegacyQuadCount: 1,
-          targetGraph: namedGraph,
-        };
+      clearPublishedKnowledgeAssetSwm: async (...args: any[]) => {
+        cleanupCalls.push(args);
+        await store.dropGraph(namedGraph);
       },
       clearSwmShareComplete: async () => {},
-      clearPublishedSwmRoots: async (...args: any[]) => { cleanupCalls.push(args); },
     };
     agent._buildPrecomputedUpdateAttestationForSeal = async () => ({
       expectedNewMerkleRoot: MERKLE,
@@ -446,54 +384,34 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
 
     expect(result.status).toBe('confirmed');
-    expect(ensureCalls).toEqual([{
-      lifecycle: {
-        contextGraphId: CG,
-        assertionName: NAME,
-        assertionLifecycleAgentAddress: AGENT_B,
-        subGraphName: undefined,
-      },
-      sealAuthorScope: { agentAddress: AGENT_B, kaNumber: 1n },
-      rootEntities: [ROOT],
-    }]);
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0].slice(0, 2)).toEqual([RESERVED_KA_ID, CG]);
-    expect(updateCalls[0][2]).toEqual([{
-      subject: ROOT,
-      predicate: 'http://schema.org/name',
-      object: '"updated"',
-      graph: '',
-    }]);
+    expect(updateCalls[0][2]).toEqual([PUBLIC_QUAD]);
+    expect(updateCalls[0][4]).toMatchObject({
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: KA_UAL,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    });
     expect(cleanupCalls).toHaveLength(1);
-    expect(cleanupCalls[0].slice(0, 3)).toEqual([CG, [ROOT], undefined]);
-    expect(cleanupCalls[0][4]).toEqual({
+    expect(cleanupCalls[0][0]).toBe(CG);
+    expect(cleanupCalls[0][1]).toEqual({
       kind: 'named-lifecycle',
       identity: { agentAddress: AGENT_B, kaNumber: 1n },
     });
+    expect(cleanupCalls[0][2]).toBeUndefined();
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
     expect(legacy).toMatchObject({ type: 'boolean', value: true });
-    expect(canonical).toMatchObject({ type: 'boolean', value: true });
+    expect(canonical).toMatchObject({ type: 'boolean', value: false });
   });
 
   it('rejects a finalized seal whose packed KA id belongs to another author namespace', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
     const mismatchedReservedKaId = (BigInt(DEFAULT_AGENT) << 96n) | 1n;
-    await store.insert(buildAssertionSealQuads({
-      assertionUri,
-      metaGraph: contextGraphMetaUri(CG),
-      merkleRoot: MERKLE,
-      authorAddress: AGENT_B,
-      authorAttestationR: new Uint8Array(32).fill(1),
-      authorAttestationVS: new Uint8Array(32).fill(2),
-      authorSchemeVersion: 1,
-      chainId: 31337n,
-      kav10Address: AGENT_B,
-      reservedKaId: mismatchedReservedKaId,
-      finalizedAtIso: '2026-01-01T00:00:00.000Z',
-      rootEntities: [ROOT],
-    }) as Quad[]);
+    await store.insert(buildGraphSeal(assertionUri, mismatchedReservedKaId));
 
     let swmLoads = 0;
     let publishes = 0;
@@ -517,7 +435,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     await expect(
       agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B }),
-    ).rejects.toThrow(/not in author/i);
+    ).rejects.toThrow(/does not match UAL-derived kaId/i);
     expect(swmLoads).toBe(0);
     expect(publishes).toBe(0);
   });

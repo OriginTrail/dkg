@@ -4823,8 +4823,8 @@ export class PublishMethods extends DKGAgentBase {
     );
     if (scopedSwmQuads.length === 0 && scopedPrivateQuads.length === 0) {
       throw new Error(
-        `No public or private quads in shared memory for context graph ${contextGraphId} ` +
-          `matching graph-scoped KA ${graphScope.ual}`,
+        `No quads in shared memory for context graph ${contextGraphId} matching graph-scoped ` +
+          `KA ${graphScope.ual} (neither public nor private content is present)`,
       );
     }
     const canonicalParts = await skolemizeKnowledgeAssetParts(
