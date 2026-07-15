@@ -464,6 +464,13 @@ describe('GraphSetIndexStore', () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 2,
       ackReservedSlots: 0,
+      // Pin the pre-health-lane 2-slot ordinary pool this scenario was designed
+      // around. Commit 4057c25df added DEFAULT_HEALTH_RESERVED_SLOTS=1, which would
+      // otherwise steal the 2nd of 2 slots and clamp normalReservedSlots to 0, so
+      // the normal read could not bypass the in-flight background seed. Production
+      // (DEFAULT_MAX_CONCURRENT=4) keeps a 2-slot ordinary pool, so the bypass
+      // invariant still holds there; only this contrived 2-slot config needs it.
+      healthReservedSlots: 0,
       normalReservedSlots: 1,
       backgroundReservedSlots: 0,
     });
@@ -545,6 +552,13 @@ describe('GraphSetIndexStore', () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 2,
       ackReservedSlots: 0,
+      // Pin the pre-health-lane 2-slot ordinary pool this scenario was designed
+      // around. Commit 4057c25df added DEFAULT_HEALTH_RESERVED_SLOTS=1, which would
+      // otherwise steal the 2nd of 2 slots and clamp normalReservedSlots to 0, so
+      // the normal read could not bypass the in-flight background seed. Production
+      // (DEFAULT_MAX_CONCURRENT=4) keeps a 2-slot ordinary pool, so the bypass
+      // invariant still holds there; only this contrived 2-slot config needs it.
+      healthReservedSlots: 0,
       normalReservedSlots: 1,
       backgroundReservedSlots: 0,
     });
