@@ -50,7 +50,10 @@ export function buildAtomicGraphReplaceUpdate(
     update:
       `${cleanup};\n` +
       `INSERT DATA {\n  GRAPH <${stagingGraph}> {\n${triples}\n  }\n};\n` +
-      `MOVE SILENT GRAPH <${stagingGraph}> TO GRAPH <${target}>`,
+      // The final MOVE must NOT be SILENT: if the staging graph is missing the
+      // commit did not happen, and SILENT would report that as success while
+      // the stale target content survives.
+      `MOVE GRAPH <${stagingGraph}> TO GRAPH <${target}>`,
   };
 }
 

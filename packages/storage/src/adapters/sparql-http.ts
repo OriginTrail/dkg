@@ -45,6 +45,7 @@ import {
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -146,6 +147,15 @@ export interface SparqlHttpStoreOptions {
    * index/revalidation owner.
    */
   managedByDkg?: boolean;
+  /**
+   * Declare that the endpoint executes a whole multi-operation SPARQL Update
+   * request as one transaction (SPARQL 1.1 only RECOMMENDS this). Required for
+   * `replaceGraph`: without it the staged DROP/INSERT/MOVE could be applied
+   * partially, violating the old-graph-or-new-graph contract, so the
+   * capability fails closed. Daemon-owned endpoints (`managedByDkg`) are
+   * oxigraph-server, which is known transactional, and imply this flag.
+   */
+  atomicUpdates?: boolean;
   /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
   slowQueryThresholdMs?: number;
   /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
@@ -167,6 +177,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
   private readonly managedByDkg: boolean;
+  private readonly atomicUpdates: boolean;
 
   private readonly now: () => number;
   private readonly slowQueryThresholdMs: number;
@@ -189,6 +200,7 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
     this.managedByDkg = options.managedByDkg === true;
+    this.atomicUpdates = options.atomicUpdates === true || this.managedByDkg;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
       options.slowQueryThresholdMs,
@@ -418,6 +430,13 @@ export class SparqlHttpStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
+    if (!this.atomicUpdates) {
+      // A generic SPARQL endpoint may apply the staged DROP/INSERT/MOVE
+      // operations non-transactionally, which can strand the target graph in a
+      // partial state — the one outcome replaceGraph must never produce. Fail
+      // closed (before any request) so callers take their non-atomic fallback.
+      throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'SparqlHttpStore');
+    }
     assertQuadLiteralsMutf8Safe(quads, {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.replaceGraph',
