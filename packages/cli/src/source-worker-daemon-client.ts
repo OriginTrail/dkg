@@ -11,7 +11,11 @@ export interface KnowledgeAssetLifecycleClient {
   publishAsync(contextGraphId: string, name: string, options?: { subGraphName?: string }): Promise<{
     jobId: string;
     shareOperationId?: string;
-    rootsCount?: number;
+    contentScopeVersion?: number;
+    kaUal?: string;
+    assertionVersion?: string;
+    publicTripleCount?: number;
+    privateTripleCount?: number;
     intentKey?: string;
   }>;
   getJobStatus(jobId: string): Promise<SourceWorkerJobStatusResult>;
@@ -72,7 +76,16 @@ export function createDaemonKnowledgeAssetLifecycleClient(
       contextGraphId: string,
       name: string,
       options: { subGraphName?: string } = {},
-    ): Promise<{ jobId: string; shareOperationId?: string; rootsCount?: number; intentKey?: string }> {
+    ): Promise<{
+      jobId: string;
+      shareOperationId?: string;
+      contentScopeVersion?: number;
+      kaUal?: string;
+      assertionVersion?: string;
+      publicTripleCount?: number;
+      privateTripleCount?: number;
+      intentKey?: string;
+    }> {
       const response = await fetch(`${daemonUrl}/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
         method: 'POST',
         headers: jsonHeaders(token),
@@ -90,7 +103,11 @@ export function createDaemonKnowledgeAssetLifecycleClient(
       return {
         jobId,
         shareOperationId: stringField((payload as { shareOperationId?: unknown }).shareOperationId),
-        rootsCount: numberField((payload as { rootsCount?: unknown }).rootsCount),
+        contentScopeVersion: numberField((payload as { contentScopeVersion?: unknown }).contentScopeVersion),
+        kaUal: stringField((payload as { kaUal?: unknown }).kaUal),
+        assertionVersion: stringField((payload as { assertionVersion?: unknown }).assertionVersion),
+        publicTripleCount: numberField((payload as { publicTripleCount?: unknown }).publicTripleCount),
+        privateTripleCount: numberField((payload as { privateTripleCount?: unknown }).privateTripleCount),
         intentKey: stringField((payload as { intentKey?: unknown }).intentKey),
       };
     },

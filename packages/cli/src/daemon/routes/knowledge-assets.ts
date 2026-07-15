@@ -1216,14 +1216,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           if (e?.code === "WM_DRAFT_CONFLICT") {
             return jsonResponse(res, 409, { code: "WM_DRAFT_CONFLICT", error: e.message });
           }
-          // #1116 (round 5): the seal-less SWM reconstruction is also reachable
-          // here (pull-from swm + a plain finalize bypasses the finalize(layer:
-          // "swm") wrapper guard). The publisher now rejects a subset-only asset
-          // at the source with SWM_SUBSET_NOT_SEALABLE — map it to 409 (parity
-          // with the wm/finalize verb's mapping) so a partial asset can't be
-          // reconstructed/published under the KA name.
-          if (e?.code === "SWM_SUBSET_NOT_SEALABLE") {
-            return jsonResponse(res, 409, { code: "SWM_SUBSET_NOT_SEALABLE", error: e.message });
+          if (
+            e?.code === "UNSEALED_PULL_FROM_BLOCKED"
+            || e?.code === "PULL_FROM_EMPTY_SOURCE"
+            || e?.code === "LEGACY_KA_READ_ONLY"
+          ) {
+            return jsonResponse(res, 409, { code: e.code, error: e.message });
           }
           throw e; // -> outer catch -> 500
         }
@@ -1236,13 +1234,26 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // agent config default (`swmAwaitCuratorAck`). The promote aborts with 503
       // (mapped in respondAssertionError) if the curator doesn't confirm.
       const awaitCuratorAck = typeof parsed?.awaitCuratorAck === "boolean" ? parsed.awaitCuratorAck : undefined;
-      // #1116: a full share SEALS BY DEFAULT; `skipSeal:true` opts out into an
-      // unsealed SWM share. Strict-boolean: a stray "false" string must 400, not
-      // silently flip the default.
+      if (!validateEntities(parsed.entities, res)) return;
+      if (Array.isArray(parsed.entities)) {
+        return jsonResponse(res, 400, {
+          code: "KA_ATOMIC_SHARE_REQUIRED",
+          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+        });
+      }
+      // Graph-scoped KAs are seal-before-share. Retain strict parsing and accept
+      // an explicit false for older clients, but reject the removed true mode
+      // before any lifecycle mutation.
       let skipSeal: boolean | undefined;
       if (parsed?.skipSeal !== undefined) {
         if (typeof parsed.skipSeal !== "boolean") {
           return jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
+        }
+        if (parsed.skipSeal === true) {
+          return jsonResponse(res, 400, {
+            code: "UNSEALED_SHARE_UNSUPPORTED",
+            error: "skipSeal:true is not supported for graph-scoped Knowledge Assets; finalize and share the complete KA atomically",
+          });
         }
         skipSeal = parsed.skipSeal;
       }
@@ -1270,8 +1281,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
         });
       } catch (e: any) {
-        // #1116 D1: a default full share that can't seal (a residual capability
-        // gap, no skipSeal) fails CLOSED with WM preserved — map to a 409 that
+        // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
         // carries the recovery hint. Everything else (e.g. the curator-ack 503)
         // propagates to the outer handler unchanged.
         if (e?.code === "UNSEALED_SHARE_BLOCKED") {
@@ -1302,6 +1312,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (asyncPromoteUnavailable(res)) return;
       const entities = parsed.entities;
       if (!validateEntities(entities, res)) return;
+      if (Array.isArray(entities)) {
+        return jsonResponse(res, 400, {
+          code: "KA_ATOMIC_SHARE_REQUIRED",
+          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+        });
+      }
       // #1116 (round 5): the sync swm/share validates `skipSeal` as a strict
       // boolean; the async queue ALWAYS seals (the safe default) and can't carry
       // skipSeal through the job, so it was silently dropped — a footgun where a
@@ -1313,7 +1329,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           return jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
         }
         if (parsed.skipSeal === true) {
-          return jsonResponse(res, 400, { error: "skipSeal is not supported for async share; use swm/share (the synchronous route) to share without sealing" });
+          return jsonResponse(res, 400, { error: "skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share" });
         }
       }
       try {
@@ -1379,7 +1395,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           contextGraphId,
           name,
           shareOperationId: intent.shareOperationId,
-          rootsCount: intent.roots.length,
+          contentScopeVersion: intent.contentScopeVersion,
+          kaUal: intent.kaUal,
+          assertionVersion: intent.assertionVersion,
+          publicTripleCount: intent.publicTripleCount,
+          privateTripleCount: intent.privateTripleCount,
           sealMerkleRoot: intent.sealMerkleRoot,
           intentKey: intent.intentKey,
           ...(subGraphName ? { subGraphName } : {}),

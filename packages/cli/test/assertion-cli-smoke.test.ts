@@ -110,7 +110,11 @@ describe.sequential('assertion CLI smoke', () => {
           name: 'paper',
           subGraphName: 'lab',
           shareOperationId: 'share-cli-123',
-          rootsCount: 1,
+          contentScopeVersion: 2,
+          kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+          assertionVersion: '1',
+          publicTripleCount: 1,
+          privateTripleCount: 0,
           sealMerkleRoot: `0x${'12'.repeat(32)}`,
           intentKey: `sha256:${'ab'.repeat(32)}`,
         }));
