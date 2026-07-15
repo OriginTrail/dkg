@@ -2254,6 +2254,7 @@ export class DKGPublisher implements Publisher {
         allSkolemizedQuads.map((quad) => ({ ...quad, graph: vmGraph })),
         vmGraph,
         graphPublish.publicTripleCount,
+        { allowCanonicalSkolemTerms: true },
       );
       if (!validation.valid) {
         throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
@@ -4026,6 +4027,7 @@ export class DKGPublisher implements Publisher {
         allSkolemizedQuads.map((quad) => ({ ...quad, graph: dataGraph })),
         dataGraph,
         graphUpdate.publicTripleCount,
+        { allowCanonicalSkolemTerms: true },
       );
       if (!validation.valid) {
         throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
@@ -4117,6 +4119,18 @@ export class DKGPublisher implements Publisher {
       onPhase?.('store', 'start');
 
       if (graphUpdate) {
+        const labelMeta = options.targetMetaGraphUri
+          ?? this.graphManager.metaGraphUri(contextGraphId);
+        const inherited = await this.readGraphKnowledgeAssetIdentity(
+          labelMeta,
+          graphUpdate.scope.ual,
+        );
+        if (inherited.subGraphName !== options.subGraphName) {
+          throw new Error(
+            `Graph-scoped KA update cannot move ${graphUpdate.scope.ual} from ` +
+              `${inherited.subGraphName ?? '(root)'} to ${options.subGraphName ?? '(root)'}`,
+          );
+        }
         await this.replaceExactKnowledgeAssetGraph(
           dataGraph,
           allSkolemizedQuads,
@@ -4128,19 +4142,19 @@ export class DKGPublisher implements Publisher {
           canonicalPrivateQuads,
           options.subGraphName,
         );
-        const labelMeta = options.targetMetaGraphUri
-          ?? this.graphManager.metaGraphUri(contextGraphId);
         const metadata = generateGraphKnowledgeAssetMetadata(
           {
             ual: graphUpdate.scope.ual,
             contextGraphId,
             merkleRoot: kcMerkleRoot,
-            publisherPeerId: options.publisherPeerId?.trim() || 'unknown',
-            accessPolicy: options.accessPolicy,
-            allowedPeers: options.allowedPeers,
+            publisherPeerId: inherited.publisherPeerId,
+            accessPolicy: inherited.accessPolicy,
+            ...(inherited.accessPolicy === 'allowList'
+              ? { allowedPeers: inherited.allowedPeers }
+              : {}),
             timestamp: new Date(),
-            subGraphName: options.subGraphName,
-            authorAddress: options.precomputedUpdateAttestation?.authorAddress,
+            subGraphName: inherited.subGraphName,
+            authorAddress: inherited.authorAddress,
             assertionVersion: graphUpdate.scope.assertionVersion,
             publicTripleCount: graphUpdate.publicTripleCount,
             privateTripleCount: graphUpdate.privateTripleCount,
@@ -5915,6 +5929,75 @@ export class DKGPublisher implements Publisher {
     if (stale.length > 0) await this.store.delete(stale);
   }
 
+  /** Load the immutable access/sub-graph identity of an existing graph KA. */
+  private async readGraphKnowledgeAssetIdentity(
+    metaGraph: string,
+    ual: string,
+  ): Promise<{
+    accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+    allowedPeers: string[];
+    publisherPeerId: string;
+    authorAddress?: string;
+    subGraphName?: string;
+  }> {
+    const dkg = 'http://dkg.io/ontology/';
+    const result = await this.store.query(
+      `SELECT ?scopeVersion ?policy ?allowedPeer ?publisherPeerId ?attributedTo ?subGraphName WHERE {
+         GRAPH <${assertSafeIri(metaGraph)}> {
+           OPTIONAL { <${assertSafeIri(ual)}> <${dkg}contentScopeVersion> ?scopeVersion }
+           OPTIONAL { <${assertSafeIri(ual)}> <${dkg}accessPolicy> ?policy }
+           OPTIONAL { <${assertSafeIri(ual)}> <${dkg}allowedPeer> ?allowedPeer }
+           OPTIONAL { <${assertSafeIri(ual)}> <${dkg}publisherPeerId> ?publisherPeerId }
+           OPTIONAL { <${assertSafeIri(ual)}> <http://www.w3.org/ns/prov#wasAttributedTo> ?attributedTo }
+           OPTIONAL { <${assertSafeIri(ual)}> <${dkg}subGraphName> ?subGraphName }
+         }
+       }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      throw new Error(`Graph-scoped KA update requires existing metadata for ${ual}`);
+    }
+    const values = (name: string): Set<string> => new Set(
+      result.bindings
+        .map((row) => rdfLexicalValue(row[name]))
+        .filter((value): value is string => value !== undefined && value.length > 0),
+    );
+    const single = (name: string, required: boolean): string | undefined => {
+      const found = values(name);
+      if (found.size > 1 || (required && found.size !== 1)) {
+        throw new Error(
+          `Graph-scoped KA update found ambiguous or missing ${name} metadata for ${ual}`,
+        );
+      }
+      return [...found][0];
+    };
+    if (single('scopeVersion', true) !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
+      throw new Error(`Graph-scoped KA update requires V2 metadata for ${ual}`);
+    }
+    const policy = single('policy', true);
+    if (policy !== 'public' && policy !== 'ownerOnly' && policy !== 'allowList') {
+      throw new Error(`Graph-scoped KA update has invalid access policy for ${ual}`);
+    }
+    const allowedPeers = [...values('allowedPeer')];
+    if (
+      (policy === 'allowList' && allowedPeers.length === 0)
+      || (policy !== 'allowList' && allowedPeers.length > 0)
+    ) {
+      throw new Error(`Graph-scoped KA update has inconsistent allow-list metadata for ${ual}`);
+    }
+    const attributedTo = single('attributedTo', false);
+    const subGraphName = single('subGraphName', false);
+    const authorMatch = attributedTo
+      ? /^did:dkg:agent:(0x[0-9a-f]{40})$/i.exec(attributedTo)
+      : null;
+    return {
+      accessPolicy: policy,
+      allowedPeers,
+      publisherPeerId: single('publisherPeerId', true)!,
+      ...(authorMatch ? { authorAddress: authorMatch[1] } : {}),
+      ...(subGraphName ? { subGraphName } : {}),
+    };
+  }
+
   /**
    * Materialize the exact canonical WM payload under its deterministic UAL graph.
    *
@@ -7420,6 +7503,10 @@ function stripSparqlLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
   if (!value.startsWith('"')) return value;
   return value.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+}
+
+function rdfLexicalValue(value: string | undefined): string | undefined {
+  return stripSparqlLiteral(value);
 }
 
 function addOwner(owners: Map<string, Set<string>>, root: string, owner: string): void {

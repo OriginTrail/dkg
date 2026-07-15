@@ -7,6 +7,7 @@ import {
   trustedCatalogTripleKeySet,
   type TrustedCatalogTripleKeys,
 } from './catalog-trust.js';
+import { KNOWLEDGE_ASSET_SKOLEM_PREFIX } from './auto-partition.js';
 
 export interface ValidationResult {
   valid: boolean;
@@ -38,6 +39,7 @@ export function validateKnowledgeAssetPublishRequest(
   nquads: readonly Quad[],
   expectedGraph: string,
   publicTripleCount: number,
+  options: { allowCanonicalSkolemTerms?: boolean } = {},
 ): ValidationResult {
   const errors: string[] = [];
 
@@ -68,9 +70,13 @@ export function validateKnowledgeAssetPublishRequest(
       );
     } else if (!isSafeIri(quad.subject)) {
       errors.push(`Graph-scoped KA quad ${index} has an unsafe subject IRI`);
+    } else if (isForbiddenKnowledgeAssetSkolemTerm(quad.subject, options)) {
+      errors.push(`Graph-scoped KA quad ${index} uses the reserved KA skolem namespace in its subject`);
     }
     if (!isSafeIri(quad.predicate)) {
       errors.push(`Graph-scoped KA quad ${index} has an unsafe predicate IRI`);
+    } else if (quad.predicate.toLowerCase().startsWith(KNOWLEDGE_ASSET_SKOLEM_PREFIX)) {
+      errors.push(`Graph-scoped KA quad ${index} uses the reserved KA skolem namespace in its predicate`);
     }
     if (isBlankNode(quad.object)) {
       errors.push(
@@ -85,10 +91,30 @@ export function validateKnowledgeAssetPublishRequest(
       } catch {
         errors.push(`Graph-scoped KA quad ${index} has an unsafe RDF object`);
       }
+      if (
+        !quad.object.startsWith('"')
+        && isForbiddenKnowledgeAssetSkolemTerm(quad.object, options)
+      ) {
+        errors.push(`Graph-scoped KA quad ${index} uses the reserved KA skolem namespace in its object`);
+      }
+    }
+    if (quad.graph.toLowerCase().startsWith(KNOWLEDGE_ASSET_SKOLEM_PREFIX)) {
+      errors.push(`Graph-scoped KA quad ${index} uses the reserved KA skolem namespace as its graph`);
     }
   }
 
   return { valid: errors.length === 0, errors };
+}
+
+function isForbiddenKnowledgeAssetSkolemTerm(
+  term: string,
+  options: { allowCanonicalSkolemTerms?: boolean },
+): boolean {
+  if (!term.toLowerCase().startsWith(KNOWLEDGE_ASSET_SKOLEM_PREFIX)) return false;
+  return !(
+    options.allowCanonicalSkolemTerms === true
+    && /^urn:dkg:ka-skolem:c14n[0-9]+$/.test(term)
+  );
 }
 
 /**

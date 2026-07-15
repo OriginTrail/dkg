@@ -172,6 +172,48 @@ describe('graph-scoped KA publish storage', () => {
     expect(replaced.bindings).toEqual([{ s: 'urn:version:two' }]);
   });
 
+  it.each([
+    ['ownerOnly' as const, undefined],
+    ['allowList' as const, ['peer-a', 'peer-b']],
+  ])('inherits %s access metadata on originator updates', async (accessPolicy, allowedPeers) => {
+    const initial = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:access:data', 'urn:predicate:value', '"old"')],
+      publisherPeerId: 'original-peer',
+      accessPolicy,
+      ...(allowedPeers ? { allowedPeers } : {}),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+    });
+
+    await publisher.update(initial.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:access:data', 'urn:predicate:value', '"new"')],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 2,
+      publicTripleCount: 1,
+    });
+
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const rows = await store.query(
+      `SELECT ?policy ?peer ?publisher WHERE { GRAPH <${metaGraph}> {
+         <${UAL}> <http://dkg.io/ontology/accessPolicy> ?policy ;
+           <http://dkg.io/ontology/publisherPeerId> ?publisher .
+         OPTIONAL { <${UAL}> <http://dkg.io/ontology/allowedPeer> ?peer }
+       } }`,
+    );
+    expect(rows.type).toBe('bindings');
+    if (rows.type !== 'bindings') throw new Error('expected access metadata bindings');
+    expect(new Set(rows.bindings.map((row) => row.policy))).toEqual(new Set([`"${accessPolicy}"`]));
+    expect(new Set(rows.bindings.map((row) => row.publisher))).toEqual(new Set(['"original-peer"']));
+    expect(new Set(rows.bindings.map((row) => row.peer).filter(Boolean))).toEqual(
+      new Set(allowedPeers?.map((peer) => `"${peer}"`) ?? []),
+    );
+  });
+
   it('updates a fully private KA from SWM without requiring a public placeholder', async () => {
     const initialPrivate = [
       quad('urn:private:only', 'urn:predicate:secret', '"one"'),
