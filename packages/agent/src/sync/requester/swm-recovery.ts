@@ -27,9 +27,13 @@ import {
  * sync path's blind union (which corrupts a non-empty store — see
  * {@link applySwmRecovery}).
  *
- * It fetches the COMPLETE state across pages (each `fetchSyncPages` call loops
- * internally to completion-or-deadline), verifies it, then replaces each root
- * exactly once.
+ * It fetches the COMPLETE metadata state across pages, verifies it, then uses
+ * the narrowest safe recovery path:
+ *
+ * - graph-scoped KAs backed by immutable public snapshots are fetched and
+ *   verified one KA at a time, without scanning the aggregate SWM data graph;
+ * - legacy root-scoped KAs and graph-backed legacy snapshots retain the full
+ *   data-phase recovery below.
  *
  * A partial fetch (deadline) is NOT safe to apply, and is deliberately NOT
  * applied. Pagination is row-based, so a single root's rows (the root + its
@@ -167,22 +171,15 @@ export async function recoverContextGraphSwm(
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
   const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(deps.contextGraphId);
 
-  // Meta first (its rootEntity list is what validates the data subjects), then data.
+  // Metadata is the recovery plan: it identifies both legacy roots and exact
+  // graph-scoped assets. Fetch it before deciding whether an aggregate SWM data
+  // scan is necessary.
   const meta = await fetchPhaseFully(deps, 'meta', wsMetaGraph);
-  const data = await fetchPhaseFully(deps, 'data', wsGraph);
-
-  // All-or-nothing gate (B10): a partial fetch may have cut a root mid-stream,
-  // so applying REPLACE over a prefix would truncate that root. If EITHER phase
-  // is incomplete, mutate nothing — not the data REPLACE, not the additive meta
-  // insert, not the ownership-cache hydration (hydrating roots we didn't write
-  // would desync the ownership map from the store) — and report `completed:
-  // false` so the caller retries. The checkpoint was already dropped above, so
-  // the retry re-accumulates the complete state from offset 0.
-  if (!meta.completed || !data.completed) {
+  if (!meta.completed) {
     deps.logInfo?.(
       deps.ctx,
-      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: partial fetch ` +
-      `(meta ${meta.completed ? 'complete' : 'incomplete'}, data ${data.completed ? 'complete' : 'incomplete'}) — skipped, will retry`,
+      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+      'partial metadata fetch — skipped, will retry',
     );
     return {
       replacedRoots: 0,
@@ -217,6 +214,24 @@ export async function recoverContextGraphSwm(
     registeredSubGraphNames: recoveryRegistered,
     excludedSubGraphNames: excluded,
   });
+
+  // Classify legacy roots from metadata alone. The verifier does not need data
+  // rows to derive entityCreators, and this lets a rootless-only CG avoid the
+  // expensive aggregate `_shared_memory` query entirely. That query is both
+  // redundant (the immutable snapshot is the canonical source for an exact
+  // graph asset) and scales with every KA in the CG.
+  const metadataOnlyProcessed = await deps.processSharedMemoryBatch(
+    [], meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
+  );
+  const hasLegacyRoots = metadataOnlyProcessed.entityCreators.length > 0;
+  const hasGraphBackedSnapshots = graphScopedDescriptors.some(
+    (descriptor) => descriptor.publicSnapshotGraph !== undefined,
+  );
+
+  // Fetch store-backed snapshots before any aggregate data scan. Each completed
+  // snapshot is persisted independently, so a deadline can make monotonic
+  // progress across retries while memory remains bounded to one KA rather than
+  // the complete context graph.
   if (graphScopedDescriptors.length > 0) {
     const activeGraphMeta = graphScopedDescriptors.flatMap((descriptor) => [
       ...descriptor.metadataQuads,
@@ -249,6 +264,33 @@ export async function recoverContextGraphSwm(
     }
   }
 
+  // Only legacy roots and old graph-backed snapshot rows require the aggregate
+  // data phase. New rootless KAs use immutable snapshot refs and never enter
+  // this path.
+  const needsAggregateData = hasLegacyRoots || hasGraphBackedSnapshots;
+  const data = needsAggregateData
+    ? await fetchPhaseFully(deps, 'data', wsGraph)
+    : { quads: [] as Quad[], completed: true };
+
+  // Legacy row pagination can cut a root (or a graph-backed snapshot) in the
+  // middle. Preserve the existing all-or-nothing gate for that compatibility
+  // path; store-backed exact assets above do not depend on it.
+  if (!data.completed) {
+    deps.logInfo?.(
+      deps.ctx,
+      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+      'partial legacy data fetch — skipped, will retry',
+    );
+    return {
+      replacedRoots: 0,
+      replacedGraphs: 0,
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      droppedDataTriples: 0,
+      completed: false,
+    };
+  }
+
   // Rootless exact graphs and graph-backed immutable snapshots are verified
   // per KA below. Keep them out of the legacy rootEntity worker path so they
   // are not counted as invalid root subjects or inserted by union.
@@ -263,9 +305,11 @@ export async function recoverContextGraphSwm(
     (quad) => !graphScopedTransportGraphs.has(quad.graph),
   );
 
-  const processed = await deps.processSharedMemoryBatch(
-    legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
-  );
+  const processed = needsAggregateData
+    ? await deps.processSharedMemoryBatch(
+      legacyDataQuads, meta.quads, deps.contextGraphId, recoveryRegistered, excluded,
+    )
+    : metadataOnlyProcessed;
 
   await deps.ensureContextGraph(deps.contextGraphId);
 

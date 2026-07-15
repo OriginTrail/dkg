@@ -38,6 +38,7 @@ export default defineConfig({
       'test/publish-lifecycle-logger.test.ts',
       'test/storage-ack-handler.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
+      'test/workspace-snapshot-store.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

@@ -829,7 +829,7 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(1);
   });
 
-  it('reports resume-capable shared-memory snapshot timeouts as checkpoint progress', async () => {
+  it('restarts incomplete shared-memory snapshots because their unverified prefix is not persisted', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_quads: Quad[]) => {});
@@ -897,10 +897,10 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.timedOutPhases).toBe(1);
-    expect(summary.checkpointAdvances).toBe(1);
+    expect(summary.checkpointAdvances).toBe(0);
     expect(summary.insertedTriples).toBe(0);
-    expect(setCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref', 500]);
-    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref']);
     expect(storeInsert.calls).toEqual([]);
     expect(ensureContextGraph.calls).toEqual([]);
   });
@@ -990,15 +990,15 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.timedOutPhases).toBe(2);
-    expect(summary.checkpointAdvances).toBe(2);
+    expect(summary.checkpointAdvances).toBe(1);
     expect(summary.insertedDataTriples).toBe(1);
     expect(summary.insertedMetaTriples).toBe(0);
     expect(ensureContextGraph.calls).toContainEqual(['large-swm']);
     expect(storeInsert.calls).toHaveLength(1);
     expect(storeInsert.calls).toContainEqual([[dataQuad]]);
-    expect(setCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref', 500]);
+    expect(setCheckpoint.calls).not.toContainEqual(['large-swm:snapshot:snapshot-ref', expect.any(Number)]);
     expect(setCheckpoint.calls).toContainEqual(['large-swm:data', 7]);
     expect(setCheckpoint.calls).not.toContainEqual(['large-swm:meta', expect.any(Number)]);
-    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref']);
   });
 });

@@ -412,13 +412,16 @@ export async function syncPublicSnapshotsForMeta(params: {
     if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
       completedPhases += 1;
     }
-    if (result.nextOffset > result.resumedFromOffset) {
-      checkpointAdvances += 1;
-    }
-
     if (result.completed) params.deleteCheckpoint(result.checkpointKey);
     else {
-      params.setCheckpoint(result.checkpointKey, result.nextOffset);
+      // `fetchSyncPages` returns only the quads fetched during THIS call. We do
+      // not persist an unverified prefix, so resuming a snapshot at nextOffset
+      // would validate only the tail against the full digest/count and can never
+      // succeed. Restart this one immutable KA at offset zero on the next round;
+      // already completed snapshots remain cached and are skipped, preserving
+      // monotonic recovery progress across the CG without accepting a partial
+      // asset.
+      params.deleteCheckpoint(result.checkpointKey);
       return {
         bytesReceived,
         resumedPhases,
