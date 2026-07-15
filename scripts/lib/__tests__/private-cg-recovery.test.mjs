@@ -141,10 +141,10 @@ test('testnet release-gate constraints fail at the shell boundary before SSH', (
   }
 });
 
-test('payload and integrity validation reuse the publisher digest implementation', () => {
+test('payload and integrity validation normalize term strings and SPARQL-JSON bindings', () => {
   assert.equal(publicQuadsDigestFromPayload({ quads: publicQuads }), expectedDigest);
 
-  const result = validateIntegrityDataResponse(manifest, {
+  const termStringResult = validateIntegrityDataResponse(manifest, {
     result: {
       bindings: publicQuads.map((quad) => ({
         s: { value: quad.subject },
@@ -153,7 +153,19 @@ test('payload and integrity validation reuse the publisher digest implementation
       })),
     },
   });
-  assert.deepEqual(result, { publicTripleCount: 2, publicQuadsDigest: expectedDigest });
+  assert.deepEqual(termStringResult, { publicTripleCount: 2, publicQuadsDigest: expectedDigest });
+
+  const sparqlJsonResult = validateIntegrityDataResponse(manifest, {
+    results: {
+      bindings: publicQuads.map((quad) => ({
+        s: { type: 'uri', value: quad.subject },
+        p: { type: 'uri', value: quad.predicate },
+        o: { type: 'literal', value: quad.object.slice(1, -1) },
+      })),
+    },
+  });
+  assert.deepEqual(sparqlJsonResult, { publicTripleCount: 2, publicQuadsDigest: expectedDigest });
+
   assert.throws(
     () => validateIntegrityDataResponse({ ...manifest, publicQuadsDigest: 'sha256:deadbeef' }, {
       bindings: publicQuads.map((quad) => ({ s: quad.subject, p: quad.predicate, o: quad.object })),

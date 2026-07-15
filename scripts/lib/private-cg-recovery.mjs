@@ -2,6 +2,24 @@ import fs from 'node:fs';
 
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 
+const RDF_LITERAL_SHORT_ESCAPES = Object.freeze({
+  '\b': '\\b',
+  '\t': '\\t',
+  '\n': '\\n',
+  '\f': '\\f',
+  '\r': '\\r',
+  '"': '\\"',
+  '\\': '\\\\',
+});
+const RDF_LITERAL_ESCAPE_PATTERN = /["\\\u0000-\u001F\u007F]/g;
+
+function formatRdfLiteral(value, suffix = '') {
+  const escaped = value.replace(RDF_LITERAL_ESCAPE_PATTERN, (character) =>
+    RDF_LITERAL_SHORT_ESCAPES[character]
+      ?? `\\u${character.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`);
+  return `"${escaped}"${suffix}`;
+}
+
 function positiveInteger(value, label) {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
@@ -20,6 +38,25 @@ function responseBindings(payload) {
 
 function rawBindingValue(value) {
   return typeof value === 'string' ? value : value?.value;
+}
+
+function rdfBindingTerm(value) {
+  if (typeof value === 'string') return value;
+  const lexical = String(value?.value ?? '');
+  if (value?.type === 'bnode') return lexical.startsWith('_:') ? lexical : `_:${lexical}`;
+  if (value?.type === 'literal' || value?.type === 'typed-literal') {
+    if (value['xml:lang']) {
+      return formatRdfLiteral(lexical, `@${value['xml:lang']}`);
+    }
+    if (value.datatype) {
+      const suffix = value.datatype === 'http://www.w3.org/2001/XMLSchema#string'
+        ? ''
+        : `^^<${value.datatype}>`;
+      return formatRdfLiteral(lexical, suffix);
+    }
+    return formatRdfLiteral(lexical);
+  }
+  return lexical;
 }
 
 function lexicalBindingValue(value) {
@@ -185,9 +222,9 @@ export function createIntegrityDataQuery({ contextGraphId, subGraphName, manifes
 export function validateIntegrityDataResponse(manifest, payload) {
   const bindings = responseBindings(payload);
   const quads = bindings.map((row) => ({
-    subject: String(rawBindingValue(row.s) ?? ''),
-    predicate: String(rawBindingValue(row.p) ?? ''),
-    object: String(rawBindingValue(row.o) ?? ''),
+    subject: rdfBindingTerm(row.s),
+    predicate: rdfBindingTerm(row.p),
+    object: rdfBindingTerm(row.o),
     graph: '',
   }));
   const digest = workspacePublicQuadsDigest(quads);
