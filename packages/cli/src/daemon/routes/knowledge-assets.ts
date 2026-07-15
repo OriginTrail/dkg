@@ -244,11 +244,25 @@ function classifyKaIdentifier(
 ): { kind: "kaId"; kaId: bigint } | { kind: "name" } {
   const includeCompact = opts.includeCompact ?? true;
   if (seg.startsWith("did:dkg:")) {
-    // The kaId is the last `/`-delimited segment of the UAL.
+    // Rootless V2 uses the author-scoped identity
+    //   did:dkg:<chain>/<author>/<per-author-number>
+    // while the legacy/canonical on-chain form carries an already-packed id
+    // in the last segment. Reconstruct the packed id for the rootless form so
+    // resolveByKaId can recover the lifecycle author after a cross-node sync.
+    // A value larger than the 96-bit per-author range is already packed and
+    // must remain byte-for-byte unchanged.
     const idPart = seg.slice(seg.lastIndexOf("/") + 1);
     if (/^[0-9]+$/.test(idPart)) {
       try {
-        return { kind: "kaId", kaId: BigInt(idPart) };
+        const numericId = BigInt(idPart);
+        if (numericId <= ((1n << 96n) - 1n)) {
+          const withoutId = seg.slice(0, seg.lastIndexOf("/"));
+          const authorPart = withoutId.slice(withoutId.lastIndexOf("/") + 1);
+          if (/^0x[0-9a-fA-F]{40}$/.test(authorPart)) {
+            return { kind: "kaId", kaId: (BigInt(authorPart) << 96n) | numericId };
+          }
+        }
+        return { kind: "kaId", kaId: numericId };
       } catch {
         /* fall through to name */
       }

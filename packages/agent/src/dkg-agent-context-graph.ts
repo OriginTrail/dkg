@@ -1425,7 +1425,12 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);
 
-    // Update _meta with registered status and on-chain ID
+    // Update _meta with registered status and the member-syncable on-chain
+    // binding.  The ontology copy remains for system-graph discovery, while
+    // the authenticated CG-local copy lets a late member learn the immutable
+    // slot from the curator's private `_meta` snapshot.  A private joiner may
+    // have missed the one-shot ontology gossip emitted below and must not be
+    // left unable to start chain-driven VM reconciliation as a result.
     await this.store.deleteByPattern({
       graph: cgMetaGraph,
       subject: contextGraphUri,
@@ -1439,9 +1444,15 @@ export class ContextGraphMethods extends DKGAgentBase {
       subject: contextGraphUri,
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
     });
+    await this.store.deleteByPattern({
+      graph: cgMetaGraph,
+      subject: contextGraphUri,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+    });
     await this.store.insert([
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
       { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
+      { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: cgMetaGraph },
       // Persist the wire-id commitment in the cg's _meta graph so a
       // restart can resume host-mode subscription on the correct
       // topic without re-reading the chain event.

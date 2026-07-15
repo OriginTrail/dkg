@@ -4841,6 +4841,7 @@ export class PublishMethods extends DKGAgentBase {
           sharedMemoryScope,
           request.subGraphName,
           ctx,
+          graphScope.ual,
         );
       } catch (err) {
         this.log.warn(
@@ -5426,6 +5427,7 @@ export class PublishMethods extends DKGAgentBase {
             sharedMemoryScope,
             opts?.subGraphName,
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+            graphScope.ual,
           );
         } catch (err) {
           this.log.warn(

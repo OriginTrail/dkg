@@ -371,6 +371,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       identity: { agentAddress: AGENT_B, kaNumber: 1n },
     });
     expect(cleanupCalls[0][2]).toBeUndefined();
+    expect(cleanupCalls[0][4]).toBe(KA_UAL);
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
     expect(legacy).toMatchObject({ type: 'boolean', value: true });

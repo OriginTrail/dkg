@@ -158,6 +158,9 @@ describe('sync responder pagination interleaving', () => {
       publicTripleCount: 2,
       status: 'tentative',
     });
+    const legacyProjection = `did:dkg:context-graph:${cgId}/context/106`;
+    const legacyProjectionMeta = `${legacyProjection}/_meta`;
+    const catalog = `did:dkg:context-graph:${cgId}/_catalog`;
     await store.insert([
       ...confirmed.quads,
       ...tentative.quads,
@@ -166,6 +169,9 @@ describe('sync responder pagination interleaving', () => {
       q(confirmed.graph, 2),
       q(tentative.graph, 3),
       q(tentative.graph, 4),
+      q(legacyProjection, 5),
+      q(legacyProjectionMeta, 6),
+      q(catalog, 7),
     ]);
 
     const originalCount = store.countQuads.bind(store);
@@ -209,6 +215,9 @@ describe('sync responder pagination interleaving', () => {
     expect(linesFromNquads(data)).toHaveLength(3);
     expect(data).toContain(confirmed.graph);
     expect(data).not.toContain(tentative.graph);
+    expect(data).not.toContain(legacyProjection);
+    expect(data).not.toContain(legacyProjectionMeta);
+    expect(data).not.toContain(catalog);
     expect(meta).toContain(confirmed.quads[0]!.subject);
     expect(meta).toContain('contentScopeVersion');
     expect(meta).not.toContain(tentative.quads[0]!.subject);
@@ -261,6 +270,41 @@ describe('sync responder pagination interleaving', () => {
       limit: 10,
       syncSessionId: 'rootless-v2-incomplete-manifest',
     })).rejects.toThrow(/incomplete V2 descriptor/);
+  });
+
+  it('does not mistake a graph lifecycle scope marker for a V2 UAL descriptor', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'rootless-v2-lifecycle-marker';
+    const manifest = graphScopedVmMeta({
+      cgId,
+      ual: 'did:dkg:base:8453/0x00000000000000000000000000000000000000ad/11',
+      publicTripleCount: 1,
+      status: 'confirmed',
+    });
+    const lifecycleSubject = `${manifest.graph}/assertion-lifecycle`;
+    await store.insert([
+      ...manifest.quads,
+      {
+        graph: `did:dkg:context-graph:${cgId}/_meta`,
+        subject: lifecycleSubject,
+        predicate: `${DKG_NS}contentScopeVersion`,
+        object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      },
+      q(manifest.graph, 0),
+    ]);
+    const cap = registerTestSyncHandler(store, { syncPageSize: 10 });
+
+    const data = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 10,
+      syncSessionId: 'rootless-v2-lifecycle-marker',
+    });
+
+    expect(linesFromNquads(data)).toHaveLength(1);
+    expect(data).toContain(manifest.graph);
   });
 
   it('fails closed on a future graph-scoped content version', async () => {

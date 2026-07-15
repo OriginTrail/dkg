@@ -2342,6 +2342,7 @@ export class DKGPublisher implements Publisher {
           sharedMemoryScope,
           options?.subGraphName,
           ctx,
+          graphPublish.scope.ual,
         );
       } else {
         const kaMap = skolemizeByEntity(quads);
@@ -7035,19 +7036,51 @@ export class DKGPublisher implements Publisher {
     scope: SharedMemoryGraphScope,
     subGraphName: string | undefined,
     ctx: OperationContext,
+    kaUal: string,
   ): Promise<void> {
     if (scope.kind !== 'named-lifecycle') {
       throw new Error('Graph-scoped KA SWM cleanup requires an exact named-lifecycle scope');
     }
+    const kaScope = createGraphKnowledgeAssetScope(kaUal, 1);
+    if (
+      kaScope.agentAddress.toLowerCase() !== scope.identity.agentAddress.toLowerCase()
+      || BigInt(kaScope.kaNumber) !== scope.identity.kaNumber
+    ) {
+      throw new Error('Graph-scoped KA SWM cleanup UAL does not match the named-lifecycle scope');
+    }
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    const headSubject = assertSafeIri(`${kaScope.ual}#dkg-swm-head`);
+    const operationRows = await this.store.query(`
+      SELECT DISTINCT ?operation WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?shareId .
+          ?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
+              <http://dkg.io/ontology/WorkspaceOperation> ;
+            <http://dkg.io/ontology/shareOperationId> ?shareId ;
+            <http://dkg.io/ontology/kaUal> <${assertSafeIri(kaScope.ual)}> .
+        }
+      }
+      LIMIT 16
+    `);
+    const operationSubjects = operationRows.type === 'bindings'
+      ? [...new Set(operationRows.bindings.map((row) => row['operation']).filter(Boolean))]
+      : [];
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
     }
+    await this.store.deleteByPattern({ graph: swmMetaGraph, subject: headSubject });
+    for (const operationSubject of operationSubjects) {
+      await this.store.deleteByPattern({
+        graph: swmMetaGraph,
+        subject: assertSafeIri(operationSubject),
+      });
+    }
     this.log.info(
       ctx,
       `Cleared graph-scoped KA SWM ${scope.identity.agentAddress}/${scope.identity.kaNumber.toString()} ` +
-        `from ${graphs.length} exact graph(s)`,
+        `from ${graphs.length} exact graph(s) and ${operationSubjects.length + 1} metadata subject(s)`,
     );
   }
 

@@ -206,6 +206,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const pendingId = 'approved-a-pending';
       const confirmedId = 'approved-b-confirmed';
       const dormantId = 'approved-z-dormant';
+      const confirmedOnChainHash = ethers.keccak256(ethers.toUtf8Bytes(confirmedId));
+      const subscriptionWrites: any[] = [];
       const subscriptionStore = {
         loadAll: async () => [
           // Reproduce the v10.0.6 poison: an unrelated empty peer promoted all
@@ -214,7 +216,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           { id: confirmedId, subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true, syncScoped: true },
           { id: dormantId, subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: false, syncScoped: true },
         ],
-        save: async () => {},
+        save: async (record: any) => { subscriptionWrites.push({ ...record }); },
         delete: async () => {},
       };
       const membershipStore = {
@@ -328,6 +330,18 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           graph: confirmedMeta,
         },
         {
+          subject: confirmedUri,
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: sparqlString('106'),
+          graph: confirmedMeta,
+        },
+        {
+          subject: confirmedUri,
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
+          object: sparqlString(confirmedOnChainHash),
+          graph: confirmedMeta,
+        },
+        {
           subject: confirmedDelegation,
           predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT,
           object: sparqlString(localAgentAddress),
@@ -368,8 +382,17 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(agent.getSubscribedContextGraphs().get(confirmedId)).toMatchObject({
           subscribed: true,
           metaSynced: true,
+          onChainId: '106',
+          onChainHash: confirmedOnChainHash.toLowerCase(),
         });
         expect(agent.getSubscribedContextGraphs().get(confirmedId)?.pendingMeta).toBeUndefined();
+        expect(subscriptionWrites.filter((row) => row.id === confirmedId).at(-1)).toMatchObject({
+          id: confirmedId,
+          subscribed: true,
+          metaSynced: true,
+          onChainId: '106',
+          onChainHash: confirmedOnChainHash.toLowerCase(),
+        });
         expect(agent.getSubscribedContextGraphs().get(dormantId)).toBeUndefined();
         expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantIds).toEqual([dormantId]);
 

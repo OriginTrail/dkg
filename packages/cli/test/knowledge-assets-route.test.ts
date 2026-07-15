@@ -831,6 +831,31 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(other.status).toBe(404);
     });
 
+    it('resolves a finalized rootless KA by its author-scoped UAL', async () => {
+      const name = `rootless-ual-${Date.now().toString(36)}`;
+      const created = await createKa(REG, name, {
+        quads: [{ subject: 'ex:rootless-ual', predicate: 'ex:p', object: '"value"' }],
+        finalize: true,
+      });
+      expect(created.status, `create+finalize: ${JSON.stringify(created.body)}`).toBe(201);
+
+      const byName = await getJson(
+        daemon,
+        `/api/knowledge-assets/${encodeURIComponent(name)}?contextGraphId=${encodeURIComponent(REG)}`,
+      );
+      expect(byName.status, `name descriptor: ${JSON.stringify(byName.body)}`).toBe(200);
+      const reservedUal = String(byName.body.reservedUal ?? '');
+      expect(reservedUal).toMatch(/^did:dkg:[^/]+\/0x[0-9a-f]{40}\/[0-9]+$/);
+
+      const byUal = await getJson(
+        daemon,
+        `/api/knowledge-assets/${encodeURIComponent(reservedUal)}?contextGraphId=${encodeURIComponent(REG)}`,
+      );
+      expect(byUal.status, `UAL descriptor: ${JSON.stringify(byUal.body)}`).toBe(200);
+      expect(byUal.body.name).toBe(name);
+      expect(String(byUal.body.reservedUal).toLowerCase()).toBe(reservedUal.toLowerCase());
+    });
+
     it('agent-token reads and discards its own WM draft without an explicit agentAddress query param', async () => {
       const agent = await registerAgentClient('ka-token-lane-wm');
       const cg = `ka-token-lane-wm-${Date.now().toString(36)}`;

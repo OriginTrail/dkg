@@ -169,6 +169,25 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(result.logs.some(({ message }) => message.includes('not bound to a verified KA'))).toBe(true);
   });
 
+  it('drops detached legacy projections while admitting verified rootless graphs', () => {
+    const generated = fixture();
+    const legacyProjection = `${CONTEXT_GRAPH_URI}/context/106`;
+    const detached = [
+      quad('urn:legacy:projection', 'urn:p', '"drop-data"', legacyProjection),
+      quad('urn:legacy:projection-meta', 'urn:p', '"drop-meta"', `${legacyProjection}/_meta`),
+      quad(CONTEXT_GRAPH_URI, 'urn:p', '"drop-catalog"', `${CONTEXT_GRAPH_URI}/_catalog`),
+    ];
+
+    const result = verifyBoth([...generated.payload, ...detached], generated.meta);
+
+    expect(result.rejected).toBe(0);
+    expect(result.data).toEqual(generated.payload);
+    expect(result.meta).toEqual(generated.meta);
+    expect(result.logs.some(({ message }) => message.includes(
+      'Dropped 3 detached legacy projection triples',
+    ))).toBe(true);
+  });
+
   it('preserves the explicit system-graph override for otherwise-unbound data', () => {
     const generated = fixture();
     const unbound = quad('urn:system:extra', 'urn:p', '"accepted"', CONTEXT_GRAPH_URI);

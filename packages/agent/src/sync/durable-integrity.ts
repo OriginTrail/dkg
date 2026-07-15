@@ -731,6 +731,7 @@ function selectVerifiedQuads(
 
   const dataIndexes: number[] = [];
   let unboundDataTriples = 0;
+  let detachedLegacyProjectionTriples = 0;
   for (let index = 0; index < dataQuads.length; index++) {
     const quad = dataQuads[index]!;
     const graphVerified = outcome.graphVerification.get(quad.graph);
@@ -743,10 +744,30 @@ function selectVerifiedQuads(
       if (verifiedLegacyRoots.has(legacyOwner)) dataIndexes.push(index);
       continue;
     }
+    // Rootless V2 KAs are authoritative only in their UAL-derived assertion
+    // graphs. Older finalization code may leave a detached aggregate
+    // `/context/<id>` projection (plus its metadata and public catalog) beside
+    // those exact graphs. These reserved projections have no V2 integrity
+    // binding and must never be inserted, but their presence must not turn an
+    // otherwise fully verified rootless snapshot into an all-or-nothing retry.
+    // Arbitrary unbound graphs still take the strict rejection path below.
+    if (
+      outcome.hasGraphScopedCandidates
+      && isDetachedLegacyProjectionGraph(quad.graph)
+    ) {
+      detachedLegacyProjectionTriples += 1;
+      continue;
+    }
     if (outcome.hasGraphScopedCandidates) unboundDataTriples += 1;
     else dataIndexes.push(index); // quarantined legacy compatibility
   }
 
+  if (detachedLegacyProjectionTriples > 0) {
+    logs.push({
+      level: 'debug',
+      message: `Dropped ${detachedLegacyProjectionTriples} detached legacy projection triples from rootless sync batch`,
+    });
+  }
   if (unboundDataTriples > 0) {
     logs.push({
       level: acceptUnverified ? 'debug' : 'warn',
@@ -802,6 +823,12 @@ function selectVerifiedQuads(
     verifiedGraphScopedDataGraphs,
     logs,
   };
+}
+
+function isDetachedLegacyProjectionGraph(graph: string): boolean {
+  if (!graph.startsWith('did:dkg:context-graph:')) return false;
+  return graph.endsWith('/_catalog')
+    || /\/context\/[0-9]+(?:\/_meta)?$/.test(graph);
 }
 
 /**

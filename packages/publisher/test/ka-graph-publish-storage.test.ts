@@ -4,6 +4,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   TypedEventBus,
+  createOperationContext,
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
@@ -111,6 +112,48 @@ describe('graph-scoped KA publish storage', () => {
     expect(metadata.quads.filter((q) => q.predicate.endsWith('assertionGraph'))).toEqual([
       expect.objectContaining({ object: vmGraph }),
     ]);
+  });
+
+  it('clears the exact SWM graph and its active recovery metadata after VM finalization', async () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+    );
+    const swmMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
+    const head = `${UAL}#dkg-swm-head`;
+    const operationId = 'rootless-finalized-cleanup';
+    const operation = `urn:dkg:share:${CONTEXT_GRAPH}:${operationId}`;
+    const unrelatedOperation = `urn:dkg:share:${CONTEXT_GRAPH}:unrelated`;
+    await store.insert([
+      { ...quad('urn:swm:data', 'urn:predicate:value', '"active"'), graph: swmGraph },
+      { graph: swmMetaGraph, subject: head, predicate: 'http://dkg.io/ontology/kaUal', object: UAL },
+      { graph: swmMetaGraph, subject: head, predicate: 'http://dkg.io/ontology/shareOperationId', object: `"${operationId}"` },
+      { graph: swmMetaGraph, subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
+      { graph: swmMetaGraph, subject: operation, predicate: 'http://dkg.io/ontology/kaUal', object: UAL },
+      { graph: swmMetaGraph, subject: operation, predicate: 'http://dkg.io/ontology/shareOperationId', object: `"${operationId}"` },
+      { graph: swmMetaGraph, subject: unrelatedOperation, predicate: 'http://dkg.io/ontology/shareOperationId', object: '"unrelated"' },
+    ]);
+
+    await publisher.clearPublishedKnowledgeAssetSwm(
+      CONTEXT_GRAPH,
+      {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) },
+      },
+      undefined,
+      createOperationContext('test'),
+      UAL,
+    );
+
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    await expect(store.query(`ASK { GRAPH <${swmMetaGraph}> { <${head}> ?p ?o } }`))
+      .resolves.toMatchObject({ type: 'boolean', value: false });
+    await expect(store.query(`ASK { GRAPH <${swmMetaGraph}> { <${operation}> ?p ?o } }`))
+      .resolves.toMatchObject({ type: 'boolean', value: false });
+    await expect(store.query(`ASK { GRAPH <${swmMetaGraph}> { <${unrelatedOperation}> ?p ?o } }`))
+      .resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
   it('replaces the complete VM graph and preserves the prior version on failed swap', async () => {

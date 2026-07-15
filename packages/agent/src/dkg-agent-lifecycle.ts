@@ -5508,15 +5508,77 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const sub = this.subscribedContextGraphs.get(contextGraphId);
       if (!sub) continue;
       if (await this.hasConfirmedMetaState(contextGraphId)) {
-        if (sub.metaSynced !== true) {
-          this.setContextGraphSubscription(contextGraphId, { ...sub, metaSynced: true });
+        // A late private-CG member may never have observed the one-shot public
+        // registry announcement that normally supplies the numeric chain id.
+        // The authenticated curator snapshot carries that immutable binding in
+        // the CG's exact top-level `_meta` graph. Once the full private
+        // definition has passed `hasConfirmedMetaState`, bind and persist it as
+        // part of the same readiness transition. This also makes a completed
+        // catch-up restart-safe instead of leaving `on_chain_id = NULL` in the
+        // durable subscription row.
+        const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+        const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+        const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+        const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
+        const registrationResult = await this.store.query(`
+          SELECT ?predicate ?value WHERE {
+            GRAPH <${metaGraph}> {
+              <${contextGraphUri}> ?predicate ?value .
+              VALUES ?predicate {
+                <${onChainIdPredicate}>
+                <${onChainHashPredicate}>
+              }
+            }
+          }
+        `);
+        let confirmedOnChainId: string | undefined;
+        let confirmedOnChainHash: string | undefined;
+        if (registrationResult.type === 'bindings') {
+          for (const row of registrationResult.bindings) {
+            const predicate = row['predicate'];
+            const value = stripLiteral(row['value'] ?? '');
+            if (predicate === onChainIdPredicate && /^\d+$/.test(value)) {
+              try {
+                if (BigInt(value) > 0n) confirmedOnChainId = value;
+              } catch {
+                // Ignore malformed or out-of-domain metadata fail-closed.
+              }
+            } else if (
+              predicate === onChainHashPredicate
+              && /^0x[0-9a-fA-F]{64}$/.test(value)
+            ) {
+              confirmedOnChainHash = value.toLowerCase();
+            }
+          }
         }
-        if (sub.pendingMeta) {
+
+        let current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
+        let registrationChanged = false;
+        if (confirmedOnChainId && current.onChainId !== confirmedOnChainId) {
+          this.bindSubscriptionOnChainId(contextGraphId, current, confirmedOnChainId);
+          registrationChanged = true;
+        }
+        if (
+          confirmedOnChainHash
+          && current.onChainHash?.toLowerCase() !== confirmedOnChainHash
+        ) {
+          this.recordCgWireId(contextGraphId, confirmedOnChainHash);
+          registrationChanged = true;
+        }
+        if (registrationChanged) {
+          this.setContextGraphSubscription(contextGraphId, { ...current });
+          current = this.subscribedContextGraphs.get(contextGraphId) ?? current;
+        }
+
+        if (current.metaSynced !== true) {
+          this.setContextGraphSubscription(contextGraphId, { ...current, metaSynced: true });
+        }
+        current = this.subscribedContextGraphs.get(contextGraphId) ?? current;
+        if (current.pendingMeta) {
           // Meta arrived; the freshly-joined "waiting for sync" state
           // (set by the join-approved handler) no longer applies — the
           // CG will now surface via the normal `_meta` branch in
           // `listContextGraphs`.
-          const current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
           this.setContextGraphSubscription(contextGraphId, {
             ...current,
             metaSynced: true,
@@ -6290,6 +6352,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         if (row.subscribed) {
           this.subscribeToContextGraph(row.id, { trackSyncScope: false, persist: false });
           this.persistLocalNodeMembership(row.id, 'rehydrated-subscription');
+        }
+        // Upgrade/self-heal path for late private-CG members whose payload and
+        // authenticated `_meta` already completed before registration binding
+        // persistence was introduced. Do not make them re-download the whole
+        // CG merely to repair a NULL `on_chain_id`: the exact meta graph is
+        // already proven above, and `refreshMetaSyncedFlags` can bind its
+        // immutable registration tuple locally. The strict write makes the
+        // repair durable before rehydration reports completion.
+        if (approvedMetaConfirmed && !row.onChainId) {
+          await this.refreshMetaSyncedFlags([row.id]);
+          if (this.subscribedContextGraphs.get(row.id)?.onChainId) {
+            await this.persistContextGraphSubscriptionStrict(row.id);
+          }
         }
         // Throttle: yield so concurrent store-backed work (routes, sync) can
         // interleave instead of being starved by a synchronous activation burst.

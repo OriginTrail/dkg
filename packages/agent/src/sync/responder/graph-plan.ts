@@ -52,6 +52,7 @@ const DKG_PUBLIC_TRIPLE_COUNT = `${DKG}publicTripleCount`;
 const DKG_PRIVATE_TRIPLE_COUNT = `${DKG}privateTripleCount`;
 const DKG_STATUS = `${DKG}status`;
 const DKG_SUB_GRAPH_NAME = `${DKG}subGraphName`;
+const DETERMINISTIC_KA_UAL_SHAPE = /^did:dkg:[^/]+\/0x[0-9A-Fa-f]{40}\/[0-9]+$/;
 const DKG_PART_OF = `${DKG}partOf`;
 const DKG_BATCH_ID = `${DKG}batchId`;
 const SCHEMA_NAME = 'http://schema.org/name';
@@ -459,6 +460,19 @@ export async function readSwmMetaPage(params: {
     params.offset,
     params.limit,
     params.signal,
+    cache
+      ? () => readBoundedSwmMetaSnapshot(
+        params.store,
+        candidateGraphs,
+        params.cutoffIso,
+        cache,
+      )
+      : undefined,
+    // The TTL-filtered SPARQL fallback joins and globally sorts a mutable meta
+    // graph. On large stores that query is worse than a bounded refusal: it can
+    // consume multiple cores and gigabytes until the HTTP timeout. Unfiltered
+    // legacy sessions retain the existing store-paged compatibility path.
+    params.cutoffIso == null,
   );
 }
 
@@ -674,6 +688,10 @@ async function readGraphScopedVmManifest(
   }
   const currentV2Uals = new Set<string>();
   for (const [ual, versions] of scopeVersionsByUal) {
+    // Lifecycle, assertion-graph and SWM-operation rows deliberately repeat
+    // contentScopeVersion. Only deterministic UAL subjects are V2 descriptor
+    // candidates; a UAL-shaped partial descriptor still fails closed below.
+    if (!DETERMINISTIC_KA_UAL_SHAPE.test(ual)) continue;
     if (versions.size !== 1) {
       throw new Error(`Rootless sync manifest ${ual} has ambiguous scopeVersion`);
     }
@@ -1089,10 +1107,19 @@ export async function readDurableDataPage(params: {
         // A just-committed exact graph may precede a stale external graph-list
         // cache. Include every confirmed non-empty manifest graph explicitly;
         // the count-vs-read invariant below will fail closed if its payload is
-        // absent or raced. The legacy list remains only as the compatibility
-        // source for pre-V2 graphs and non-KA durable partitions.
+        // absent or raced.
+        //
+        // Once a CG has a V2 manifest, that manifest is the complete durable KA
+        // payload inventory. Mixing the old aggregate `/context/<id>` projection
+        // (and other unbound legacy partitions such as `_catalog`) into the same
+        // response makes the requester reject an otherwise valid rootless batch.
+        // Legacy-only CGs retain the graph-list path, so their existing local
+        // data remains readable and can still be synchronized on that lane.
+        const legacyCandidateGraphs = manifest.knownGraphs.size === 0
+          ? params.graphList.filter(isCandidateGraph)
+          : [];
         const candidateGraphs = dedupeStrings([
-          ...params.graphList.filter(isCandidateGraph),
+          ...legacyCandidateGraphs,
           ...manifest.confirmedEntries
             .filter((entry) => entry.rowCount > 0)
             .map((entry) => entry.graph),
@@ -1623,6 +1650,7 @@ async function readResponderRowsPage(
   limit: number,
   signal?: AbortSignal,
   loadSnapshot?: () => Promise<readonly SyncRow[]>,
+  fallbackOnPerSnapshotBudget = true,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
@@ -1637,7 +1665,7 @@ async function readResponderRowsPage(
       signal,
     );
   } catch (error) {
-    if (!isPerSnapshotBudgetError(error)) throw error;
+    if (!isPerSnapshotBudgetError(error) || !fallbackOnPerSnapshotBudget) throw error;
     return loadStoreBoundedPage(safeOffset, safeLimit, signal);
   }
 }
@@ -1916,6 +1944,151 @@ async function readSwmMetaRows(
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
     .filter((row) => row.s && row.p && row.o && row.g)
     .sort(compareRows);
+}
+
+async function readBoundedSwmMetaSnapshot(
+  store: TripleStore,
+  swmMetaGraphs: readonly string[],
+  cutoffIso: string | null,
+  cache: RowListCache,
+): Promise<readonly SyncRow[]> {
+  const limits = cache.memo.snapshotLoadLimits ?? {
+    maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+    maxBytesEstimate: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+    pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  };
+  const rows: SyncRow[] = [];
+  let bytesEstimate = 0;
+
+  for (const graph of dedupeStrings(swmMetaGraphs).sort(compareCodePoint)) {
+    const remainingRows = limits.maxRows - rows.length;
+    if (remainingRows < 0) {
+      throw snapshotBudgetError({
+        key: cache.key,
+        reason: 'snapshot_rows',
+        rows: rows.length,
+        bytesEstimate,
+        limit: limits.maxRows,
+      });
+    }
+    let result;
+    try {
+      result = await store.query(`
+        SELECT ?s ?p ?o WHERE {
+          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+        }
+        LIMIT ${remainingRows + 1}
+      `, {
+        ...syncResponderStoreOptions(undefined, 'sync.responder.readSwmMetaGraphSnapshot'),
+        maxResponseBytes: snapshotResponseByteLimit(
+          Math.max(1, limits.maxBytesEstimate - bytesEstimate),
+        ),
+      });
+    } catch (error) {
+      if (!(error instanceof StoreResponseTooLargeError)) throw error;
+      const actualBytes = typeof error.actualBytes === 'bigint'
+        ? Number(error.actualBytes > BigInt(Number.MAX_SAFE_INTEGER)
+          ? BigInt(Number.MAX_SAFE_INTEGER)
+          : error.actualBytes)
+        : error.actualBytes;
+      throw snapshotBudgetError({
+        key: cache.key,
+        reason: 'snapshot_bytes',
+        rows: rows.length,
+        bytesEstimate: bytesEstimate + actualBytes,
+        limit: limits.maxBytesEstimate,
+      });
+    }
+    if (result.type !== 'bindings') continue;
+    for (const binding of result.bindings) {
+      const s = binding['s'];
+      const p = binding['p'];
+      const o = binding['o'];
+      if (!s || !p || !o) continue;
+      const nextRows = rows.length + 1;
+      if (nextRows > limits.maxRows) {
+        throw snapshotBudgetError({
+          key: cache.key,
+          reason: 'snapshot_rows',
+          rows: nextRows,
+          bytesEstimate,
+          limit: limits.maxRows,
+        });
+      }
+      const nextBytes = bytesEstimate + estimateStringRowHeapBytes(s, p, o, graph);
+      if (nextBytes > limits.maxBytesEstimate) {
+        throw snapshotBudgetError({
+          key: cache.key,
+          reason: 'snapshot_bytes',
+          rows: nextRows,
+          bytesEstimate: nextBytes,
+          limit: limits.maxBytesEstimate,
+        });
+      }
+      rows.push({ s, p, o, g: graph });
+      bytesEstimate = nextBytes;
+    }
+  }
+
+  return filterSwmMetaSnapshotRows(rows, cutoffIso);
+}
+
+function filterSwmMetaSnapshotRows(
+  rows: readonly SyncRow[],
+  cutoffIso: string | null,
+): SyncRow[] {
+  if (cutoffIso == null) return [...rows].sort(compareRows);
+  const cutoffMs = Date.parse(cutoffIso);
+  if (!Number.isFinite(cutoffMs)) return [];
+
+  const bySubject = new Map<string, SyncRow[]>();
+  for (const row of rows) {
+    const bucket = bySubject.get(row.s) ?? [];
+    bucket.push(row);
+    bySubject.set(row.s, bucket);
+  }
+  const objects = (subject: string, predicate: string): string[] =>
+    (bySubject.get(subject) ?? [])
+      .filter((row) => row.p === predicate)
+      .map((row) => row.o);
+  const isFresh = (subject: string): boolean => objects(subject, DKG_PUBLISHED_AT)
+    .some((value) => {
+      const timestamp = Date.parse(stripLiteral(value));
+      return Number.isFinite(timestamp) && timestamp >= cutoffMs;
+    });
+  const scopeIsCurrent = (subject: string): boolean =>
+    objects(subject, DKG_CONTENT_SCOPE_VERSION)
+      .some((value) => stripLiteral(value) === String(GRAPH_KA_CONTENT_SCOPE_VERSION));
+  const tupleKeys = (subject: string): string[] => {
+    if (!scopeIsCurrent(subject)) return [];
+    const uals = objects(subject, DKG_KA_UAL);
+    const versions = objects(subject, DKG_ASSERTION_VERSION);
+    const shares = objects(subject, DKG_SHARE_OPERATION_ID);
+    const keys: string[] = [];
+    for (const ual of uals) {
+      for (const version of versions) {
+        for (const share of shares) keys.push(JSON.stringify([ual, version, share]));
+      }
+    }
+    return keys;
+  };
+
+  const admitted = new Set<string>();
+  const freshOperationKeys = new Set<string>();
+  for (const [subject] of bySubject) {
+    if (isFresh(subject)) admitted.add(subject);
+    if (
+      isFresh(subject) &&
+      objects(subject, DKG_ONTOLOGY.RDF_TYPE).includes(DKG_WORKSPACE_OPERATION)
+    ) {
+      for (const key of tupleKeys(subject)) freshOperationKeys.add(key);
+    }
+  }
+  for (const [subject] of bySubject) {
+    if (tupleKeys(subject).some((key) => freshOperationKeys.has(key))) admitted.add(subject);
+  }
+
+  return rows.filter((row) => admitted.has(row.s)).sort(compareRows);
 }
 
 async function readSwmMetaRowsPage(
@@ -2443,7 +2616,7 @@ function filterDurableMetaSnapshotRows(
   // validation, so a malformed confirmed marker is visible and fails closed
   // instead of silently falling through as harmless configuration metadata.
   for (const [subject] of bySubject) {
-    if (!/^did:dkg:[^/]+\/0x[0-9A-Fa-f]{40}\/[0-9]+$/.test(subject)) continue;
+    if (!DETERMINISTIC_KA_UAL_SHAPE.test(subject)) continue;
     const versions = objects(subject, DKG_CONTENT_SCOPE_VERSION).map(stripLiteral);
     const statuses = objects(subject, DKG_STATUS).map(stripLiteral);
     if (

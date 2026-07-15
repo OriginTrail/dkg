@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import { SYNC_TOTAL_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
   buildAuthoritativePrivateMetaAskQuery,
   hasAuthoritativePrivateMetaDefinition,
@@ -371,6 +372,7 @@ describe('refreshMetaFromCurator', () => {
     }];
     let resolved = false;
     let fetchPeer: string | undefined;
+    let fetchDeadline: number | undefined;
     let forceFreshSession: boolean | undefined;
     let staged: Quad[] = [];
     let replacementUpdate = '';
@@ -391,6 +393,7 @@ describe('refreshMetaFromCurator', () => {
       fetchSyncPages: async (...args: unknown[]) => {
         const peerId = args[1] as string;
         fetchPeer = peerId;
+        fetchDeadline = args[6] as number;
         forceFreshSession = args[11] as boolean | undefined;
         return {
           quads: inserted,
@@ -414,6 +417,7 @@ describe('refreshMetaFromCurator', () => {
       },
     };
 
+    const refreshStartedAt = Date.now();
     const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
       agent as never,
       contextGraphId,
@@ -423,6 +427,9 @@ describe('refreshMetaFromCurator', () => {
     expect(refreshed).toBe(true);
     expect(resolved).toBe(false);
     expect(fetchPeer).toBe(CURATOR_PEER_ID);
+    expect(fetchDeadline).toBeGreaterThanOrEqual(
+      refreshStartedAt + SYNC_TOTAL_TIMEOUT_MS - 100,
+    );
     expect(forceFreshSession).toBe(true);
     expect(staged).toHaveLength(4);
     expect(staged[0]).toMatchObject({
@@ -708,6 +715,8 @@ describe('refreshMetaFromCurator', () => {
     const freshDelegation = `did:dkg:agent-delegation:${contextGraphId}:${freshAgent}`;
     const pendingJoinRequest = `did:dkg:join-request:${contextGraphId}:${freshAgent}`;
     const localDraftLifecycle = `urn:dkg:lifecycle:draft:${contextGraphId}:42`;
+    const freshOnChainId = '105';
+    const freshOnChainHash = `0x${'A'.repeat(64)}`;
     const store = new OxigraphStore();
     try {
       await store.insert([
@@ -724,10 +733,16 @@ describe('refreshMetaFromCurator', () => {
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${CURATOR_PEER_ID}`, graph: metaGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: freshCurator, graph: metaGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${freshAgent}"`, graph: metaGraph },
+        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${freshOnChainId}"`, graph: metaGraph },
+        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${freshOnChainHash}"`, graph: metaGraph },
         { subject: freshDelegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: '"fresh-peer"', graph: metaGraph },
       ];
       let invalidations = 0;
       let projectionInvalidations = 0;
+      let persistedBindings = 0;
+      const subscription: { onChainId?: string; onChainHash?: string } = {
+        onChainId: '104',
+      };
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
         peerId: 'local-peer',
@@ -747,6 +762,17 @@ describe('refreshMetaFromCurator', () => {
         oversizeTombstoneLog: { record: noop },
         invalidateListContextGraphsCache: () => { invalidations += 1; },
         contextGraphMetaProjection: { markDirty: () => { projectionInvalidations += 1; } },
+        subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
+        bindSubscriptionOnChainId: (
+          _localCgId: string,
+          sub: { onChainId?: string },
+          onChainId: string,
+        ) => { sub.onChainId = onChainId; },
+        recordCgWireId: (
+          _localCgId: string,
+          onChainHash: string | null,
+        ) => { subscription.onChainHash = onChainHash ?? undefined; },
+        persistContextGraphSubscription: () => { persistedBindings += 1; },
         syncCheckpoints: new Map<string, number>(),
         log: { warn: noop, info: noop },
       };
@@ -787,6 +813,11 @@ describe('refreshMetaFromCurator', () => {
       });
       expect(invalidations).toBe(2);
       expect(projectionInvalidations).toBe(2);
+      expect(subscription).toEqual({
+        onChainId: freshOnChainId,
+        onChainHash: freshOnChainHash.toLowerCase(),
+      });
+      expect(persistedBindings).toBe(1);
     } finally {
       await store.close();
     }
