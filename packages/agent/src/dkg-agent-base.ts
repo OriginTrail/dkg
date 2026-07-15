@@ -11,6 +11,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -117,8 +118,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -348,6 +348,7 @@ import {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type VmReconcileNegativeRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -366,9 +367,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -474,6 +472,13 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => markProjectionDirty?.(),
       );
     },
+    replaceGraph: innerStore.replaceGraph
+      ? (graphUri, quads, options) => invalidateAfterMutation(
+          () => innerStore.replaceGraph!(graphUri, quads, options),
+          () => true,
+          () => markProjectionDirty?.(),
+        )
+      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },
@@ -827,6 +832,15 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_SWEEP_INTERVAL_MS =
     Number(process.env['DKG_VM_RECONCILE_INTERVAL_MS']) || 60_000;
+  // The periodic sweep is a missed-event safety net, not startup readiness.
+  // Spread its first run across the configured cadence so a rolling fleet
+  // restart does not immediately launch a full reconciliation scan on every
+  // node. Live chain nudges remain available from startup.
+  static readonly VM_RECONCILE_STARTUP_MAX_DELAY_MS =
+    resolveVmReconcileStartupMaxDelayMs(
+      process.env['DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS'],
+      DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS,
+    );
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
@@ -885,6 +899,10 @@ export class DKGAgentBase {
   protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
   /** Next eligible CG index for bounded periodic-sweep admission. */
   protected vmReconcileSweepCursor = 0;
+  /** Deterministically staggered cold-start prime, separate from the interval. */
+  protected vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Process-wide sweep single-flight; interval/startup callers join this promise. */
+  protected vmReconcileSweepInFlight: Promise<void> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
@@ -900,14 +918,9 @@ export class DKGAgentBase {
   /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
   protected coreHostRecordingGeneration = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
-  protected readonly vmReconcileNegativeCache = new Map<string, {
-    localCgId: string;
-    failures: number;
-    nextRetryAt: number;
-    swmGen: string;
-    candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-    peerTopologyKey: string;
-  }>();
+  protected readonly vmReconcileNegativeCache = new Map<string, Omit<VmReconcileNegativeRecord, 'cacheKey'>>();
+  /** Keys already consulted in the durable store during this process lifetime. */
+  protected readonly vmReconcileNegativeCacheHydrated = new Set<string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();

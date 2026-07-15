@@ -4,6 +4,7 @@ import {
   SparqlHttpStore,
   createTripleStore,
   getExternalStorePrioritySchedulerSnapshot,
+  tryReplaceGraphAtomically,
   type Quad,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
@@ -195,7 +196,8 @@ describe('SparqlHttpStore (test server)', () => {
     expect(before.ackReservedSlots).toBeGreaterThan(0);
     const backgroundSlots = before.maxConcurrent
       - before.ackReservedSlots
-      - before.normalReservedSlots;
+      - (before.healthReservedSlots ?? 0)
+      - (before.normalReservedSlots ?? 0);
     const arrivals: Array<'listGraphs' | 'ack' | 'other'> = [];
     const heldListGraphResponses: ServerResponse[] = [];
     let listGraphRequests = 0;
@@ -337,6 +339,48 @@ describe('SparqlHttpStore (test server)', () => {
       signalController.abort(new Error('caller aborted'));
 
       await expect(query).rejects.toThrow(/caller aborted/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not return a timeout until the aborted server attempt has stopped', async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      if (calls > 1) {
+        active -= 1;
+        return new Response(JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          // Model an HTTP/server stack that needs cleanup time after receiving
+          // cancellation. The adapter must keep its admission slot and caller
+          // promise pending until that cleanup finishes.
+          setTimeout(() => {
+            active -= 1;
+            reject(init.signal?.reason);
+          }, 20);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 5 });
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
+      expect(active).toBe(0);
+
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
+        type: 'bindings',
+      });
+      expect(maxActive).toBe(1);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -484,6 +528,60 @@ describe('SparqlHttpStore (test server)', () => {
     insertedQuads.length = 0;
     await store.dropGraph('http://ex.org/g1');
     expect(insertedQuads.some(q => q.includes('DROP'))).toBe(true);
+  });
+
+  it('replaceGraph sends one staged MOVE update when the endpoint declares atomic updates', async () => {
+    insertedQuads.length = 0;
+    const atomicStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      atomicUpdates: true,
+    });
+    await atomicStore.replaceGraph('http://ex.org/g1', [{
+      subject: 'http://ex.org/new',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }]);
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('urn:dkg:internal:atomic-graph-replace:');
+    expect(insertedQuads[0]).toContain('INSERT DATA');
+    // Non-SILENT: a missing staging graph must fail loudly, not report success.
+    expect(insertedQuads[0]).toContain('MOVE GRAPH');
+    expect(insertedQuads[0]).not.toContain('MOVE SILENT');
+    expect(insertedQuads[0]).toContain('TO GRAPH <http://ex.org/g1>');
+  });
+
+  it('replaceGraph fails closed for endpoints without a declared atomicity guarantee', async () => {
+    // SPARQL 1.1 only RECOMMENDS whole-request atomicity: a generic endpoint
+    // could apply the staged DROP/INSERT/MOVE partially and strand the target
+    // graph. The plain store must refuse the capability BEFORE sending any
+    // update, so rootless KA writers take their non-atomic fallback instead.
+    insertedQuads.length = 0;
+    const replacement = [{
+      subject: 'http://ex.org/new',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }];
+    await expect(store.replaceGraph('http://ex.org/g1', replacement))
+      .rejects.toMatchObject({
+        name: 'UnsupportedTripleStoreCapabilityError',
+        capability: 'replaceGraph',
+      });
+    await expect(tryReplaceGraphAtomically(store, 'http://ex.org/g1', replacement))
+      .resolves.toBe(false);
+    expect(insertedQuads).toHaveLength(0);
+
+    // Daemon-owned endpoints are oxigraph-server (transactional) and keep it.
+    const managedStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      managedByDkg: true,
+    });
+    await expect(tryReplaceGraphAtomically(managedStore, 'http://ex.org/g1', replacement))
+      .resolves.toBe(true);
+    expect(insertedQuads).toHaveLength(1);
   });
 
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {

@@ -48,6 +48,63 @@ it('rejects an explicitly invalid receipt deadline at the adapter boundary', () 
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 });
 
+describe('EVMChainAdapter historical KA update verification', () => {
+  const kaId = 42n;
+  const publisher = '0x1111111111111111111111111111111111111111';
+  const storageAddress = '0x2222222222222222222222222222222222222222';
+  const root = ethers.keccak256(ethers.toUtf8Bytes('historical-update'));
+  const iface = new Interface([
+    'event KnowledgeAssetUpdated(uint256 indexed id, address indexed author, string updateOperationId, bytes32 merkleRoot, uint256 byteSize, uint96 tokenAmount)',
+  ]);
+
+  function adapterWithHistoricalRead(
+    roots: unknown[] | Error,
+  ): { adapter: EVMChainAdapter; latestRead: ReturnType<typeof recorder> } {
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapter.initialized = true;
+    adapter.init = async () => {};
+    const encoded = iface.encodeEventLog(
+      iface.getEvent('KnowledgeAssetUpdated')!,
+      [kaId, publisher, 'op', root, 10n, 1n],
+    );
+    adapter.getTransactionReceiptWithFailover = async () => ({
+      status: 1,
+      blockNumber: 77,
+      index: 2,
+      logs: [{ address: storageAddress, topics: encoded.topics, data: encoded.data }],
+    });
+    adapter.contracts.knowledgeAssetStorage = {
+      getAddress: async () => storageAddress,
+      interface: iface,
+    };
+    const latestRead = recorder(async () => publisher);
+    adapter.readContract = async (
+      _contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (method === 'getMerkleRoots') {
+        if (roots instanceof Error) throw roots;
+        return roots;
+      }
+      if (method === 'getLatestMerkleRootPublisher') return latestRead();
+      throw new Error(`unexpected method ${method}`);
+    };
+    return { adapter, latestRead };
+  }
+
+  it.each([
+    ['receipt-block history has no matching publisher/root', [{ publisher, merkleRoot: ethers.ZeroHash }]],
+    ['receipt-block history cannot be read', new Error('archive state unavailable')],
+  ])('fails closed when %s', async (_label, historicalResult) => {
+    const { adapter, latestRead } = adapterWithHistoricalRead(historicalResult as unknown[] | Error);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .resolves.toEqual({ verified: false });
+    expect(latestRead.calls).toHaveLength(0);
+  });
+});
+
 describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
   const ADDR = '0x00000000000000000000000000000000000000a1';
   const ADDR2 = '0x00000000000000000000000000000000000000a2';

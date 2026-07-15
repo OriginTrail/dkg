@@ -139,7 +139,11 @@ describe.sequential('knowledge-asset CLI smoke', () => {
             contextGraphId: body.contextGraphId,
             name: 'paper',
             shareOperationId: 'share-op-1',
-            rootsCount: 1,
+            contentScopeVersion: 2,
+            kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+            assertionVersion: '1',
+            publicTripleCount: 1,
+            privateTripleCount: 0,
             sealMerkleRoot: `0x${'44'.repeat(32)}`,
             intentKey: `sha256:${'55'.repeat(32)}`,
           }));
@@ -605,11 +609,16 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     expect(createCall?.body.alsoPublishVm).toBeUndefined();
 
     await runCli(['knowledge-asset', 'write', 'paper', '-c', 'research', '--subject', 'urn:company:acme', '--predicate', 'http://schema.org/description', '--object', 'Logistics'], env);
-    await runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'swm'], env);
-    const shared = await runCli(['ka', 'share', 'paper', '-c', 'research', '--entity', 'urn:company:acme', '--skip-seal', '--await-curator-ack'], env);
-    expect(shared.stdout).not.toContain('Next:');
-    const sealedShare = await runCli(['ka', 'share', 'paper', '-c', 'research'], env);
-    expect(sealedShare.stdout).toContain('Next:');
+    await runCli(['ka', 'finalize', 'paper', '-c', 'research'], env);
+    await runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'wm'], env);
+    await expect(runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'swm'], env))
+      .rejects.toMatchObject({ stderr: expect.stringContaining('Legacy root-scoped Knowledge Assets are read-only') });
+    await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--entity', 'urn:company:acme'], env))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--entity'") });
+    await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--skip-seal'], env))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--skip-seal'") });
+    const shared = await runCli(['ka', 'share', 'paper', '-c', 'research', '--await-curator-ack'], env);
+    expect(shared.stdout).toContain('Next:');
     await runCli(['ka', 'publish', 'paper', '-c', 'research', '--publish-epochs', '3', '--publisher-node-identity-id', '7'], env);
     await runCli(['ka', 'publish-async', 'paper', '-c', 'research', '--publish-epochs', '4', '--json'], env);
     await runCli(['ka', 'pull-from', 'paper', '-c', 'research', '--layer', 'swm', '--on-conflict', 'replace', '--json'], env);
@@ -630,18 +639,16 @@ describe.sequential('knowledge-asset CLI smoke', () => {
         object: '"Logistics"',
       }),
     ]);
-    expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/wm/finalize')?.body.layer).toBe('swm');
+    const finalizeCalls = calls.filter((call) => call.url === '/api/knowledge-assets/paper/wm/finalize');
+    expect(finalizeCalls).toHaveLength(2);
+    expect(finalizeCalls.every((call) => call.body.layer === undefined)).toBe(true);
     const shareCalls = calls.filter((call) => call.url === '/api/knowledge-assets/paper/swm/share');
     expect(shareCalls[0]?.body).toMatchObject({
-      entities: ['urn:company:acme'],
-      skipSeal: true,
+      contextGraphId: 'research',
       awaitCuratorAck: true,
     });
-    expect(shareCalls[1]?.body).toMatchObject({
-      contextGraphId: 'research',
-    });
-    expect(shareCalls[1]?.body.entities).toBeUndefined();
-    expect(shareCalls[1]?.body.skipSeal).toBeUndefined();
+    expect(shareCalls[0]?.body.entities).toBeUndefined();
+    expect(shareCalls[0]?.body.skipSeal).toBeUndefined();
     expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/vm/publish')?.body.options).toMatchObject({
       publishEpochs: 3,
       publisherNodeIdentityIdOverride: '7',
@@ -666,7 +673,8 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     await runCli(['ka', 'import-file', 'paper-doc', '-c', 'research', '--input-file', join(dkgHome, 'paper.md')], env);
     await runCli(['ka', 'extraction-status', 'paper-doc', '-c', 'research'], env);
     await runCli(['ka', 'share-async', 'paper', '-c', 'research'], env);
-    await runCli(['ka', 'share-async', 'paper', '-c', 'research', '--entity', 'urn:company:acme', 'urn:company:globex'], env);
+    await expect(runCli(['ka', 'share-async', 'paper', '-c', 'research', '--entity', 'urn:company:acme'], env))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--entity'") });
     await runCli(['ka', 'share-jobs', '-c', 'research', '--state', 'queued', '--limit', '5'], env);
     await runCli(['ka', 'share-job', 'share-job-1'], env);
     await runCli(['ka', 'cancel-share-job', 'share-job-1'], env);
@@ -680,7 +688,6 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       .toMatchObject({ contextGraphId: 'research' });
     const shareAsyncCalls = calls.filter((call) => call.url === '/api/knowledge-assets/paper/swm/share-async');
     expect(shareAsyncCalls[0]?.body.entities).toBeUndefined();
-    expect(shareAsyncCalls[1]?.body.entities).toEqual(['urn:company:acme', 'urn:company:globex']);
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/swm/share-jobs?contextGraphId=research&state=queued&limit=5');
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/swm/share-jobs/share-job-1');
     expect(calls.map((call) => `${call.method} ${call.url}`)).toContain('DELETE /api/knowledge-assets/swm/share-jobs/share-job-1');

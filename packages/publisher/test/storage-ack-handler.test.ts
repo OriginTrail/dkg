@@ -934,6 +934,18 @@ describe('StorageACKHandler', () => {
       expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
     });
 
+    it('accepts zero assertion leaves because curated sampling uses the catalog tree', async () => {
+      const handler = await createHandler([]);
+      const response = await handler.handler(
+        curatedIntent({ merkleLeafCount: 0 }),
+        fakePeerId,
+      );
+      const ack = decodeStorageACK(response);
+
+      expect(isStorageACKDecline(ack)).toBe(false);
+      expect(ethers.hexlify(ack.merkleRoot)).toBe(ethers.hexlify(claimedRoot));
+    });
+
     it('DECLINEs CATALOG_ROOT_MISMATCH when the rebuilt root != the claimed catalogRoot', async () => {
       const handler = await createHandler([]);
       const wrongRoot = ethers.getBytes(ethers.keccak256(new TextEncoder().encode('wrong-catalog-root')));

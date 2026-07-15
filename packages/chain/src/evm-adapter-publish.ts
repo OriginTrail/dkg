@@ -326,17 +326,53 @@ export class PublishMethods extends EVMChainAdapterBase {
 
       if (!onChainMerkleRoot) return { verified: false };
 
-      // Check publisher address: try V10 storage first, then V9
+      // Read the V10 root history at the receipt block, not latest. Besides
+      // producing the post-update assertion index, this prevents a later
+      // update by another publisher from making verification of this older,
+      // otherwise-valid transaction fail. The block tag excludes future
+      // blocks; matching the event root selects this update when the block
+      // contains multiple updates for the same KA.
       let onChainPublisher: string | undefined;
+      let merkleRootCount: bigint | undefined;
       if (this.contracts.knowledgeAssetStorage) {
         try {
-          onChainPublisher = await this.readContract(
-            this.contracts.knowledgeAssetStorage, 'kas.getLatestMerkleRootPublisher',
-            'getLatestMerkleRootPublisher', batchId,
-          );
-        } catch { /* not found in V10 storage */ }
+          const roots = await this.readContract(
+            this.contracts.knowledgeAssetStorage,
+            'kas.getMerkleRootsAtUpdateBlock',
+            'getMerkleRoots',
+            batchId,
+            { blockTag: receipt.blockNumber },
+          ) as Array<{ publisher?: string; merkleRoot?: string } | readonly unknown[]>;
+          let matchedIndex = -1;
+          for (let i = roots.length - 1; i >= 0; i--) {
+            const root = roots[i] as { publisher?: string; merkleRoot?: string };
+            const rootPublisher = root.publisher ?? String((root as readonly unknown[])[0] ?? '');
+            const rootValue = root.merkleRoot ?? String((root as readonly unknown[])[1] ?? '');
+            if (
+              rootPublisher.toLowerCase() === publisherAddress.toLowerCase()
+              && rootValue.toLowerCase() === ethers.hexlify(onChainMerkleRoot).toLowerCase()
+            ) {
+              matchedIndex = i;
+              onChainPublisher = rootPublisher;
+              break;
+            }
+          }
+          if (matchedIndex < 0) {
+            return { verified: false };
+          }
+          merkleRootCount = BigInt(matchedIndex + 1);
+        } catch {
+          // A latest-state fallback can authenticate a historical receipt with
+          // a different publisher/root after a later update. V10 verification
+          // therefore fails closed when the receipt-block view is unavailable.
+          return { verified: false };
+        }
       }
-      if ((!onChainPublisher || onChainPublisher === ethers.ZeroAddress) && this.contracts.knowledgeAssetsStorage) {
+      if (
+        !this.contracts.knowledgeAssetStorage
+        && (!onChainPublisher || onChainPublisher === ethers.ZeroAddress)
+        && this.contracts.knowledgeAssetsStorage
+      ) {
         try {
           onChainPublisher = await this.readContract(
             this.contracts.knowledgeAssetsStorage, 'kasV9.getBatchPublisher',
@@ -353,6 +389,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         onChainMerkleRoot,
         blockNumber: receipt.blockNumber,
         txIndex: receipt.index,
+        merkleRootCount,
       };
     } catch {
       return { verified: false };

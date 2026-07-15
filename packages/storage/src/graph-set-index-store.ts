@@ -10,7 +10,11 @@ import type {
   UpdateOptions,
 } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
-import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import {
+  UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphCapabilityRefusal,
+} from './unsupported-capability-error.js';
+import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -24,10 +28,16 @@ export type GraphSetMutationSource =
   | 'deleteByPattern'
   | 'deleteBySubjectPrefix'
   | 'dropGraph'
+  | 'replaceGraph'
   | 'query'
   | 'update';
 
-type TouchedGraphMutationSource = 'delete' | 'deleteByPattern' | 'deleteBySubjectPrefix' | 'update';
+type TouchedGraphMutationSource =
+  | 'delete'
+  | 'deleteByPattern'
+  | 'deleteBySubjectPrefix'
+  | 'replaceGraph'
+  | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
 
@@ -294,6 +304,7 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    if (isAtomicGraphReplaceStagingGraph(graphUri)) return false;
     if (!this.enabled) {
       return this.inner.hasGraph(graphUri, options);
     }
@@ -324,9 +335,40 @@ export class GraphSetIndexStore implements TripleStore {
     this.removeGraphs([graphUri], 'dropGraph');
   }
 
+  async replaceGraph(
+    graphUri: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraph !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'GraphSetIndexStore');
+    }
+    if (!this.enabled) {
+      await this.inner.replaceGraph(graphUri, quads, options);
+      return;
+    }
+    try {
+      await this.inner.replaceGraph(graphUri, quads, options);
+    } catch (error) {
+      // The replaceGraph contract allows a rejected call to have committed the
+      // complete new graph (or dropped the old one). Serving the cached graph
+      // set would then hide a committed KA graph from enumeration, so mark the
+      // index dirty for a lazy rebuild — unless this was a clean preflight
+      // capability refusal, where nothing was mutated.
+      if (!isReplaceGraphCapabilityRefusal(error)) {
+        this.scheduleFullRefresh('replaceGraph');
+      }
+      throw error;
+    }
+    this.bumpMutation();
+    await this.maintainTouchedGraphs([graphUri], 'replaceGraph', options);
+  }
+
   async listGraphs(options?: QueryOptions): Promise<string[]> {
     if (!this.enabled) {
-      return this.inner.listGraphs(options);
+      return (await this.inner.listGraphs(options)).filter(
+        (graph) => !isAtomicGraphReplaceStagingGraph(graph),
+      );
     }
     const graphs = await this.ensureGraphSet(options);
     return [...graphs];
@@ -335,9 +377,13 @@ export class GraphSetIndexStore implements TripleStore {
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
     if (!this.enabled) {
       if (this.inner.listGraphsByPrefix) {
-        return this.inner.listGraphsByPrefix(prefix, options);
+        return (await this.inner.listGraphsByPrefix(prefix, options)).filter(
+          (graph) => !isAtomicGraphReplaceStagingGraph(graph),
+        );
       }
-      return (await this.inner.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
+      return (await this.inner.listGraphs(options)).filter(
+        (graph) => graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph),
+      );
     }
     const graphs = await this.ensureGraphSet(options);
     return [...graphs].filter((graph) => graph.startsWith(prefix));
@@ -435,7 +481,11 @@ export class GraphSetIndexStore implements TripleStore {
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
       const scan = this.refreshCoordinator.beginScan(flight);
-      const next = new Set((await this.inner.listGraphs(scanOptions)).filter(Boolean));
+      const next = new Set(
+        (await this.inner.listGraphs(scanOptions)).filter(
+          (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
+        ),
+      );
       if (generation !== this.mutationGeneration) continue;
       // Priority promotion intentionally permits overlapping scans. Fence the
       // shared cache by scan start order so an older, slower background response
@@ -525,7 +575,7 @@ export class GraphSetIndexStore implements TripleStore {
   private addGraphs(graphs: string[], source: GraphSetMutationSource): void {
     if (!this.graphs) return;
     for (const graph of graphs) {
-      if (!graph || this.graphs.has(graph)) continue;
+      if (!graph || isAtomicGraphReplaceStagingGraph(graph) || this.graphs.has(graph)) continue;
       this.graphs.add(graph);
       this.emit({ type: 'graph-added', graph, source });
     }

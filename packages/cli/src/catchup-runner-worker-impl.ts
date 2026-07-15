@@ -64,7 +64,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   let noProtocolPeers = 0;
 
   const cleanPlaneCompletions: NonNullable<CatchupJobResult['cleanPlaneCompletions']> = {
-    durable: { verifiedDataPeers: 0, emptyPeers: 0 },
+    durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
     sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
   };
 
@@ -82,6 +82,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       checkpointAdvances: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
       rejectedKcs: 0,
       failedPeers: 0,
@@ -156,6 +157,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     checkpointAdvances: 0,
     emptyResponses: 0,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
     rejectedKcs: 0,
     failedPeers: 1,
@@ -190,7 +192,11 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     syncCapable,
     CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
     async (peerId) => {
-      const durable = await invoke<any>('syncDurable', peerId, request.contextGraphId).catch(() => emptyDurable());
+      const rawDurable = await invoke<any>('syncDurable', peerId, request.contextGraphId).catch(() => emptyDurable());
+      const durable = {
+        ...rawDurable,
+        verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
+      };
       const shared = request.includeSharedMemory
         ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(() => emptyShared())
         : null;
@@ -211,6 +217,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.checkpointAdvances += durable.checkpointAdvances ?? 0;
     diagnostics.durable.emptyResponses += durable.emptyResponses;
     diagnostics.durable.metaOnlyResponses += durable.metaOnlyResponses;
+    diagnostics.durable.verifiedPrivateOnlyResponses +=
+      durable.verifiedPrivateOnlyResponses;
     diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
     diagnostics.durable.rejectedKcs += durable.rejectedKcs;
     diagnostics.durable.failedPeers += durable.failedPeers;
@@ -224,6 +232,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     if (catchupPlaneCompletedWithoutFailure(durable)) {
       if ((durable.insertedDataTriples ?? 0) > 0) {
         cleanPlaneCompletions.durable.verifiedDataPeers += 1;
+      }
+      if (durable.verifiedPrivateOnlyResponses > 0) {
+        cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers += 1;
       }
       if ((durable.emptyResponses ?? 0) > 0) {
         cleanPlaneCompletions.durable.emptyPeers += 1;

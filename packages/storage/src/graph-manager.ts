@@ -14,9 +14,11 @@ import {
   contextGraphCatalogUri,
   canonicalKnowledgeAssetGraphIdentitySuffix,
   knowledgeAssetAgentAddressesEqual,
+  getMetrics,
   isSafeIri,
   assertSafeIri,
   sparqlString,
+  validateNewContextGraphId,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
@@ -97,34 +99,48 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
   quadFilter?: (quad: Quad) => boolean;
+  /**
+   * Optional hard materialization budget for expensive SWM slices. When set,
+   * the store is read in bounded SELECT pages and the loader rejects before
+   * retaining more than `maxRows` or `maxBytesEstimate`. This is an explicit
+   * backpressure boundary: callers must retry/defer, never treat the error as an
+   * empty or complete snapshot.
+   */
+  resultBudget?: SharedMemoryResultBudget;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
     hadInput: boolean;
   }) => string;
 }
 
+export interface SharedMemoryResultBudget {
+  pageRows: number;
+  maxRows: number;
+  maxBytesEstimate: number;
+}
+
+export class SharedMemoryResultBudgetError extends Error {
+  readonly code = 'SHARED_MEMORY_RESULT_BUDGET' as const;
+  readonly retryable = true as const;
+
+  constructor(
+    readonly reason: 'rows' | 'bytes',
+    readonly rows: number,
+    readonly bytesEstimate: number,
+    readonly limit: number,
+  ) {
+    super(
+      `Shared-memory result exceeded ${reason} budget ` +
+      `(rows=${rows}, bytesEstimate=${bytesEstimate}, limit=${limit})`,
+    );
+    this.name = 'SharedMemoryResultBudgetError';
+  }
+}
+
 export interface LoadSelectedVerifiableMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
 }
-
-export interface MigrateNamedLifecycleSharedMemoryOptions {
-  graphResolution?: QueryOptions;
-  namedSource?: QueryOptions;
-  legacyBucketSource?: QueryOptions;
-}
-
-export type NamedLifecycleSharedMemoryMigrationResult =
-  | {
-      sourceEmpty: true;
-      migratedLegacyQuadCount: 0;
-      targetGraph: string;
-    }
-  | {
-      sourceEmpty: false;
-      migratedLegacyQuadCount: number;
-      targetGraph: string;
-    };
 
 function mergeQueryOptions(
   options?: QueryOptions,
@@ -425,6 +441,7 @@ export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
   sources: SwmSliceSourceTags;
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>;
   queryOptions?: Omit<QueryOptions, 'source'>;
+  resultBudget?: SharedMemoryResultBudget;
 }
 
 /**
@@ -460,6 +477,7 @@ export function loadSharedMemorySliceWithKaBoundFallback(
   kaGraphBound: SwmKaGraphBound | undefined,
   sources: SwmSliceSourceTags,
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  loadOptions?: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'>,
 ): Promise<{ quads: Quad[]; accepted: Quad[] | null }>;
 export async function loadSharedMemorySliceWithKaBoundFallback(
   store: TripleStore,
@@ -468,15 +486,24 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
   kaGraphBound: SwmKaGraphBound | undefined,
   optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
   legacyCreateAccept?: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  legacyLoadOptions: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'> = {},
 ): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
-  const options = normalizeLoadSharedMemorySliceOptions(optionsOrSources, legacyCreateAccept);
-  const { sources, createAccept, queryOptions = {} } = options;
+  const options = normalizeLoadSharedMemorySliceOptions(
+    optionsOrSources,
+    legacyCreateAccept,
+    legacyLoadOptions,
+  );
+  const { sources, createAccept, queryOptions = {}, resultBudget } = options;
+  const loadOptions = { queryOptions, resultBudget };
   const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
-    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { queryOptions, querySource: source });
+    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, {
+      ...loadOptions,
+      querySource: source,
+    });
 
   let quads = kaGraphBound
     ? await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
-        queryOptions,
+        ...loadOptions,
         querySource: sources.bounded,
       })
     : await readComplete(sources.unbounded);
@@ -500,12 +527,17 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
 function normalizeLoadSharedMemorySliceOptions(
   optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
   legacyCreateAccept: (() => Promise<(quads: Quad[]) => Quad[] | null>) | undefined,
+  legacyLoadOptions: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'>,
 ): LoadSharedMemorySliceWithKaBoundFallbackOptions {
   if ('sources' in optionsOrSources) return optionsOrSources;
   if (!legacyCreateAccept) {
     throw new TypeError('loadSharedMemorySliceWithKaBoundFallback requires createAccept');
   }
-  return { sources: optionsOrSources, createAccept: legacyCreateAccept };
+  return {
+    sources: optionsOrSources,
+    createAccept: legacyCreateAccept,
+    ...legacyLoadOptions,
+  };
 }
 
 function sharedMemorySelectionGraphPattern(
@@ -541,105 +573,6 @@ function sharedMemorySelectionGraphPattern(
           )`;
 }
 
-/**
- * Load one selected SWM root closure from explicit source graphs while
- * preserving the source graph on every returned quad. The selection pattern is
- * shared with the normal scoped loader, so migration cannot drift from publish
- * semantics. One CONSTRUCT is issued per graph because CONSTRUCT results are a
- * default-graph dataset and otherwise lose their source graph identity.
- */
-async function loadGraphQualifiedSharedMemoryQuads(
-  store: TripleStore,
-  graphs: readonly string[],
-  selection: SharedMemoryReadSelection,
-  options: LoadSelectedSharedMemoryQuadsOptions = {},
-): Promise<Quad[]> {
-  const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
-  const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const quads: Quad[] = [];
-  for (const graph of new Set(graphs)) {
-    assertSafeIri(graph);
-    const result = await store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH <${graph}> { ${innerGraphPattern} }
-      }`,
-      queryOptions,
-    );
-    if (result.type === 'quads') {
-      quads.push(...result.quads.map((quad) => ({ ...quad, graph })));
-    }
-  }
-  return options.quadFilter ? quads.filter(options.quadFilter) : quads;
-}
-
-/**
- * Converge a selected legacy-bucket / checksum-alias root closure into the
- * canonical named lifecycle graph. Storage owns graph discovery and
- * graph-qualified loading; lifecycle metadata repair remains the publisher's
- * responsibility.
- *
- * Checksum aliases are safe to delete after canonical insertion because they
- * identify this exact lifecycle. The bare legacy bucket is different: it
- * predates KA-number scoping and one root closure may be the only SWM copy for
- * multiple not-yet-finalized lifecycles. Keep that compatibility copy until a
- * higher-level owner can prove no sibling lifecycle references it. Exact named
- * reads exclude the bucket, so retaining it cannot contaminate the migrated KA.
- */
-export async function migrateSharedMemoryRootClosureToNamedLifecycle(
-  store: TripleStore,
-  bucketGraph: string,
-  selection: SharedMemoryReadSelection,
-  identity: NamedKnowledgeAssetGraphIdentity,
-  options: MigrateNamedLifecycleSharedMemoryOptions = {},
-): Promise<NamedLifecycleSharedMemoryMigrationResult> {
-  const scope = { kind: 'named-lifecycle', identity } as const;
-  const targetGraph = canonicalSharedMemoryScopeWriteGraph(bucketGraph, scope);
-  const namedGraphs = await resolveSharedMemoryScopeGraphs(
-    store,
-    bucketGraph,
-    scope,
-    options.graphResolution,
-  );
-  const namedQuads = await loadGraphQualifiedSharedMemoryQuads(
-    store,
-    namedGraphs,
-    selection,
-    { queryOptions: options.namedSource },
-  );
-  const legacyBucketQuads = await loadGraphQualifiedSharedMemoryQuads(
-    store,
-    [bucketGraph],
-    selection,
-    { queryOptions: options.legacyBucketSource },
-  );
-  if (namedQuads.length === 0 && legacyBucketQuads.length === 0) {
-    return {
-      sourceEmpty: true,
-      migratedLegacyQuadCount: 0,
-      targetGraph,
-    };
-  }
-
-  const canonicalQuadsByTriple = new Map<string, Quad>();
-  for (const quad of [...namedQuads, ...legacyBucketQuads]) {
-    const canonicalQuad = { ...quad, graph: targetGraph };
-    canonicalQuadsByTriple.set(
-      JSON.stringify([quad.subject, quad.predicate, quad.object]),
-      canonicalQuad,
-    );
-  }
-  await store.insert([...canonicalQuadsByTriple.values()]);
-
-  const legacyAliasQuads = namedQuads.filter((quad) => quad.graph !== targetGraph);
-  if (legacyAliasQuads.length > 0) await store.delete(legacyAliasQuads);
-
-  return {
-    sourceEmpty: false,
-    migratedLegacyQuadCount: legacyBucketQuads.length,
-    targetGraph,
-  };
-}
-
 async function loadSharedMemoryQuadsInternal(
   store: TripleStore,
   bucketGraph: string,
@@ -669,12 +602,88 @@ async function loadSharedMemoryQuadsInternal(
     );
   }
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
+  if (options.resultBudget) {
+    return loadSharedMemoryQuadsPaged(
+      store,
+      graphValues,
+      innerGraphPattern,
+      queryOptions,
+      options,
+    );
+  }
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }
         GRAPH ?g { ${innerGraphPattern} }
       }`, queryOptions);
   if (result.type !== 'quads') return [];
   return options.quadFilter ? result.quads.filter(options.quadFilter) : result.quads;
+}
+
+function normalizePositiveInteger(value: number, fallback: number): number {
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function estimateQuadHeapBytes(quad: Quad): number {
+  // V8 strings are up to two bytes/code-unit. Include a fixed object/field
+  // allowance so the bound remains conservative without allocating a serialized
+  // N-Quads copy merely to measure it.
+  return 96 + 2 * (
+    quad.subject.length + quad.predicate.length + quad.object.length + quad.graph.length
+  );
+}
+
+async function loadSharedMemoryQuadsPaged(
+  store: TripleStore,
+  graphValues: string,
+  innerGraphPattern: string,
+  queryOptions: QueryOptions | undefined,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+): Promise<Quad[]> {
+  const configured = options.resultBudget!;
+  const pageRows = normalizePositiveInteger(configured.pageRows, 1_000);
+  const maxRows = normalizePositiveInteger(configured.maxRows, pageRows);
+  const maxBytesEstimate = normalizePositiveInteger(configured.maxBytesEstimate, 64 * 1024 * 1024);
+  const quads: Quad[] = [];
+  let rawRows = 0;
+  let bytesEstimate = 0;
+  const source = queryOptions?.source ?? 'unknown';
+  const observeMaterialization = () => {
+    getMetrics().storeQueryResultRows.record(rawRows, { source });
+    getMetrics().storeQueryResultBytesEstimate.record(bytesEstimate, { source });
+  };
+
+  for (let offset = 0; ; offset += pageRows) {
+    const result = await store.query(`SELECT DISTINCT ?s ?p ?o WHERE {
+      VALUES ?g { ${graphValues} }
+      GRAPH ?g { ${innerGraphPattern} }
+    }
+    ORDER BY ?s ?p ?o
+    OFFSET ${offset}
+    LIMIT ${pageRows}`, queryOptions);
+    if (result.type !== 'bindings' || result.bindings.length === 0) break;
+
+    for (const row of result.bindings) {
+      const subject = row['s'];
+      const predicate = row['p'];
+      const object = row['o'];
+      if (!subject || !predicate || !object) continue;
+      rawRows += 1;
+      if (rawRows > maxRows) {
+        observeMaterialization();
+        throw new SharedMemoryResultBudgetError('rows', rawRows, bytesEstimate, maxRows);
+      }
+      const quad: Quad = { subject, predicate, object, graph: '' };
+      bytesEstimate += estimateQuadHeapBytes(quad);
+      if (bytesEstimate > maxBytesEstimate) {
+        observeMaterialization();
+        throw new SharedMemoryResultBudgetError('bytes', rawRows, bytesEstimate, maxBytesEstimate);
+      }
+      if (!options.quadFilter || options.quadFilter(quad)) quads.push(quad);
+    }
+    if (result.bindings.length < pageRows) break;
+  }
+  observeMaterialization();
+  return quads;
 }
 
 /**
@@ -802,6 +811,23 @@ export class ContextGraphManager {
     await this.store.createGraph(this.subGraphPrivateUri(contextGraphId, subGraphName));
     await this.store.createGraph(contextGraphSharedMemoryUri(contextGraphId, subGraphName));
     await this.store.createGraph(contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName));
+  }
+
+  /** Reject an ID that would alias one of the storage-owned partitions. */
+  assertNewContextGraphId(contextGraphId: string): void {
+    const validation = validateNewContextGraphId(contextGraphId);
+    if (!validation.valid) {
+      throw new Error(`Invalid context graph ID: ${validation.reason}`);
+    }
+  }
+
+  /**
+   * Create the storage partitions for a newly-authored context graph.
+   * Existing read and sync paths intentionally keep using ensureContextGraph.
+   */
+  async ensureNewContextGraph(contextGraphId: string): Promise<void> {
+    this.assertNewContextGraphId(contextGraphId);
+    await this.ensureContextGraph(contextGraphId);
   }
 
   async ensureContextGraph(contextGraphId: string): Promise<void> {

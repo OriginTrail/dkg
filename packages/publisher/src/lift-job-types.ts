@@ -46,6 +46,24 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly subGraphName?: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];
+  /** Graph-scoped v2 discriminator. Missing/one is a legacy read-only job. */
+  readonly contentScopeVersion?: number;
+  /** Canonical UAL for the one atomic queued Knowledge Asset. */
+  readonly kaUal?: string;
+  /** One-based assertion version included in the immutable graph identity. */
+  readonly assertionVersion?: string;
+  /** Exact public triple count committed by the queued seal. */
+  readonly publicTripleCount?: number;
+  /** Optional single KA-level private commitment. */
+  readonly privateMerkleRoot?: LiftJobHex;
+  /** Exact private triple count committed by privateMerkleRoot. */
+  readonly privateTripleCount?: number;
+  /** Immutable access policy captured with the queued SWM snapshot. */
+  readonly accessPolicy?: LiftAccessPolicy;
+  /** Canonical peer allow-list when accessPolicy is allowList. */
+  readonly allowedPeers?: readonly string[];
+  /** V10 selective-disclosure mode captured at enqueue. */
+  readonly entityProofs?: boolean;
   /** Author seal captured with the queued SWM share snapshot. */
   readonly seal: LiftRequestAuthorSeal;
   readonly sealChainId: LiftJobBigInt;
@@ -67,6 +85,13 @@ export interface LiftPublishSnapshotRequest {
   readonly shareOperationId: string;
   readonly roots: readonly string[];
   readonly contextGraphId: string;
+  /** Graph-scoped v2 discriminator. Missing/one is a legacy read-only snapshot. */
+  readonly contentScopeVersion?: number;
+  readonly kaUal?: string;
+  readonly assertionVersion?: string;
+  readonly publicTripleCount?: number;
+  readonly privateMerkleRoot?: LiftJobHex;
+  readonly privateTripleCount?: number;
   readonly priorVersion?: string;
   readonly subGraphName?: string;
   readonly accessPolicy?: LiftAccessPolicy;
@@ -92,10 +117,17 @@ export interface LiftRequestBase extends LiftPublishSnapshotRequest, LiftPublish
   readonly namespace: string;
 }
 
+/**
+ * Persisted V10 root-lift request. Kept only so existing queue records can be
+ * inspected and recovered; runtime enqueue is disabled by default.
+ *
+ * @deprecated Legacy root-scoped Knowledge Assets are read-only.
+ */
 export interface RawLiftRequest extends LiftRequestBase {
   readonly jobType?: 'lift';
 }
 
+/** @deprecated Use KnowledgeAssetVmPublishRequest for all new queue writes. */
 export type LiftRequest = RawLiftRequest;
 
 export interface RawLiftJobRequest {

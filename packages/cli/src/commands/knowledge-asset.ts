@@ -104,11 +104,6 @@ function parseFinalizeAuthorOptions(opts: ActionOpts): {
   };
 }
 
-function parseShareEntities(opts: ActionOpts): string[] | undefined {
-  if (!opts.entity || opts.entity.length === 0) return undefined;
-  return opts.entity.map(String);
-}
-
 function parseShareJobStates(raw: unknown): KnowledgeAssetShareJobState[] | undefined {
   if (raw === undefined) return undefined;
   const states = String(raw)
@@ -346,15 +341,15 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   addFinalizeAuthorOptions(addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('finalize <name>')
-      .description('Finalize/seal a Knowledge Asset from WM, or from SWM with --layer swm')
-      .option('--layer <layer>', 'Layer to finalize: wm or swm (default: wm)'),
+      .description('Finalize/seal a Knowledge Asset from WM')
+      .option('--layer <layer>', 'Deprecated compatibility option: wm (swm is read-only)'),
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
+      const authorOptions = parseFinalizeAuthorOptions(opts);
       const layer = opts.layer === undefined ? undefined : String(opts.layer);
       if (layer !== undefined && layer !== 'wm' && layer !== 'swm') {
         throw new Error('--layer must be wm or swm');
       }
-      const authorOptions = parseFinalizeAuthorOptions(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetFinalize(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
@@ -371,18 +366,14 @@ export function registerKnowledgeAssetCommand(program: Command): void {
     kaCmd
       .command('share <name>')
       .description('Share a finalized Knowledge Asset from WM to SWM')
-      .option('--entity <uri...>', 'Share only specific root entities (defaults to all)')
-      .option('--await-curator-ack', 'Require curator acknowledgement')
-      .option('--skip-seal', 'Share without sealing; not publishable until finalized/sealed later'),
+      .option('--await-curator-ack', 'Require curator acknowledgement'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetShare(contextGraphId, name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
-        ...(parseShareEntities(opts) ? { entities: parseShareEntities(opts) } : {}),
         ...(opts.awaitCuratorAck === true ? { awaitCuratorAck: true } : {}),
-        ...(opts.skipSeal === true ? { skipSeal: true } : {}),
       });
       assertSharePromotedContent(result, name, contextGraphId);
       console.log('Knowledge asset shared to SWM:');
@@ -399,14 +390,12 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('share-async <name>')
-      .description('Enqueue an async WM-to-SWM share job for a Knowledge Asset')
-      .option('--entity <uri...>', 'Share only specific root entities (defaults to all)'),
+      .description('Enqueue an async WM-to-SWM share job for a Knowledge Asset'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetShareAsync(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
-        ...(parseShareEntities(opts) ? { entities: parseShareEntities(opts) } : {}),
       });
       console.log('Knowledge asset share job accepted:');
       console.log(`  Job ID:  ${result.jobId}`);

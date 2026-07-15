@@ -23,6 +23,7 @@ import {
   type AsyncLiftPublisherRecoveryResult,
   type LiftRequest,
 } from '../src/index.js';
+import { withLegacyRawLiftTestSeeder } from './_helpers/legacy-raw-lift.js';
 
 function makeLiftRequest(overrides: Partial<LiftRequest> = {}): LiftRequest {
   return {
@@ -53,19 +54,25 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
     recoveryResult?: AsyncLiftPublisherRecoveryResult | null;
     publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   } = {}) {
-    return new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++time,
-      idGenerator: () => `job-${++ids}`,
+    const clock = () => ++time;
+    const nextId = () => `job-${++ids}`;
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: clock,
+      idGenerator: nextId,
       chainRecoveryResolver: opts.recoveryResult === undefined
         ? undefined
         : async () => opts.recoveryResult ?? null,
       publishExecutor: opts.publishExecutor,
     });
+    return withLegacyRawLiftTestSeeder(publisher, store, {
+      now: clock,
+      idGenerator: nextId,
+    });
   }
 
   it('lift → claimNext → status transitions accepted→claimed', async () => {
     const pub = create();
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
     expect(jobId).toBe('job-1');
 
     const status = await pub.getStatus(jobId);
@@ -79,9 +86,9 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
 
   it('multiple jobs are claimed in FIFO order by different wallets', async () => {
     const pub = create();
-    const id1 = await pub.lift(makeLiftRequest({ contextGraphId: 'cg-1' }));
-    const id2 = await pub.lift(makeLiftRequest({ contextGraphId: 'cg-2' }));
-    const id3 = await pub.lift(makeLiftRequest({ contextGraphId: 'cg-3' }));
+    const id1 = await pub.seedLegacyRawLift(makeLiftRequest({ contextGraphId: 'cg-1' }));
+    const id2 = await pub.seedLegacyRawLift(makeLiftRequest({ contextGraphId: 'cg-2' }));
+    const id3 = await pub.seedLegacyRawLift(makeLiftRequest({ contextGraphId: 'cg-3' }));
 
     // Each wallet can only hold one active lock, so use different wallets
     const c1 = await pub.claimNext('wallet-1');
@@ -98,7 +105,7 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
 
   it('pause prevents claiming; resume re-enables', async () => {
     const pub = create();
-    await pub.lift(makeLiftRequest());
+    await pub.seedLegacyRawLift(makeLiftRequest());
 
     await pub.pause();
     const duringPause = await pub.claimNext('wallet-1');
@@ -111,7 +118,7 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
 
   it('cancel removes a pending job', async () => {
     const pub = create();
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
 
     await pub.cancel(jobId);
     const status = await pub.getStatus(jobId);
@@ -124,8 +131,8 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
 
   it('stats reflect live queue composition', async () => {
     const pub = create();
-    await pub.lift(makeLiftRequest());
-    await pub.lift(makeLiftRequest());
+    await pub.seedLegacyRawLift(makeLiftRequest());
+    await pub.seedLegacyRawLift(makeLiftRequest());
 
     let stats = await pub.getStats();
     expect(stats['accepted']).toBe(2);
@@ -148,7 +155,7 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
       }),
     });
 
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
     const claimed = await pub.claimNext('wallet-1');
     expect(claimed).not.toBeNull();
 
@@ -186,8 +193,8 @@ describe('Async Lift Publisher Queue — E2E Pipeline', () => {
 
   it('two wallets claim different jobs in parallel', async () => {
     const pub = create();
-    await pub.lift(makeLiftRequest());
-    await pub.lift(makeLiftRequest());
+    await pub.seedLegacyRawLift(makeLiftRequest());
+    await pub.seedLegacyRawLift(makeLiftRequest());
 
     const c1 = await pub.claimNext('wallet-A');
     const c2 = await pub.claimNext('wallet-B');
@@ -209,10 +216,22 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
     ids = 0;
   });
 
+  function createSeededPublisher(config: AsyncLiftPublisherConfig = {}) {
+    const clock = () => ++time;
+    const nextId = () => `job-${++ids}`;
+    return withLegacyRawLiftTestSeeder(
+      new TripleStoreAsyncLiftPublisher(store, {
+        now: clock,
+        idGenerator: nextId,
+        ...config,
+      }),
+      store,
+      { now: clock, idGenerator: nextId },
+    );
+  }
+
   it('job transitions through entire lifecycle: accepted → claimed → validated → broadcast → included → finalized', async () => {
-    const pub = new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++time,
-      idGenerator: () => `job-${++ids}`,
+    const pub = createSeededPublisher({
       publishExecutor: async () => ({
         status: 'confirmed' as const,
         merkleRoot: new Uint8Array(32),
@@ -223,7 +242,7 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
       }),
     });
 
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
     expect((await pub.getStatus(jobId))?.status).toBe('accepted');
 
     const claimed = await pub.claimNext('wallet-1');
@@ -262,12 +281,9 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
   });
 
   it('job stuck at accepted never reaches finalized without claim', async () => {
-    const pub = new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++time,
-      idGenerator: () => `job-${++ids}`,
-    });
+    const pub = createSeededPublisher();
 
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
 
     const stats = await pub.getStats();
     expect(stats['accepted']).toBe(1);
@@ -279,12 +295,9 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
   });
 
   it('invalid state transition is rejected', async () => {
-    const pub = new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++time,
-      idGenerator: () => `job-${++ids}`,
-    });
+    const pub = createSeededPublisher();
 
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
 
     // Jumping 'accepted' → 'broadcast' without first going through
     // 'claimed' + 'validated' is a double fail-closed: the state
@@ -330,12 +343,18 @@ describe('Async Lift Publisher Queue — Recovery', () => {
   });
 
   function create(opts: { recoveryResult?: AsyncLiftPublisherRecoveryResult | null } = {}) {
-    return new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++time,
-      idGenerator: () => `job-${++ids}`,
+    const clock = () => ++time;
+    const nextId = () => `job-${++ids}`;
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: clock,
+      idGenerator: nextId,
       chainRecoveryResolver: opts.recoveryResult === undefined
         ? undefined
         : async () => opts.recoveryResult ?? null,
+    });
+    return withLegacyRawLiftTestSeeder(publisher, store, {
+      now: clock,
+      idGenerator: nextId,
     });
   }
 
@@ -347,7 +366,7 @@ describe('Async Lift Publisher Queue — Recovery', () => {
       },
     });
 
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
     await pub.claimNext('wallet-1');
     await pub.update(jobId, 'validated', VALIDATION_META);
     await pub.update(jobId, 'broadcast', BROADCAST_META);
@@ -362,7 +381,7 @@ describe('Async Lift Publisher Queue — Recovery', () => {
   it('recover fails broadcast jobs when resolver returns null and timeout elapses', async () => {
     const pub = create({ recoveryResult: null });
 
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
     await pub.claimNext('wallet-1');
     await pub.update(jobId, 'validated', VALIDATION_META);
     await pub.update(jobId, 'broadcast', BROADCAST_META);
@@ -380,7 +399,7 @@ describe('Async Lift Publisher Queue — Recovery', () => {
   it('retry re-queues retryable failed jobs (workspace_unavailable)', async () => {
     // Manually create a failed job with workspace_unavailable (retryable)
     const pub = create();
-    const jobId = await pub.lift(makeLiftRequest());
+    const jobId = await pub.seedLegacyRawLift(makeLiftRequest());
     await pub.claimNext('wallet-1');
 
     // Simulate a retryable failure by walking through internal update

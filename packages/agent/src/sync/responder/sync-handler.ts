@@ -14,6 +14,8 @@ import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
+  createResponderExactGraphPagePlanMemo,
+  createResponderFreshSwmDataGraphPlanMemo,
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
@@ -433,6 +435,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
     { phase: 'shared_memory', budget: responderSnapshotBudget },
   );
+  const freshSwmDataGraphPlanMemo = createResponderFreshSwmDataGraphPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
+  const durableDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+  );
+  const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
   const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
@@ -583,11 +597,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           if (!snapshotRef || !publicSnapshotStore) {
             return new TextEncoder().encode('');
           }
-          const snapshot = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal);
-          if (!snapshot) {
-            return new TextEncoder().encode('');
-          }
-          const page = snapshot.slice(offset, offset + limit);
+          const page = publicSnapshotStore.getSnapshotPage
+            ? await raceAgainstAbort(
+              publicSnapshotStore.getSnapshotPage(snapshotRef, offset, limit, { signal }),
+              signal,
+            )
+            : (await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal))
+              ?.slice(offset, offset + limit);
+          if (!page) return new TextEncoder().encode('');
           if (page.length === 0) {
             return new TextEncoder().encode('');
           }
@@ -664,6 +681,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            freshGraphPlanMemo: freshSwmDataGraphPlanMemo,
+            exactGraphPlanMemo: swmDataExactGraphPlanMemo,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -750,6 +769,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
+          exactGraphPlanMemo: durableDataExactGraphPlanMemo,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();

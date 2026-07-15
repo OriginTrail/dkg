@@ -89,6 +89,80 @@ describe('context graph catch-up readiness classification', () => {
     });
   });
 
+  it('uses a clean private-only durable completion even when another peer denies and times out', () => {
+    const result = mixedPeerResult(0);
+    result.dataSynced = 0;
+    result.peersSucceeded = 1;
+    if (!result.cleanPlaneCompletions || !result.diagnostics?.durable) {
+      throw new Error('durable completion evidence missing');
+    }
+    result.cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers = 1;
+    result.diagnostics.durable.fetchedDataTriples = 0;
+    result.diagnostics.durable.insertedDataTriples = 0;
+    result.diagnostics.durable.verifiedPrivateOnlyResponses = 1;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'done',
+      statePatch: {
+        synced: true,
+        sharedMemorySynced: false,
+      },
+      readinessPatch: {
+        durableVerified: true,
+        sharedMemoryVerified: false,
+      },
+      eventPayload: {
+        dataSynced: 0,
+        sharedMemorySynced: 0,
+        verifiedPrivateOnlyResponses: 1,
+      },
+    });
+  });
+
+  it('accepts legacy-runner diagnostics for a clean verified private-only durable response', () => {
+    const result = mixedPeerResult(0);
+    delete result.cleanPlaneCompletions;
+    result.dataSynced = 0;
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.peersSucceeded = 1;
+    if (!result.diagnostics?.durable) throw new Error('durable diagnostics missing');
+    result.diagnostics.durable.fetchedMetaTriples = 8;
+    result.diagnostics.durable.fetchedDataTriples = 0;
+    result.diagnostics.durable.insertedMetaTriples = 8;
+    result.diagnostics.durable.insertedDataTriples = 0;
+    result.diagnostics.durable.verifiedPrivateOnlyResponses = 1;
+    result.diagnostics.durable.timedOutPhases = 0;
+    result.diagnostics.durable.deniedPhases = 0;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'done',
+      readinessPatch: {
+        durableVerified: true,
+        sharedMemoryVerified: false,
+      },
+      eventPayload: {
+        verifiedPrivateOnlyResponses: 1,
+      },
+    });
+  });
+
   it('keeps same-peer partial progress unready when no peer completed cleanly', () => {
     const classification = classifyContextGraphCatchupReadiness({
       result: mixedPeerResult(0),
