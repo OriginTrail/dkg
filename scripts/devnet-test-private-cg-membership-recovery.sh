@@ -578,11 +578,12 @@ REMOTE
 
 audit_testnet_health_samples() {
   local baseline_file="$RUN_DIR/health-baselines.jsonl"
+  local restart_nodes=("$@")
   node "$HARNESS_TOOL" audit-testnet-health \
     "$baseline_file" "$RUN_DIR/health-samples.jsonl" \
     "$TESTNET_MAX_ACCEPT_QUEUE" "$TESTNET_MAX_MEMORY_USED_PERCENT" \
     "$TESTNET_MAX_LOAD_PER_CPU_PERCENT" "$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" \
-    "$CURATOR_NODE" "$JOINER_NODE"
+    "${restart_nodes[@]}"
 }
 
 audit_node_health() {
@@ -606,7 +607,7 @@ audit_node_health() {
     done
     [ "$findings" -eq 0 ] \
       || fail "$findings testnet node(s) logged an OOM, process crash, or Oxigraph fatal condition"
-    if ! health_report="$(audit_testnet_health_samples 2>&1)"; then
+    if ! health_report="$(audit_testnet_health_samples "$CURATOR_NODE" "$JOINER_NODE" 2>&1)"; then
       save_artifact "health-audit.json" "$health_report"
       fail "testnet health samples failed the OOM/sustained-saturation gate"
     fi

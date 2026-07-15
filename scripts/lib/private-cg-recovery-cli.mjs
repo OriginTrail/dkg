@@ -127,6 +127,10 @@ async function main() {
       }));
       return;
     case 'audit-testnet-health': {
+      const restartNodes = args.slice(6).map((value) => Number(value));
+      if (restartNodes.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+        throw new Error('audit-testnet-health restart nodes must be positive integers');
+      }
       const report = auditTestnetHealthFiles({
         baselineFile: args[0],
         samplesFile: args[1],
@@ -136,7 +140,7 @@ async function main() {
           maxLoadPerCpuPercent: Number(args[4]),
           consecutiveSamples: Number(args[5]),
         },
-        restartNodes: [Number(args[6]), Number(args[7])],
+        restartNodes,
       });
       writeJson(report, true);
       if (!report.passed) process.exitCode = 1;

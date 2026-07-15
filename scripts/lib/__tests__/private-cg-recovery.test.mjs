@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -139,6 +140,29 @@ test('testnet release-gate constraints fail at the shell boundary before SSH', (
     assert.match(result.stderr, expected);
     assert.doesNotMatch(result.stderr, /SSH is required/);
   }
+});
+
+test('testnet health restart allowances are applied only after planned restarts', () => {
+  const harness = fs.readFileSync(HARNESS, 'utf8');
+  const helperStart = harness.indexOf('audit_testnet_health_samples() {');
+  const helperEnd = harness.indexOf('\n}\n\naudit_node_health()', helperStart);
+  const helper = harness.slice(helperStart, helperEnd);
+  assert.match(helper, /local restart_nodes=\("\$@"\)/);
+  assert.match(helper, /"\$\{restart_nodes\[@\]\}"/);
+
+  const preflightStart = harness.indexOf('sample_node_health preflight');
+  const preflightEnd = harness.indexOf('save_artifact "preflight-health-audit.json"', preflightStart);
+  const preflight = harness.slice(preflightStart, preflightEnd);
+  assert.match(preflight, /audit_testnet_health_samples 2>&1/);
+  assert.doesNotMatch(preflight, /audit_testnet_health_samples "\$CURATOR_NODE"/);
+
+  const finalAuditStart = harness.indexOf('audit_node_health() {');
+  const finalAuditEnd = harness.indexOf('\n}\n', finalAuditStart);
+  const finalAudit = harness.slice(finalAuditStart, finalAuditEnd);
+  assert.match(
+    finalAudit,
+    /audit_testnet_health_samples "\$CURATOR_NODE" "\$JOINER_NODE" 2>&1/,
+  );
 });
 
 test('payload and integrity validation normalize term strings and SPARQL-JSON bindings', () => {
