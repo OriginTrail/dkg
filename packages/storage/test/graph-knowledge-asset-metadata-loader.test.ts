@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  buildGraphKnowledgeAssetMetadataQuery,
+  parseDeterministicKnowledgeAssetUal,
+} from '@origintrail-official/dkg-core';
+import {
   resolveGraphScopedOrLegacyMetadata,
   type QueryResult,
   type TripleStore,
@@ -33,6 +37,32 @@ describe('graph-scoped-first metadata resolution', () => {
       kind: 'legacy',
       metadata: { rootEntity: 'urn:legacy:root' },
     });
+  });
+
+  it('canonicalizes a bare non-canonical UAL before the V2 marker lookup', async () => {
+    // A leading-zero KA number (like a checksum-cased address) is a valid but
+    // non-canonical alias of the same asset. V2 markers are stored under the
+    // canonical form, so the marker lookup MUST query the canonical UAL — else
+    // the alias misses its own marker and falls through to the legacy reader,
+    // serving quarantined legacy rows / the private bag under the legacy access
+    // policy. Regression: this fails if the raw input is queried verbatim.
+    const ALIAS_UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/007';
+    const canonicalUal = parseDeterministicKnowledgeAssetUal(ALIAS_UAL).ual;
+    expect(canonicalUal).toBe(UAL); // /007 normalizes to /7
+
+    const captured: string[] = [];
+    const store = {
+      query: vi.fn(async (q: string): Promise<QueryResult> => {
+        captured.push(q);
+        return { type: 'bindings', bindings: [] };
+      }),
+    } as Pick<TripleStore, 'query'> as TripleStore;
+    const loadLegacy = vi.fn(async () => null);
+
+    await resolveGraphScopedOrLegacyMetadata(store, ALIAS_UAL, loadLegacy);
+
+    expect(captured[0]).toBe(buildGraphKnowledgeAssetMetadataQuery(canonicalUal));
+    expect(captured[0]).not.toContain('/007'); // never queried the raw alias
   });
 
   it('fails closed on an incomplete V2 marker without invoking legacy lookup', async () => {

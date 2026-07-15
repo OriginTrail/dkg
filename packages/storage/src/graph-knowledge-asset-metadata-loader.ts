@@ -1,6 +1,7 @@
 import {
   buildGraphKnowledgeAssetMetadataQuery,
   parseGraphKnowledgeAssetMetadataBindings,
+  parseDeterministicKnowledgeAssetUal,
   type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
 import type { QueryOptions, TripleStore } from './triple-store.js';
@@ -23,12 +24,25 @@ export async function resolveGraphScopedOrLegacyMetadata<TLegacy>(
   loadLegacyMetadata: () => Promise<TLegacy | null>,
   queryOptions?: QueryOptions,
 ): Promise<GraphScopedOrLegacyMetadata<TLegacy>> {
+  // Canonicalize a bare deterministic UAL before the V2 marker lookup. V2
+  // markers are stored under the canonical form (lowercase author address,
+  // BigInt-normalized KA number), so a checksum-cased or leading-zero variant
+  // — what ethers-based clients emit — would otherwise miss its own marker and
+  // fall through to the legacy reader, serving quarantined legacy rows and the
+  // private bag under the legacy access policy. Non-deterministic identifiers
+  // stay eligible for legacy read-both.
+  let graphScopedUal = ual;
+  try {
+    graphScopedUal = parseDeterministicKnowledgeAssetUal(ual).ual;
+  } catch {
+    // Non-deterministic identifiers remain eligible for legacy read-both.
+  }
   const result = await store.query(
-    buildGraphKnowledgeAssetMetadataQuery(ual),
+    buildGraphKnowledgeAssetMetadataQuery(graphScopedUal),
     queryOptions,
   );
   const parsed = parseGraphKnowledgeAssetMetadataBindings(
-    ual,
+    graphScopedUal,
     result.type === 'bindings' ? result.bindings : [],
   );
   if (parsed.kind === 'graph') return parsed;
