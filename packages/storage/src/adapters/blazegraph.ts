@@ -19,7 +19,11 @@ import {
 } from './sparql-json-results.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
+import {
+  assertQuadLiteralsMutf8Safe,
+  getMetrics,
+  JAVA_WRITE_UTF_MAX_BYTES,
+} from '@origintrail-official/dkg-core';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import {
   buildAtomicGraphReplaceUpdate,
@@ -114,7 +118,13 @@ function createStoreOperationDeadline(
   const waitFor = async <T>(work: Promise<T>): Promise<T> => {
     let result: T;
     try {
-      result = await raceAgainstAbort(work, controller.signal);
+      // Do not race the operation against the abort signal here. The signal is
+      // already passed to fetch (and therefore to its response body), so the
+      // underlying promise settles only after the HTTP stack has processed the
+      // cancellation. Racing would reject the scheduler task immediately and
+      // release its admission slot while the prior Blazegraph request could
+      // still be unwinding server-side, allowing a retry to overlap it.
+      result = await work;
     } catch (error) {
       // The timer callback may be delayed by synchronous response processing.
       // Re-check the monotonic deadline before preserving an underlying error
@@ -138,38 +148,6 @@ function createStoreOperationDeadline(
       detachCaller();
     },
   };
-}
-
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let listening = false;
-    const cleanup = () => {
-      if (!listening) return;
-      listening = false;
-      signal.removeEventListener('abort', onAbort);
-    };
-    const onAbort = () => {
-      cleanup();
-      reject(abortError(signal));
-    };
-    work.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      },
-    );
-    if (signal.aborted) {
-      onAbort();
-    } else {
-      listening = true;
-      signal.addEventListener('abort', onAbort, { once: true });
-      if (signal.aborted) onAbort();
-    }
-  });
 }
 
 /**
@@ -197,10 +175,13 @@ export class BlazegraphStore implements TripleStore {
     work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
     const deadline = createStoreOperationDeadline(this.operationTimeoutMs, options?.signal);
+    const source = options?.source ?? `blazegraph.${operation}`;
+    let admitted = false;
     const scheduled = externalStorePriorityScheduler.run(
       options?.priority,
-      options?.source ?? `blazegraph.${operation}`,
+      source,
       async () => {
+        admitted = true;
         deadline.check();
         const result = await work(deadline);
         deadline.check();
@@ -208,7 +189,19 @@ export class BlazegraphStore implements TripleStore {
       },
       deadline.signal,
     );
-    return scheduled.finally(deadline.dispose);
+    return scheduled
+      .catch((error) => {
+        // This runs only after the admitted work promise has settled. Combined
+        // with StoreOperationDeadline.waitFor awaiting the real fetch/body
+        // promise, the metric means transport cleanup completed before the
+        // caller can launch a retry. Queued work that expired before admission
+        // is intentionally excluded.
+        if (admitted && deadline.signal.aborted) {
+          getMetrics().storeCancellationCompletedTotal.add(1, { operation, source });
+        }
+        throw error;
+      })
+      .finally(deadline.dispose);
   }
 
   getPressureSnapshot(): StorePressureSnapshot {

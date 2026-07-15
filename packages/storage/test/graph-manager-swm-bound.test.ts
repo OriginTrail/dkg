@@ -11,6 +11,7 @@ import {
   resolveSharedMemoryReadGraphs,
   type Quad,
   type SwmKaGraphBound,
+  SharedMemoryResultBudgetError,
 } from '../src/index.js';
 // The unsafe bounded primitives are deliberately NOT re-exported from `src/index.ts`
 // (pruning is not part of the package's public surface — see the API-surface test at
@@ -509,6 +510,29 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       // Unbounded ⇒ both authors read; accept applied exactly once.
       expect(quads.map((q) => q.object).sort()).toEqual(['"a"', '"b"']);
       expect(accepts).toBe(1);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+describe('bounded SWM result materialization', () => {
+  it('rejects before retaining a result beyond the configured row budget', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('result-budget');
+    const root = 'urn:budget:root';
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p:1', object: '"one"', graph: swm },
+        { subject: root, predicate: 'urn:p:2', object: '"two"', graph: swm },
+      ]);
+
+      await expect(loadSelectedSharedMemoryQuads(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { resultBudget: { pageRows: 1, maxRows: 1, maxBytesEstimate: 1024 * 1024 } },
+      )).rejects.toBeInstanceOf(SharedMemoryResultBudgetError);
     } finally {
       await store.close();
     }

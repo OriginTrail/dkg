@@ -1604,6 +1604,10 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.vmReconcileTimer);
       this.vmReconcileTimer = null;
     }
+    if (this.vmReconcileStartupTimer) {
+      clearTimeout(this.vmReconcileStartupTimer);
+      this.vmReconcileStartupTimer = null;
+    }
     // Close admission before any network/store teardown. Pending reconciles
     // are rejected immediately and therefore can never start after shutdown
     // begins; an already-active pass gets a bounded grace period because

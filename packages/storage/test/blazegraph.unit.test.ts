@@ -325,54 +325,85 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   });
 
   it('keeps the SELECT deadline active through response JSON decoding', async () => {
-    let rejectBody!: (reason?: unknown) => void;
-    const body = new Promise<unknown>((_resolve, reject) => {
-      rejectBody = reject;
+    setFetch(async (_url, init) => {
+      const body = new Promise<unknown>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: () => body,
+      } as Response;
     });
-    setFetch(async () => ({
-      ok: true,
-      status: 200,
-      json: () => body,
-    }) as Response);
     const s = new BlazegraphStore(baseUrl, { timeout: 20 });
 
-    try {
-      const outcome = await outcomeWithin(
-        s.query('SELECT ?s WHERE { ?s ?p ?o }'),
-        200,
-      );
-      expect(outcome).toMatchObject({ name: 'TimeoutError' });
-    } finally {
-      rejectBody(new Error('late JSON failure'));
-    }
+    const outcome = await outcomeWithin(
+      s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
   });
 
   it('keeps the UPDATE deadline active while reading an error response body', async () => {
-    let rejectBody!: (reason?: unknown) => void;
-    const body = new Promise<string>((_resolve, reject) => {
-      rejectBody = reject;
+    setFetch(async (_url, init) => {
+      const body = new Promise<string>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+      return {
+        ok: false,
+        status: 500,
+        text: () => body,
+      } as Response;
     });
-    setFetch(async () => ({
-      ok: false,
-      status: 500,
-      text: () => body,
-    }) as Response);
     const s = new BlazegraphStore(baseUrl, { timeout: 20 });
 
-    try {
-      const outcome = await outcomeWithin(
-        s.update('DELETE WHERE { ?s ?p ?o }'),
-        200,
-      );
-      expect(outcome).toMatchObject({ name: 'TimeoutError' });
-    } finally {
-      rejectBody(new Error('late body failure'));
-    }
+    const outcome = await outcomeWithin(
+      s.update('DELETE WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('does not return a timeout until the aborted Blazegraph attempt has stopped', async () => {
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    setFetch(async (_url, init) => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      if (calls > 1) {
+        active -= 1;
+        return blazeSelectResponse();
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          // Model delayed HTTP/server cleanup after Blazegraph receives the
+          // cancellation. The adapter must not release admission or reject the
+          // caller until this underlying attempt has actually settled.
+          setTimeout(() => {
+            active -= 1;
+            reject(init.signal?.reason);
+          }, 20);
+        }, { once: true });
+      });
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 5 });
+
+    await expect(s.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
+    expect(active).toBe(0);
+
+    await expect(s.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
+      type: 'bindings',
+    });
+    expect(maxActive).toBe(1);
   });
 
   it('expires queued work before fetch and never dispatches it later', async () => {
     const before = getExternalStorePrioritySchedulerSnapshot();
-    const normalSlots = before.maxConcurrent - before.ackReservedSlots;
+    const normalSlots = before.maxConcurrent
+      - before.ackReservedSlots
+      - (before.healthReservedSlots ?? 0);
     const releases: Array<(response: Response) => void> = [];
     const blockers: Array<Promise<unknown>> = [];
     let fetchCount = 0;
@@ -439,7 +470,8 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(before.ackReservedSlots).toBeGreaterThan(0);
     const backgroundSlots = before.maxConcurrent
       - before.ackReservedSlots
-      - before.normalReservedSlots;
+      - (before.healthReservedSlots ?? 0)
+      - (before.normalReservedSlots ?? 0);
     const arrivals: Array<'listGraphs' | 'ack' | 'other'> = [];
     const releaseHeldListGraphs: Array<() => void> = [];
     const backgroundWork: Array<Promise<unknown>> = [];

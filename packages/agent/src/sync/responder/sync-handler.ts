@@ -14,6 +14,7 @@ import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
+  createResponderFreshSwmDataGraphPlanMemo,
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
@@ -433,6 +434,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
     { phase: 'shared_memory', budget: responderSnapshotBudget },
   );
+  const freshSwmDataGraphPlanMemo = createResponderFreshSwmDataGraphPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
   const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
@@ -664,6 +669,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            freshGraphPlanMemo: freshSwmDataGraphPlanMemo,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();

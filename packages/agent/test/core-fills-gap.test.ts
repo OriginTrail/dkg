@@ -43,7 +43,12 @@ import {
   contextGraphWorkspaceMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
-import type { ReplicationEvent, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
+import type {
+  ReplicationEvent,
+  ContextGraphSubscriptionRecord,
+  ContextGraphSubscriptionStore,
+  VmReconcileNegativeRecord,
+} from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
 import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
 
@@ -712,9 +717,13 @@ describe('Phase D - VM reconcile damping', () => {
     }
   });
 
-  async function boot(): Promise<AgentInternals> {
+  async function boot(contextGraphSubscriptionStore?: ContextGraphSubscriptionStore): Promise<AgentInternals> {
     const chain = new MockChainAdapter();
-    agent = await DKGAgent.create({ name: 'VmReconcileDamping', chainAdapter: chain });
+    agent = await DKGAgent.create({
+      name: 'VmReconcileDamping',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore,
+    });
     stubNode(agent);
     return agent as unknown as AgentInternals;
   }
@@ -755,6 +764,44 @@ describe('Phase D - VM reconcile damping', () => {
     await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBe(0);
+  });
+
+  it('rehydrates a generation-gated miss after restart without repeating the scan', async () => {
+    const durable = new Map<string, VmReconcileNegativeRecord>();
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
+      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
+      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
+      deleteVmReconcileNegativesForContextGraph: async (cg) => {
+        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
+      },
+    };
+    const onChainCgId = 52n;
+    let internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
+    (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
+    await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
+    expect(durable.size).toBe(1);
+
+    await agent!.stop();
+    agent = null;
+    internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+    await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
+    expect(expensiveScans).toBe(0);
+    expect(fetch.calls).toHaveLength(0);
   });
 
   it('does not reuse a negative cache entry after catchup peer topology changes', async () => {
@@ -958,7 +1005,7 @@ describe('Phase D - VM reconcile damping', () => {
     );
 
     await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertWorkspaceDataTriple(internals.store, '48', entity, value);
 
@@ -1025,7 +1072,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '52', entity, staleValue);
 
     await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await replaceWorkspaceDataTriple(internals.store, '52', entity, freshValue);
 
@@ -1059,7 +1106,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '49', entity, value);
 
     await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
 
@@ -1295,7 +1342,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
-  it('does not negative-cache misses once candidate SWM operation metadata exists', async () => {
+  it('negative-caches unchanged incomplete SWM operations and invalidates on namespace/content changes', async () => {
     const internals = await boot();
     const onChainCgId = 43n;
     registerUnmatchedKC(internals.chain, 9002n, onChainCgId);
@@ -1319,7 +1366,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
     expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertWorkspaceOperationMeta(
       internals.store,
@@ -1655,6 +1702,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       tryTriggerPeriodic: (cg: string) => {
         periodicTriggered.push(cg);
         return true;
+      },
+      dispatch: async (cg: string, source: 'live' | 'periodic' | 'manual') => {
+        if (source === 'periodic') periodicTriggered.push(cg);
+        else if (source === 'live') liveTriggered.push(cg);
+        return {};
       },
     };
 

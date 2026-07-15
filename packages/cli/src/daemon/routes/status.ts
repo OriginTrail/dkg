@@ -448,6 +448,7 @@ function getCachedExternalStoreQuads(
       try {
         const r = await agent.store.query(
           'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
+          { priority: 'health', source: 'daemon.status.storeQuads' },
         );
         let value: number | null = null;
         if (r.type === 'bindings' && r.bindings.length > 0) {

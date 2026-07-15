@@ -168,7 +168,6 @@ describe('DKGAgent sync fetch coalescing', () => {
       { name: 'includeSharedMemory', base: {}, variant: { includeSharedMemory: true, graphUri: 'did:dkg:context-graph:coalesced-cg/_shared_memory' } },
       { name: 'phase', base: {}, variant: { phase: 'meta', graphUri: 'did:dkg:context-graph:coalesced-cg/_meta' } },
       { name: 'graphUri', base: {}, variant: { graphUri: 'did:dkg:context-graph:coalesced-cg/_alternate' } },
-      { name: 'deadline', base: {}, variant: { deadline: DEFAULT_DEADLINE + 1 } },
       {
         name: 'snapshotRef',
         base: { includeSharedMemory: true, phase: 'snapshot', graphUri: '', snapshotRef: 'snapshot-a' },
@@ -198,6 +197,29 @@ describe('DKGAgent sync fetch coalescing', () => {
       } finally {
         await agent.stop().catch(() => {});
       }
+    }
+  });
+
+  it('coalesces equivalent fetches whose callers computed different deadlines', async () => {
+    const response = deferred<Uint8Array>();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => {
+      sends++;
+      return response.promise;
+    });
+
+    try {
+      const first = fetchPages(agent, { deadline: DEFAULT_DEADLINE });
+      await flushMicrotasks();
+      const second = fetchPages(agent, { deadline: DEFAULT_DEADLINE + 1 });
+      await flushMicrotasks();
+
+      expect(sends).toBe(1);
+      response.resolve(new Uint8Array(0));
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(firstResult).toBe(secondResult);
+    } finally {
+      await agent.stop().catch(() => {});
     }
   });
 

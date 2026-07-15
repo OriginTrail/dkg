@@ -411,10 +411,11 @@ export function createResponderSyncRowListMemo(
         })
         .catch((error) => {
           loadOutcome = 'error';
-          // A store-paged snapshot builder can detect its local row/byte cap
-          // before materialising the complete query result. Remember that
-          // intrinsic rejection exactly like storeCached() does, so every later
-          // page in this responder session goes straight to bounded store paging.
+          // A loader may reject before returning its array when a cheap store
+          // preflight or store-paged builder proves the full query would cross
+          // a response/heap safety bound. Remember intrinsic rejections exactly
+          // like storeCached() does, so later pages in this responder session go
+          // straight to bounded store paging instead of repeating the full load.
           if (
             error instanceof SyncRowSnapshotBudgetError &&
             (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')

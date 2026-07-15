@@ -43,18 +43,21 @@ export interface AskResult {
 
 export type QueryResult = SelectResult | ConstructResult | AskResult;
 export type QueryCancellationMode = 'interruptible' | 'pre-dispatch';
-export type StoreWorkPriority = 'ack' | 'normal' | 'background';
+export type StoreWorkPriority = 'ack' | 'health' | 'normal' | 'background';
 
 export interface StorePressureSnapshot {
   ackInflight: number;
+  healthInflight?: number;
   normalInflight: number;
   backgroundInflight: number;
   ackQueued: number;
+  healthQueued?: number;
   normalQueued: number;
   backgroundQueued: number;
   maxConcurrent: number;
   ackReservedSlots: number;
   normalReservedSlots?: number;
+  healthReservedSlots?: number;
   backgroundReservedSlots?: number;
 }
 
@@ -63,7 +66,8 @@ export interface QueryOptions {
   source?: string;
   /**
    * Store admission priority. ACK verification uses `ack` so it can bypass
-   * queued background scans; sync/catch-up work may use `background`.
+   * queued background scans; liveness probes use `health`; sync/catch-up work
+   * may use `background`.
    */
   priority?: StoreWorkPriority;
   /**

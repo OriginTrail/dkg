@@ -312,6 +312,7 @@ import {
 import {
   PRIVATE_DATA_ANCHOR,
   SYNC_PAGE_SIZE,
+  SYNC_REQUEST_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
   SYNC_TOTAL_TIMEOUT_MS,
   SYNC_PAGE_TIMEOUT_MS,
@@ -437,6 +438,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { deterministicStartupJitterMs } from './startup-jitter.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 type InFlightSyncPageFetch = {
@@ -479,7 +481,6 @@ function syncPageFetchCoalescingKey(params: {
   includeSharedMemory: boolean;
   phase: SyncPhase;
   graphUri: string;
-  deadline: number;
   snapshotRef?: string;
   sinceBatchId?: string;
   recovery?: boolean;
@@ -491,7 +492,6 @@ function syncPageFetchCoalescingKey(params: {
     params.includeSharedMemory,
     params.phase,
     params.graphUri,
-    params.deadline,
     params.snapshotRef ?? null,
     params.sinceBatchId ?? null,
     params.recovery === true,
@@ -2773,12 +2773,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);
         });
       };
-      // Prime once after startup so a late subscriber catches up immediately,
-      // then on a steady cadence.
-      runSweep();
+      // Prime once after a deterministic per-peer delay. A simultaneous
+      // four-node cold rollout must not turn into four synchronized Oxigraph
+      // scans; keeping this deterministic also makes restart behaviour and
+      // regression tests reproducible.
+      const startupDelayMs = deterministicStartupJitterMs(
+        `${this.node.peerId.toString()}\0${this.chain.chainId}`,
+        DKGAgentBase.VM_RECONCILE_STARTUP_MAX_DELAY_MS,
+      );
+      this.vmReconcileStartupTimer = setTimeout(() => {
+        this.vmReconcileStartupTimer = null;
+        runSweep();
+      }, startupDelayMs);
+      if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
       this.vmReconcileTimer = setInterval(runSweep, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
       if (this.vmReconcileTimer.unref) this.vmReconcileTimer.unref();
-      this.log.info(ctx, `Chain-driven VM reconciliation armed (sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
+      this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
     }
 
     // rc.9 PR-10: dedicated join-approval retry tick removed. The
@@ -4255,7 +4265,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       includeSharedMemory,
       phase,
       graphUri,
-      deadline,
       snapshotRef,
       sinceBatchId,
       recovery,
@@ -4300,7 +4309,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
       syncRouterAttempts: SYNC_ROUTER_ATTEMPTS,
       syncPageRetryAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
-      syncPageSize: SYNC_PAGE_SIZE,
+      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       // Caller AbortSignals are waiter-scoped below: one duplicate trigger
       // timing out must not abort the shared fetch for the other waiters. The

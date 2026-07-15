@@ -21,9 +21,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
+  estimateSyncStoreInsertQuadBytes,
   filterOversizedSyncQuads,
-  splitStoreRejectedQuads,
   insertWithOversizeGuard,
+  splitStoreRejectedQuads,
+  SYNC_STORE_INSERT_BATCH_MAX_BYTES,
   type OversizeDrop,
 } from '../src/sync/oversize-filter.js';
 import { OversizeTombstoneLog } from '../src/sync/oversize-tombstones.js';
@@ -170,6 +172,28 @@ describe('insertWithOversizeGuard', () => {
     await expect(
       insertWithOversizeGuard(async () => { throw new Error('store connection refused'); }, [quad(lit(10))], hooks, 'test'),
     ).rejects.toThrow('store connection refused');
+  });
+
+  it('splits a large sync ingest into adapter-neutral byte-bounded inserts', async () => {
+    const { hooks } = collect();
+    const item = quad(lit(50_000), SWM_GRAPH);
+    const input = Array.from({ length: 200 }, () => ({ ...item }));
+    const batches: Quad[][] = [];
+
+    const result = await insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      input,
+      hooks,
+      'swm-sync',
+    );
+
+    expect(result).toHaveLength(input.length);
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.flat()).toHaveLength(input.length);
+    for (const batch of batches) {
+      const bytes = batch.reduce((sum, q) => sum + estimateSyncStoreInsertQuadBytes(q), 0);
+      expect(bytes).toBeLessThanOrEqual(SYNC_STORE_INSERT_BATCH_MAX_BYTES);
+    }
   });
 
   it('rethrows an oversize error the split cannot explain (real store bug, loud failure)', async () => {

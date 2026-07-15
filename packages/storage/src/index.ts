@@ -103,6 +103,8 @@ export {
   resolveSharedMemoryReadGraphs,
   resolveVerifiableMemoryReadGraphs,
   type LoadSelectedSharedMemoryQuadsOptions,
+  type SharedMemoryResultBudget,
+  SharedMemoryResultBudgetError,
   type LoadSelectedVerifiableMemoryQuadsOptions,
   type NonEmptyGraphList,
   type NamedKnowledgeAssetGraphIdentity,

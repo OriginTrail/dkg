@@ -15,6 +15,7 @@ import {
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
+  getMetrics,
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
@@ -23,6 +24,7 @@ import {
   asGraphWriteGenSource,
   tryReplaceGraphAtomically,
   type GraphWriteGenSource,
+  type SharedMemoryResultBudget,
   type SwmKaGraphBound,
   type TripleStore,
   type Quad,
@@ -171,6 +173,26 @@ function vmReconcileNegativeTtlMs(): number {
 /** LRU cap for the negative reconcile memo — bounds memory across CGs × roots. */
 const VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES = 4096;
 
+const FINALIZATION_SWM_PAGE_ROWS_DEFAULT = 1_000;
+const FINALIZATION_SWM_MAX_ROWS_DEFAULT = 250_000;
+const FINALIZATION_SWM_MAX_BYTES_DEFAULT = 128 * 1024 * 1024;
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function finalizationSwmResultBudget(): SharedMemoryResultBudget {
+  return {
+    pageRows: positiveIntegerEnv('DKG_FINALIZATION_SWM_PAGE_ROWS', FINALIZATION_SWM_PAGE_ROWS_DEFAULT),
+    maxRows: positiveIntegerEnv('DKG_FINALIZATION_SWM_MAX_ROWS', FINALIZATION_SWM_MAX_ROWS_DEFAULT),
+    maxBytesEstimate: positiveIntegerEnv(
+      'DKG_FINALIZATION_SWM_MAX_BYTES',
+      FINALIZATION_SWM_MAX_BYTES_DEFAULT,
+    ),
+  };
+}
+
 type NegativeSnapshotMemoEntry = {
   /** Write generation for the CG's graph prefix observed BEFORE the scan. */
   writeGen: number;
@@ -205,6 +227,8 @@ export class FinalizationHandler {
   // no local write has touched the CG since the scan. LRU, in-memory only —
   // a restart clears it (fail-open).
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
+  /** Equivalent finalization/reconcile reads share one promise until it settles. */
+  private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
 
   constructor(
     store: TripleStore,
@@ -389,6 +413,7 @@ export class FinalizationHandler {
         msg.rootEntities,
         subGraphName,
         swmKaBoundDisabled() ? undefined : deriveSwmKaGraphBound(startKAId, endKAId),
+        msg.kcMerkleRoot,
         async () => {
           const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities, subGraphName);
           const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, ctxGraphId);
@@ -1319,26 +1344,40 @@ export class FinalizationHandler {
     rootEntities: string[],
     subGraphName: string | undefined,
     kaGraphBound: SwmKaGraphBound | undefined,
+    expectedMerkleRoot: Uint8Array,
     createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
   ): Promise<{ quads: Quad[]; matched: Quad[] | null }> {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return { quads: [], matched: null };
-    const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
-      this.store,
-      this.finalizationSwmBucketUri(contextGraphId, subGraphName),
-      { rootEntities: safeRoots },
-      kaGraphBound,
-      {
-        sources: {
-          bounded: SWM_SLICE_SOURCE_BOUNDED,
-          widened: SWM_SLICE_SOURCE_WIDENED,
-          unbounded: SWM_SLICE_SOURCE,
+    const writeGen = this.graphWriteGen?.getWriteGen(`${contextGraphDataUri(contextGraphId)}/`);
+    const key = [
+      'finalization',
+      contextGraphId,
+      subGraphName ?? '',
+      safeRoots.slice().sort().join('\u0001'),
+      kaGraphBound ? `${kaGraphBound.agentAddress}:${kaGraphBound.startNumber}:${kaGraphBound.endNumber}` : '*',
+      ethers.hexlify(expectedMerkleRoot),
+      String(writeGen ?? 'unknown'),
+    ].join('\u0000');
+    return this.runScanSingleFlight(key, async () => {
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        this.store,
+        this.finalizationSwmBucketUri(contextGraphId, subGraphName),
+        { rootEntities: safeRoots },
+        kaGraphBound,
+        {
+          sources: {
+            bounded: SWM_SLICE_SOURCE_BOUNDED,
+            widened: SWM_SLICE_SOURCE_WIDENED,
+            unbounded: SWM_SLICE_SOURCE,
+          },
+          createAccept,
+          queryOptions: { priority: 'background' },
+          resultBudget: finalizationSwmResultBudget(),
         },
-        createAccept,
-        queryOptions: { priority: 'background' },
-      },
-    );
-    return { quads, matched: accepted };
+      );
+      return { quads, matched: accepted };
+    });
   }
 
   /** Complete (unbounded) SWM read for the chain-reconcile backstop. */
@@ -1353,8 +1392,28 @@ export class FinalizationHandler {
       this.store,
       this.finalizationSwmBucketUri(contextGraphId, subGraphName),
       { rootEntities: safeRoots },
-      { queryOptions: { priority: 'background' }, querySource: SWM_SLICE_SOURCE },
+      {
+        querySource: SWM_SLICE_SOURCE,
+        queryOptions: { priority: 'background' },
+        resultBudget: finalizationSwmResultBudget(),
+      },
     );
+  }
+
+  private runScanSingleFlight<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const scope = key.startsWith('finalization\u0000') ? 'finalization' : 'reconcile';
+    const existing = this.scanSingleFlights.get(key) as Promise<T> | undefined;
+    if (existing) {
+      getMetrics().storeScanSingleFlightJoinsTotal.add(1, { scope });
+      return existing;
+    }
+    getMetrics().storeScanSingleFlightActive.add(1, { scope });
+    const running = work().finally(() => {
+      if (this.scanSingleFlights.get(key) === running) this.scanSingleFlights.delete(key);
+      getMetrics().storeScanSingleFlightActive.add(-1, { scope });
+    });
+    this.scanSingleFlights.set(key, running);
+    return running;
   }
 
   private verifyMerkleMatch(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[], expectedMerkleRoot: Uint8Array): boolean {
@@ -1945,11 +2004,14 @@ export class FinalizationHandler {
       }
     }
 
-    const hit = await this.scanForSwmSnapshot(
-      contextGraphId,
-      merkleRoot,
-      subGraphName,
-      allowGeneratedCatalogFloor,
+    const hit = await this.runScanSingleFlight(
+      ['reconcile', memoKey, String(allowGeneratedCatalogFloor), String(preScanGen ?? 'unknown')].join('\u0000'),
+      () => this.scanForSwmSnapshot(
+        contextGraphId,
+        merkleRoot,
+        subGraphName,
+        allowGeneratedCatalogFloor,
+      ),
     );
     if (hit) return hit;
 

@@ -45,7 +45,7 @@ import {
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
-import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
+import { assertQuadLiteralsMutf8Safe, getMetrics, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 
@@ -244,13 +244,22 @@ export class SparqlHttpStore implements TripleStore {
     // SPARQL protocol prescribes.
     const timeoutSignal = AbortSignal.timeout(this.timeout);
     const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
-    const res = await fetch(this.queryEndpoint, {
-      method: 'POST',
-      headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
-      body: sparql,
-      signal,
-    });
-    return res;
+    try {
+      return await fetch(this.queryEndpoint, {
+        method: 'POST',
+        headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
+        body: sparql,
+        signal,
+      });
+    } catch (error) {
+      if (signal.aborted) {
+        getMetrics().storeCancellationCompletedTotal.add(1, {
+          operation: 'query',
+          source: options?.source ?? 'sparql-http.query',
+        });
+      }
+      throw error;
+    }
   }
 
   private async postUpdate(
@@ -267,12 +276,22 @@ export class SparqlHttpStore implements TripleStore {
       // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
-      return fetch(this.updateEndpoint, {
-        method: 'POST',
-        headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
-        body: update,
-        signal,
-      });
+      try {
+        return await fetch(this.updateEndpoint, {
+          method: 'POST',
+          headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
+          body: update,
+          signal,
+        });
+      } catch (error) {
+        if (signal.aborted) {
+          getMetrics().storeCancellationCompletedTotal.add(1, {
+            operation,
+            source: options?.source ?? `sparql-http.${operation}`,
+          });
+        }
+        throw error;
+      }
     });
   }
 
