@@ -274,6 +274,81 @@ describe('graph-scoped KA private access & metadata convergence', () => {
     expect(response.granted).toBe(true);
   });
 
+  it('rejects a graph-scoped update whose UAL names a different chain', async () => {
+    // Regression (otReviewAgent 3586686572): the packed-id preflight proves
+    // author+number but ignored the UAL's chain namespace, so an update could
+    // persist/return an identity naming another chain. NoChainAdapter is
+    // exempt (no chain identity to disagree with), so pin a chain id.
+    const chain = new NoChainAdapter();
+    Object.defineProperty(chain, 'chainId', { value: 'base:8453' });
+    const chainedPublisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+    const wrongChainUal = `did:dkg:gnosis:100/${AUTHOR}/77`;
+    const kaId = (BigInt(AUTHOR) << 96n) | 77n; // same packed id as the UAL derives
+    await expect(chainedPublisher.update(kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [quad('urn:public:one', 'urn:predicate:value', '"v2"')],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: wrongChainUal,
+      assertionVersion: 2,
+      publicTripleCount: 1,
+    })).rejects.toThrow(/targets chain gnosis:100/);
+  });
+
+  it('fails closed when an interrupted converge leaves conflicting access rows', async () => {
+    // Regression (otReviewAgent 3586687232): a converge interrupted between
+    // insert-new and delete-stale leaves both policy rows on the subject;
+    // the meta reader took accessPolicy off one arbitrary SPARQL binding, so
+    // a stale "public" row could be paired with the newest version and expose
+    // private triples. Conflicting policies must resolve to ownerOnly.
+    const { canonicalPrivate } = await publishVersion(
+      publisher,
+      1,
+      [quad('urn:public:one', 'urn:predicate:value', '"v1"')],
+      [quad('urn:private:one', 'urn:predicate:secret', '"v1-secret"')],
+    );
+    await store.insert([{
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/accessPolicy',
+      object: '"public"',
+      graph: META_GRAPH,
+    }]);
+
+    const denied = decodeAccessResponse(
+      await handler.handler(accessRequestBytes(UAL), 'graph-scope-requester' as never),
+    );
+    expect(denied.granted).toBe(false);
+
+    // The unambiguous owner still gets through under the fail-closed policy.
+    const granted = decodeAccessResponse(
+      await handler.handler(await ownerAccessRequestBytes(UAL), 'rootless-publisher' as never),
+    );
+    expect(granted.rejectionReason).toBe('');
+    expect(granted.granted).toBe(true);
+    expect(parseSimpleNQuads(new TextDecoder().decode(granted.nquads)))
+      .toHaveLength(canonicalPrivate.length);
+
+    // A conflicting owner identity is ambiguous — nobody passes ownerOnly.
+    await store.insert([{
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/publisherPeerId',
+      object: '"impostor-peer"',
+      graph: META_GRAPH,
+    }]);
+    const ownerDenied = decodeAccessResponse(
+      await handler.handler(await ownerAccessRequestBytes(UAL), 'rootless-publisher' as never),
+    );
+    expect(ownerDenied.granted).toBe(false);
+    const impostorDenied = decodeAccessResponse(
+      await handler.handler(await ownerAccessRequestBytes(UAL), 'impostor-peer' as never),
+    );
+    expect(impostorDenied.granted).toBe(false);
+  });
+
   it('denies cleanly when a graph-scoped KA has no private content', async () => {
     await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,

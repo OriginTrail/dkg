@@ -308,22 +308,32 @@ export class AccessHandler {
     }
     if (!best || bestVersion < 1n) return null;
 
+    // Every row cross-producted with the newest version. An interrupted
+    // converge (insert-new-then-delete-stale) can leave superseded rows on
+    // the subject, and OPTIONAL bindings pair each of them with the newest
+    // assertionVersion — so no single binding can be trusted for the fields
+    // below; each must be derived from the full set.
+    const bestRows = result.bindings.filter((b) => {
+      try {
+        return b['assertionVersion'] !== undefined
+          && BigInt(stripLiteral(b['assertionVersion'])) === bestVersion;
+      } catch {
+        return false;
+      }
+    });
+    const distinctValues = (key: string): string[] => [
+      ...new Set(
+        bestRows
+          .map((b) => b[key])
+          .filter((v): v is string => Boolean(v))
+          .map((v) => stripLiteral(v)),
+      ),
+    ];
+
     // If the newest version still binds more than one distinct private root,
     // the meta value cannot be trusted for attestation — drop it so
     // handleAccess recomputes the root over the actually-served triples.
-    const bestVersionRoots = new Set(
-      result.bindings
-        .filter((b) => {
-          try {
-            return b['assertionVersion'] !== undefined
-              && BigInt(stripLiteral(b['assertionVersion'])) === bestVersion;
-          } catch {
-            return false;
-          }
-        })
-        .map((b) => b['privateMerkleRoot'])
-        .filter(Boolean),
-    );
+    const bestVersionRoots = new Set(bestRows.map((b) => b['privateMerkleRoot']).filter(Boolean));
     const rawRoot = bestVersionRoots.size === 1 ? best['privateMerkleRoot'] : undefined;
     const privateMerkleRoot = rawRoot ? parseHexRootLiteral(rawRoot) : undefined;
 
@@ -334,14 +344,29 @@ export class AccessHandler {
     const privateTripleCount = best['privateTripleCount']
       ? Number(stripLiteral(best['privateTripleCount']))
       : 0;
-    const rawPolicy = best['accessPolicy'];
-    const parsedPolicy = rawPolicy ? stripLiteral(rawPolicy) : undefined;
-    const accessPolicy = isAccessPolicy(parsedPolicy) ? parsedPolicy : undefined;
-    const hasInvalidExplicitPolicy = !!parsedPolicy && !isAccessPolicy(parsedPolicy);
-    const publisherPeerId = best['publisherPeerId']
-      ? stripLiteral(best['publisherPeerId'])
-      : best['attributedTo']
-        ? stripLiteral(best['attributedTo'])
+    // 🔴 PR #1712 review (3586687232): SPARQL binding order is not a
+    // contract. Taking accessPolicy/publisherPeerId off one arbitrary row
+    // could pair a stale `public` policy with the newest version and expose
+    // private triples an update meant to protect. Ambiguity fails closed:
+    // conflicting valid policies resolve to ownerOnly (the most restrictive),
+    // any invalid policy row denies, and a conflicting owner identity is
+    // treated as missing (which the ownerOnly branch denies).
+    const distinctPolicies = distinctValues('accessPolicy');
+    let accessPolicy: AccessPolicy | undefined;
+    let hasInvalidExplicitPolicy = false;
+    if (distinctPolicies.some((p) => !isAccessPolicy(p))) {
+      hasInvalidExplicitPolicy = true;
+    } else if (distinctPolicies.length === 1) {
+      accessPolicy = distinctPolicies[0] as AccessPolicy;
+    } else if (distinctPolicies.length > 1) {
+      accessPolicy = 'ownerOnly';
+    }
+    const distinctPeerIds = distinctValues('publisherPeerId');
+    const distinctAttributed = distinctValues('attributedTo');
+    const publisherPeerId = distinctPeerIds.length === 1
+      ? distinctPeerIds[0]
+      : distinctPeerIds.length === 0 && distinctAttributed.length === 1
+        ? distinctAttributed[0]
         : undefined;
     const subGraphName = best['sgName'] ? stripLiteral(best['sgName']) : undefined;
 
