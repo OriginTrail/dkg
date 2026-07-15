@@ -692,9 +692,47 @@ type InternalPublishOptions = PublishOptions & {
 
 interface GraphScopedPublishDescriptor {
   scope: GraphKnowledgeAssetScope;
+  /** Packed V10 kaId derived once from the immutable UAL author/number pair. */
+  expectedPackedKaId: bigint;
   publicTripleCount: number;
   privateTripleCount: number;
   expectedPrivateMerkleRoot?: Uint8Array;
+}
+
+/**
+ * Return the numeric EIP-155 suffix carried by a DKG chain label.
+ *
+ * UALs in persisted jobs use both bare numeric labels (`31337`) and
+ * namespaced labels (`evm:31337`, `base:8453`).  The adapter exposes the
+ * authoritative numeric network through `getEvmChainId()`, so representation
+ * aliases must compare by that value rather than by their raw strings.
+ */
+function numericEvmChainId(chainId: string): bigint | undefined {
+  const match = /(?:^|:)([0-9]+)$/.exec(chainId.trim());
+  if (!match) return undefined;
+  try {
+    return BigInt(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+function graphScopeTargetsChain(
+  scopeChainId: string,
+  adapterChainId: string,
+  evmChainId?: bigint,
+): boolean {
+  const scopeNumericId = numericEvmChainId(scopeChainId);
+  // When the adapter exposes the live EIP-155 id, it is authoritative even
+  // if a stale configured label happens to match the UAL textually.
+  if (scopeNumericId !== undefined && evmChainId !== undefined) {
+    return scopeNumericId === evmChainId;
+  }
+  if (scopeChainId === adapterChainId) return true;
+  const adapterNumericId = evmChainId ?? numericEvmChainId(adapterChainId);
+  return scopeNumericId !== undefined
+    && adapterNumericId !== undefined
+    && scopeNumericId === adapterNumericId;
 }
 
 /**
@@ -747,8 +785,37 @@ function resolveGraphScopedPublishDescriptor(
   if ((options.manifest?.length ?? 0) > 0) {
     throw new Error('Graph-scoped publish must not carry a root-entity manifest');
   }
+  const scope = createGraphKnowledgeAssetScope(options.kaUal, options.assertionVersion);
+  const expectedPackedKaId =
+    (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+  // Reject conflicting caller-supplied identity before planner, chain, or
+  // storage work. Discovering it only after mint would strand an on-chain KA
+  // that can never materialize under the requested UAL.
+  const suppliedReservedKaId =
+    options.reservedKaId ?? options.precomputedAttestation?.reservedKaId;
+  if (suppliedReservedKaId !== undefined) {
+    if (suppliedReservedKaId !== expectedPackedKaId) {
+      throw new Error(
+        `Graph-scoped publish carries reserved kaId ${suppliedReservedKaId}, but UAL ` +
+          `${scope.ual} derives packed kaId ${expectedPackedKaId}`,
+      );
+    }
+  }
+  const attestationAuthor =
+    options.precomputedAttestation?.authorAddress
+    ?? options.precomputedUpdateAttestation?.authorAddress;
+  if (
+    attestationAuthor !== undefined
+    && attestationAuthor.toLowerCase() !== scope.agentAddress
+  ) {
+    throw new Error(
+      `Graph-scoped publish attestation author ${attestationAuthor} does not match ` +
+        `the UAL author ${scope.agentAddress}`,
+    );
+  }
   return {
-    scope: createGraphKnowledgeAssetScope(options.kaUal, options.assertionVersion),
+    scope,
+    expectedPackedKaId,
     publicTripleCount: options.publicTripleCount!,
     privateTripleCount,
     ...(options.privateMerkleRoot
@@ -2534,6 +2601,7 @@ export class DKGPublisher implements Publisher {
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
+    const graphPublish = resolveGraphScopedPublishDescriptor(options);
     const onChainContextGraphId = options.onChainContextGraphId ?? options.publishContextGraphId;
     let publisherContextGraphId: bigint | undefined;
     try {
@@ -2605,7 +2673,6 @@ export class DKGPublisher implements Publisher {
       onChainContextGraphId: publisherContextGraphId,
       internalCatalogOrigin: isTrustedCatalogInternalOrigin(options),
     });
-    const graphPublish = resolveGraphScopedPublishDescriptor(options);
     let canonical: ReturnType<typeof canonicalPublishPayload> | undefined;
     let canonicalPrivateQuads: Quad[] = [];
     let allSkolemizedQuads: Quad[];
@@ -3754,6 +3821,25 @@ export class DKGPublisher implements Publisher {
           // precomputedAttestation (the agent is the single allocation point).
           (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId,
         );
+        if (graphPublish && reservedKaId !== undefined) {
+          if (reservedKaId !== graphPublish.expectedPackedKaId) {
+            throw new Error(
+              `Graph-scoped publish reserved kaId ${reservedKaId} does not derive from ` +
+                `UAL ${graphPublish.scope.ual} (expected ${graphPublish.expectedPackedKaId}); refusing to mint`,
+            );
+          }
+          if (!graphScopeTargetsChain(
+            graphPublish.scope.chainId,
+            this.chain.chainId,
+            v10ChainId,
+          )) {
+            throw new Error(
+              `Graph-scoped publish UAL ${graphPublish.scope.ual} targets chain ` +
+                `${graphPublish.scope.chainId}, but this publisher mints on ` +
+                `${this.chain.chainId} (EIP-155 ${v10ChainId})`,
+            );
+          }
+        }
         await lifecycle.rememberAssetUal(reservedKaId);
         if (!lifecycle.identityAllocatedEmitted && reservedKaId !== undefined) {
           lifecycle.emit('identity', 'asset_ual_allocated', {
@@ -3865,13 +3951,10 @@ export class DKGPublisher implements Publisher {
           throw new Error('Publish succeeded but DKGKnowledgeAssets address is unavailable for UAL assignment');
         }
         if (graphPublish) {
-          const expectedPackedKaId =
-            (BigInt(graphPublish.scope.agentAddress) << 96n)
-            | BigInt(graphPublish.scope.kaNumber);
-          if (kaId !== expectedPackedKaId) {
+          if (kaId !== graphPublish.expectedPackedKaId) {
             throw new Error(
               `Graph-scoped publish returned kaId ${kaId}, but UAL ${graphPublish.scope.ual} ` +
-                `derives packed kaId ${expectedPackedKaId}`,
+                `derives packed kaId ${graphPublish.expectedPackedKaId}`,
             );
           }
           ual = graphPublish.scope.ual;
@@ -4399,12 +4482,10 @@ export class DKGPublisher implements Publisher {
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const graphUpdate = resolveGraphScopedPublishDescriptor(options);
     if (graphUpdate) {
-      const scopeKaId =
-        (BigInt(graphUpdate.scope.agentAddress) << 96n)
-        | BigInt(graphUpdate.scope.kaNumber);
-      if (scopeKaId !== kaId) {
+      if (graphUpdate.expectedPackedKaId !== kaId) {
         throw new Error(
-          `Graph-scoped update kaId ${kaId} does not match UAL-derived kaId ${scopeKaId}`,
+          `Graph-scoped update kaId ${kaId} does not match UAL-derived kaId ` +
+            `${graphUpdate.expectedPackedKaId}`,
         );
       }
       // 🔴 PR #1712 review (3586686572): the packed-id check above proves
@@ -4413,11 +4494,27 @@ export class DKGPublisher implements Publisher {
       // identity that names another chain. Mirror publish()'s pre-mint guard;
       // chainless (NoChainAdapter) updates stay exempt like local publishes —
       // with no chain identity there is nothing for the UAL to disagree with.
-      if (this.chain.chainId !== 'none' && graphUpdate.scope.chainId !== this.chain.chainId) {
-        throw new Error(
-          `Graph-scoped update UAL ${graphUpdate.scope.ual} targets chain ` +
-            `${graphUpdate.scope.chainId}, but this publisher operates on ${this.chain.chainId}`,
-        );
+      if (this.chain.chainId !== 'none') {
+        let updateEvmChainId: bigint | undefined;
+        try {
+          updateEvmChainId = await this.chain.getEvmChainId?.();
+        } catch {
+          // Legacy/non-V10 adapters can still compare exact labels or their
+          // configured numeric suffix; V10 adapters are checked again while
+          // validating the update attestation before submission.
+        }
+        if (!graphScopeTargetsChain(
+          graphUpdate.scope.chainId,
+          this.chain.chainId,
+          updateEvmChainId,
+        )) {
+          throw new Error(
+            `Graph-scoped update UAL ${graphUpdate.scope.ual} targets chain ` +
+              `${graphUpdate.scope.chainId}, but this publisher operates on ` +
+              `${this.chain.chainId}` +
+              (updateEvmChainId === undefined ? '' : ` (EIP-155 ${updateEvmChainId})`),
+          );
+        }
       }
     }
     // Round 12 Bug 34: `update()` is a Bucket A public write entry
