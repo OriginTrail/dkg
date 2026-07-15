@@ -1173,7 +1173,7 @@ describe('publishJsonLd', () => {
           transitionType: 'MUTATE',
         },
       ),
-    ).rejects.toThrow(/use the KA update API/);
+    ).rejects.toThrow(/no longer accepts transitionType/);
     await expect(
       agent.publishAsync(
         'did:dkg:context-graph:async-priorver',
@@ -1181,6 +1181,15 @@ describe('publishJsonLd', () => {
         {
           localOnly: true,
           transitionType: 'CREATE',
+        },
+      ),
+    ).rejects.toThrow(/no longer accepts transitionType/);
+    await expect(
+      agent.publishAsync(
+        'did:dkg:context-graph:async-priorver',
+        content,
+        {
+          localOnly: true,
           priorVersion: 'did:dkg:mock:31337/0xabc/7',
         },
       ),

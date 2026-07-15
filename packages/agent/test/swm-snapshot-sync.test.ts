@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { FileWorkspacePublicSnapshotStore, serializeWorkspacePublicSnapshotQuads, TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import { withLegacyRawLiftTestSeeder } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/index.js';
@@ -58,11 +59,13 @@ describe('SWM snapshot catch-up sync', () => {
       expect(legacyPayloads.bindings).toHaveLength(0);
     }
 
-    const asyncPublisher = new TripleStoreAsyncLiftPublisher(nodeB.store, {
+    const asyncPublisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(nodeB.store, {
       publicSnapshotStore: targetSnapshots,
-      legacyRawLiftWriteCapability: 'migration-only',
+    }), nodeB.store, {
+      now: () => Date.now(),
+      idGenerator: () => 'swm-snapshot-legacy-job',
     });
-    const jobId = await asyncPublisher.lift({
+    const jobId = await asyncPublisher.seedLegacyRawLift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: [ENTITY],

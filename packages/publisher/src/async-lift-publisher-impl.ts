@@ -24,7 +24,6 @@ import {
   type KnowledgeAssetVmPublishRequest,
   type LiftPublishRequestMetadata,
   type LiftPublishSnapshotRequest,
-  type RawLiftRequest,
 } from './lift-job.js';
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
@@ -40,7 +39,7 @@ import {
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
 import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
-import { canonicalRootIri, validateLiftPublishPayload } from './async-lift-validation.js';
+import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
@@ -58,7 +57,6 @@ import {
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
-  createRawLiftJobRequest,
   createJobSlug,
   expectBindings,
   getRecoveryTxHash,
@@ -173,7 +171,6 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
-  private readonly legacyRawLiftWriteEnabled: boolean;
   private readonly graphManager: GraphManager;
   private paused = false;
   private graphEnsured = false;
@@ -223,39 +220,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
-    this.legacyRawLiftWriteEnabled = config.legacyRawLiftWriteCapability === 'migration-only';
     this.graphManager = new GraphManager(store);
-  }
-
-  /**
-   * Restore a legacy raw-root queue item for an offline migration or a
-   * compatibility test. Normal runtime instances reject this operation.
-   * New Knowledge Assets must use enqueueKnowledgeAssetVmPublish().
-   *
-   * @deprecated Legacy root-scoped Knowledge Assets are read-only.
-   */
-  async lift(request: RawLiftRequest): Promise<string> {
-    if (!this.legacyRawLiftWriteEnabled) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
-    await this.ensureGraph();
-
-    const now = this.now();
-    const jobId = this.idGenerator();
-    const jobRequest = createRawLiftJobRequest(request);
-    const job: LiftJobAccepted = {
-      jobId,
-      jobSlug: createJobSlug(jobRequest),
-      request: jobRequest,
-      status: 'accepted',
-      timestamps: { acceptedAt: now, updatedAt: now },
-      retries: { retryCount: 0, maxRetries: this.maxRetries },
-      controlPlane: { jobRef: jobSubject(jobId) },
-    };
-
-    await this.writeJob(job);
-    await this.stampCanonicalAnchorsInWorkspace(request);
-    return jobId;
   }
 
   async enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string> {
@@ -296,42 +261,6 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     });
   }
 
-  // Adapt the lift's canonicalization to the SWM partition: for every
-  // request root that already has private staging from the share, insert
-  // a `<canonical> dkg:privateDataAnchor "true"` triple into
-  // `<cg>/_shared_memory`. The canonical IRI is the same one the
-  // validator will produce later (`dkg:<cg>:<ns>:<scope>/<name>-<hash>`)
-  // when it canonicalizes the chain payload, so EPCIS partition-aware
-  // queries can JOIN the public anchor in SWM with the canonical payload
-  // that lands in `<cg>/_private` after `processNext` completes. The
-  // source-IRI anchor stamped by `agent.publishAsync` stays in place for
-  // legacy joins; this is purely additive.
-  private async stampCanonicalAnchorsInWorkspace(request: RawLiftRequest): Promise<void> {
-    if (!request.roots || request.roots.length === 0) return;
-    const privateStore = new PrivateContentStore(this.store, this.graphManager);
-    const swmGraph = this.graphManager.sharedMemoryUri(request.contextGraphId, request.subGraphName);
-    const anchors: Quad[] = [];
-    for (const sourceRoot of request.roots) {
-      const staged = await privateStore.getPrivateTriplesForOperation(
-        request.contextGraphId,
-        request.shareOperationId,
-        sourceRoot,
-        request.subGraphName,
-      );
-      if (staged.length === 0) continue;
-      const canonical = canonicalRootIri(request, sourceRoot);
-      if (canonical === sourceRoot) continue;
-      anchors.push({
-        subject: canonical,
-        predicate: 'http://dkg.io/ontology/privateDataAnchor',
-        object: '"true"',
-        graph: swmGraph,
-      });
-    }
-    if (anchors.length > 0) {
-      await this.store.insert(anchors);
-    }
-  }
 
   async claimNext(walletId: string): Promise<LiftJob | null> {
     return this.withClaimLock(async () => {
