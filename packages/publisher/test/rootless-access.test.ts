@@ -221,6 +221,47 @@ describe('rootless graph-scoped private access', () => {
     expect(new TextDecoder().decode(response.nquads)).toContain('legacy-token-data');
   });
 
+  it('keeps collapsed non-deterministic legacy UALs readable through token aliases', async () => {
+    const store = new OxigraphStore();
+    const legacyUal = 'did:dkg:test/1/42';
+    const legacyRoot = 'urn:legacy:collapsed-token-alias';
+    await store.insert([
+      rootContextGraphRegistration(),
+      {
+        subject: legacyUal,
+        predicate: `${DKG}rootEntity`,
+        object: legacyRoot,
+        graph: META_GRAPH,
+      },
+      {
+        subject: legacyUal,
+        predicate: `${DKG}contextGraph`,
+        object: CONTEXT_GRAPH_URI,
+        graph: META_GRAPH,
+      },
+      {
+        subject: legacyUal,
+        predicate: `${DKG}accessPolicy`,
+        object: '"public"',
+        graph: META_GRAPH,
+      },
+      {
+        subject: legacyRoot,
+        predicate: 'urn:p',
+        object: '"legacy-collapsed-data"',
+        graph: `${CONTEXT_GRAPH_URI}/_private`,
+      },
+    ]);
+
+    const response = await request(
+      new AccessHandler(store, new TypedEventBus()),
+      `${legacyUal}/1`,
+    );
+
+    expect(response.granted).toBe(true);
+    expect(new TextDecoder().decode(response.nquads)).toContain('legacy-collapsed-data');
+  });
+
   it('denies private access when the metadata partition is also a registered legacy root', async () => {
     const { store } = await seedRootlessPrivateKA();
     await store.insert([{

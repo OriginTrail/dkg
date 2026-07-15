@@ -279,7 +279,8 @@ export class AccessHandler {
 
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
     const legacyAliasBase = legacyTokenAliasBase(kaUal);
-    const canonicalUal = legacyAliasBase ?? kaUal;
+    const graphScopedAliasBase = canonicalDeterministicUal(legacyAliasBase);
+    const canonicalUal = graphScopedAliasBase ?? kaUal;
     // A token-form legacy alias must not bypass a V2 marker on the canonical
     // bare UAL. Resolve the canonical control plane before either legacy path.
     const resolved = await resolveGraphScopedOrLegacyMetadata(
@@ -300,7 +301,7 @@ export class AccessHandler {
       // Numeric token suffixes are a legacy compatibility address only.
       // A V2 asset has one canonical UAL; detect its marker above so an alias
       // cannot fall through, but never serve graph-scoped data through it.
-      if (legacyAliasBase) return null;
+      if (graphScopedAliasBase) return null;
       return this.graphScopedKAMeta(resolved.metadata);
     }
     return resolved.kind === 'legacy' ? resolved.metadata : null;
@@ -465,14 +466,21 @@ function isAccessPolicy(value: string | undefined): value is AccessPolicy {
 }
 
 function legacyTokenAliasBase(kaUal: string): string | undefined {
-  const match = /^(.+)\/\d+$/.exec(kaUal);
-  const candidate = match?.[1];
-  if (!candidate) return undefined;
   try {
-    return parseDeterministicKnowledgeAssetUal(candidate).ual;
+    parseDeterministicKnowledgeAssetUal(kaUal);
+    return undefined;
   } catch {
-    // A canonical bare UAL also ends in digits. Its prefix is not itself a
-    // deterministic KA UAL, so it must never be stripped as a token alias.
+    // Continue: non-deterministic legacy UALs may still carry a token suffix.
+  }
+  const match = /^(.+)\/\d+$/.exec(kaUal);
+  return match?.[1];
+}
+
+function canonicalDeterministicUal(ual: string | undefined): string | undefined {
+  if (!ual) return undefined;
+  try {
+    return parseDeterministicKnowledgeAssetUal(ual).ual;
+  } catch {
     return undefined;
   }
 }
