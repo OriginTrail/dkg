@@ -129,10 +129,6 @@ export function okfDaemonHandler(createdCGs: Set<string>): StubHandler {
       return { status: 200, body: { merkleRoot: '0xroot', eip712Digest: '0xdig' } };
     }
     if (m === 'POST' && /\/api\/knowledge-assets\/.+\/swm\/share$/.test(path)) {
-      const parsed = JSON.parse(body || '{}');
-      if (parsed.entities !== 'all') {
-        return { status: 400, body: { error: 'entities:all required' } };
-      }
       return { status: 200, body: { swmShared: true, promotedCount: 1 } };
     }
     return { status: 404, body: { error: 'NotFound', path } };

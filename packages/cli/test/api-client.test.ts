@@ -976,6 +976,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
   it('knowledgeAssetShare → swm/share, knowledgeAssetPublish → vm/publish', async () => {
     let calls = track({ swmShared: true, promotedCount: 2 });
     await client.knowledgeAssetShare('cg', 'f', {
+      entities: 'all',
       subGraphName: 'notes',
       awaitCuratorAck: true,
     });
@@ -985,6 +986,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       subGraphName: 'notes',
       awaitCuratorAck: true,
     });
+    expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('entities');
 
     calls = track({ kaId: '7', status: 'confirmed' });
     await client.knowledgeAssetPublish('cg', 'f', {
@@ -1031,11 +1033,31 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     const calls = track({ swmShared: true, promotedCount: 1 });
     await expect(client.knowledgeAssetShare('cg', 'f', {
       entities: ['urn:entity:1'],
-    })).rejects.toThrow('Knowledge Assets are shared atomically');
+    } as any)).rejects.toThrow('Knowledge Assets are shared atomically');
     await expect(client.knowledgeAssetShare('cg', 'f', {
       skipSeal: true,
-    })).rejects.toThrow('always seal-before-share');
+    } as any)).rejects.toThrow('always seal-before-share');
+    await expect(client.promoteAssertion('f', {
+      contextGraphId: 'cg',
+      entities: ['urn:entity:1'],
+    } as any)).rejects.toThrow('Knowledge Assets are shared atomically');
     expect(calls).toHaveLength(0);
+  });
+
+  it('promoteAssertion accepts legacy "all" without putting a selector on the atomic share wire', async () => {
+    const calls = track({ swmShared: true, promotedCount: 1 });
+
+    await client.promoteAssertion('f', {
+      contextGraphId: 'cg',
+      entities: 'all',
+      subGraphName: 'notes',
+    });
+
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share`);
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+    });
   });
 
   it('knowledgeAssetFinalize rejects the legacy SWM write bridge before HTTP serialization', async () => {
@@ -1046,9 +1068,24 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls).toHaveLength(0);
   });
 
+  it('gives the legacy SWM read-only gate precedence over authorship validation', async () => {
+    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
+    await expect(client.knowledgeAssetFinalize('cg', 'f', {
+      layer: 'swm',
+      authorAgentAddress: '0x1111111111111111111111111111111111111111',
+      preSignedAuthorAttestation: {
+        address: '0x2222222222222222222222222222222222222222',
+        reservedKaId: '1',
+        signature: { r: `0x${'22'.repeat(32)}`, vs: `0x${'33'.repeat(32)}` },
+      },
+    })).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetShareAsync and share job helpers use lifecycle routes', async () => {
     let calls = track({ jobId: 'share-job-1', state: 'queued' });
     await client.knowledgeAssetShareAsync('cg', 'f', {
+      entities: 'all',
       subGraphName: 'notes',
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share-async`);
@@ -1056,6 +1093,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       contextGraphId: 'cg',
       subGraphName: 'notes',
     });
+    expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('entities');
 
     calls = track({ jobs: [] });
     await client.knowledgeAssetShareJobs({
@@ -1087,7 +1125,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     } as any)).rejects.toThrow('skipSeal is not supported');
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       entities: ['urn:entity:1'],
-    })).rejects.toThrow('Knowledge Assets are shared atomically');
+    } as any)).rejects.toThrow('Knowledge Assets are shared atomically');
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       awaitCuratorAck: true,
     } as any)).rejects.toThrow('awaitCuratorAck is not supported for async share');

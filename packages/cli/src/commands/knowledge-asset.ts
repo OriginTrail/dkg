@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import {
   ApiClient,
@@ -341,13 +341,19 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   addFinalizeAuthorOptions(addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('finalize <name>')
-      .description('Finalize/seal a Knowledge Asset from WM'),
+      .description('Finalize/seal a Knowledge Asset from WM')
+      .addOption(new Option('--layer <layer>').hideHelp()),
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
+      const layer = opts.layer === undefined ? undefined : String(opts.layer);
+      if (layer !== undefined && layer !== 'wm' && layer !== 'swm') {
+        throw new Error('--layer must be wm or swm');
+      }
       const authorOptions = parseFinalizeAuthorOptions(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetFinalize(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
+        ...(layer ? { layer } : {}),
         ...authorOptions,
       });
       console.log('Knowledge asset finalized:');

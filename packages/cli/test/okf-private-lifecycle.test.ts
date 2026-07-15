@@ -82,7 +82,7 @@ describe.sequential('dkg okf private lifecycle', { timeout: 180_000 }, () => {
     expect(paths.filter((p) => p.endsWith('/swm/share'))).toHaveLength(2);
     const shareBodies = ['a', 'b'].flatMap((name) => knowledgeAssetShareBodies(stub.calls, name));
     expect(shareBodies).toHaveLength(2);
-    expect(shareBodies.every((b) => b.entities === 'all')).toBe(true);
+    expect(shareBodies.every((b) => !Object.prototype.hasOwnProperty.call(b, 'entities'))).toBe(true);
     expect(paths.some((p) => /private-bulk/.test(p))).toBe(false);
     expect(paths.some((p) => p.startsWith('POST /api/shared-memory'))).toBe(false);
 

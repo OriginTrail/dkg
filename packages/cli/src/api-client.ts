@@ -4,6 +4,7 @@ import type {
   ContextGraphReconcileResult,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
+import { LegacyKnowledgeAssetReadOnlyError } from '@origintrail-official/dkg-core';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -12,8 +13,10 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import type { KnowledgeAssetContentEnvelope } from '@origintrail-official/dkg-publisher';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
+export type { KnowledgeAssetContentEnvelope } from '@origintrail-official/dkg-publisher';
 
 export type ContextGraphJoinPolicyMode = 'manual' | 'open';
 
@@ -108,14 +111,13 @@ export interface KnowledgeAssetShareResponse {
 
 export interface KnowledgeAssetShareTargetOptions {
   subGraphName?: string;
-  /** @deprecated New Knowledge Assets are atomic. Only `"all"` is accepted. */
-  entities?: string[] | 'all';
+  /** @deprecated Atomic sharing always means the complete Knowledge Asset. */
+  entities?: 'all';
 }
 
 export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOptions {
   awaitCuratorAck?: boolean;
-  /** @deprecated `true` is rejected; graph-scoped KAs are always seal-before-share. */
-  skipSeal?: boolean;
+  skipSeal?: false;
 }
 
 export type KnowledgeAssetShareAsyncOptions = KnowledgeAssetShareTargetOptions;
@@ -138,21 +140,17 @@ export interface KnowledgeAssetLifecycleError {
   [key: string]: unknown;
 }
 
-export interface KnowledgeAssetPublishAsyncResponse {
+export type KnowledgeAssetPublishAsyncResponse = KnowledgeAssetContentEnvelope & {
   jobId: string;
   status: string;
   contextGraphId: string;
   name: string;
   subGraphName?: string;
   shareOperationId?: string;
-  contentScopeVersion?: number;
-  kaUal?: string;
-  assertionVersion?: string;
-  publicTripleCount?: number;
-  privateTripleCount?: number;
   sealMerkleRoot?: string;
   intentKey?: string;
-}
+  rootsCount?: number;
+};
 
 export type KnowledgeAssetShareJobState =
   | 'queued'
@@ -219,7 +217,6 @@ function hasOwnKey<K extends PropertyKey>(value: unknown, key: K): value is Reco
 }
 
 function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptions | undefined): void {
-  assertAtomicKnowledgeAssetShare(options);
   if (hasOwnKey(options, 'skipSeal') && options.skipSeal !== undefined) {
     throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
   }
@@ -228,12 +225,23 @@ function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptio
   }
 }
 
-function assertAtomicKnowledgeAssetShare(options: KnowledgeAssetShareTargetOptions | undefined): void {
-  if (Array.isArray(options?.entities)) {
+function assertAtomicKnowledgeAssetShare(options: unknown): void {
+  if (
+    hasOwnKey(options, 'entities')
+    && options.entities !== undefined
+    && options.entities !== 'all'
+  ) {
     throw new Error(
       'entities selection is not supported; graph-scoped Knowledge Assets are shared atomically',
     );
   }
+}
+
+function atomicKnowledgeAssetSharePayload<T extends object>(options: T | undefined): Omit<T, 'entities'> | undefined {
+  assertAtomicKnowledgeAssetShare(options);
+  if (!options) return undefined;
+  const { entities: _legacyEntities, ...payload } = options as T & { entities?: unknown };
+  return payload;
 }
 
 function assertionCreateResponse(result: KnowledgeAssetCreateResponse): AssertionCreateResponse {
@@ -714,16 +722,13 @@ export class ApiClient {
       schemeVersion?: number;
     },
   ): Promise<{ merkleRoot: string; eip712Digest: string }> {
+    if (options?.layer === 'swm') {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
     // Mirror the mcp-dkg / openclaw / node-ui clients: reject the
     // self-sign vs external-signer conflict client-side instead of relying on
     // the daemon, so every SDK surface enforces the same contract.
     assertExclusiveAuthorFields(options ?? {});
-    if (options?.layer === 'swm') {
-      throw Object.assign(
-        new Error('Legacy root-scoped Knowledge Assets are read-only'),
-        { code: 'LEGACY_KA_READ_ONLY' },
-      );
-    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...(options ?? {}) });
   }
 
@@ -748,11 +753,11 @@ export class ApiClient {
     name: string,
     options?: KnowledgeAssetShareOptions,
   ): Promise<KnowledgeAssetShareResponse> {
-    assertAtomicKnowledgeAssetShare(options);
-    if (options?.skipSeal === true) {
+    const payload = atomicKnowledgeAssetSharePayload(options);
+    if ((options as { skipSeal?: unknown } | undefined)?.skipSeal === true) {
       throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
     }
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(payload ?? {}) });
   }
 
   async knowledgeAssetShareAsync(
@@ -761,7 +766,8 @@ export class ApiClient {
     options?: KnowledgeAssetShareAsyncOptions,
   ): Promise<{ jobId: string; state: 'queued' }> {
     assertSupportedAsyncShareOptions(options);
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
+    const payload = atomicKnowledgeAssetSharePayload(options);
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(payload ?? {}) });
   }
 
   async knowledgeAssetShareJobs(options?: {
@@ -1918,7 +1924,8 @@ export class ApiClient {
 
   async promoteAssertion(name: string, request: {
     contextGraphId: string;
-    entities?: 'all' | string[];
+    /** @deprecated Atomic sharing always means the complete Knowledge Asset. */
+    entities?: 'all';
     subGraphName?: string;
   }): Promise<{
     promoted?: boolean;
@@ -1929,7 +1936,8 @@ export class ApiClient {
     sharedMemoryGraph?: string;
     rootEntities?: string[];
   }> {
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, request);
+    const { contextGraphId, ...options } = request;
+    return this.knowledgeAssetShare(contextGraphId, name, options);
   }
 
   async queryAssertion(name: string, request: {
