@@ -374,14 +374,16 @@ describe('QueryHandler', () => {
         scope,
       );
       const metadataGraph = `${GRAPH}/_meta`;
-      const payloadSubject = 'urn:asset:graph-aware';
+      const blankSubject = '_:graph-aware';
+      const blankObject = '_:related';
       await store.insert([
         q(GRAPH, RDF_TYPE, DKG_CONTEXT_GRAPH, 'did:dkg:context-graph:ontology'),
-        q(payloadSubject, SCHEMA_NAME, '"Graph aware"', assertionGraph),
+        q(blankSubject, SCHEMA_NAME, '"Graph aware"', assertionGraph),
+        q('urn:asset:iri', 'urn:related', blankObject, assertionGraph),
         q(ual, `${DKG}contentScopeVersion`, `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, metadataGraph),
         q(ual, `${DKG}kaUal`, ual, metadataGraph),
         q(ual, `${DKG}assertionVersion`, `"${assertionVersion}"^^<${XSD_INTEGER}>`, metadataGraph),
-        q(ual, `${DKG}publicTripleCount`, `"1"^^<${XSD_INTEGER}>`, metadataGraph),
+        q(ual, `${DKG}publicTripleCount`, `"2"^^<${XSD_INTEGER}>`, metadataGraph),
         q(ual, `${DKG}privateTripleCount`, `"0"^^<${XSD_INTEGER}>`, metadataGraph),
         q(ual, `${DKG}assertionGraph`, assertionGraph, metadataGraph),
         q(ual, `${DKG}contextGraph`, GRAPH, metadataGraph),
@@ -394,8 +396,14 @@ describe('QueryHandler', () => {
       );
 
       expect(response.status).toBe('OK');
-      expect(response.resultCount).toBe(1);
-      expect(response.ntriples).toContain(payloadSubject);
+      expect(response.resultCount).toBe(2);
+      expect(response.ntriples).toMatch(
+        /^_:[A-Za-z0-9]+ <https:\/\/schema\.org\/name> "Graph aware" \.$/m,
+      );
+      expect(response.ntriples).toMatch(
+        /^<urn:asset:iri> <urn:related> _:[A-Za-z0-9]+ \.$/m,
+      );
+      expect(response.ntriples).not.toContain('<_:');
     });
 
     it('returns error when ual is missing', async () => {

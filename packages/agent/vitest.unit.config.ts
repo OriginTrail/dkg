@@ -37,6 +37,7 @@ export default defineConfig({
       "test/swm-late-joiner-deferred-gossip.test.ts",
       "test/oversize-filter.test.ts",
       "test/cg-registration-oversize-guard.test.ts",
+      "test/context-graph-id-validation.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
       "test/durable-meta-admission.test.ts",
       "test/sync-responder-log-volume.test.ts",

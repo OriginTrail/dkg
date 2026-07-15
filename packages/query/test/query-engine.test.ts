@@ -256,6 +256,27 @@ describe('DKGQueryEngine', () => {
       expect(result.quads.some((quad) => quad.predicate === 'urn:predicate:decoy')).toBe(false);
     });
 
+    it('resolves a leading-zero deterministic UAL alias to the canonical graph', async () => {
+      const alias = UAL.replace(/\/7$/, '/0007');
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert([
+        q('urn:asset:canonical', 'urn:p', '"canonical"', vmGraph),
+        ...graphScopedMetadata(UAL, '1', vmGraph, 1),
+      ]);
+
+      const result = await engine.resolveKnowledgeAsset(alias);
+
+      expect(result.ual).toBe(UAL);
+      expect(result.quads).toEqual([
+        q('urn:asset:canonical', 'urn:p', '"canonical"', vmGraph),
+      ]);
+    });
+
     it('ignores scope markers stored in another KA payload graph', async () => {
       const scope = createGraphKnowledgeAssetScope(UAL, '1');
       const vmGraph = knowledgeAssetLayerGraphUri(

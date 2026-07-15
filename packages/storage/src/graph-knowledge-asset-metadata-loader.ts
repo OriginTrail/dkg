@@ -1,6 +1,7 @@
 import {
   buildGraphKnowledgeAssetMetadataQuery,
   parseGraphKnowledgeAssetMetadataBindings,
+  parseDeterministicKnowledgeAssetUal,
   type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
 import type { QueryOptions, TripleStore } from './triple-store.js';
@@ -23,12 +24,18 @@ export async function resolveGraphScopedOrLegacyMetadata<TLegacy>(
   loadLegacyMetadata: () => Promise<TLegacy | null>,
   queryOptions?: QueryOptions,
 ): Promise<GraphScopedOrLegacyMetadata<TLegacy>> {
+  let graphScopedUal = ual;
+  try {
+    graphScopedUal = parseDeterministicKnowledgeAssetUal(ual).ual;
+  } catch {
+    // Non-deterministic identifiers remain eligible for legacy read-both.
+  }
   const result = await store.query(
-    buildGraphKnowledgeAssetMetadataQuery(ual),
+    buildGraphKnowledgeAssetMetadataQuery(graphScopedUal),
     queryOptions,
   );
   const parsed = parseGraphKnowledgeAssetMetadataBindings(
-    ual,
+    graphScopedUal,
     result.type === 'bindings' ? result.bindings : [],
   );
   if (parsed.kind === 'graph') return parsed;

@@ -141,6 +141,27 @@ describe('rootless graph-scoped private access', () => {
     expect(Array.from(result.privateMerkleRoot ?? [])).toEqual(Array.from(privateRoot));
   });
 
+  it.each([
+    [
+      'checksum-cased',
+      UAL.replace(
+        '0x70997970c51812dc3a010c7d01b50e0d17dc79c8',
+        '0x70997970C51812DC3A010C7D01B50E0D17DC79C8',
+      ),
+    ],
+    ['leading-zero', UAL.replace(/\/41$/, '/00041')],
+  ])('canonicalizes %s deterministic UAL aliases before graph metadata resolution', async (_kind, alias) => {
+    const { store } = await seedRootlessPrivateKA();
+
+    const response = await request(
+      new AccessHandler(store, new TypedEventBus()),
+      alias,
+    );
+
+    expect(response.granted).toBe(true);
+    expect(new TextDecoder().decode(response.nquads)).toContain('urn:secret:alpha');
+  });
+
   it('denies token aliases for graph-scoped private access', async () => {
     const { store } = await seedRootlessPrivateKA();
 
