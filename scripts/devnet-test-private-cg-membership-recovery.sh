@@ -161,6 +161,14 @@ TESTNET_PREFLIGHT_ONLY="${TESTNET_PREFLIGHT_ONLY:-0}"
 TESTNET_MAX_ACCEPT_QUEUE="${TESTNET_MAX_ACCEPT_QUEUE:-128}"
 TESTNET_SERVICE="${TESTNET_SERVICE:-dkg-v9-node}"
 TESTNET_SSH_CONNECT_TIMEOUT="${TESTNET_SSH_CONNECT_TIMEOUT:-90}"
+INTEGRITY_PROGRESS_EVERY_KAS="${INTEGRITY_PROGRESS_EVERY_KAS:-10}"
+HEALTH_SAMPLE_EVERY_KAS="${HEALTH_SAMPLE_EVERY_KAS:-5}"
+HEALTH_SAMPLE_INTERVAL_S="${HEALTH_SAMPLE_INTERVAL_S:-15}"
+TESTNET_MAX_MEMORY_USED_PERCENT="${TESTNET_MAX_MEMORY_USED_PERCENT:-90}"
+TESTNET_MAX_LOAD_PER_CPU_PERCENT="${TESTNET_MAX_LOAD_PER_CPU_PERCENT:-200}"
+TESTNET_SATURATION_CONSECUTIVE_SAMPLES="${TESTNET_SATURATION_CONSECUTIVE_SAMPLES:-3}"
+TESTNET_PREFLIGHT_HEALTH_SAMPLE_ROUNDS="${TESTNET_PREFLIGHT_HEALTH_SAMPLE_ROUNDS:-3}"
+TESTNET_PREFLIGHT_HEALTH_SAMPLE_INTERVAL_S="${TESTNET_PREFLIGHT_HEALTH_SAMPLE_INTERVAL_S:-5}"
 
 case "$HARNESS_EXPECT" in
   broken|fixed) ;;
@@ -191,12 +199,34 @@ for numeric in \
   "$PLANNED_KA_COUNT" "$ROOT_KA_COUNT" "$SUB_GRAPH_KA_COUNT" \
   "$TOTAL_TRIPLES" "$CATCHUP_TIMEOUT_S" "$JOIN_DELIVERY_TIMEOUT_S" \
   "$RECOVERY_TIMEOUT_S" "$POST_RESTART_TIMEOUT_S" \
-  "$TESTNET_MAX_ACCEPT_QUEUE" "$TESTNET_SSH_CONNECT_TIMEOUT"; do
+  "$TESTNET_MAX_ACCEPT_QUEUE" "$TESTNET_SSH_CONNECT_TIMEOUT" \
+  "$INTEGRITY_PROGRESS_EVERY_KAS" "$HEALTH_SAMPLE_EVERY_KAS" \
+  "$HEALTH_SAMPLE_INTERVAL_S" "$TESTNET_MAX_MEMORY_USED_PERCENT" \
+  "$TESTNET_MAX_LOAD_PER_CPU_PERCENT" \
+  "$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" \
+  "$TESTNET_PREFLIGHT_HEALTH_SAMPLE_ROUNDS" \
+  "$TESTNET_PREFLIGHT_HEALTH_SAMPLE_INTERVAL_S"; do
   [[ "$numeric" =~ ^[0-9]+$ ]] || {
     echo "All node/count/timeout settings must be non-negative integers (got: $numeric)" >&2
     exit 2
   }
 done
+[ "$INTEGRITY_PROGRESS_EVERY_KAS" -ge 1 ] \
+  || { echo "INTEGRITY_PROGRESS_EVERY_KAS must be at least 1." >&2; exit 2; }
+[ "$HEALTH_SAMPLE_EVERY_KAS" -ge 1 ] \
+  || { echo "HEALTH_SAMPLE_EVERY_KAS must be at least 1." >&2; exit 2; }
+[ "$HEALTH_SAMPLE_INTERVAL_S" -ge 1 ] \
+  || { echo "HEALTH_SAMPLE_INTERVAL_S must be at least 1." >&2; exit 2; }
+[ "$TESTNET_MAX_MEMORY_USED_PERCENT" -ge 1 ] && [ "$TESTNET_MAX_MEMORY_USED_PERCENT" -le 100 ] \
+  || { echo "TESTNET_MAX_MEMORY_USED_PERCENT must be in 1..100." >&2; exit 2; }
+[ "$TESTNET_MAX_LOAD_PER_CPU_PERCENT" -ge 1 ] \
+  || { echo "TESTNET_MAX_LOAD_PER_CPU_PERCENT must be at least 1." >&2; exit 2; }
+[ "$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" -ge 2 ] \
+  || { echo "TESTNET_SATURATION_CONSECUTIVE_SAMPLES must be at least 2." >&2; exit 2; }
+[ "$TESTNET_PREFLIGHT_HEALTH_SAMPLE_ROUNDS" -ge "$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" ] \
+  || { echo "TESTNET_PREFLIGHT_HEALTH_SAMPLE_ROUNDS must cover the saturation streak threshold." >&2; exit 2; }
+[ "$TESTNET_PREFLIGHT_HEALTH_SAMPLE_INTERVAL_S" -ge 1 ] \
+  || { echo "TESTNET_PREFLIGHT_HEALTH_SAMPLE_INTERVAL_S must be at least 1." >&2; exit 2; }
 
 if [ "$HARNESS_TARGET" = "devnet" ]; then
   if [ "$NUM_NODES" -ne 6 ] || [ "$CURATOR_NODE" -ne 5 ] || [ "$JOINER_NODE" -ne 6 ]; then
@@ -294,6 +324,12 @@ SEED_STARTED_AT_MS=0
 SEED_FINISHED_AT_MS=0
 SEED_DURATION_MS=0
 LAST_SEED_WRITE=""
+CURATOR_INTEGRITY_VERIFIED=0
+JOINER_INTEGRITY_VERIFIED=0
+POST_RESTART_INTEGRITY_VERIFIED=0
+HEALTH_SAMPLE_COUNT=0
+LAST_HEALTH_SAMPLE_EPOCH=0
+HEALTH_AUDIT_PASSED=0
 
 log()  { echo "[private-cg-recovery] $*"; }
 warn() { echo "[private-cg-recovery] WARN: $*" >&2; }
@@ -341,10 +377,50 @@ testnet_probe_node() {
 set -u
 service="$1"
 service_active="$(systemctl is-active "$service" 2>/dev/null || true)"
+main_pid="$(systemctl show "$service" -p MainPID --value 2>/dev/null || true)"
+n_restarts="$(systemctl show "$service" -p NRestarts --value 2>/dev/null || true)"
+memory_current="$(systemctl show "$service" -p MemoryCurrent --value 2>/dev/null || true)"
+memory_peak="$(systemctl show "$service" -p MemoryPeak --value 2>/dev/null || true)"
+cpu_usage_nsec="$(systemctl show "$service" -p CPUUsageNSec --value 2>/dev/null || true)"
+control_group="$(systemctl show "$service" -p ControlGroup --value 2>/dev/null || true)"
+oxigraph_pid="$(ps -eo pid=,comm= 2>/dev/null | awk '$2 ~ /^oxigraph-v/ {print $1; exit}')"
+oxigraph_watchdog_pid="$(ps -eo pid=,comm=,args= 2>/dev/null | awk '$2 == "node" && $0 ~ /oxigraph-parent-watchdog[.]js/ {print $1; exit}')"
+oxigraph_rss_kib=0
+oxigraph_start_ticks=0
+oxigraph_control_group=""
+oxigraph_memory_current=0
+oxigraph_memory_peak=0
+oxigraph_oom_events=0
+oxigraph_oom_kill_events=0
+if [ -n "$oxigraph_pid" ] && [ -r "/proc/$oxigraph_pid/status" ]; then
+  oxigraph_rss_kib="$(awk '$1 == "VmRSS:" {print $2}' "/proc/$oxigraph_pid/status")"
+  oxigraph_start_ticks="$(awk '{print $22}' "/proc/$oxigraph_pid/stat")"
+  oxigraph_control_group="$(awk -F: '$1 == "0" {print $3}' "/proc/$oxigraph_pid/cgroup")"
+  if [ -n "$oxigraph_control_group" ]; then
+    [ ! -r "/sys/fs/cgroup${oxigraph_control_group}/memory.current" ] \
+      || oxigraph_memory_current="$(cat "/sys/fs/cgroup${oxigraph_control_group}/memory.current")"
+    [ ! -r "/sys/fs/cgroup${oxigraph_control_group}/memory.peak" ] \
+      || oxigraph_memory_peak="$(cat "/sys/fs/cgroup${oxigraph_control_group}/memory.peak")"
+    if [ -r "/sys/fs/cgroup${oxigraph_control_group}/memory.events" ]; then
+      oxigraph_oom_events="$(awk '$1 == "oom" {print $2}' "/sys/fs/cgroup${oxigraph_control_group}/memory.events")"
+      oxigraph_oom_kill_events="$(awk '$1 == "oom_kill" {print $2}' "/sys/fs/cgroup${oxigraph_control_group}/memory.events")"
+    fi
+  fi
+fi
 current_commit="$(tr -d '\r\n' < "$HOME/.dkg/.current-commit" 2>/dev/null || true)"
 active_git="$(git -C "$HOME/.dkg/releases/current" rev-parse HEAD 2>/dev/null || true)"
 active_slot="$(readlink -f "$HOME/.dkg/releases/current" 2>/dev/null | sed 's#.*/##')"
 accept_queue="$(ss -lnt 2>/dev/null | awk '$4 ~ /:9090$/ {print $2; exit}')"
+cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf '1')"
+load_one="$(awk '{print $1}' /proc/loadavg 2>/dev/null || printf '0')"
+memory_total_kib="$(awk '$1 == "MemTotal:" {print $2}' /proc/meminfo 2>/dev/null || printf '0')"
+memory_available_kib="$(awk '$1 == "MemAvailable:" {print $2}' /proc/meminfo 2>/dev/null || printf '0')"
+oom_events=0
+oom_kill_events=0
+if [ -n "$control_group" ] && [ -r "/sys/fs/cgroup${control_group}/memory.events" ]; then
+  oom_events="$(awk '$1 == "oom" {print $2}' "/sys/fs/cgroup${control_group}/memory.events")"
+  oom_kill_events="$(awk '$1 == "oom_kill" {print $2}' "/sys/fs/cgroup${control_group}/memory.events")"
+fi
 build_running=false
 for pid in $(pgrep -f 'pnpm install|build-runtime-packages|vite.*build|tsup.*cli-default|typescript/bin/tsc' 2>/dev/null || true); do
   cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
@@ -362,11 +438,49 @@ sudo -n -l /usr/bin/systemctl restart "$service" >/dev/null 2>&1 \
 stop_allowed=false
 sudo -n -l /usr/bin/systemctl stop "$service" >/dev/null 2>&1 \
   && stop_allowed=true
-SERVICE_ACTIVE="$service_active" CURRENT_COMMIT="$current_commit" ACTIVE_GIT="$active_git" \
+SERVICE_ACTIVE="$service_active" MAIN_PID="$main_pid" N_RESTARTS="$n_restarts" \
+MEMORY_CURRENT="$memory_current" MEMORY_PEAK="$memory_peak" CPU_USAGE_NSEC="$cpu_usage_nsec" \
+CONTROL_GROUP="$control_group" OOM_EVENTS="$oom_events" OOM_KILL_EVENTS="$oom_kill_events" \
+OXIGRAPH_PID="$oxigraph_pid" OXIGRAPH_WATCHDOG_PID="$oxigraph_watchdog_pid" \
+OXIGRAPH_RSS_KIB="$oxigraph_rss_kib" OXIGRAPH_START_TICKS="$oxigraph_start_ticks" \
+OXIGRAPH_CONTROL_GROUP="$oxigraph_control_group" \
+OXIGRAPH_MEMORY_CURRENT="$oxigraph_memory_current" OXIGRAPH_MEMORY_PEAK="$oxigraph_memory_peak" \
+OXIGRAPH_OOM_EVENTS="$oxigraph_oom_events" OXIGRAPH_OOM_KILL_EVENTS="$oxigraph_oom_kill_events" \
+CPU_COUNT="$cpu_count" LOAD_ONE="$load_one" MEMORY_TOTAL_KIB="$memory_total_kib" \
+MEMORY_AVAILABLE_KIB="$memory_available_kib" \
+CURRENT_COMMIT="$current_commit" ACTIVE_GIT="$active_git" \
 ACTIVE_SLOT="$active_slot" ACCEPT_QUEUE="$accept_queue" BUILD_RUNNING="$build_running" \
 RESTART_ALLOWED="$restart_allowed" STOP_ALLOWED="$stop_allowed" node -e '
+  const integer = value => /^\d+$/.test(value || "") ? Number(value) : null;
+  const finite = value => Number.isFinite(Number(value)) ? Number(value) : null;
+  const memoryTotal = integer(process.env.MEMORY_TOTAL_KIB) ?? 0;
+  const memoryAvailable = integer(process.env.MEMORY_AVAILABLE_KIB) ?? 0;
   process.stdout.write(JSON.stringify({
     serviceActive: process.env.SERVICE_ACTIVE,
+    mainPid: integer(process.env.MAIN_PID),
+    nRestarts: integer(process.env.N_RESTARTS),
+    serviceMemoryCurrentBytes: integer(process.env.MEMORY_CURRENT),
+    serviceMemoryPeakBytes: integer(process.env.MEMORY_PEAK),
+    serviceCpuUsageNSec: integer(process.env.CPU_USAGE_NSEC),
+    controlGroup: process.env.CONTROL_GROUP || null,
+    oomEvents: integer(process.env.OOM_EVENTS) ?? 0,
+    oomKillEvents: integer(process.env.OOM_KILL_EVENTS) ?? 0,
+    oxigraphPid: integer(process.env.OXIGRAPH_PID),
+    oxigraphWatchdogPid: integer(process.env.OXIGRAPH_WATCHDOG_PID),
+    oxigraphRssKiB: integer(process.env.OXIGRAPH_RSS_KIB) ?? 0,
+    oxigraphStartTicks: integer(process.env.OXIGRAPH_START_TICKS),
+    oxigraphControlGroup: process.env.OXIGRAPH_CONTROL_GROUP || null,
+    oxigraphMemoryCurrentBytes: integer(process.env.OXIGRAPH_MEMORY_CURRENT) ?? 0,
+    oxigraphMemoryPeakBytes: integer(process.env.OXIGRAPH_MEMORY_PEAK) ?? 0,
+    oxigraphOomEvents: integer(process.env.OXIGRAPH_OOM_EVENTS) ?? 0,
+    oxigraphOomKillEvents: integer(process.env.OXIGRAPH_OOM_KILL_EVENTS) ?? 0,
+    cpuCount: integer(process.env.CPU_COUNT) ?? 1,
+    loadOne: finite(process.env.LOAD_ONE) ?? 0,
+    hostMemoryTotalKiB: memoryTotal,
+    hostMemoryAvailableKiB: memoryAvailable,
+    hostMemoryUsedPercent: memoryTotal > 0
+      ? Math.round(((memoryTotal - memoryAvailable) / memoryTotal) * 10000) / 100
+      : null,
     currentCommit: process.env.CURRENT_COMMIT || null,
     activeGit: process.env.ACTIVE_GIT || null,
     activeSlot: process.env.ACTIVE_SLOT || null,
@@ -377,6 +491,276 @@ RESTART_ALLOWED="$restart_allowed" STOP_ALLOWED="$stop_allowed" node -e '
   }));
 '
 REMOTE
+}
+
+node_is_intentionally_stopped() {
+  local node="$1"
+  [ "$node" = "$CURATOR_NODE" ] && [ "$CURATOR_STOPPED" -eq 1 ] && return 0
+  [ "$node" = "$JOINER_NODE" ] && [ "$JOINER_STOPPED" -eq 1 ] && return 0
+  return 1
+}
+
+sample_node_health() {
+  local phase="$1" node probe status ready peer timestamp
+  timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  for node in $(seq 1 "$NUM_NODES"); do
+    node_is_intentionally_stopped "$node" && continue
+    if [ "$HARNESS_TARGET" = "testnet" ]; then
+      probe="$(testnet_probe_node "$node" 2>/dev/null || true)"
+      [ -n "$probe" ] || fail "health sample '$phase' could not probe testnet node $node"
+      [ "$(json_get "$probe" serviceActive)" = "active" ] \
+        || fail "health sample '$phase' found node $node service inactive: $probe"
+      [ -n "$(json_get "$probe" mainPid)" ] && [ "$(json_get "$probe" mainPid)" != "0" ] \
+        || fail "health sample '$phase' found node $node without a main process: $probe"
+      [ -n "$(json_get "$probe" oxigraphPid)" ] && [ "$(json_get "$probe" oxigraphPid)" != "0" ] \
+        || fail "health sample '$phase' found node $node without an Oxigraph process: $probe"
+      [ -n "$(json_get "$probe" oxigraphWatchdogPid)" ] && [ "$(json_get "$probe" oxigraphWatchdogPid)" != "0" ] \
+        || fail "health sample '$phase' found node $node without the Oxigraph watchdog: $probe"
+    else
+      status="$(API_TIMEOUT_OVERRIDE=10 api_call "$node" GET /api/status 2>/dev/null || true)"
+      peer="$(json_get "$status" peerId)"
+      [ -n "$peer" ] && ready=true || ready=false
+      probe="$(READY="$ready" PEER="$peer" node -e '
+        process.stdout.write(JSON.stringify({
+          apiReady: process.env.READY === "true",
+          peerId: process.env.PEER || null,
+        }));
+      ')"
+    fi
+    PHASE="$phase" NODE_ID="$node" TIMESTAMP="$timestamp" PROBE="$probe" node -e '
+      process.stdout.write(JSON.stringify({
+        timestamp: process.env.TIMESTAMP,
+        phase: process.env.PHASE,
+        node: Number(process.env.NODE_ID),
+        ...JSON.parse(process.env.PROBE),
+      }));
+    ' >> "$RUN_DIR/health-samples.jsonl"
+    printf '\n' >> "$RUN_DIR/health-samples.jsonl"
+  done
+  HEALTH_SAMPLE_COUNT=$((HEALTH_SAMPLE_COUNT + 1))
+  LAST_HEALTH_SAMPLE_EPOCH="$(date +%s)"
+}
+
+maybe_sample_node_health() {
+  local phase="$1" now
+  now="$(date +%s)"
+  if [ $((now - LAST_HEALTH_SAMPLE_EPOCH)) -ge "$HEALTH_SAMPLE_INTERVAL_S" ]; then
+    sample_node_health "$phase"
+  fi
+}
+
+record_devnet_log_offsets() {
+  [ "$HARNESS_TARGET" = "devnet" ] || return 0
+  local node log_path size
+  for node in $(seq 1 "$NUM_NODES"); do
+    log_path="$(node_log "$node")"
+    size=0
+    [ ! -f "$log_path" ] || size="$(wc -c < "$log_path" | tr -d '[:space:]')"
+    printf '%s\n' "$size" > "$RUN_DIR/node${node}-daemon-log-start-byte"
+  done
+}
+
+collect_testnet_health_journal() {
+  local node="$1" host since_b64
+  host="$(testnet_node_ssh "$node")"
+  since_b64="$(printf '%s' "$TESTNET_JOURNAL_SINCE" | base64_one_line)"
+  ssh "${TESTNET_SSH_OPTIONS[@]}" "$host" /bin/bash -s -- \
+    "$TESTNET_SERVICE" "$since_b64" <<'REMOTE'
+set -u
+service="$1"
+since="$(printf '%s' "$2" | base64 -d)"
+pattern='heap out of memory|oom-kill|out of memory|killed process|segmentation fault|segfault|core dumped|thread .* panicked|fatal runtime error|oxigraph.*(panic|fatal|crash|aborted)|code=killed, status=9/KILL'
+{
+  journalctl -u "$service" --since "$since" --no-pager 2>/dev/null || true
+  journalctl -k --since "$since" --no-pager 2>/dev/null || true
+} | grep -Ei "$pattern" || true
+REMOTE
+}
+
+audit_testnet_health_samples() {
+  local baseline_file="$RUN_DIR/health-baselines.jsonl"
+  BASELINES_FILE="$baseline_file" SAMPLES_FILE="$RUN_DIR/health-samples.jsonl" \
+    MAX_QUEUE="$TESTNET_MAX_ACCEPT_QUEUE" MAX_MEMORY="$TESTNET_MAX_MEMORY_USED_PERCENT" \
+    MAX_LOAD="$TESTNET_MAX_LOAD_PER_CPU_PERCENT" \
+    MAX_CONSECUTIVE="$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" \
+    CURATOR="$CURATOR_NODE" JOINER="$JOINER_NODE" node -e '
+      const fs = require("node:fs");
+      const readLines = file => fs.existsSync(file)
+        ? fs.readFileSync(file, "utf8").split(/\n+/).filter(Boolean).map(line => JSON.parse(line))
+        : [];
+      const baselines = new Map(readLines(process.env.BASELINES_FILE).map(row => [row.node, row]));
+      const samples = readLines(process.env.SAMPLES_FILE);
+      const maxQueue = Number(process.env.MAX_QUEUE);
+      const maxMemory = Number(process.env.MAX_MEMORY);
+      const maxLoad = Number(process.env.MAX_LOAD);
+      const maxConsecutive = Number(process.env.MAX_CONSECUTIVE);
+      const restartNodes = new Set([Number(process.env.CURATOR), Number(process.env.JOINER)]);
+      const state = new Map();
+      const failures = [];
+      for (const sample of samples) {
+        const baseline = baselines.get(sample.node);
+        if (!baseline) {
+          failures.push(`node ${sample.node} has samples without a baseline`);
+          continue;
+        }
+        const prior = state.get(sample.node) ?? {
+          pid: baseline.mainPid,
+          pidChanges: 0,
+          oxigraphPid: baseline.oxigraphPid,
+          oxigraphPidChanges: 0,
+          streak: 0,
+          maxStreak: 0,
+          oomEvents: baseline.oomEvents ?? 0,
+          oomKillEvents: baseline.oomKillEvents ?? 0,
+          oxigraphOomEvents: baseline.oxigraphOomEvents ?? 0,
+          oxigraphOomKillEvents: baseline.oxigraphOomKillEvents ?? 0,
+          saturationSamples: [],
+        };
+        const requiredNumbers = [
+          "mainPid", "nRestarts", "oxigraphPid", "oxigraphWatchdogPid",
+          "acceptQueue", "cpuCount", "loadOne", "hostMemoryUsedPercent",
+          "oomEvents", "oomKillEvents", "oxigraphOomEvents", "oxigraphOomKillEvents",
+        ];
+        for (const field of requiredNumbers) {
+          if (sample[field] === null || sample[field] === undefined || !Number.isFinite(Number(sample[field]))) {
+            failures.push(`node ${sample.node} sample ${sample.phase} omitted numeric ${field}`);
+          }
+        }
+        if (prior.pid !== sample.mainPid) {
+          prior.pid = sample.mainPid;
+          prior.pidChanges += 1;
+          prior.streak = 0;
+        }
+        if (prior.oxigraphPid !== sample.oxigraphPid) {
+          prior.oxigraphPid = sample.oxigraphPid;
+          prior.oxigraphPidChanges += 1;
+          prior.streak = 0;
+        }
+        const checkCounter = (label, currentRaw, previousRaw) => {
+          const current = Number(currentRaw ?? 0);
+          const previous = Number(previousRaw ?? 0);
+          if (current > previous || (current < previous && current > 0)) {
+            failures.push(`node ${sample.node} ${label} increased during ${sample.phase}`);
+          }
+          return current;
+        };
+        prior.oomEvents = checkCounter("daemon cgroup OOM counter", sample.oomEvents, prior.oomEvents);
+        prior.oomKillEvents = checkCounter("daemon cgroup OOM-kill counter", sample.oomKillEvents, prior.oomKillEvents);
+        prior.oxigraphOomEvents = checkCounter(
+          "Oxigraph cgroup OOM counter", sample.oxigraphOomEvents, prior.oxigraphOomEvents,
+        );
+        prior.oxigraphOomKillEvents = checkCounter(
+          "Oxigraph cgroup OOM-kill counter", sample.oxigraphOomKillEvents, prior.oxigraphOomKillEvents,
+        );
+        if (Number(sample.nRestarts) !== Number(baseline.nRestarts)) {
+          failures.push(`node ${sample.node} systemd NRestarts changed during ${sample.phase}`);
+        }
+        const loadPerCpuPercent = Number(sample.cpuCount) > 0
+          ? (Number(sample.loadOne) / Number(sample.cpuCount)) * 100
+          : Infinity;
+        const reasons = [];
+        if (Number(sample.acceptQueue) > maxQueue) reasons.push(`acceptQueue=${sample.acceptQueue}`);
+        if (Number(sample.hostMemoryUsedPercent) >= maxMemory) reasons.push(`memory=${sample.hostMemoryUsedPercent}%`);
+        if (loadPerCpuPercent >= maxLoad) reasons.push(`loadPerCpu=${loadPerCpuPercent.toFixed(1)}%`);
+        if (reasons.length > 0) {
+          prior.streak += 1;
+          prior.saturationSamples.push({ phase: sample.phase, reasons });
+        } else {
+          prior.streak = 0;
+        }
+        prior.maxStreak = Math.max(prior.maxStreak, prior.streak);
+        state.set(sample.node, prior);
+      }
+      for (const [node, value] of state) {
+        const allowedPidChanges = restartNodes.has(node) ? 1 : 0;
+        if (value.pidChanges > allowedPidChanges) {
+          failures.push(`node ${node} daemon PID changed ${value.pidChanges} times; allowed ${allowedPidChanges}`);
+        }
+        if (value.oxigraphPidChanges > allowedPidChanges) {
+          failures.push(`node ${node} Oxigraph PID changed ${value.oxigraphPidChanges} times; allowed ${allowedPidChanges}`);
+        }
+        if (value.maxStreak >= maxConsecutive) {
+          failures.push(
+            `node ${node} sustained saturation for ${value.maxStreak} samples: ` +
+            JSON.stringify(value.saturationSamples.slice(-value.maxStreak)),
+          );
+        }
+      }
+      const report = {
+        thresholds: {
+          maxAcceptQueue: maxQueue,
+          maxHostMemoryUsedPercent: maxMemory,
+          maxLoadPerCpuPercent: maxLoad,
+          consecutiveSamples: maxConsecutive,
+        },
+        sampleRows: samples.length,
+        nodes: Object.fromEntries([...state].map(([node, value]) => [node, {
+          daemonPidChanges: value.pidChanges,
+          oxigraphPidChanges: value.oxigraphPidChanges,
+          maxConsecutiveSaturationSamples: value.maxStreak,
+          saturationSamples: value.saturationSamples,
+        }])),
+        failures,
+        passed: failures.length === 0,
+      };
+      process.stdout.write(JSON.stringify(report, null, 2));
+      if (failures.length > 0) process.exitCode = 1;
+    '
+}
+
+audit_node_health() {
+  local node baseline probe journal findings=0 health_report
+  sample_node_health final
+  if [ "$HARNESS_TARGET" = "testnet" ]; then
+    for node in $(seq 1 "$NUM_NODES"); do
+      baseline="$(sed -n "${node}p" "$RUN_DIR/health-baselines.jsonl")"
+      probe="$(testnet_probe_node "$node")" || fail "final health probe failed for node $node"
+      [ "$(json_get "$probe" serviceActive)" = "active" ] \
+        || fail "node $node service is not active at the final gate: $probe"
+      [ "$(json_get "$probe" nRestarts)" = "$(json_get "$baseline" nRestarts)" ] \
+        || fail "node $node had an unexpected systemd restart: baseline=$baseline final=$probe"
+      commit_matches "$(json_get "$probe" currentCommit)" "$TESTNET_EXPECT_COMMIT" \
+        || fail "node $node changed deployed commit during the run: $probe"
+      journal="$(collect_testnet_health_journal "$node" 2>/dev/null || true)"
+      printf '%s\n' "$journal" | sanitize_stream > "$RUN_DIR/node${node}-health-journal.log"
+      if [ -n "$journal" ]; then
+        findings=$((findings + 1))
+      fi
+    done
+    [ "$findings" -eq 0 ] \
+      || fail "$findings testnet node(s) logged an OOM, process crash, or Oxigraph fatal condition"
+    if ! health_report="$(audit_testnet_health_samples 2>&1)"; then
+      save_artifact "health-audit.json" "$health_report"
+      fail "testnet health samples failed the OOM/sustained-saturation gate"
+    fi
+    save_artifact "health-audit.json" "$health_report"
+  else
+    for node in $(seq 1 "$NUM_NODES"); do
+      wait_node_ready "$node" 30 || fail "devnet node $node is not API-ready at the final health gate"
+      local log_path start size start_from recent
+      log_path="$(node_log "$node")"
+      start="$(cat "$RUN_DIR/node${node}-daemon-log-start-byte" 2>/dev/null || printf '0')"
+      size=0
+      [ ! -f "$log_path" ] || size="$(wc -c < "$log_path" | tr -d '[:space:]')"
+      [ "$size" -ge "$start" ] && start_from=$((start + 1)) || start_from=1
+      recent="$(tail -c "+$start_from" "$log_path" 2>/dev/null \
+        | grep -Ei 'heap out of memory|oom-kill|out of memory|killed process|segmentation fault|segfault|core dumped|thread .* panicked|fatal runtime error|oxigraph.*(panic|fatal|crash|aborted)' || true)"
+      printf '%s\n' "$recent" | sanitize_stream > "$RUN_DIR/node${node}-health-log.log"
+      [ -z "$recent" ] || findings=$((findings + 1))
+    done
+    [ "$findings" -eq 0 ] \
+      || fail "$findings devnet node(s) logged an OOM, process crash, or Oxigraph fatal condition"
+    save_artifact "health-audit.json" "$(SAMPLES="$HEALTH_SAMPLE_COUNT" node -e '
+      process.stdout.write(JSON.stringify({
+        target: "devnet",
+        sampleRounds: Number(process.env.SAMPLES),
+        finalApisReady: true,
+        fatalLogFindings: 0,
+        passed: true,
+      }, null, 2));
+    ')"
+  fi
+  HEALTH_AUDIT_PASSED=1
 }
 
 stop_node() {
@@ -785,6 +1169,197 @@ knowledge_asset_count() {
   query_count "$1" _meta '?s <http://dkg.io/ontology/assertionName> ?name'
 }
 
+integrity_head_query() {
+  local node="$1" manifest_row="$2" lane ual meta_graph body
+  lane="$(json_get "$manifest_row" lane)"
+  ual="$(json_get "$manifest_row" kaUal)"
+  if [ "$lane" = "subgraph" ]; then
+    meta_graph="did:dkg:context-graph:$CG_ID/$SUB_GRAPH_NAME/_shared_memory_meta"
+  else
+    meta_graph="did:dkg:context-graph:$CG_ID/_shared_memory_meta"
+  fi
+  body="$(CG="$CG_ID" LANE="$lane" SUB="$SUB_GRAPH_NAME" META="$meta_graph" UAL="$ual" node -e '
+    const dkg = "http://dkg.io/ontology/";
+    const sparql = `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph
+                            ?shareOperationId ?digest ?publicCount ?privateCount WHERE {
+      GRAPH <${process.env.META}> {
+        ?head <${dkg}contentScopeVersion> ?scopeVersion ;
+              <${dkg}kaUal> <${process.env.UAL}> ;
+              <${dkg}kaUal> ?kaUal ;
+              <${dkg}assertionVersion> ?assertionVersion ;
+              <${dkg}assertionGraph> ?assertionGraph ;
+              <${dkg}shareOperationId> ?shareOperationId .
+        ?operation <${dkg}shareOperationId> ?shareOperationId ;
+                   <${dkg}kaUal> <${process.env.UAL}> ;
+                   <${dkg}assertionVersion> ?assertionVersion ;
+                   <${dkg}publicQuadsDigest> ?digest ;
+                   <${dkg}publicQuadsCount> ?publicCount ;
+                   <${dkg}privateTripleCount> ?privateCount .
+      }
+    }`;
+    process.stdout.write(JSON.stringify({
+      contextGraphId: process.env.CG,
+      sparql,
+      ...(process.env.LANE === "subgraph" ? { subGraphName: process.env.SUB } : {}),
+    }));
+  ')"
+  api_call "$node" POST /api/query "$body"
+}
+
+validate_integrity_head_response() {
+  local manifest_row="$1"
+  EXPECTED="$manifest_row" node -e '
+    let input = "";
+    process.stdin.on("data", chunk => input += chunk);
+    process.stdin.on("end", () => {
+      const expected = JSON.parse(process.env.EXPECTED);
+      const payload = JSON.parse(input);
+      const bindings = payload?.result?.bindings
+        ?? payload?.result?.results?.bindings
+        ?? payload?.results?.bindings
+        ?? payload?.bindings
+        ?? [];
+      const raw = value => typeof value === "string" ? value : value?.value;
+      const lexical = value => {
+        const text = String(raw(value) ?? "");
+        const match = text.match(/^("(?:[^"\\]|\\.)*")/);
+        return match ? JSON.parse(match[1]) : text;
+      };
+      const integer = value => {
+        const match = lexical(value).match(/^-?\d+$/);
+        return match ? Number(match[0]) : NaN;
+      };
+      if (bindings.length !== 1) {
+        throw new Error(`expected one SWM head binding, found ${bindings.length}`);
+      }
+      const row = bindings[0];
+      const actual = {
+        contentScopeVersion: integer(row.scopeVersion),
+        kaUal: lexical(row.kaUal),
+        assertionVersion: integer(row.assertionVersion),
+        assertionGraph: lexical(row.assertionGraph),
+        shareOperationId: lexical(row.shareOperationId),
+        publicQuadsDigest: lexical(row.digest),
+        publicTripleCount: integer(row.publicCount),
+        privateTripleCount: integer(row.privateCount),
+      };
+      const mismatches = [];
+      if (actual.contentScopeVersion !== 2) mismatches.push("contentScopeVersion");
+      if (actual.kaUal !== expected.kaUal) mismatches.push("kaUal");
+      if (actual.assertionVersion !== Number(expected.assertionVersion)) mismatches.push("assertionVersion");
+      if (actual.assertionGraph !== expected.assertionGraph) mismatches.push("assertionGraph");
+      if (actual.shareOperationId !== expected.shareOperationId) mismatches.push("shareOperationId");
+      if (actual.publicQuadsDigest !== expected.publicQuadsDigest) mismatches.push("publicQuadsDigest");
+      if (actual.publicTripleCount !== Number(expected.triplesExpected)) mismatches.push("publicTripleCount");
+      if (actual.privateTripleCount !== 0) mismatches.push("privateTripleCount");
+      if (mismatches.length > 0) {
+        throw new Error(`SWM head mismatch (${mismatches.join(", ")}): ${JSON.stringify(actual)}`);
+      }
+      process.stdout.write(JSON.stringify(actual));
+    });
+  '
+}
+
+integrity_data_query() {
+  local node="$1" manifest_row="$2" lane graph body
+  lane="$(json_get "$manifest_row" lane)"
+  graph="$(json_get "$manifest_row" assertionGraph)"
+  body="$(CG="$CG_ID" LANE="$lane" SUB="$SUB_GRAPH_NAME" GRAPH_IRI="$graph" node -e '
+    const sparql = `SELECT ?s ?p ?o WHERE {
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(STR(?g) = ${JSON.stringify(process.env.GRAPH_IRI)})
+    }`;
+    process.stdout.write(JSON.stringify({
+      contextGraphId: process.env.CG,
+      sparql,
+      includeContextGraphPartitions: true,
+      ...(process.env.LANE === "subgraph" ? { subGraphName: process.env.SUB } : {}),
+    }));
+  ')"
+  api_call "$node" POST /api/query "$body"
+}
+
+validate_integrity_data_response() {
+  local manifest_row="$1"
+  EXPECTED="$manifest_row" node -e '
+    const { createHash } = require("node:crypto");
+    let input = "";
+    process.stdin.on("data", chunk => input += chunk);
+    process.stdin.on("end", () => {
+      const expected = JSON.parse(process.env.EXPECTED);
+      const payload = JSON.parse(input);
+      const bindings = payload?.result?.bindings
+        ?? payload?.result?.results?.bindings
+        ?? payload?.results?.bindings
+        ?? payload?.bindings
+        ?? [];
+      const term = value => String(typeof value === "string" ? value : value?.value ?? "");
+      const canonical = bindings
+        .map(row => [term(row.s), term(row.p), term(row.o), ""])
+        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+      const digest = `sha256:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex")}`;
+      if (bindings.length !== Number(expected.triplesExpected)) {
+        throw new Error(`assertion graph count ${bindings.length}, expected ${expected.triplesExpected}`);
+      }
+      if (digest !== expected.publicQuadsDigest) {
+        throw new Error(`assertion graph digest ${digest}, expected ${expected.publicQuadsDigest}`);
+      }
+      process.stdout.write(JSON.stringify({
+        publicTripleCount: bindings.length,
+        publicQuadsDigest: digest,
+      }));
+    });
+  '
+}
+
+verify_manifest_on_node() {
+  local node="$1" phase="$2" report
+  report="$RUN_DIR/${phase}-node${node}-integrity.jsonl"
+  local manifest_row head_response head_result data_response data_result verified=0
+  : > "$report"
+  while IFS= read -r manifest_row; do
+    [ -n "$manifest_row" ] || continue
+    if ! head_response="$(integrity_head_query "$node" "$manifest_row" 2>/dev/null)"; then
+      fail "$phase node $node could not query SWM head for KA $(json_get "$manifest_row" ordinal)"
+    fi
+    if ! head_result="$(printf '%s' "$head_response" | validate_integrity_head_response "$manifest_row" 2>&1)"; then
+      save_artifact "${phase}-node${node}-ka-$(json_get "$manifest_row" ordinal)-head-error.json" "$head_response"
+      fail "$phase node $node failed SWM-head integrity for KA $(json_get "$manifest_row" ordinal): $head_result"
+    fi
+    if ! data_response="$(integrity_data_query "$node" "$manifest_row" 2>/dev/null)"; then
+      fail "$phase node $node could not query exact assertion graph for KA $(json_get "$manifest_row" ordinal)"
+    fi
+    if ! data_result="$(printf '%s' "$data_response" | validate_integrity_data_response "$manifest_row" 2>&1)"; then
+      save_artifact "${phase}-node${node}-ka-$(json_get "$manifest_row" ordinal)-data-error.json" "$data_response"
+      fail "$phase node $node failed assertion-graph integrity for KA $(json_get "$manifest_row" ordinal): $data_result"
+    fi
+    EXPECTED="$manifest_row" HEAD_RESULT="$head_result" DATA_RESULT="$data_result" \
+      NODE_ID="$node" PHASE="$phase" node -e '
+        process.stdout.write(JSON.stringify({
+          phase: process.env.PHASE,
+          node: Number(process.env.NODE_ID),
+          expected: JSON.parse(process.env.EXPECTED),
+          swmHead: JSON.parse(process.env.HEAD_RESULT),
+          assertionGraph: JSON.parse(process.env.DATA_RESULT),
+          verified: true,
+        }));
+      ' >> "$report"
+    printf '\n' >> "$report"
+    verified=$((verified + 1))
+    if [ $((verified % INTEGRITY_PROGRESS_EVERY_KAS)) -eq 0 ] || [ "$verified" -eq "$PLANNED_KA_COUNT" ]; then
+      log "$phase node $node per-KA integrity: $verified/$PLANNED_KA_COUNT"
+      maybe_sample_node_health "$phase-integrity-$verified"
+    fi
+  done < "$SEED_MANIFEST"
+  [ "$verified" = "$PLANNED_KA_COUNT" ] \
+    || fail "$phase node $node verified $verified KAs, expected $PLANNED_KA_COUNT"
+  case "$phase" in
+    curator) CURATOR_INTEGRITY_VERIFIED="$verified" ;;
+    joiner-recovered) JOINER_INTEGRITY_VERIFIED="$verified" ;;
+    joiner-post-restart) POST_RESTART_INTEGRITY_VERIFIED="$verified" ;;
+  esac
+}
+
 private_policy_count() {
   query_count "$1" _meta \
     "<did:dkg:context-graph:$CG_ID> <https://dkg.network/ontology#accessPolicy> \"private\""
@@ -871,30 +1446,71 @@ build_swm_payload() {
   '
 }
 
+# Keep this byte-for-byte aligned with
+# packages/publisher/src/workspace-snapshot-store.ts:workspacePublicQuadsDigest.
+# The graph component is deliberately normalized to the empty string because
+# graph-scoped KA sharing pins every submitted triple into the UAL-derived SWM
+# graph before computing the durable public commitment.
+payload_public_digest() {
+  node -e '
+    const { createHash } = require("node:crypto");
+    let input = "";
+    process.stdin.on("data", chunk => input += chunk);
+    process.stdin.on("end", () => {
+      const payload = JSON.parse(input);
+      const quads = Array.isArray(payload.quads) ? payload.quads : [];
+      const canonical = quads
+        .map(quad => [String(quad.subject), String(quad.predicate), String(quad.object), ""])
+        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+      const hash = createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+      process.stdout.write(`sha256:${hash}`);
+    });
+  '
+}
+
+knowledge_asset_descriptor() {
+  local node="$1" name="$2" lane="$3" path
+  path="/api/knowledge-assets/$(urlencode "$name")?contextGraphId=$(urlencode "$CG_ID")"
+  if [ "$lane" = "subgraph" ]; then
+    path="$path&subGraphName=$(urlencode "$SUB_GRAPH_NAME")"
+  fi
+  api_call "$node" GET "$path"
+}
+
 epoch_ms() {
   node -e 'process.stdout.write(String(Date.now()))'
 }
 
 record_seed_manifest() {
   local ordinal="$1" lane="$2" label="$3" triples="$4"
-  local payload_bytes="$5" duration_ms="$6" write_response="$7"
+  local payload_bytes="$5" duration_ms="$6" expected_digest="$7"
+  local descriptor="$8" write_response="$9"
   printf '%s' "$write_response" \
     | ORDINAL="$ordinal" LANE="$lane" LABEL="$label" TRIPLES="$triples" \
-      PAYLOAD_BYTES="$payload_bytes" DURATION_MS="$duration_ms" node -e '
+      PAYLOAD_BYTES="$payload_bytes" DURATION_MS="$duration_ms" \
+      EXPECTED_DIGEST="$expected_digest" DESCRIPTOR="$descriptor" node -e '
         let input = "";
         process.stdin.on("data", chunk => input += chunk);
         process.stdin.on("end", () => {
           const response = JSON.parse(input);
+          const descriptor = JSON.parse(process.env.DESCRIPTOR);
+          const createResponse = Array.isArray(response.responses) ? response.responses[0] : undefined;
           process.stdout.write(JSON.stringify({
             ordinal: Number(process.env.ORDINAL),
             lane: process.env.LANE,
             label: process.env.LABEL,
+            name: Array.isArray(response.names) ? response.names[0] : null,
+            kaUal: descriptor.reservedUal || null,
+            assertionVersion: 1,
+            assertionGraph: descriptor.assertionGraph || null,
             triplesExpected: Number(process.env.TRIPLES),
             triplesWritten: Number(response.triplesWritten),
+            publicQuadsDigest: process.env.EXPECTED_DIGEST,
             payloadBytes: Number(process.env.PAYLOAD_BYTES),
             durationMs: Number(process.env.DURATION_MS),
             names: Array.isArray(response.names) ? response.names : [],
-            shareOperationId: response.shareOperationId || null,
+            shareOperationId: createResponse?.shareOperationId || descriptor.currentShareOperationId || null,
+            merkleRoot: createResponse?.merkleRoot || descriptor.swmCurrentAssertion || null,
             responses: (Array.isArray(response.responses) ? response.responses : []).map(item => ({
               shareOperationId: item.shareOperationId || null,
               swmShared: item.swmShared === true,
@@ -909,7 +1525,9 @@ record_seed_manifest() {
 
 seed_named_ka() {
   local ordinal="$1" lane="$2" triples="$3" label="$4"
-  local payload payload_bytes started_ms finished_ms duration_ms write_response name_prefix
+  local payload payload_bytes expected_digest started_ms finished_ms duration_ms
+  local write_response name_prefix name descriptor reserved_ual assertion_graph
+  local share_operation_id descriptor_share_operation_id
   case "$lane" in
     root)
       payload="$(build_swm_payload "$triples" "$label")"
@@ -920,6 +1538,9 @@ seed_named_ka() {
     *) fail "unsupported seed lane: $lane" ;;
   esac
   payload_bytes="$(printf '%s' "$payload" | wc -c | tr -d '[:space:]')"
+  expected_digest="$(printf '%s' "$payload" | payload_public_digest)"
+  [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || fail "KA $ordinal ($lane) expected digest could not be computed"
   started_ms="$(epoch_ms)"
   [ "$SEED_STARTED_AT_MS" != "0" ] || SEED_STARTED_AT_MS="$started_ms"
   name_prefix="private-cg-recovery-${lane}-$(printf '%03d' "$ordinal")"
@@ -937,6 +1558,18 @@ seed_named_ka() {
   ')" = "1" ] || fail "KA $ordinal ($lane) did not produce exactly one named KA: $write_response"
   [ "$(json_get "$write_response" responses.0.promotedCount)" = "$triples" ] \
     || fail "KA $ordinal ($lane) did not share all $triples triples to SWM: $write_response"
+  name="$(json_get "$write_response" names.0)"
+  descriptor="$(knowledge_asset_descriptor "$CURATOR_NODE" "$name" "$lane" 2>/dev/null || true)"
+  reserved_ual="$(json_get "$descriptor" reservedUal)"
+  assertion_graph="$(json_get "$descriptor" assertionGraph)"
+  share_operation_id="$(json_get "$write_response" responses.0.shareOperationId)"
+  descriptor_share_operation_id="$(json_get "$descriptor" currentShareOperationId)"
+  [ -n "$reserved_ual" ] && [[ "$reserved_ual" == did:dkg:* ]] \
+    || fail "KA $ordinal ($lane) descriptor omitted its reserved UAL: $descriptor"
+  [ -n "$assertion_graph" ] && [[ "$assertion_graph" == *"/_shared_memory/"* ]] \
+    || fail "KA $ordinal ($lane) descriptor did not point at an exact SWM graph: $descriptor"
+  [ -n "$share_operation_id" ] && [ "$descriptor_share_operation_id" = "$share_operation_id" ] \
+    || fail "KA $ordinal ($lane) descriptor/share operation mismatch: descriptor=$descriptor response=$write_response"
   finished_ms="$(epoch_ms)"
   duration_ms=$((finished_ms - started_ms))
   SEED_FINISHED_AT_MS="$finished_ms"
@@ -952,9 +1585,12 @@ seed_named_ka() {
     SEEDED_SUB_GRAPH_KA_COUNT=$((SEEDED_SUB_GRAPH_KA_COUNT + 1))
   fi
   record_seed_manifest "$ordinal" "$lane" "$label" "$triples" \
-    "$payload_bytes" "$duration_ms" "$write_response"
+    "$payload_bytes" "$duration_ms" "$expected_digest" "$descriptor" "$write_response"
   LAST_SEED_WRITE="$write_response"
   log "seeded KA $ordinal/$PLANNED_KA_COUNT lane=$lane triples=$triples payloadBytes=$payload_bytes durationMs=$duration_ms"
+  if [ $((ordinal % HEALTH_SAMPLE_EVERY_KAS)) -eq 0 ] || [ "$ordinal" -eq "$PLANNED_KA_COUNT" ]; then
+    sample_node_health "seed-$ordinal"
+  fi
 }
 
 write_seed_summary_artifact() {
@@ -1032,6 +1668,7 @@ wait_full_recovery() {
   start="$(date +%s)"
   while [ $(( $(date +%s) - start )) -lt "$timeout" ]; do
     if full_recovery_present; then return 0; fi
+    maybe_sample_node_health recovery-wait
     sleep "$POLL_INTERVAL_S"
   done
   return 1
@@ -1143,6 +1780,10 @@ write_summary() {
     SEEDED_SUB_KAS="$SEEDED_SUB_GRAPH_KA_COUNT" SEEDED_TRIPLES="$SEEDED_TRIPLE_COUNT" \
     SEED_PAYLOAD_BYTES="$SEED_PAYLOAD_BYTES" MAX_SEED_PAYLOAD_BYTES="$MAX_SEED_PAYLOAD_BYTES" \
     SEED_DURATION_MS="$SEED_DURATION_MS" \
+    CURATOR_INTEGRITY="$CURATOR_INTEGRITY_VERIFIED" \
+    JOINER_INTEGRITY="$JOINER_INTEGRITY_VERIFIED" \
+    POST_RESTART_INTEGRITY="$POST_RESTART_INTEGRITY_VERIFIED" \
+    HEALTH_SAMPLES="$HEALTH_SAMPLE_COUNT" HEALTH_PASSED="$HEALTH_AUDIT_PASSED" \
     AUTO_OBSERVED="$AUTO_APPROVAL_OBSERVED" AUTO_MEMBERS="$AUTO_MAX_MEMBERS" \
     AUTO_HOURLY="$AUTO_MAX_APPROVALS_PER_HOUR" \
     FAILURE="$FAIL_REASON" RECOVERED_BEFORE="$BROKEN_RECOVERED_BEFORE_RESTART" \
@@ -1185,6 +1826,20 @@ write_summary() {
             && Number(process.env.SEEDED_ROOT_KAS) === Number(process.env.ROOT_KAS)
             && Number(process.env.SEEDED_SUB_KAS) === Number(process.env.SUB_KAS)
             && Number(process.env.SEEDED_TRIPLES) === Number(process.env.TOTAL_TRIPLES_ENV),
+        },
+        integrity: {
+          curatorVerifiedKAs: Number(process.env.CURATOR_INTEGRITY),
+          recoveredJoinerVerifiedKAs: Number(process.env.JOINER_INTEGRITY),
+          postRestartJoinerVerifiedKAs: Number(process.env.POST_RESTART_INTEGRITY),
+          complete: process.env.EXPECT !== "fixed" || (
+            Number(process.env.CURATOR_INTEGRITY) === Number(process.env.PLANNED_KAS)
+            && Number(process.env.JOINER_INTEGRITY) === Number(process.env.PLANNED_KAS)
+            && Number(process.env.POST_RESTART_INTEGRITY) === Number(process.env.PLANNED_KAS)
+          ),
+        },
+        health: {
+          sampleRounds: Number(process.env.HEALTH_SAMPLES),
+          passed: process.env.HEALTH_PASSED === "1",
         },
         autoApproval: {
           enabled: process.env.ADMISSION === "auto",
@@ -1248,6 +1903,8 @@ else
 fi
 
 SEEN_TESTNET_PEERS=" "
+: > "$RUN_DIR/health-baselines.jsonl"
+: > "$RUN_DIR/health-samples.jsonl"
 for node in $(seq 1 "$NUM_NODES"); do
   if [ "$HARNESS_TARGET" = "devnet" ]; then
     [ -f "$(node_dir "$node")/auth.token" ] || fail "node $node auth token is missing under $DEVNET_DIR"
@@ -1286,8 +1943,24 @@ for node in $(seq 1 "$NUM_NODES"); do
     fi
     probe="$(testnet_probe_node "$node")" || fail "could not probe testnet node $node over SSH"
     save_artifact "preflight-node${node}-host.json" "$probe"
+    NODE_ID="$node" PROBE="$probe" node -e '
+      process.stdout.write(JSON.stringify({
+        node: Number(process.env.NODE_ID),
+        ...JSON.parse(process.env.PROBE),
+      }));
+    ' >> "$RUN_DIR/health-baselines.jsonl"
+    printf '\n' >> "$RUN_DIR/health-baselines.jsonl"
     [ "$(json_get "$probe" serviceActive)" = "active" ] \
       || fail "node $node service is not active: $probe"
+    for metric in mainPid nRestarts oxigraphPid oxigraphWatchdogPid acceptQueue cpuCount \
+      oomEvents oomKillEvents oxigraphOomEvents oxigraphOomKillEvents; do
+      metric_value="$(json_get "$probe" "$metric")"
+      [[ "$metric_value" =~ ^[0-9]+$ ]] \
+        || fail "node $node host probe omitted numeric $metric: $probe"
+    done
+    [ "$(json_get "$probe" mainPid)" -gt 0 ] && [ "$(json_get "$probe" oxigraphPid)" -gt 0 ] \
+      && [ "$(json_get "$probe" oxigraphWatchdogPid)" -gt 0 ] \
+      || fail "node $node daemon/Oxigraph processes are not all running: $probe"
     [ "$(json_get "$probe" buildRunning)" = "false" ] \
       || fail "node $node is still building an auto-update: $probe"
     [ "$(json_get "$probe" restartAllowed)" = "true" ] \
@@ -1314,6 +1987,19 @@ for node in $(seq 1 "$NUM_NODES"); do
     log "node $node ready (role=$role, peer=$peer)"
   fi
 done
+record_devnet_log_offsets
+sample_node_health preflight
+if [ "$HARNESS_TARGET" = "testnet" ]; then
+  for round in $(seq 2 "$TESTNET_PREFLIGHT_HEALTH_SAMPLE_ROUNDS"); do
+    sleep "$TESTNET_PREFLIGHT_HEALTH_SAMPLE_INTERVAL_S"
+    sample_node_health "preflight-$round"
+  done
+  if ! PREFLIGHT_HEALTH_REPORT="$(audit_testnet_health_samples 2>&1)"; then
+    save_artifact "preflight-health-audit.json" "$PREFLIGHT_HEALTH_REPORT"
+    fail "testnet preflight detected OOM/restart evidence or sustained queue, memory, or load saturation"
+  fi
+  save_artifact "preflight-health-audit.json" "$PREFLIGHT_HEALTH_REPORT"
+fi
 
 if [ "$HARNESS_TARGET" = "testnet" ]; then
   # Exercise the streamed-body SSH path with a read-only request larger than
@@ -1354,6 +2040,15 @@ PACKAGE_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || tr
   echo "apiTimeoutSeconds=$API_TIMEOUT_S"
   echo "recoveryTimeoutSeconds=$RECOVERY_TIMEOUT_S"
   echo "postRestartTimeoutSeconds=$POST_RESTART_TIMEOUT_S"
+  echo "integrityProgressEveryKas=$INTEGRITY_PROGRESS_EVERY_KAS"
+  echo "healthSampleEveryKas=$HEALTH_SAMPLE_EVERY_KAS"
+  echo "healthSampleIntervalSeconds=$HEALTH_SAMPLE_INTERVAL_S"
+  echo "testnetMaxAcceptQueue=$TESTNET_MAX_ACCEPT_QUEUE"
+  echo "testnetMaxMemoryUsedPercent=$TESTNET_MAX_MEMORY_USED_PERCENT"
+  echo "testnetMaxLoadPerCpuPercent=$TESTNET_MAX_LOAD_PER_CPU_PERCENT"
+  echo "testnetSaturationConsecutiveSamples=$TESTNET_SATURATION_CONSECUTIVE_SAMPLES"
+  echo "testnetPreflightHealthSampleRounds=$TESTNET_PREFLIGHT_HEALTH_SAMPLE_ROUNDS"
+  echo "testnetPreflightHealthSampleIntervalSeconds=$TESTNET_PREFLIGHT_HEALTH_SAMPLE_INTERVAL_S"
   echo "autoMaxMembers=$AUTO_MAX_MEMBERS"
   echo "autoMaxApprovalsPerHour=$AUTO_MAX_APPROVALS_PER_HOUR"
 } > "$RUN_DIR/runtime.txt"
@@ -1471,6 +2166,10 @@ CURATOR_KAS="$(knowledge_asset_count "$CURATOR_NODE")"
 [ "$CURATOR_KAS" = "$PLANNED_KA_COUNT" ] \
   || fail "curator metadata contains $CURATOR_KAS named KAs, expected $PLANNED_KA_COUNT"
 log "curator workload verified: KAs=$CURATOR_KAS triples=$SEEDED_TRIPLE_COUNT root=$CURATOR_ROOT subgraph=$CURATOR_SUB payloadBytes=$SEED_PAYLOAD_BYTES"
+if [ "$HARNESS_EXPECT" = "fixed" ]; then
+  act "Verify every curator SWM head and exact per-KA assertion graph"
+  verify_manifest_on_node "$CURATOR_NODE" curator
+fi
 
 act "Prove unrelated nodes ($UNRELATED_NODES) and joiner $JOINER_NODE do not already hold the private CG"
 for node in $UNRELATED_NODES "$JOINER_NODE"; do
@@ -1694,6 +2393,8 @@ if [ "$HARNESS_EXPECT" = "fixed" ]; then
   wait_full_recovery "$RECOVERY_TIMEOUT_S" \
     || { snapshot_phase post-approval-timeout; fail "fixed build did not recover metadata + exact SWM fixtures within ${RECOVERY_TIMEOUT_S}s"; }
   assert_fixed_list_state
+  act "Verify every recovered joiner SWM head and exact per-KA assertion graph"
+  verify_manifest_on_node "$JOINER_NODE" joiner-recovered
   log "recovered: metadata private+allowlisted+delegated, KAs=$PLANNED_KA_COUNT, root=$ROOT_TRIPLES, subgraph=$SUB_GRAPH_TRIPLES"
 else
   if wait_full_recovery "$BROKEN_RECOVERY_OBSERVE_S"; then
@@ -1716,6 +2417,8 @@ if [ "$HARNESS_EXPECT" = "fixed" ]; then
   wait_full_recovery "$POST_RESTART_TIMEOUT_S" \
     || { snapshot_phase post-restart-timeout; fail "fixed state did not survive/recover after joiner restart"; }
   assert_fixed_list_state
+  act "Re-verify every joiner SWM head and exact per-KA graph after restart"
+  verify_manifest_on_node "$JOINER_NODE" joiner-post-restart
   log "restart persistence verified"
 else
   if wait_full_recovery "$BROKEN_POST_RESTART_OBSERVE_S"; then
@@ -1730,6 +2433,12 @@ else
   fi
 fi
 snapshot_phase post-restart
+
+if [ "$HARNESS_EXPECT" = "fixed" ]; then
+  act "Audit daemon, Oxigraph, OOM, and sustained-saturation health"
+  audit_node_health
+  log "health gate passed: no crash/OOM evidence and no sustained queue, memory, or load saturation"
+fi
 
 echo
 if [ "$HARNESS_EXPECT" = "broken" ]; then
