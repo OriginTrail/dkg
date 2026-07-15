@@ -607,7 +607,16 @@ describe('DKGAgent.update inline encryption routing', () => {
         error: recorder(() => undefined),
         debug: recorder(() => undefined),
       },
-      chain: { chainId },
+      chain: {
+        chainId,
+        getEvmChainId: recorder(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: recorder(
+          async () => '0x2222222222222222222222222222222222222222',
+        ),
+        getKnowledgeAssetOwner: recorder(async () => author),
+        hasContractCode: recorder(async () => true),
+        verifyContractSignature: recorder(async () => true),
+      },
       getContextGraphOnChainId: recorder(async () => '42'),
       createV10UpdateACKProvider: recorder(() => undefined),
       node: { peerId: { toString: () => 'peer-1' } },

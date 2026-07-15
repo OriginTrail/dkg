@@ -729,12 +729,6 @@ export class ApiClient {
     // self-sign vs external-signer conflict client-side instead of relying on
     // the daemon, so every SDK surface enforces the same contract.
     assertExclusiveAuthorFields(options ?? {});
-    if (options?.layer === 'swm') {
-      throw Object.assign(
-        new Error('Legacy root-scoped Knowledge Assets are read-only'),
-        { code: 'LEGACY_KA_READ_ONLY' },
-      );
-    }
     const wireOptions = { ...(options ?? {}) };
     delete wireOptions.layer;
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...wireOptions });

@@ -350,10 +350,6 @@ export function registerKnowledgeAssetCommand(program: Command): void {
         throw new Error('--layer must be wm or swm');
       }
       const authorOptions = parseFinalizeAuthorOptions(opts);
-      const layer = opts.layer === undefined ? undefined : String(opts.layer);
-      if (layer !== undefined && layer !== 'wm' && layer !== 'swm') {
-        throw new Error('--layer must be wm or swm');
-      }
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetFinalize(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
