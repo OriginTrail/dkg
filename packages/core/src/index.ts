@@ -7,6 +7,7 @@ export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
 export * from './ka-content-scope.js';
+export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
 export * from './publisher-extension.js';

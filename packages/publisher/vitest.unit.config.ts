@@ -28,6 +28,8 @@ export default defineConfig({
       'test/ka-graph-publish-handler.test.ts',
       'test/ka-graph-update-ack.test.ts',
       'test/ka-graph-update-handler.test.ts',
+      'test/rootless-access.test.ts',
+      'test/access-verification.test.ts',
       'test/agents-meta-bound.test.ts',
       'test/ack-collector.test.ts',
       'test/publish-lifecycle-logger.test.ts',

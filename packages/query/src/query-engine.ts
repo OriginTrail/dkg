@@ -92,6 +92,14 @@ export interface ResolvedKnowledgeAssetBase {
   quads: Quad[];
 }
 
+/** The original public result contract of {@link QueryEngine.resolveKA}. */
+export interface LegacyResolveKAResult {
+  rootEntity: string;
+  rootEntities: string[];
+  contextGraphId: string;
+  quads: Quad[];
+}
+
 /** Current V10 KA model: one exact graph identified by UAL + assertion version. */
 export interface ResolvedGraphKnowledgeAsset extends ResolvedKnowledgeAssetBase {
   contentScopeVersion: 2;
@@ -102,7 +110,8 @@ export interface ResolvedGraphKnowledgeAsset extends ResolvedKnowledgeAssetBase 
 }
 
 /** Existing V10 root-scoped KAs remain queryable but are never writable. */
-export interface ResolvedLegacyKnowledgeAsset extends ResolvedKnowledgeAssetBase {
+export interface ResolvedLegacyKnowledgeAsset
+  extends ResolvedKnowledgeAssetBase, LegacyResolveKAResult {
   contentScopeVersion: 1;
   rootEntity: string;
   rootEntities: string[];
@@ -116,5 +125,19 @@ export type ResolvedKnowledgeAsset =
 
 export interface QueryEngine {
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
-  resolveKA(ual: string): Promise<ResolvedKnowledgeAsset>;
+  /**
+   * Backwards-compatible legacy resolver. Its required root fields remain
+   * source-compatible with callers published before graph-scoped KAs existed.
+   */
+  resolveKA(ual: string): Promise<LegacyResolveKAResult>;
+  /**
+   * Graph-aware resolver for current callers. Optional so third-party
+   * QueryEngine implementations are not broken by the additive API.
+   */
+  resolveKnowledgeAsset?(ual: string): Promise<ResolvedKnowledgeAsset>;
+}
+
+/** Query engine surface for callers that understand graph-scoped KAs. */
+export interface GraphAwareQueryEngine extends QueryEngine {
+  resolveKnowledgeAsset(ual: string): Promise<ResolvedKnowledgeAsset>;
 }

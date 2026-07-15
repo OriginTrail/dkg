@@ -25,6 +25,7 @@ import {
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import { quadToNQuad } from '../bounded-rdf.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -534,14 +535,6 @@ interface BlazeAskResponse {
 // =====================================================================
 // N-Quad serialisation / parsing helpers (shared with oxigraph adapter)
 // =====================================================================
-
-function quadToNQuad(q: DKGQuad): string {
-  const s = formatTerm(q.subject);
-  const p = `<${q.predicate}>`;
-  const o = formatTerm(q.object);
-  const g = q.graph ? ` <${q.graph}>` : '';
-  return `${s} ${p} ${o}${g} .`;
-}
 
 /**
  * N-Quads serializer for Blazegraph's bulk-insert wire format: a standard
