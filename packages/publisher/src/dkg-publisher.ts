@@ -4962,12 +4962,46 @@ export class DKGPublisher implements Publisher {
     const updateSeal = options.precomputedUpdateAttestation;
     const effectiveAuthorAddress = updateSeal.authorAddress;
     const effectiveSchemeVersion = updateSeal.schemeVersion;
-    await assertValidPrecomputedUpdateAttestation(
-      this.chain,
-      kaId,
-      kcMerkleRoot,
-      updateSeal,
-    );
+    try {
+      await assertValidPrecomputedUpdateAttestation(
+        this.chain,
+        kaId,
+        kcMerkleRoot,
+        updateSeal,
+      );
+    } catch (attestErr) {
+      // Fail-closed contract: update() returns {status:'failed'} and mutates
+      // nothing when the chain has no updatable KA. This pre-staging owner
+      // check reads chain-truth (getKnowledgeAssetOwner -> ownerOf) BEFORE the
+      // chain-submit try/catch below, so an update against a non-existent or
+      // expired KA reverts HERE and — before the rootless cutover moved this
+      // check ahead of staging — would escape update() as a throw instead of a
+      // failed result. Convert only that definitive "no updatable KA" class to
+      // a failed result; every authorization failure (wrong owner of an
+      // EXISTING KA -> KA_UPDATE_AUTHOR_NOT_OWNER, signer mismatch, or a
+      // missing-adapter-method config error) still throws, preserving the
+      // reject-unauthorized-before-staging semantics.
+      const errorName = enrichEvmError(attestErr)
+        ?? (attestErr as { revert?: { name?: string } })?.revert?.name;
+      const NO_UPDATABLE_KA = ['ERC721NonexistentToken', 'KnowledgeAssetExpired'];
+      if (!errorName || !NO_UPDATABLE_KA.includes(errorName)) {
+        throw attestErr;
+      }
+      this.log.warn(
+        ctx,
+        `V10 update rejected pre-staging (${errorName}) for kaId=${kaId}: no updatable KA on chain`,
+      );
+      onPhase?.('chain:submit', 'end');
+      onPhase?.('chain', 'end');
+      return {
+        kaId,
+        ual: graphUpdate?.scope.ual ?? await this.resolveKaUal(kaId),
+        merkleRoot: kcMerkleRoot,
+        kaManifest: manifestEntries,
+        status: 'failed',
+        publicQuads: allSkolemizedQuads,
+      };
+    }
 
     // P-1 review (iter-2): `chain:writeahead:start` fires from inside
     // the V10 adapter via `onBroadcast` — i.e. AFTER allowance +
