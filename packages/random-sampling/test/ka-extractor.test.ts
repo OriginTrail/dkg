@@ -321,6 +321,17 @@ describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
     ]);
   });
 
+  it('rejects an overfull graph-scoped VM graph instead of proving extra data', async () => {
+    const store = new OxigraphStore();
+    await seedGraphScoped(store, [
+      { subject: 'urn:asset:counted', predicate: 'urn:p:value', object: '"committed"' },
+      { subject: 'urn:asset:counted', predicate: 'urn:p:extra', object: '"uncommitted"' },
+    ], { publicCountLiteral: `"1"^^<${XSD}integer>` });
+
+    await expect(extractV10KCFromStore(store, CG_ID, KA_ID))
+      .rejects.toBeInstanceOf(KCDataMissingError);
+  });
+
   it('rejects partial and conflicting confirmed V2 envelopes without legacy fallback', async () => {
     const partialStore = new OxigraphStore();
     await seedGraphScoped(partialStore, [
