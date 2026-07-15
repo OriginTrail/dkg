@@ -834,10 +834,48 @@ export class PublishHandler {
       let merkleRoot: Uint8Array;
       let startKAId: bigint;
       let endKAId: bigint;
+      let graphScoped: PendingPublish['graphScoped'];
       try {
         merkleRoot = ethers.getBytes(entry.expectedMerkleRoot);
         startKAId = BigInt(entry.expectedStartKAId);
         endKAId = BigInt(entry.expectedEndKAId);
+        const hasGraphFields = entry.contentScopeVersion !== undefined
+          || entry.assertionVersion !== undefined
+          || entry.subGraphName !== undefined;
+        if (hasGraphFields) {
+          if (
+            entry.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+            || !entry.assertionVersion
+          ) {
+            throw new Error('Incomplete graph-scoped journal entry');
+          }
+          if (entry.subGraphName) {
+            const validation = validateSubGraphName(entry.subGraphName);
+            if (!validation.valid) {
+              throw new Error(`Invalid graph-scoped journal subGraphName: ${validation.reason}`);
+            }
+          }
+          const scope = createGraphKnowledgeAssetScope(entry.ual, entry.assertionVersion);
+          if (scope.ual !== entry.ual) {
+            throw new Error('Non-canonical graph-scoped journal UAL');
+          }
+          graphScoped = {
+            assertionVersion: scope.assertionVersion,
+            vmGraph: knowledgeAssetLayerGraphUri(
+              entry.contextGraphId,
+              MemoryLayer.VerifiableMemory,
+              scope,
+              entry.subGraphName,
+            ),
+            swmGraph: knowledgeAssetLayerGraphUri(
+              entry.contextGraphId,
+              MemoryLayer.SharedWorkingMemory,
+              scope,
+              entry.subGraphName,
+            ),
+            subGraphName: entry.subGraphName,
+          };
+        }
       } catch (parseErr) {
         this.log.warn(ctx, `Skipping malformed journal entry ${entry.ual}: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
         skippedInvalid++;
@@ -863,30 +901,7 @@ export class PublishHandler {
         rootEntities: entry.rootEntities ?? [],
         createdAt: entry.createdAt,
         restoredFromJournal: true,
-        ...(entry.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
-          && entry.assertionVersion
-          ? (() => {
-              const scope = createGraphKnowledgeAssetScope(entry.ual, entry.assertionVersion!);
-              return {
-                graphScoped: {
-                  assertionVersion: scope.assertionVersion,
-                  vmGraph: knowledgeAssetLayerGraphUri(
-                    entry.contextGraphId,
-                    MemoryLayer.VerifiableMemory,
-                    scope,
-                    entry.subGraphName,
-                  ),
-                  swmGraph: knowledgeAssetLayerGraphUri(
-                    entry.contextGraphId,
-                    MemoryLayer.SharedWorkingMemory,
-                    scope,
-                    entry.subGraphName,
-                  ),
-                  subGraphName: entry.subGraphName,
-                },
-              };
-            })()
-          : {}),
+        ...(graphScoped ? { graphScoped } : {}),
       });
       restored++;
     }

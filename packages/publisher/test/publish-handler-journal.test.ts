@@ -1,20 +1,27 @@
 /**
  * PublishHandler journal restore / expiry paths (tentative publish persistence).
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ethers } from 'ethers';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
 import { PublishHandler } from '../src/publish-handler.js';
 import type { JournalEntry } from '../src/publish-journal.js';
 
 const TENTATIVE_MS = 60 * 60 * 1000;
 
-function makeStore() {
+function makeStore(droppedGraphs?: string[]) {
   return {
     query: async () => ({ type: 'bindings' as const, bindings: [] }),
     insert: async () => {},
     delete: async () => {},
     deleteByPattern: async () => 0,
     deleteBySubjectPrefix: async () => 0,
+    dropGraph: async (graph: string) => { droppedGraphs?.push(graph); },
   };
 }
 
@@ -63,6 +70,61 @@ describe('PublishHandler.restorePendingPublishes', () => {
     const h = new PublishHandler(store as any, bus, { journal: journal as any });
     const n = await h.restorePendingPublishes();
     expect(n).toBe(1);
+    expect(h.hasPendingPublishes).toBe(true);
+  });
+
+  it('restores graph-scoped identity and expires the exact VM and SWM graphs', async () => {
+    vi.useFakeTimers();
+    try {
+      const droppedGraphs: string[] = [];
+      store = makeStore(droppedGraphs);
+      const entry = baseEntry({
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        assertionVersion: '3',
+        subGraphName: 'research',
+      });
+      const journal = {
+        load: async () => [entry],
+        save: async () => {},
+      };
+      const h = new PublishHandler(store as any, bus, { journal: journal as any });
+
+      expect(await h.restorePendingPublishes()).toBe(1);
+      await (h as any).expireRestoredPublish(entry.ual);
+
+      const scope = createGraphKnowledgeAssetScope(entry.ual, '3');
+      expect(droppedGraphs).toEqual([
+        knowledgeAssetLayerGraphUri(
+          entry.contextGraphId,
+          MemoryLayer.VerifiableMemory,
+          scope,
+          'research',
+        ),
+        knowledgeAssetLayerGraphUri(
+          entry.contextGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          scope,
+          'research',
+        ),
+      ]);
+      expect(h.hasPendingPublishes).toBe(false);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips a malformed graph-scoped entry without aborting later restores', async () => {
+    const journal = {
+      load: async () => [
+        baseEntry({ assertionVersion: '1' }),
+        baseEntry(),
+      ],
+      save: async () => {},
+    };
+    const h = new PublishHandler(store as any, bus, { journal: journal as any });
+
+    expect(await h.restorePendingPublishes()).toBe(1);
     expect(h.hasPendingPublishes).toBe(true);
   });
 

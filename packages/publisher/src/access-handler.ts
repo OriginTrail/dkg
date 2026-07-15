@@ -7,6 +7,8 @@ import {
   assertSafeIri,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
@@ -240,7 +242,11 @@ export class AccessHandler {
     return null;
   }
 
-  /** Resolve V2 metadata through the durable StorageACK head, never VM wire rows. */
+  /**
+   * Resolve replicated V2 metadata through the durable StorageACK head. Direct
+   * publishes do not have a StorageACK workspace, so they fall back to the
+   * complete confirmed metadata written by the local publish transaction.
+   */
   private async queryGraphScopedKAMeta(kaUal: string): Promise<KAMeta | null> {
     const safeUal = assertSafeIri(kaUal);
     const candidates = await this.store.query(
@@ -256,7 +262,9 @@ export class AccessHandler {
         }
       }`,
     );
-    if (candidates.type !== 'bindings' || candidates.bindings.length === 0) return null;
+    if (candidates.type !== 'bindings' || candidates.bindings.length === 0) {
+      return this.queryConfirmedGraphScopedKAMeta(kaUal);
+    }
 
     const distinct = new Map<string, { contextGraphId: string; assertionVersion: string; subGraphName?: string }>();
     for (const binding of candidates.bindings) {
@@ -309,6 +317,131 @@ export class AccessHandler {
       accessPolicy: head.accessPolicy,
       publisherPeerId: head.publisherPeerId,
       allowedPeers: head.allowedPeers,
+    };
+  }
+
+  /**
+   * Resolve the originator's direct-publish metadata without weakening the
+   * durable-head rule for replicated SWM data. Every value must come from the
+   * canonical context-graph metadata graph, be confirmed, and describe the
+   * exact assertion-version VM graph whose private bag will be served.
+   */
+  private async queryConfirmedGraphScopedKAMeta(kaUal: string): Promise<KAMeta | null> {
+    const safeUal = assertSafeIri(kaUal);
+    const result = await this.store.query(
+      `SELECT ?metaGraph ?contextGraph ?assertionVersion ?assertionGraph
+              ?publicTripleCount ?privateTripleCount ?privateMerkleRoot
+              ?accessPolicy ?publisherPeerId ?subGraphName ?allowedPeer WHERE {
+        GRAPH ?metaGraph {
+          <${safeUal}> <${DKG_NS}contentScopeVersion> "${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+            <${DKG_NS}kaUal> <${safeUal}> ;
+            <${DKG_NS}status> "confirmed" ;
+            <${DKG_NS}contextGraph> ?contextGraph ;
+            <${DKG_NS}assertionVersion> ?assertionVersion ;
+            <${DKG_NS}assertionGraph> ?assertionGraph ;
+            <${DKG_NS}publicTripleCount> ?publicTripleCount ;
+            <${DKG_NS}privateTripleCount> ?privateTripleCount ;
+            <${DKG_NS}privateMerkleRoot> ?privateMerkleRoot ;
+            <${DKG_NS}accessPolicy> ?accessPolicy ;
+            <${DKG_NS}publisherPeerId> ?publisherPeerId .
+          OPTIONAL { <${safeUal}> <${DKG_NS}subGraphName> ?subGraphName }
+          OPTIONAL { <${safeUal}> <${DKG_NS}allowedPeer> ?allowedPeer }
+        }
+      }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+
+    const values = (key: string): string[] => [...new Set(
+      result.bindings
+        .map((row) => row[key])
+        .filter((value): value is string => value !== undefined)
+        .map(stripLiteral),
+    )];
+    const requiredSingleton = (key: string): string => {
+      const found = values(key);
+      if (found.length !== 1 || found[0].length === 0) {
+        throw new Error(`Corrupt confirmed graph-scoped access metadata: ${key}`);
+      }
+      return found[0];
+    };
+    const optionalSingleton = (key: string): string | undefined => {
+      const found = values(key);
+      if (found.length > 1) {
+        throw new Error(`Corrupt confirmed graph-scoped access metadata: ${key}`);
+      }
+      return found[0];
+    };
+
+    const contextGraph = requiredSingleton('contextGraph');
+    const contextGraphPrefix = 'did:dkg:context-graph:';
+    const contextGraphId = contextGraph.startsWith(contextGraphPrefix)
+      ? contextGraph.slice(contextGraphPrefix.length)
+      : '';
+    if (
+      !contextGraphId
+      || requiredSingleton('metaGraph') !== `${contextGraph}/_meta`
+    ) {
+      throw new Error('Corrupt confirmed graph-scoped access metadata: contextGraph');
+    }
+
+    const assertionVersion = requiredSingleton('assertionVersion');
+    const publicTripleCount = requiredSingleton('publicTripleCount');
+    const privateTripleCountLiteral = requiredSingleton('privateTripleCount');
+    if (
+      !/^[1-9][0-9]*$/.test(assertionVersion)
+      || !/^(?:0|[1-9][0-9]*)$/.test(publicTripleCount)
+      || !/^[1-9][0-9]*$/.test(privateTripleCountLiteral)
+    ) {
+      throw new Error('Corrupt confirmed graph-scoped access metadata: content counts');
+    }
+    const publicTripleCountNumber = Number(publicTripleCount);
+    const privateTripleCount = Number(privateTripleCountLiteral);
+    if (
+      !Number.isSafeInteger(publicTripleCountNumber)
+      || !Number.isSafeInteger(privateTripleCount)
+    ) {
+      throw new Error('Corrupt confirmed graph-scoped access metadata: content counts');
+    }
+
+    const subGraphName = optionalSingleton('subGraphName');
+    if (subGraphName && !validateSubGraphName(subGraphName).valid) {
+      throw new Error('Corrupt confirmed graph-scoped access metadata: subGraphName');
+    }
+    const graphScope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
+    const expectedAssertionGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      graphScope,
+      subGraphName,
+    );
+    if (requiredSingleton('assertionGraph') !== expectedAssertionGraph) {
+      throw new Error('Corrupt confirmed graph-scoped access metadata: assertionGraph');
+    }
+
+    const accessPolicy = requiredSingleton('accessPolicy');
+    if (!isAccessPolicy(accessPolicy)) {
+      throw new Error('Corrupt confirmed graph-scoped access metadata: accessPolicy');
+    }
+    const allowedPeers = values('allowedPeer');
+    if (
+      allowedPeers.some((peer) => peer.length === 0 || peer.trim() !== peer)
+      || (accessPolicy === 'allowList' && allowedPeers.length === 0)
+      || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+    ) {
+      throw new Error('Corrupt confirmed graph-scoped access metadata: allowedPeer');
+    }
+
+    return {
+      rootEntity: '',
+      rootEntities: [],
+      contextGraphId,
+      ...(subGraphName ? { subGraphName } : {}),
+      graphScope,
+      privateMerkleRoot: hexToBytes(requiredSingleton('privateMerkleRoot')),
+      privateTripleCount,
+      accessPolicy,
+      publisherPeerId: requiredSingleton('publisherPeerId'),
+      allowedPeers,
     };
   }
 

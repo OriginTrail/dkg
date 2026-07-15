@@ -18,9 +18,12 @@ import {
   decodeAccessRequest,
   decodeAccessResponse,
   createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, GraphManager, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
 import { AccessHandler } from '../src/access-handler.js';
+import { generateGraphKnowledgeAssetMetadata } from '../src/metadata.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
 import {
   storeKnowledgeAssetOperationPublicQuads,
@@ -400,6 +403,79 @@ describe('graph-scoped private access', () => {
     expect(response.granted).toBe(true);
     expect(new TextDecoder().decode(response.nquads)).toContain('exact-version-secret');
     expect(toHex(response.privateMerkleRoot)).toBe(toHex(privateMerkleRoot));
+  });
+
+  it('serves a direct confirmed allow-list publish without a StorageACK workspace head', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const privateStore = new PrivateContentStore(store, graphManager);
+    const ual = 'did:dkg:mock:31337/0x2222222222222222222222222222222222222222/10';
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const privateQuads: Quad[] = [{
+      subject: 'urn:direct:private',
+      predicate: 'urn:p:secret',
+      object: '"direct-only-secret"',
+      graph: '',
+    }];
+    const privateMerkleRoot = computePrivateRootV10(privateQuads)!;
+    await privateStore.replaceKnowledgeAssetPrivateTriples(
+      CONTEXT_GRAPH,
+      scope,
+      privateQuads,
+    );
+    await store.insert(generateGraphKnowledgeAssetMetadata({
+      ual,
+      contextGraphId: CONTEXT_GRAPH,
+      merkleRoot: privateMerkleRoot,
+      publisherPeerId: 'owner-peer',
+      accessPolicy: 'allowList',
+      allowedPeers: ['reader-peer'],
+      timestamp: new Date(0),
+      assertionVersion: scope.assertionVersion,
+      publicTripleCount: 0,
+      privateTripleCount: privateQuads.length,
+      privateMerkleRoot,
+      assertionGraph: knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      ),
+    }, 'confirmed', {
+      txHash: `0x${'11'.repeat(32)}`,
+      blockNumber: 1,
+      blockTimestamp: 1,
+      publisherAddress: '0x2222222222222222222222222222222222222222',
+      batchId: 10n,
+      chainId: 'mock:31337',
+    }));
+
+    const handler = new AccessHandler(store, new TypedEventBus());
+    const denied = decodeAccessResponse(await handler.handler(encodeAccessRequest({
+      kaUal: ual,
+      requesterPeerId: 'intruder-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    }), 'intruder-peer' as any));
+    expect(denied.granted).toBe(false);
+    expect(denied.rejectionReason).toContain('not on allow list');
+
+    const keypair = await generateEd25519Keypair();
+    const paymentProof = new Uint8Array(0);
+    const signature = await ed25519Sign(
+      new TextEncoder().encode(ual + toHex(paymentProof)),
+      keypair.secretKey,
+    );
+    const granted = decodeAccessResponse(await handler.handler(encodeAccessRequest({
+      kaUal: ual,
+      requesterPeerId: 'reader-peer',
+      paymentProof,
+      requesterSignature: signature,
+      requesterPublicKey: keypair.publicKey,
+    }), 'reader-peer' as any));
+
+    expect(granted.granted).toBe(true);
+    expect(new TextDecoder().decode(granted.nquads)).toContain('direct-only-secret');
+    expect(toHex(granted.privateMerkleRoot)).toBe(toHex(privateMerkleRoot));
   });
 });
 
