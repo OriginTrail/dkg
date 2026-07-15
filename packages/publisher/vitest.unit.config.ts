@@ -22,6 +22,7 @@ export default defineConfig({
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',
       'test/ka-graph-workspace-receiver.test.ts',
+      'test/graph-knowledge-asset-metadata-state.test.ts',
       'test/ka-graph-finalization-storage.test.ts',
       'test/ka-graph-publish-storage.test.ts',
       'test/ka-graph-publish-ack.test.ts',

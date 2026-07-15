@@ -54,6 +54,31 @@ export interface KnowledgeAssetOperationPublicSnapshot {
   readonly publisherPeerId?: string;
 }
 
+/**
+ * The immutable operation snapshot was legitimately removed or was never
+ * retained. Callers may fall back to another independently verified
+ * commitment only for this absence case; corruption and store failures remain
+ * ordinary errors and must propagate.
+ */
+export class KnowledgeAssetOperationPublicSnapshotNotFoundError extends Error {
+  readonly code = 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'KnowledgeAssetOperationPublicSnapshotNotFoundError';
+  }
+}
+
+/** A durable graph-scoped workspace head exists but is incomplete or invalid. */
+export class KnowledgeAssetWorkspaceHeadCorruptError extends Error {
+  readonly code = 'KA_WORKSPACE_HEAD_CORRUPT';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'KnowledgeAssetWorkspaceHeadCorruptError';
+  }
+}
+
 /** Durable last-applied state for one graph-scoped KA in SWM. */
 export interface KnowledgeAssetWorkspaceHead {
   readonly kaUal: string;
@@ -109,17 +134,51 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
       }
     } LIMIT 1`,
   );
-  if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+  if (result.type !== 'bindings') {
+    throw new Error(
+      `Unexpected graph-scoped SWM head query result for ${scope.ual}: ${result.type}`,
+    );
+  }
+  if (result.bindings.length === 0) {
+    const existence = await params.store.query(
+      `ASK { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+      `<${assertSafeIri(subject)}> ?predicate ?object } }`,
+    );
+    if (existence.type !== 'boolean') {
+      throw new Error(
+        `Unexpected graph-scoped SWM head existence result for ${scope.ual}: ${existence.type}`,
+      );
+    }
+    if (existence.value) {
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
+      );
+    }
+    return undefined;
+  }
 
   const row = result.bindings[0];
   if (parseIntegerLiteral(row?.['scopeVersion']) !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-    throw new Error(`Corrupt graph-scoped SWM head for ${scope.ual}: invalid scope version`);
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid scope version`,
+    );
   }
   const actualUal = row?.['kaUal'];
-  const assertionVersion = parsePositiveBigIntLiteral(row?.['assertionVersion']);
-  const actualScope = createGraphKnowledgeAssetScope(actualUal ?? '', assertionVersion);
+  let assertionVersion: bigint;
+  let actualScope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  try {
+    assertionVersion = parsePositiveBigIntLiteral(row?.['assertionVersion']);
+    actualScope = createGraphKnowledgeAssetScope(actualUal ?? '', assertionVersion);
+  } catch (error) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid assertion identity ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
   if (actualScope.ual !== scope.ual) {
-    throw new Error(`Corrupt graph-scoped SWM head for ${scope.ual}: UAL mismatch`);
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: UAL mismatch`,
+    );
   }
   const assertionGraph = row?.['assertionGraph'] ?? '';
   const expectedGraph = knowledgeAssetLayerGraphUri(
@@ -129,7 +188,9 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     subGraphName,
   );
   if (assertionGraph !== expectedGraph) {
-    throw new Error(`Corrupt graph-scoped SWM head for ${scope.ual}: assertion graph mismatch`);
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: assertion graph mismatch`,
+    );
   }
   const publicQuadsDigest = stripLiteral(row?.['digest'])?.trim() ?? '';
   const publicTripleCount = parseIntegerLiteral(row?.['publicCount']);
@@ -143,11 +204,27 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     || rawAccessPolicy === 'allowList'
     ? rawAccessPolicy
     : undefined;
-  const expectedOperationSubject = shareOperationId
-    ? workspaceOperationSubject(params.contextGraphId, shareOperationId)
-    : '';
+  let expectedOperationSubject = '';
+  try {
+    expectedOperationSubject = shareOperationId
+      ? workspaceOperationSubject(params.contextGraphId, shareOperationId)
+      : '';
+  } catch (error) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid share operation ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
   const operationUal = row?.['operationUal'] ?? '';
-  const operationVersion = parsePositiveBigIntLiteral(row?.['operationVersion']);
+  let operationVersion: bigint;
+  try {
+    operationVersion = parsePositiveBigIntLiteral(row?.['operationVersion']);
+  } catch (error) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid operation version ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
   if (
     !publicQuadsDigest ||
     !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
@@ -161,22 +238,29 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     (privateTripleCount === 0 && privateMerkleRoot !== undefined)
     || (rawAccessPolicy !== undefined && accessPolicy === undefined)
   ) {
-    throw new Error(`Corrupt graph-scoped SWM head for ${scope.ual}: incomplete commitment metadata`);
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete commitment metadata`,
+    );
   }
   const peersResult = await params.store.query(
     `SELECT ?peer WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
       `<${assertSafeIri(expectedOperationSubject)}> <${DKG}allowedPeer> ?peer } }`,
   );
-  const allowedPeers = peersResult.type === 'bindings'
-    ? [...new Set(peersResult.bindings
-        .map((binding) => stripLiteral(binding['peer'])?.trim())
-        .filter((peer): peer is string => Boolean(peer)))]
-    : [];
+  if (peersResult.type !== 'bindings') {
+    throw new Error(
+      `Unexpected graph-scoped SWM access query result for ${scope.ual}: ${peersResult.type}`,
+    );
+  }
+  const allowedPeers = [...new Set(peersResult.bindings
+    .map((binding) => stripLiteral(binding['peer'])?.trim())
+    .filter((peer): peer is string => Boolean(peer)))];
   if (
     (accessPolicy === 'allowList' && allowedPeers.length === 0)
     || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
   ) {
-    throw new Error(`Corrupt graph-scoped SWM head for ${scope.ual}: invalid access envelope`);
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid access envelope`,
+    );
   }
   return {
     kaUal: actualScope.ual,
@@ -489,8 +573,30 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
       }
     } LIMIT 1`,
   );
-  if (result.type !== 'bindings' || result.bindings.length === 0) {
+  if (result.type !== 'bindings') {
     throw new Error(
+      `Unexpected graph-scoped public snapshot query result for share operation ` +
+      `${params.shareOperationId}: ${result.type}`,
+    );
+  }
+  if (result.bindings.length === 0) {
+    const existence = await params.store.query(
+      `ASK { GRAPH <${assertSafeIri(workspaceMetaGraph)}> { ` +
+      `<${assertSafeIri(subject)}> ?predicate ?object } }`,
+    );
+    if (existence.type !== 'boolean') {
+      throw new Error(
+        `Unexpected graph-scoped public snapshot existence result for share operation ` +
+        `${params.shareOperationId}: ${existence.type}`,
+      );
+    }
+    if (existence.value) {
+      throw new Error(
+        `Immutable graph-scoped public snapshot metadata is corrupt for ` +
+        `share operation ${params.shareOperationId}`,
+      );
+    }
+    throw new KnowledgeAssetOperationPublicSnapshotNotFoundError(
       `No graph-scoped public snapshot for context graph ${params.contextGraphId} ` +
       `share operation ${params.shareOperationId}`,
     );
@@ -524,11 +630,22 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
       throw new Error(`Snapshot store is required for share operation ${params.shareOperationId}`);
     }
     quads = await params.publicSnapshotStore.getSnapshot(snapshotRef);
-  } else if (snapshotGraph && isSafeIri(snapshotGraph)) {
+  } else if (snapshotGraph) {
+    if (!isSafeIri(snapshotGraph)) {
+      throw new Error(
+        `Immutable graph-scoped public snapshot metadata is corrupt for ` +
+        `share operation ${params.shareOperationId}: unsafe snapshot graph`,
+      );
+    }
     quads = await resolveSnapshotGraphQuads(params.store, snapshotGraph);
   }
+  if (!quads) {
+    throw new KnowledgeAssetOperationPublicSnapshotNotFoundError(
+      `Immutable graph-scoped public snapshot is missing for ` +
+      `share operation ${params.shareOperationId}`,
+    );
+  }
   if (
-    !quads ||
     !expectedDigest ||
     !Number.isInteger(expectedCount) ||
     quads.length !== expectedCount ||

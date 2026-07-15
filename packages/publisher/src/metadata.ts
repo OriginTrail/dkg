@@ -361,6 +361,178 @@ export function generateGraphKnowledgeAssetMetadata(
   return quads;
 }
 
+export type GraphKnowledgeAssetMetadataExpectation = Omit<
+  GraphKnowledgeAssetMetadata,
+  'timestamp'
+> & {
+  batchId: bigint;
+  expectedTxHash?: string;
+  materializedVersion?: MaterializedVersion;
+};
+
+export type GraphKnowledgeAssetMetadataState = 'matching' | 'different' | 'absent';
+
+function rdfLiteralLexicalValue(value: string): string | undefined {
+  const match = /^("(?:\\.|[^"\\])*")/.exec(value);
+  if (!match) return undefined;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+function canonicalMetadataObject(predicate: string, value: string): string {
+  const literal = rdfLiteralLexicalValue(value);
+  if (literal === undefined) return `iri:${value}`;
+  if (
+    predicate === `${DKG}merkleRoot`
+    || predicate === `${DKG}privateMerkleRoot`
+    || predicate === `${DKG}transactionHash`
+  ) {
+    return `literal:${literal.replace(/^0x/i, '').toLowerCase()}`;
+  }
+  return `literal:${literal}`;
+}
+
+function metadataObjectsByPredicate(
+  rows: ReadonlyArray<{ predicate: string; object: string }>,
+): Map<string, string[]> {
+  const objects = new Map<string, string[]>();
+  for (const row of rows) {
+    const values = objects.get(row.predicate) ?? [];
+    values.push(row.object);
+    objects.set(row.predicate, values);
+  }
+  return objects;
+}
+
+/**
+ * Compare one stored graph-scoped metadata envelope with the canonical writer
+ * contract. Extra legacy predicates are tolerated; canonical predicates are
+ * cardinality-checked and compared after literal/hex normalization.
+ */
+export async function readGraphKnowledgeAssetMetadataState(
+  store: TripleStore,
+  expectation: GraphKnowledgeAssetMetadataExpectation,
+): Promise<GraphKnowledgeAssetMetadataState> {
+  const scope = createGraphKnowledgeAssetScope(
+    expectation.ual,
+    expectation.assertionVersion,
+  );
+  const metaGraph = `did:dkg:context-graph:${expectation.contextGraphId}/_meta`;
+  assertSafeGraphIriForSparql(metaGraph);
+  assertSafeGraphIriForSparql(scope.ual);
+  const result = await store.query(
+    `SELECT ?predicate ?object WHERE {
+      GRAPH <${metaGraph}> { <${scope.ual}> ?predicate ?object }
+    }`,
+  );
+  if (result.type !== 'bindings' || result.bindings.length === 0) return 'absent';
+
+  const actualRows = result.bindings
+    .filter((row): row is Record<'predicate' | 'object', string> =>
+      row['predicate'] !== undefined && row['object'] !== undefined)
+    .map((row) => ({ predicate: row['predicate'], object: row['object'] }));
+  const actual = metadataObjectsByPredicate(actualRows);
+  if ((actual.get(`${DKG}contentScopeVersion`) ?? []).length === 0) return 'absent';
+
+  const {
+    batchId,
+    expectedTxHash,
+    materializedVersion,
+    ...metadata
+  } = expectation;
+  const expectedRows = generateGraphKnowledgeAssetMetadata(
+    {
+      ...metadata,
+      allowedPeers: [...new Set(metadata.allowedPeers ?? [])],
+      timestamp: new Date(0),
+    },
+    'confirmed',
+    {
+      txHash: expectedTxHash ?? '',
+      blockNumber: materializedVersion?.blockNumber ?? 0,
+      blockTimestamp: 0,
+      publisherAddress: '',
+      batchId,
+      chainId: '',
+    },
+  );
+  const expected = metadataObjectsByPredicate(expectedRows);
+
+  // These predicates are optional in the writer but their unexpected presence
+  // changes privacy or graph identity, so absence is part of the contract too.
+  const optionalCanonicalPredicates = [
+    `${DKG}allowedPeer`,
+    `${DKG}privateMerkleRoot`,
+    `${DKG}subGraphName`,
+  ];
+  for (const predicate of optionalCanonicalPredicates) {
+    if (!expected.has(predicate) && (actual.get(predicate) ?? []).length > 0) {
+      return 'different';
+    }
+  }
+
+  for (const [predicate, expectedValues] of expected) {
+    const actualValues = actual.get(predicate) ?? [];
+    if (predicate === `${DKG}publishedAt`) {
+      if (actualValues.length !== 1 || rdfLiteralLexicalValue(actualValues[0]) === undefined) {
+        return 'different';
+      }
+      continue;
+    }
+    if (predicate === `${DKG}transactionHash` && expectedTxHash === undefined) {
+      const actualTxHash = actualValues.length === 1
+        ? rdfLiteralLexicalValue(actualValues[0])?.trim()
+        : undefined;
+      if (!actualTxHash) {
+        return 'different';
+      }
+      continue;
+    }
+    if (
+      predicate === `${PROV}wasAttributedTo`
+      && metadata.agentAddress === undefined
+      && metadata.authorAddress === undefined
+    ) {
+      if (actualValues.length !== 1) {
+        return 'different';
+      }
+      continue;
+    }
+    const normalizedExpected = expectedValues
+      .map((value) => canonicalMetadataObject(predicate, value))
+      .sort();
+    const normalizedActual = actualValues
+      .map((value) => canonicalMetadataObject(predicate, value))
+      .sort();
+    if (
+      normalizedActual.length !== normalizedExpected.length
+      || normalizedActual.some((value, index) => value !== normalizedExpected[index])
+    ) {
+      return 'different';
+    }
+  }
+
+  if (materializedVersion !== undefined) {
+    const storedMaterializedVersions = actual.get(MATERIALIZED_VERSION_PRED) ?? [];
+    if (storedMaterializedVersions.length !== 1) return 'different';
+    const storedMaterializedVersion = rdfLiteralLexicalValue(storedMaterializedVersions[0]);
+    const parsedMaterializedVersion = /^(\d+):(\d+)$/.exec(storedMaterializedVersion ?? '');
+    if (
+      !parsedMaterializedVersion
+      || !Number.isSafeInteger(Number(parsedMaterializedVersion[1]))
+      || !Number.isSafeInteger(Number(parsedMaterializedVersion[2]))
+      || storedMaterializedVersion
+        !== `${materializedVersion.blockNumber}:${materializedVersion.txIndex}`
+    ) {
+      return 'different';
+    }
+  }
+  return 'matching';
+}
+
 /**
  * GH #936 — explicit, deterministic per-root token map
  * (`<ual>/<tokenId>` dkg:tokenId / dkg:entity) for MULTI-root KCs. Emitted via a

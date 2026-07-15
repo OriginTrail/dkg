@@ -128,6 +128,9 @@ import {
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
+  resolveKnowledgeAssetOperationPublicQuads,
+  KnowledgeAssetOperationPublicSnapshotNotFoundError,
+  workspacePublicQuadsDigest,
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
   TripleStoreAsyncLiftPublisher,
@@ -4099,6 +4102,51 @@ export class PublishMethods extends DKGAgentBase {
     }));
   }
 
+  /**
+   * Re-check the named lifecycle independently of the workspace head before a
+   * recovery stamp. The head writer is delete-then-insert, so a crash can leave
+   * it completely absent even though a newer named assertion already advanced.
+   */
+  async _canStampRecoveredKnowledgeAssetVmLifecycle(
+    this: DKGAgent,
+    request: KnowledgeAssetVmPublishRequest,
+  ): Promise<boolean> {
+    const bareRoot = (value?: string | null): string | undefined => {
+      const trimmed = value?.trim().toLowerCase();
+      if (!trimmed) return undefined;
+      return trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed;
+    };
+    const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const history = await this.assertion.history(request.contextGraphId, request.name, {
+      agentAddress,
+      ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+    });
+    if (!history) return false;
+
+    const queuedSeal = bareRoot(request.sealMerkleRoot);
+    const queuedWm = bareRoot(request.wmCurrentAssertion) ?? queuedSeal;
+    const queuedVm = bareRoot(request.vmCurrentAssertion);
+    const liveWm = bareRoot(history.wmCurrentAssertion);
+    const liveSwm = bareRoot(history.swmCurrentAssertion);
+    const liveVm = bareRoot(history.vmCurrentAssertion);
+    if (!queuedSeal) return false;
+    if (liveSwm && liveSwm !== queuedSeal) return false;
+    if (liveWm && queuedWm && liveWm !== queuedWm) return false;
+    if (liveVm && liveVm !== queuedSeal && liveVm !== queuedVm) return false;
+
+    const liveShareOperationId = history.currentShareOperationId?.trim();
+    if (!liveShareOperationId || liveShareOperationId !== request.shareOperationId.trim()) {
+      return false;
+    }
+    if (history.kaNumber && request.kaNumber && history.kaNumber !== request.kaNumber) {
+      return false;
+    }
+    if (history.reservedUal && request.reservedUal && history.reservedUal !== request.reservedUal) {
+      return false;
+    }
+    return true;
+  }
+
   async finalizeRecoveredQueuedKnowledgeAssetVmPublish(
     this: DKGAgent,
     input: AsyncKnowledgeAssetVmPublishRecoveryInput,
@@ -4126,6 +4174,8 @@ export class PublishMethods extends DKGAgentBase {
       request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
       || request.kaUal === undefined
       || request.assertionVersion === undefined
+      || request.publicTripleCount === undefined
+      || request.privateTripleCount === undefined
       || request.roots.length !== 0
     ) {
       throw new LegacyKnowledgeAssetReadOnlyError();
@@ -4150,6 +4200,105 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    let trustedPublicQuadsDigest: string | undefined;
+    let trustedPublisherPeerId = this.peerId;
+    if (!recovered.materialization.superseded) {
+      let snapshot: Awaited<ReturnType<typeof resolveKnowledgeAssetOperationPublicQuads>>
+        | undefined;
+      try {
+        snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+          store: this.store,
+          graphManager: new GraphManager(this.store),
+          contextGraphId: request.contextGraphId,
+          shareOperationId: request.shareOperationId,
+          kaUal: request.kaUal,
+          assertionVersion: request.assertionVersion,
+          subGraphName: request.subGraphName,
+          publicSnapshotStore: this.publicSnapshotStore,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof KnowledgeAssetOperationPublicSnapshotNotFoundError)
+          || request.clearSharedMemoryAfter !== true
+        ) {
+          throw error;
+        }
+        // clearSharedMemoryAfter can remove the operation snapshot after the
+        // chain commit. The signed root plus queued count/private commitment
+        // still verifies the exact VM graph; only the redundant digest is lost.
+        this.log.info(
+          ctx,
+          `Named KA recovery for "${request.name}" has no durable public snapshot; `
+            + `using the immutable seal envelope: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (snapshot) {
+        if (snapshot.quads.length !== request.publicTripleCount) {
+          throw Object.assign(
+            new Error(
+              `Named KA recovery rejected for "${request.name}": queued public count `
+                + `${request.publicTripleCount} does not match operation snapshot count `
+                + `${snapshot.quads.length}`,
+            ),
+            { code: 'KA_VM_RECOVERY_INCONSISTENT' },
+          );
+        }
+        trustedPublicQuadsDigest = workspacePublicQuadsDigest(snapshot.quads);
+        trustedPublisherPeerId = snapshot.publisherPeerId ?? trustedPublisherPeerId;
+      }
+    }
+
+    // A superseded transaction has already been proved and only its durable
+    // receipt is missing. Its transaction hash cannot describe the current
+    // chain root, so never let this old queue item promote current SWM content
+    // or synthesize current metadata. The ordinary chain sweep owns that work
+    // once it has exact provenance for the superseding version.
+    if (recovered.materialization.superseded) {
+      if (typeof this.chain.getKAContextGraphId !== 'function') {
+        throw Object.assign(
+          new Error(
+            `Named KA recovery rejected for "${request.name}": ` +
+              'the configured chain cannot confirm the KA context-graph binding',
+          ),
+          { code: 'KA_VM_RECOVERY_INCONSISTENT' },
+        );
+      }
+      let boundContextGraphId: bigint;
+      try {
+        boundContextGraphId = await this.chain.getKAContextGraphId(recovered.reservedKaId);
+      } catch (error) {
+        throw Object.assign(
+          new Error(
+            `Named KA recovery rejected for "${request.name}": ` +
+              `could not confirm the KA context-graph binding: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+          { code: 'KA_VM_RECOVERY_INCONSISTENT' },
+        );
+      }
+      if (boundContextGraphId.toString() !== onChainCgId) {
+        throw Object.assign(
+          new Error(
+            `Named KA recovery rejected for "${request.name}": KA ` +
+              `${recovered.reservedKaId.toString()} is bound to context graph ` +
+              `${boundContextGraphId.toString()}, not ${onChainCgId}`,
+          ),
+          { code: 'KA_VM_RECOVERY_INCONSISTENT' },
+        );
+      }
+      await this._writeQueuedKnowledgeAssetVmPublishReceipt(
+        request,
+        recovered.txHash,
+        recovered.receiptBlockNumber,
+        recovered.reservedKaId,
+      );
+      this.log.info(
+        ctx,
+        `Recovered confirmed named KA publish ${recovered.receiptUal} from ${job.status} job ${job.jobId}`
+          + ' (receipt only; current superseding version left unchanged)',
+      );
+      return;
+    }
+
     const materialization = await this.getOrCreateFinalizationHandler().handleChainReconciledKC({
       contextGraphId: request.contextGraphId,
       onChainCgId,
@@ -4160,15 +4309,21 @@ export class PublishMethods extends DKGAgentBase {
       versionBlock: recovered.materialization.versionBlock,
       authorAddress: recovered.materialization.authorAddress,
       subGraphName: request.subGraphName,
-      ...(!recovered.materialization.superseded
-        ? {
-          trustedAssertionEvidence: {
-            assertionVersion: request.assertionVersion,
-            accessPolicy: request.accessPolicy ?? 'ownerOnly',
-            allowedPeers: [...(request.allowedPeers ?? [])],
-          },
-        }
-        : {}),
+      trustedAssertionEvidence: {
+        assertionVersion: request.assertionVersion,
+        ...(trustedPublicQuadsDigest
+          ? { publicQuadsDigest: trustedPublicQuadsDigest }
+          : {}),
+        publicTripleCount: request.publicTripleCount,
+        ...(request.privateMerkleRoot
+          ? { privateMerkleRoot: request.privateMerkleRoot }
+          : {}),
+        privateTripleCount: request.privateTripleCount,
+        publisherPeerId: trustedPublisherPeerId,
+        transactionHash: recovered.txHash,
+        accessPolicy: request.accessPolicy ?? 'ownerOnly',
+        allowedPeers: [...(request.allowedPeers ?? [])],
+      },
     }, ctx);
     if (
       materialization !== 'promoted' &&
@@ -4194,12 +4349,20 @@ export class PublishMethods extends DKGAgentBase {
     );
     // `stale-target` means a still-newer local version won the race. Do not
     // regress its pointer; the exact publish receipt is nevertheless repaired.
-    if (materialization !== 'stale-target') {
+    const canStampLifecycle = materialization !== 'stale-target'
+      && await this._canStampRecoveredKnowledgeAssetVmLifecycle(request);
+    if (canStampLifecycle) {
       await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
         request,
         recovered.receiptUal,
         recovered.reservedKaId,
         recovered.materialization.merkleRoot,
+      );
+    } else if (materialization !== 'stale-target') {
+      this.log.info(
+        ctx,
+        `Recovered receipt for "${request.name}" without lifecycle stamping because ` +
+          'the current named assertion no longer matches the queued assertion',
       );
     }
 
@@ -4209,8 +4372,7 @@ export class PublishMethods extends DKGAgentBase {
     // the shared writer-lock cleanup needed to close that wider race.
     this.log.info(
       ctx,
-      `Recovered confirmed named KA publish ${recovered.receiptUal} from ${job.status} job ${job.jobId}` +
-        (recovered.materialization.superseded ? ' (materialized current superseding version)' : ''),
+      `Recovered confirmed named KA publish ${recovered.receiptUal} from ${job.status} job ${job.jobId}`,
     );
   }
 
