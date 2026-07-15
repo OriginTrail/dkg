@@ -48,6 +48,19 @@ file names cannot alter the decision. Its routing table lives in
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
   selected job was accidentally skipped, failed, or was cancelled.
+- CI controller changes use a two-phase rollout. The controller implementation
+  lands first while every workflow remains pinned to an immutable SHA already
+  present on protected `main`. Only a follow-up PR may rotate that pin to the
+  landed controller. During this rollout, ABI freshness runs unconditionally,
+  so candidate code cannot suppress it by choosing its own planner.
+
+  Before any follow-up rotates the pin, fetch protected `main` and require this
+  command to exit zero for the proposed immutable SHA:
+
+  ```sh
+  git fetch origin main
+  git merge-base --is-ancestor <controller-sha> origin/main
+  ```
 - The merge queue tests every Node/EVM lane and the sharded Solidity suite
   against the exact combined commit before it lands. Protected-branch Solidity
   coverage remains the post-merge safety net.

@@ -23,7 +23,10 @@ import {
 } from '../ci-results.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const TRUSTED_CI_CONTROLLER_SHA = 'aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d';
+// This SHA predates the candidate branch and is already reachable from the
+// protected default branch. Controller updates in this PR need a second,
+// post-merge pin-rotation PR before workflows may execute them.
+const TRUSTED_CI_CONTROLLER_SHA = 'c441bd6766ace67e331c0dfc6e22cb1325a6e1f6';
 const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 
 function change(filePath, status = 'M') {
@@ -468,10 +471,15 @@ test('workflows execute the planner and aggregate gates from one immutable trust
   }
 
   const primaryWorkflow = workflows.get('primary');
-  assert.match(
+  assert.doesNotMatch(
     primaryWorkflow,
-    /grep -Eq '\^abi_freshness=\(true\|false\)\$'/,
-    'the primary planner must fail closed when the pinned controller omits abi_freshness',
+    /ref: aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d/,
+    'the trusted controller must not point into candidate-only history',
+  );
+  assert.doesNotMatch(
+    primaryWorkflow,
+    /if: needs\.changes\.outputs\.abi_freshness == 'true'/,
+    'ABI freshness must run conservatively until the new controller is protected',
   );
   assert.ok(
     primaryWorkflow.indexOf('run: node candidate/scripts/check-npm-metadata.mjs')
@@ -567,7 +575,11 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     );
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
-  assert.ok(workflow.includes("needs.changes.outputs.abi_freshness == 'true'"));
+  assert.doesNotMatch(
+    workflow,
+    /if: needs\.changes\.outputs\.abi_freshness == 'true'/,
+    'the first rollout phase must not depend on output from an untrusted controller update',
+  );
   assert.ok(
     workflow.includes(
       "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",

@@ -54,7 +54,6 @@ jobs:
     outputs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
-      abi_freshness: ${{ steps.plan.outputs.abi_freshness }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -87,7 +86,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -138,10 +137,6 @@ jobs:
             --sample-key "${SAMPLE_KEY}" \
             --github-output "${GITHUB_OUTPUT}" \
             --summary "${GITHUB_STEP_SUMMARY}"
-          if ! grep -Eq '^abi_freshness=(true|false)$' "${GITHUB_OUTPUT}"; then
-            echo "::error::Trusted CI controller did not emit abi_freshness"
-            exit 1
-          fi
       # Package README files are documentation for routing purposes, but they
       # are also npm metadata. Candidate code runs only after the trusted plan
       # has finalized its outputs, so it cannot influence test selection.
@@ -946,17 +941,18 @@ jobs:
   #
   # This job catches the only way that contract can break: a contributor
   # changes a `.sol` file and forgets to commit the regenerated ABIs.
-  # Runs when contract/compiler inputs or committed ABI files change. Solidity
-  # test relevance stays independent, so ABI-only PRs pay for this gate but
-  # not the four Hardhat shards. On failure prints an explicit
-  # remediation command so the fix is one copy-paste away.
+  # The controller changes in this PR are not trusted until they land on the
+  # protected default branch. During that first rollout phase, run this cheap
+  # gate unconditionally instead of pinning workflows to candidate history.
+  # A follow-up may rotate the immutable controller and restore path selection.
+  # On failure prints an explicit remediation command so the fix is one
+  # copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: needs.changes.outputs.abi_freshness == 'true'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -1402,7 +1398,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
