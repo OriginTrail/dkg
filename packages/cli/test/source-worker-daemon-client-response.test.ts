@@ -10,15 +10,17 @@ describe('source worker daemon client response decoding', () => {
 
   it('preserves a private graph commitment in the async publish envelope', async () => {
     const privateMerkleRoot = `0x${'ab'.repeat(32)}`;
+    const kaUal = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
     globalThis.fetch = (async () => new Response(JSON.stringify({
       jobId: 'private-job',
       shareOperationId: 'private-share',
       contentScopeVersion: 2,
-      kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+      kaUal,
       assertionVersion: '2',
       publicTripleCount: 1,
       privateMerkleRoot,
       privateTripleCount: 3,
+      rootsCount: 0,
       intentKey: `sha256:${'cd'.repeat(32)}`,
     }), {
       status: 202,
@@ -30,8 +32,13 @@ describe('source worker daemon client response decoding', () => {
 
     expect(publish).toMatchObject({
       jobId: 'private-job',
+      contentScopeVersion: 2,
+      kaUal,
+      assertionVersion: '2',
+      publicTripleCount: 1,
       privateMerkleRoot,
       privateTripleCount: 3,
+      rootsCount: 0,
     });
   });
 });

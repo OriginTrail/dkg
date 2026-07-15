@@ -33,7 +33,6 @@ import {
   payloadTooLargeResponseBody,
   readBody,
   safeParseJson,
-  validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
   isWritableQuad,
@@ -80,6 +79,7 @@ import {
   parseHttpFinalizedPublishOptions,
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
+import { serializeKnowledgeAssetContentEnvelope } from "../../knowledge-asset-content-envelope.js";
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -228,9 +228,14 @@ function hex(bytes: Uint8Array): string {
 }
 
 type AtomicShareRequest = {
-  entities?: "all";
   skipSeal?: false;
 };
+
+function wholeKnowledgeAssetEngineShare<T extends Record<string, unknown>>(
+  options: T,
+): T & { entities: "all" } {
+  return { ...options, entities: "all" };
+}
 
 function parseAtomicShareRequest(
   parsed: any,
@@ -238,11 +243,16 @@ function parseAtomicShareRequest(
   mode: "sync" | "async",
 ): AtomicShareRequest | null {
   const entities = parsed?.entities;
-  if (!validateEntities(entities, res)) return null;
   if (Array.isArray(entities)) {
     jsonResponse(res, 400, {
       code: "KA_ATOMIC_SHARE_REQUIRED",
       error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+    });
+    return null;
+  }
+  if (entities !== undefined && entities !== "all") {
+    jsonResponse(res, 400, {
+      error: '"entities" must be omitted or "all" for an atomic Knowledge Asset share',
     });
     return null;
   }
@@ -268,7 +278,6 @@ function parseAtomicShareRequest(
   }
 
   return {
-    ...(entities === "all" ? { entities } : {}),
     ...(skipSeal === false ? { skipSeal } : {}),
   };
 }
@@ -934,12 +943,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           // Carry the same resolved author into the share. The asset is already
           // sealed (finalize above), so promote shares the existing seal verbatim
           // and passing the author keeps the whole atomic flow in one namespace.
-          const share = await agent.assertion.promote(resolvedContextGraphId, name, {
+          const share = await agent.assertion.promote(resolvedContextGraphId, name, wholeKnowledgeAssetEngineShare({
             subGraphName,
             ...atomicAuthorLane,
             awaitCuratorAck,
             ...(resolvedAuthorAgentAddress ? { authorAgentAddress: resolvedAuthorAgentAddress } : {}),
-          });
+          }));
           result.swmShared = true;
           result.promotedCount = share.promotedCount;
           result.sealed = share.sealed;
@@ -1283,13 +1292,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       const shareRequest = parseAtomicShareRequest(parsed, res, "sync");
       if (!shareRequest) return;
       try {
-        const share = await agent.assertion.promote(contextGraphId, name, {
-          entities: shareRequest.entities,
+        const share = await agent.assertion.promote(contextGraphId, name, wholeKnowledgeAssetEngineShare({
           subGraphName,
           awaitCuratorAck,
           skipSeal: shareRequest.skipSeal,
           ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
-        });
+        }));
         if (share.promotedCount !== 0) {
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
           recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
@@ -1328,8 +1336,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // preflight above already decoded/validated `name`, parsed the JSON body,
     // validated `subGraphName`, and resolved `contextGraphId` — so we reuse
     // those here (parity with how `swm/share` reuses them). The worker-
-    // availability 503 guard, `validateEntities` 400, and the conflict/error
-    // mapping match the legacy handler exactly. Self-contained try/catch (like
+    // availability 503 guard and conflict/error mapping match the legacy
+    // handler. Atomic body validation is shared with sync share above.
+    // Self-contained try/catch (like
     // `vm/publish`) so the legacy enqueue error mapping is preserved verbatim
     // and unmatched errors rethrow rather than falling through to the outer
     // `respondAssertionError` catch.
@@ -1338,11 +1347,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       const shareRequest = parseAtomicShareRequest(parsed, res, "async");
       if (!shareRequest) return;
       try {
-        const result = await agent.assertion.promoteAsync(contextGraphId, name, {
-          entities: shareRequest.entities ?? "all",
+        const result = await agent.assertion.promoteAsync(contextGraphId, name, wholeKnowledgeAssetEngineShare({
           subGraphName,
           ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
-        });
+        }));
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
@@ -1400,12 +1408,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           contextGraphId,
           name,
           shareOperationId: intent.shareOperationId,
-          contentScopeVersion: intent.contentScopeVersion,
-          kaUal: intent.kaUal,
-          assertionVersion: intent.assertionVersion,
-          publicTripleCount: intent.publicTripleCount,
-          ...(intent.privateMerkleRoot ? { privateMerkleRoot: intent.privateMerkleRoot } : {}),
-          privateTripleCount: intent.privateTripleCount,
+          ...serializeKnowledgeAssetContentEnvelope(intent),
+          rootsCount: intent.roots.length,
           sealMerkleRoot: intent.sealMerkleRoot,
           intentKey: intent.intentKey,
           ...(subGraphName ? { subGraphName } : {}),

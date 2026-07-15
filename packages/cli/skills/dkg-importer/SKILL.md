@@ -58,8 +58,9 @@ KA shareable: the complete serialized KA must still fit one gossip message.
 Measure or conservatively estimate that size while partitioning the source.
 If it will not fit, create multiple named KAs before writing any of them.
 
-`swm/share` is whole-KA atomic and seal-before-share. Omit `entities` or pass
-`"all"`; arrays are rejected. `skipSeal:true` is rejected. If sealing
+`swm/share` is whole-KA atomic and seal-before-share. Omit `entities`; legacy
+`"all"` is accepted for wire compatibility and discarded, while arrays are
+rejected. `skipSeal:true` is rejected. If sealing
 capability is unavailable, the share fails with WM preserved; fix the
 capability and retry the same whole-KA share. There is no share-time slicing
 or unsealed fallback.
@@ -124,7 +125,6 @@ for (const partition of partitionIntoKnowledgeAssets(sourceArtefacts)) {
     contextGraphId: client.cgId,
     assertionName,
     subGraphName: 'code',
-    entities: 'all',
   });
 }
 ```
@@ -167,12 +167,14 @@ A 10,000-partition import that fails on partition 7,453 must not start over
 from partition 1, but the repository's current
 [`scripts/lib/manifest.mjs`](../../../../scripts/lib/manifest.mjs) helper is
 **not compatible with atomic whole-KA sharing**. It writes one monolithic
-manifest and sends entity arrays for declaration and status updates; those
-requests now fail with `400 KA_ATOMIC_SHARE_REQUIRED` after the WM write.
+manifest and historically sent entity arrays for declaration and status
+updates. `createImportManifest` and `markPartitionStatus` now fail fast with
+`KA_ATOMIC_MANIFEST_UNSUPPORTED` before any daemon read or mutation.
 
-Until that helper is redesigned, do not call `createImportManifest`,
-`markPartitionStatus`, or `loadImportManifest`, and do not build new importers
-on it. Persist partition state in an external durable store, including each KA
+Until that helper is redesigned, do not call its mutation helpers and do not
+build new importers on it. `loadImportManifest` is read-only compatibility for
+manifests created by older nodes, not a way to create new state. Persist
+partition state in an external durable store, including each KA
 name, source range, write status, share job ID, and terminal share result.
 Resume only KAs whose recorded share has not succeeded. Keep the WM draft after
 failures so the same whole-KA share can be retried safely.
@@ -412,7 +414,7 @@ loop.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/knowledge-assets/<name>/swm/share-async` | Enqueue a whole-KA atomic share. Body: `{ contextGraphId, entities?: "all", skipSeal?: false, subGraphName? }`; entity arrays and `skipSeal:true` are rejected. Returns `200 { jobId, state: "queued" }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
+| `POST` | `/api/knowledge-assets/<name>/swm/share-async` | Enqueue a whole-KA atomic share. Body: `{ contextGraphId, skipSeal?: false, subGraphName? }`; legacy `entities:"all"` is accepted and discarded, while entity arrays and `skipSeal:true` are rejected. Returns `200 { jobId, state: "queued" }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs/<jobId>` | Read one job: `state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`. |
 | `DELETE` | `/api/knowledge-assets/swm/share-jobs/<jobId>` | Cancel a `queued` / `failed_retrying` job. `409` if the job is `running` (let the lease expire). |

@@ -254,11 +254,26 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     },
     {
+      label: 'empty root selection',
+      body: { entities: [] },
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    },
+    {
+      label: 'malformed root selection',
+      body: { entities: [123] },
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    },
+    {
+      label: 'null selector',
+      body: { entities: null },
+      message: 'must be omitted or "all"',
+    },
+    {
       label: 'unsealed sharing',
       body: { skipSeal: true },
       code: 'UNSEALED_SHARE_UNSUPPORTED',
     },
-  ])('swm/share rejects $label before lifecycle mutation', async ({ body, code }) => {
+  ])('swm/share rejects $label before lifecycle mutation', async ({ body, code, message }) => {
     let promoteCalls = 0;
     await startWith({
       promote: async () => {
@@ -270,8 +285,28 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const res = await post('swm/share', { contextGraphId: CG_ID, ...body });
 
     expect(res.status).toBe(400);
-    expect(res.body.code).toBe(code);
+    if (code) expect(res.body.code).toBe(code);
+    if (message) expect(String(res.body.error)).toContain(message);
     expect(promoteCalls).toBe(0);
+  });
+
+  it.each([
+    { label: 'omitted selector', body: {} },
+    { label: 'legacy all selector', body: { entities: 'all' } },
+  ])('swm/share translates $label to the legacy whole-KA selector only at the engine edge', async ({ body }) => {
+    const promoteOptions: Array<Record<string, unknown>> = [];
+    await startWith({
+      promote: async (_contextGraphId: string, _name: string, options: Record<string, unknown>) => {
+        promoteOptions.push(options);
+        return { promotedCount: 1 };
+      },
+    });
+
+    const res = await post('swm/share', { contextGraphId: CG_ID, ...body });
+
+    expect(res.status).toBe(200);
+    expect(promoteOptions).toHaveLength(1);
+    expect(promoteOptions[0]?.entities).toBe('all');
   });
 
   it('wm/finalize (layer:swm): forwards layer:"swm" to the engine AND maps SWM_SUBSET_NOT_SEALABLE → 409', async () => {
@@ -509,8 +544,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       publicTripleCount: 1,
       privateMerkleRoot,
       privateTripleCount: 2,
+      rootsCount: 0,
     });
-    expect(res.body).not.toHaveProperty('rootsCount');
   });
 
   it('vm/publish-async rejects before persisting when no runtime can claim jobs', async () => {
@@ -1197,6 +1232,23 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         body: { entities: ['urn:test:root'] },
         message: 'atomically',
         code: 'KA_ATOMIC_SHARE_REQUIRED',
+      },
+      {
+        label: 'empty root selection',
+        body: { entities: [] },
+        message: 'atomically',
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      },
+      {
+        label: 'malformed root selection',
+        body: { entities: [123] },
+        message: 'atomically',
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      },
+      {
+        label: 'null selector',
+        body: { entities: null },
+        message: 'must be omitted or "all"',
       },
     ])('rejects $label before enqueue', async ({ body, message, code }) => {
       daemonState.promoteWorkerAvailable = true;

@@ -1042,19 +1042,18 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls).toHaveLength(0);
   });
 
-  it('promoteAssertion delegates through the canonical atomic share client', async () => {
+  it('promoteAssertion accepts legacy "all" without putting a selector on the atomic share wire', async () => {
     const calls = track({ swmShared: true, promotedCount: 1 });
 
     await client.promoteAssertion('f', {
       contextGraphId: 'cg',
       entities: 'all',
       subGraphName: 'notes',
-    });
+    } as any);
 
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share`);
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({
       contextGraphId: 'cg',
-      entities: 'all',
       subGraphName: 'notes',
     });
   });

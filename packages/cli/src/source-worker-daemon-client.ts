@@ -1,11 +1,15 @@
 import type { AssetPartitionQuad } from '@origintrail-official/dkg-core';
 import type { SourceWorkerJobFailureDetails, SourceWorkerJobStatusResult } from '@origintrail-official/dkg-agent';
-import type { KnowledgeAssetContentEnvelope } from './api-client.js';
+import {
+  decodeKnowledgeAssetContentEnvelope,
+  type KnowledgeAssetContentEnvelope,
+} from './knowledge-asset-content-envelope.js';
 
 export interface KnowledgeAssetLifecyclePublishAsyncResponse extends KnowledgeAssetContentEnvelope {
   jobId: string;
   shareOperationId?: string;
   intentKey?: string;
+  rootsCount?: number;
 }
 
 export interface KnowledgeAssetLifecycleClient {
@@ -96,12 +100,8 @@ export function createDaemonKnowledgeAssetLifecycleClient(
       return {
         jobId,
         shareOperationId: stringField((payload as { shareOperationId?: unknown }).shareOperationId),
-        contentScopeVersion: numberField((payload as { contentScopeVersion?: unknown }).contentScopeVersion),
-        kaUal: stringField((payload as { kaUal?: unknown }).kaUal),
-        assertionVersion: stringField((payload as { assertionVersion?: unknown }).assertionVersion),
-        publicTripleCount: numberField((payload as { publicTripleCount?: unknown }).publicTripleCount),
-        privateMerkleRoot: stringField((payload as { privateMerkleRoot?: unknown }).privateMerkleRoot),
-        privateTripleCount: numberField((payload as { privateTripleCount?: unknown }).privateTripleCount),
+        ...decodeKnowledgeAssetContentEnvelope(payload),
+        rootsCount: numberField((payload as { rootsCount?: unknown }).rootsCount),
         intentKey: stringField((payload as { intentKey?: unknown }).intentKey),
       };
     },

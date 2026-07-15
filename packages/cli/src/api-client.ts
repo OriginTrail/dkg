@@ -12,8 +12,10 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import type { KnowledgeAssetContentEnvelope } from './knowledge-asset-content-envelope.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
+export type { KnowledgeAssetContentEnvelope } from './knowledge-asset-content-envelope.js';
 
 export type ContextGraphJoinPolicyMode = 'manual' | 'open';
 
@@ -108,7 +110,6 @@ export interface KnowledgeAssetShareResponse {
 
 export interface KnowledgeAssetShareTargetOptions {
   subGraphName?: string;
-  entities?: 'all';
 }
 
 export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOptions {
@@ -136,15 +137,6 @@ export interface KnowledgeAssetLifecycleError {
   [key: string]: unknown;
 }
 
-export interface KnowledgeAssetContentEnvelope {
-  contentScopeVersion?: number;
-  kaUal?: string;
-  assertionVersion?: string;
-  publicTripleCount?: number;
-  privateMerkleRoot?: string;
-  privateTripleCount?: number;
-}
-
 export interface KnowledgeAssetPublishAsyncResponse extends KnowledgeAssetContentEnvelope {
   jobId: string;
   status: string;
@@ -154,6 +146,7 @@ export interface KnowledgeAssetPublishAsyncResponse extends KnowledgeAssetConten
   shareOperationId?: string;
   sealMerkleRoot?: string;
   intentKey?: string;
+  rootsCount?: number;
 }
 
 export type KnowledgeAssetShareJobState =
@@ -221,7 +214,6 @@ function hasOwnKey<K extends PropertyKey>(value: unknown, key: K): value is Reco
 }
 
 function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptions | undefined): void {
-  assertAtomicKnowledgeAssetShare(options);
   if (hasOwnKey(options, 'skipSeal') && options.skipSeal !== undefined) {
     throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
   }
@@ -231,11 +223,22 @@ function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptio
 }
 
 function assertAtomicKnowledgeAssetShare(options: unknown): void {
-  if (hasOwnKey(options, 'entities') && Array.isArray(options.entities)) {
+  if (
+    hasOwnKey(options, 'entities')
+    && options.entities !== undefined
+    && options.entities !== 'all'
+  ) {
     throw new Error(
       'entities selection is not supported; graph-scoped Knowledge Assets are shared atomically',
     );
   }
+}
+
+function atomicKnowledgeAssetSharePayload<T extends object>(options: T | undefined): Omit<T, 'entities'> | undefined {
+  assertAtomicKnowledgeAssetShare(options);
+  if (!options) return undefined;
+  const { entities: _legacyEntities, ...payload } = options as T & { entities?: unknown };
+  return payload;
 }
 
 function assertionCreateResponse(result: KnowledgeAssetCreateResponse): AssertionCreateResponse {
@@ -743,11 +746,11 @@ export class ApiClient {
     name: string,
     options?: KnowledgeAssetShareOptions,
   ): Promise<KnowledgeAssetShareResponse> {
-    assertAtomicKnowledgeAssetShare(options);
+    const payload = atomicKnowledgeAssetSharePayload(options);
     if ((options as { skipSeal?: unknown } | undefined)?.skipSeal === true) {
       throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
     }
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(payload ?? {}) });
   }
 
   async knowledgeAssetShareAsync(
@@ -756,7 +759,8 @@ export class ApiClient {
     options?: KnowledgeAssetShareAsyncOptions,
   ): Promise<{ jobId: string; state: 'queued' }> {
     assertSupportedAsyncShareOptions(options);
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
+    const payload = atomicKnowledgeAssetSharePayload(options);
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(payload ?? {}) });
   }
 
   async knowledgeAssetShareJobs(options?: {
@@ -1913,7 +1917,6 @@ export class ApiClient {
 
   async promoteAssertion(name: string, request: {
     contextGraphId: string;
-    entities?: 'all';
     subGraphName?: string;
   }): Promise<{
     promoted?: boolean;

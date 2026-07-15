@@ -278,9 +278,10 @@ describe('dkg-importer/SKILL.md file', () => {
 
   it('fails closed on the legacy selector-based manifest helper', () => {
     expect(importerContent).toContain('not compatible with atomic whole-KA sharing');
-    expect(importerContent).toContain('400 KA_ATOMIC_SHARE_REQUIRED');
+    expect(importerContent).toContain('KA_ATOMIC_MANIFEST_UNSUPPORTED');
+    expect(importerContent).toContain('before any daemon read or mutation');
     expect(importerContent).toContain('external durable state');
-    expect(importerContent).toContain('do not call `createImportManifest`');
+    expect(importerContent).toContain('do not call its mutation helpers');
   });
 
   it('documents the three known daemon caps with verbatim error strings', () => {
