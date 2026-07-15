@@ -46,6 +46,9 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:packages/core
+      '@origintrail-official/dkg-publisher':
+        specifier: workspace:*
+        version: link:packages/publisher
       '@types/node':
         specifier: ^22
         version: 22.19.11

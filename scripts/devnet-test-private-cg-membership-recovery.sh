@@ -62,6 +62,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$REPO_ROOT/scripts"
+HARNESS_TOOL="$SCRIPT_DIR/lib/private-cg-recovery-cli.mjs"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
 HARNESS_TARGET="${HARNESS_TARGET:-devnet}"
@@ -119,18 +120,13 @@ esac
   || { echo "LOAD_KA_COUNT must be a positive integer." >&2; exit 2; }
 [[ "$LOAD_TRIPLES_PER_KA" =~ ^[0-9]+$ ]] && [ "$LOAD_TRIPLES_PER_KA" -ge 1 ] \
   || { echo "LOAD_TRIPLES_PER_KA must be a positive integer." >&2; exit 2; }
-if [ "$HARNESS_LOAD_PROFILE" = "sync-load" ]; then
-  PLANNED_KA_COUNT="$LOAD_KA_COUNT"
-  ROOT_KA_COUNT=$(((LOAD_KA_COUNT + 1) / 2))
-  SUB_GRAPH_KA_COUNT=$((LOAD_KA_COUNT / 2))
-  ROOT_TRIPLES=$((ROOT_KA_COUNT * LOAD_TRIPLES_PER_KA))
-  SUB_GRAPH_TRIPLES=$((SUB_GRAPH_KA_COUNT * LOAD_TRIPLES_PER_KA))
-else
-  PLANNED_KA_COUNT=2
-  ROOT_KA_COUNT=1
-  SUB_GRAPH_KA_COUNT=1
-fi
-TOTAL_TRIPLES=$((ROOT_TRIPLES + SUB_GRAPH_TRIPLES))
+WORKLOAD_PLAN_JSON="$(node "$HARNESS_TOOL" workload-plan \
+  "$HARNESS_LOAD_PROFILE" "$ROOT_TRIPLES" "$SUB_GRAPH_TRIPLES" \
+  "$LOAD_KA_COUNT" "$LOAD_TRIPLES_PER_KA")"
+IFS=$'\t' read -r PLANNED_KA_COUNT ROOT_KA_COUNT SUB_GRAPH_KA_COUNT \
+  ROOT_TRIPLES SUB_GRAPH_TRIPLES TOTAL_TRIPLES PLAN_RECOVERY_TIMEOUT_S \
+  PLAN_POST_RESTART_TIMEOUT_S PLAN_API_TIMEOUT_S \
+  <<< "$(node "$HARNESS_TOOL" workload-summary-tsv "$WORKLOAD_PLAN_JSON")"
 HARNESS_EXPECT="${HARNESS_EXPECT:-}"
 ADMISSION_MODE="${ADMISSION_MODE:-manual}"
 AUTO_MAX_MEMBERS="${AUTO_MAX_MEMBERS:-10}"
@@ -138,15 +134,9 @@ AUTO_MAX_APPROVALS_PER_HOUR="${AUTO_MAX_APPROVALS_PER_HOUR:-5}"
 HARNESS_ARTIFACT_DIR="${HARNESS_ARTIFACT_DIR:-$REPO_ROOT/.harness-artifacts}"
 CATCHUP_TIMEOUT_S="${CATCHUP_TIMEOUT_S:-120}"
 JOIN_DELIVERY_TIMEOUT_S="${JOIN_DELIVERY_TIMEOUT_S:-90}"
-if [ "$HARNESS_LOAD_PROFILE" = "sync-load" ]; then
-  RECOVERY_TIMEOUT_S="${RECOVERY_TIMEOUT_S:-1800}"
-  POST_RESTART_TIMEOUT_S="${POST_RESTART_TIMEOUT_S:-600}"
-  API_TIMEOUT_S="${API_TIMEOUT_S:-180}"
-else
-  RECOVERY_TIMEOUT_S="${RECOVERY_TIMEOUT_S:-150}"
-  POST_RESTART_TIMEOUT_S="${POST_RESTART_TIMEOUT_S:-120}"
-  API_TIMEOUT_S="${API_TIMEOUT_S:-30}"
-fi
+RECOVERY_TIMEOUT_S="${RECOVERY_TIMEOUT_S:-$PLAN_RECOVERY_TIMEOUT_S}"
+POST_RESTART_TIMEOUT_S="${POST_RESTART_TIMEOUT_S:-$PLAN_POST_RESTART_TIMEOUT_S}"
+API_TIMEOUT_S="${API_TIMEOUT_S:-$PLAN_API_TIMEOUT_S}"
 BROKEN_RECOVERY_OBSERVE_S="${BROKEN_RECOVERY_OBSERVE_S:-35}"
 BROKEN_POST_RESTART_OBSERVE_S="${BROKEN_POST_RESTART_OBSERVE_S:-20}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-2}"
@@ -279,6 +269,7 @@ fi
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RUN_DIR="$HARNESS_ARTIFACT_DIR/private-cg-membership-recovery-$RUN_ID-$HARNESS_TARGET-$HARNESS_EXPECT-$ADMISSION_MODE"
 mkdir -p "$RUN_DIR"
+printf '%s\n' "$WORKLOAD_PLAN_JSON" > "$RUN_DIR/seed-plan.json"
 SEED_MANIFEST="$RUN_DIR/seed-manifest.jsonl"
 : > "$SEED_MANIFEST"
 TESTNET_JOURNAL_SINCE="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -579,133 +570,11 @@ REMOTE
 
 audit_testnet_health_samples() {
   local baseline_file="$RUN_DIR/health-baselines.jsonl"
-  BASELINES_FILE="$baseline_file" SAMPLES_FILE="$RUN_DIR/health-samples.jsonl" \
-    MAX_QUEUE="$TESTNET_MAX_ACCEPT_QUEUE" MAX_MEMORY="$TESTNET_MAX_MEMORY_USED_PERCENT" \
-    MAX_LOAD="$TESTNET_MAX_LOAD_PER_CPU_PERCENT" \
-    MAX_CONSECUTIVE="$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" \
-    CURATOR="$CURATOR_NODE" JOINER="$JOINER_NODE" node -e '
-      const fs = require("node:fs");
-      const readLines = file => fs.existsSync(file)
-        ? fs.readFileSync(file, "utf8").split(/\n+/).filter(Boolean).map(line => JSON.parse(line))
-        : [];
-      const baselines = new Map(readLines(process.env.BASELINES_FILE).map(row => [row.node, row]));
-      const samples = readLines(process.env.SAMPLES_FILE);
-      const maxQueue = Number(process.env.MAX_QUEUE);
-      const maxMemory = Number(process.env.MAX_MEMORY);
-      const maxLoad = Number(process.env.MAX_LOAD);
-      const maxConsecutive = Number(process.env.MAX_CONSECUTIVE);
-      const restartNodes = new Set([Number(process.env.CURATOR), Number(process.env.JOINER)]);
-      const state = new Map();
-      const failures = [];
-      for (const sample of samples) {
-        const baseline = baselines.get(sample.node);
-        if (!baseline) {
-          failures.push(`node ${sample.node} has samples without a baseline`);
-          continue;
-        }
-        const prior = state.get(sample.node) ?? {
-          pid: baseline.mainPid,
-          pidChanges: 0,
-          oxigraphPid: baseline.oxigraphPid,
-          oxigraphPidChanges: 0,
-          streak: 0,
-          maxStreak: 0,
-          oomEvents: baseline.oomEvents ?? 0,
-          oomKillEvents: baseline.oomKillEvents ?? 0,
-          oxigraphOomEvents: baseline.oxigraphOomEvents ?? 0,
-          oxigraphOomKillEvents: baseline.oxigraphOomKillEvents ?? 0,
-          saturationSamples: [],
-        };
-        const requiredNumbers = [
-          "mainPid", "nRestarts", "oxigraphPid", "oxigraphWatchdogPid",
-          "acceptQueue", "cpuCount", "loadOne", "hostMemoryUsedPercent",
-          "oomEvents", "oomKillEvents", "oxigraphOomEvents", "oxigraphOomKillEvents",
-        ];
-        for (const field of requiredNumbers) {
-          if (sample[field] === null || sample[field] === undefined || !Number.isFinite(Number(sample[field]))) {
-            failures.push(`node ${sample.node} sample ${sample.phase} omitted numeric ${field}`);
-          }
-        }
-        if (prior.pid !== sample.mainPid) {
-          prior.pid = sample.mainPid;
-          prior.pidChanges += 1;
-          prior.streak = 0;
-        }
-        if (prior.oxigraphPid !== sample.oxigraphPid) {
-          prior.oxigraphPid = sample.oxigraphPid;
-          prior.oxigraphPidChanges += 1;
-          prior.streak = 0;
-        }
-        const checkCounter = (label, currentRaw, previousRaw) => {
-          const current = Number(currentRaw ?? 0);
-          const previous = Number(previousRaw ?? 0);
-          if (current > previous || (current < previous && current > 0)) {
-            failures.push(`node ${sample.node} ${label} increased during ${sample.phase}`);
-          }
-          return current;
-        };
-        prior.oomEvents = checkCounter("daemon cgroup OOM counter", sample.oomEvents, prior.oomEvents);
-        prior.oomKillEvents = checkCounter("daemon cgroup OOM-kill counter", sample.oomKillEvents, prior.oomKillEvents);
-        prior.oxigraphOomEvents = checkCounter(
-          "Oxigraph cgroup OOM counter", sample.oxigraphOomEvents, prior.oxigraphOomEvents,
-        );
-        prior.oxigraphOomKillEvents = checkCounter(
-          "Oxigraph cgroup OOM-kill counter", sample.oxigraphOomKillEvents, prior.oxigraphOomKillEvents,
-        );
-        if (Number(sample.nRestarts) !== Number(baseline.nRestarts)) {
-          failures.push(`node ${sample.node} systemd NRestarts changed during ${sample.phase}`);
-        }
-        const loadPerCpuPercent = Number(sample.cpuCount) > 0
-          ? (Number(sample.loadOne) / Number(sample.cpuCount)) * 100
-          : Infinity;
-        const reasons = [];
-        if (Number(sample.acceptQueue) > maxQueue) reasons.push(`acceptQueue=${sample.acceptQueue}`);
-        if (Number(sample.hostMemoryUsedPercent) >= maxMemory) reasons.push(`memory=${sample.hostMemoryUsedPercent}%`);
-        if (loadPerCpuPercent >= maxLoad) reasons.push(`loadPerCpu=${loadPerCpuPercent.toFixed(1)}%`);
-        if (reasons.length > 0) {
-          prior.streak += 1;
-          prior.saturationSamples.push({ phase: sample.phase, reasons });
-        } else {
-          prior.streak = 0;
-        }
-        prior.maxStreak = Math.max(prior.maxStreak, prior.streak);
-        state.set(sample.node, prior);
-      }
-      for (const [node, value] of state) {
-        const allowedPidChanges = restartNodes.has(node) ? 1 : 0;
-        if (value.pidChanges > allowedPidChanges) {
-          failures.push(`node ${node} daemon PID changed ${value.pidChanges} times; allowed ${allowedPidChanges}`);
-        }
-        if (value.oxigraphPidChanges > allowedPidChanges) {
-          failures.push(`node ${node} Oxigraph PID changed ${value.oxigraphPidChanges} times; allowed ${allowedPidChanges}`);
-        }
-        if (value.maxStreak >= maxConsecutive) {
-          failures.push(
-            `node ${node} sustained saturation for ${value.maxStreak} samples: ` +
-            JSON.stringify(value.saturationSamples.slice(-value.maxStreak)),
-          );
-        }
-      }
-      const report = {
-        thresholds: {
-          maxAcceptQueue: maxQueue,
-          maxHostMemoryUsedPercent: maxMemory,
-          maxLoadPerCpuPercent: maxLoad,
-          consecutiveSamples: maxConsecutive,
-        },
-        sampleRows: samples.length,
-        nodes: Object.fromEntries([...state].map(([node, value]) => [node, {
-          daemonPidChanges: value.pidChanges,
-          oxigraphPidChanges: value.oxigraphPidChanges,
-          maxConsecutiveSaturationSamples: value.maxStreak,
-          saturationSamples: value.saturationSamples,
-        }])),
-        failures,
-        passed: failures.length === 0,
-      };
-      process.stdout.write(JSON.stringify(report, null, 2));
-      if (failures.length > 0) process.exitCode = 1;
-    '
+  node "$HARNESS_TOOL" audit-testnet-health \
+    "$baseline_file" "$RUN_DIR/health-samples.jsonl" \
+    "$TESTNET_MAX_ACCEPT_QUEUE" "$TESTNET_MAX_MEMORY_USED_PERCENT" \
+    "$TESTNET_MAX_LOAD_PER_CPU_PERCENT" "$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" \
+    "$CURATOR_NODE" "$JOINER_NODE"
 }
 
 audit_node_health() {
@@ -750,15 +619,9 @@ audit_node_health() {
     done
     [ "$findings" -eq 0 ] \
       || fail "$findings devnet node(s) logged an OOM, process crash, or Oxigraph fatal condition"
-    save_artifact "health-audit.json" "$(SAMPLES="$HEALTH_SAMPLE_COUNT" node -e '
-      process.stdout.write(JSON.stringify({
-        target: "devnet",
-        sampleRounds: Number(process.env.SAMPLES),
-        finalApisReady: true,
-        fatalLogFindings: 0,
-        passed: true,
-      }, null, 2));
-    ')"
+    save_artifact "health-audit.json" "$(
+      node "$HARNESS_TOOL" devnet-health-audit "$HEALTH_SAMPLE_COUNT"
+    )"
   fi
   HEALTH_AUDIT_PASSED=1
 }
@@ -1170,146 +1033,27 @@ knowledge_asset_count() {
 }
 
 integrity_head_query() {
-  local node="$1" manifest_row="$2" lane ual meta_graph body
-  lane="$(json_get "$manifest_row" lane)"
-  ual="$(json_get "$manifest_row" kaUal)"
-  if [ "$lane" = "subgraph" ]; then
-    meta_graph="did:dkg:context-graph:$CG_ID/$SUB_GRAPH_NAME/_shared_memory_meta"
-  else
-    meta_graph="did:dkg:context-graph:$CG_ID/_shared_memory_meta"
-  fi
-  body="$(CG="$CG_ID" LANE="$lane" SUB="$SUB_GRAPH_NAME" META="$meta_graph" UAL="$ual" node -e '
-    const dkg = "http://dkg.io/ontology/";
-    const sparql = `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph
-                            ?shareOperationId ?digest ?publicCount ?privateCount WHERE {
-      GRAPH <${process.env.META}> {
-        ?head <${dkg}contentScopeVersion> ?scopeVersion ;
-              <${dkg}kaUal> <${process.env.UAL}> ;
-              <${dkg}kaUal> ?kaUal ;
-              <${dkg}assertionVersion> ?assertionVersion ;
-              <${dkg}assertionGraph> ?assertionGraph ;
-              <${dkg}shareOperationId> ?shareOperationId .
-        ?operation <${dkg}shareOperationId> ?shareOperationId ;
-                   <${dkg}kaUal> <${process.env.UAL}> ;
-                   <${dkg}assertionVersion> ?assertionVersion ;
-                   <${dkg}publicQuadsDigest> ?digest ;
-                   <${dkg}publicQuadsCount> ?publicCount ;
-                   <${dkg}privateTripleCount> ?privateCount .
-      }
-    }`;
-    process.stdout.write(JSON.stringify({
-      contextGraphId: process.env.CG,
-      sparql,
-      ...(process.env.LANE === "subgraph" ? { subGraphName: process.env.SUB } : {}),
-    }));
-  ')"
+  local node="$1" manifest_row="$2" body
+  body="$(node "$HARNESS_TOOL" integrity-head-query \
+    "$CG_ID" "$SUB_GRAPH_NAME" "$manifest_row")"
   api_call "$node" POST /api/query "$body"
 }
 
 validate_integrity_head_response() {
   local manifest_row="$1"
-  EXPECTED="$manifest_row" node -e '
-    let input = "";
-    process.stdin.on("data", chunk => input += chunk);
-    process.stdin.on("end", () => {
-      const expected = JSON.parse(process.env.EXPECTED);
-      const payload = JSON.parse(input);
-      const bindings = payload?.result?.bindings
-        ?? payload?.result?.results?.bindings
-        ?? payload?.results?.bindings
-        ?? payload?.bindings
-        ?? [];
-      const raw = value => typeof value === "string" ? value : value?.value;
-      const lexical = value => {
-        const text = String(raw(value) ?? "");
-        const match = text.match(/^("(?:[^"\\]|\\.)*")/);
-        return match ? JSON.parse(match[1]) : text;
-      };
-      const integer = value => {
-        const match = lexical(value).match(/^-?\d+$/);
-        return match ? Number(match[0]) : NaN;
-      };
-      if (bindings.length !== 1) {
-        throw new Error(`expected one SWM head binding, found ${bindings.length}`);
-      }
-      const row = bindings[0];
-      const actual = {
-        contentScopeVersion: integer(row.scopeVersion),
-        kaUal: lexical(row.kaUal),
-        assertionVersion: integer(row.assertionVersion),
-        assertionGraph: lexical(row.assertionGraph),
-        shareOperationId: lexical(row.shareOperationId),
-        publicQuadsDigest: lexical(row.digest),
-        publicTripleCount: integer(row.publicCount),
-        privateTripleCount: integer(row.privateCount),
-      };
-      const mismatches = [];
-      if (actual.contentScopeVersion !== 2) mismatches.push("contentScopeVersion");
-      if (actual.kaUal !== expected.kaUal) mismatches.push("kaUal");
-      if (actual.assertionVersion !== Number(expected.assertionVersion)) mismatches.push("assertionVersion");
-      if (actual.assertionGraph !== expected.assertionGraph) mismatches.push("assertionGraph");
-      if (actual.shareOperationId !== expected.shareOperationId) mismatches.push("shareOperationId");
-      if (actual.publicQuadsDigest !== expected.publicQuadsDigest) mismatches.push("publicQuadsDigest");
-      if (actual.publicTripleCount !== Number(expected.triplesExpected)) mismatches.push("publicTripleCount");
-      if (actual.privateTripleCount !== 0) mismatches.push("privateTripleCount");
-      if (mismatches.length > 0) {
-        throw new Error(`SWM head mismatch (${mismatches.join(", ")}): ${JSON.stringify(actual)}`);
-      }
-      process.stdout.write(JSON.stringify(actual));
-    });
-  '
+  node "$HARNESS_TOOL" validate-integrity-head "$manifest_row"
 }
 
 integrity_data_query() {
-  local node="$1" manifest_row="$2" lane graph body
-  lane="$(json_get "$manifest_row" lane)"
-  graph="$(json_get "$manifest_row" assertionGraph)"
-  body="$(CG="$CG_ID" LANE="$lane" SUB="$SUB_GRAPH_NAME" GRAPH_IRI="$graph" node -e '
-    const sparql = `SELECT ?s ?p ?o WHERE {
-      GRAPH ?g { ?s ?p ?o }
-      FILTER(STR(?g) = ${JSON.stringify(process.env.GRAPH_IRI)})
-    }`;
-    process.stdout.write(JSON.stringify({
-      contextGraphId: process.env.CG,
-      sparql,
-      includeContextGraphPartitions: true,
-      ...(process.env.LANE === "subgraph" ? { subGraphName: process.env.SUB } : {}),
-    }));
-  ')"
+  local node="$1" manifest_row="$2" body
+  body="$(node "$HARNESS_TOOL" integrity-data-query \
+    "$CG_ID" "$SUB_GRAPH_NAME" "$manifest_row")"
   api_call "$node" POST /api/query "$body"
 }
 
 validate_integrity_data_response() {
   local manifest_row="$1"
-  EXPECTED="$manifest_row" node -e '
-    const { createHash } = require("node:crypto");
-    let input = "";
-    process.stdin.on("data", chunk => input += chunk);
-    process.stdin.on("end", () => {
-      const expected = JSON.parse(process.env.EXPECTED);
-      const payload = JSON.parse(input);
-      const bindings = payload?.result?.bindings
-        ?? payload?.result?.results?.bindings
-        ?? payload?.results?.bindings
-        ?? payload?.bindings
-        ?? [];
-      const term = value => String(typeof value === "string" ? value : value?.value ?? "");
-      const canonical = bindings
-        .map(row => [term(row.s), term(row.p), term(row.o), ""])
-        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-      const digest = `sha256:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex")}`;
-      if (bindings.length !== Number(expected.triplesExpected)) {
-        throw new Error(`assertion graph count ${bindings.length}, expected ${expected.triplesExpected}`);
-      }
-      if (digest !== expected.publicQuadsDigest) {
-        throw new Error(`assertion graph digest ${digest}, expected ${expected.publicQuadsDigest}`);
-      }
-      process.stdout.write(JSON.stringify({
-        publicTripleCount: bindings.length,
-        publicQuadsDigest: digest,
-      }));
-    });
-  '
+  node "$HARNESS_TOOL" validate-integrity-data "$manifest_row"
 }
 
 verify_manifest_on_node() {
@@ -1333,17 +1077,8 @@ verify_manifest_on_node() {
       save_artifact "${phase}-node${node}-ka-$(json_get "$manifest_row" ordinal)-data-error.json" "$data_response"
       fail "$phase node $node failed assertion-graph integrity for KA $(json_get "$manifest_row" ordinal): $data_result"
     fi
-    EXPECTED="$manifest_row" HEAD_RESULT="$head_result" DATA_RESULT="$data_result" \
-      NODE_ID="$node" PHASE="$phase" node -e '
-        process.stdout.write(JSON.stringify({
-          phase: process.env.PHASE,
-          node: Number(process.env.NODE_ID),
-          expected: JSON.parse(process.env.EXPECTED),
-          swmHead: JSON.parse(process.env.HEAD_RESULT),
-          assertionGraph: JSON.parse(process.env.DATA_RESULT),
-          verified: true,
-        }));
-      ' >> "$report"
+    node "$HARNESS_TOOL" integrity-report-row \
+      "$phase" "$node" "$manifest_row" "$head_result" "$data_result" >> "$report"
     printf '\n' >> "$report"
     verified=$((verified + 1))
     if [ $((verified % INTEGRITY_PROGRESS_EVERY_KAS)) -eq 0 ] || [ "$verified" -eq "$PLANNED_KA_COUNT" ]; then
@@ -1446,26 +1181,8 @@ build_swm_payload() {
   '
 }
 
-# Keep this byte-for-byte aligned with
-# packages/publisher/src/workspace-snapshot-store.ts:workspacePublicQuadsDigest.
-# The graph component is deliberately normalized to the empty string because
-# graph-scoped KA sharing pins every submitted triple into the UAL-derived SWM
-# graph before computing the durable public commitment.
 payload_public_digest() {
-  node -e '
-    const { createHash } = require("node:crypto");
-    let input = "";
-    process.stdin.on("data", chunk => input += chunk);
-    process.stdin.on("end", () => {
-      const payload = JSON.parse(input);
-      const quads = Array.isArray(payload.quads) ? payload.quads : [];
-      const canonical = quads
-        .map(quad => [String(quad.subject), String(quad.predicate), String(quad.object), ""])
-        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-      const hash = createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
-      process.stdout.write(`sha256:${hash}`);
-    });
-  '
+  node "$HARNESS_TOOL" payload-public-digest
 }
 
 knowledge_asset_descriptor() {
@@ -1486,40 +1203,10 @@ record_seed_manifest() {
   local payload_bytes="$5" duration_ms="$6" expected_digest="$7"
   local descriptor="$8" write_response="$9"
   printf '%s' "$write_response" \
-    | ORDINAL="$ordinal" LANE="$lane" LABEL="$label" TRIPLES="$triples" \
-      PAYLOAD_BYTES="$payload_bytes" DURATION_MS="$duration_ms" \
-      EXPECTED_DIGEST="$expected_digest" DESCRIPTOR="$descriptor" node -e '
-        let input = "";
-        process.stdin.on("data", chunk => input += chunk);
-        process.stdin.on("end", () => {
-          const response = JSON.parse(input);
-          const descriptor = JSON.parse(process.env.DESCRIPTOR);
-          const createResponse = Array.isArray(response.responses) ? response.responses[0] : undefined;
-          process.stdout.write(JSON.stringify({
-            ordinal: Number(process.env.ORDINAL),
-            lane: process.env.LANE,
-            label: process.env.LABEL,
-            name: Array.isArray(response.names) ? response.names[0] : null,
-            kaUal: descriptor.reservedUal || null,
-            assertionVersion: 1,
-            assertionGraph: descriptor.assertionGraph || null,
-            triplesExpected: Number(process.env.TRIPLES),
-            triplesWritten: Number(response.triplesWritten),
-            publicQuadsDigest: process.env.EXPECTED_DIGEST,
-            payloadBytes: Number(process.env.PAYLOAD_BYTES),
-            durationMs: Number(process.env.DURATION_MS),
-            names: Array.isArray(response.names) ? response.names : [],
-            shareOperationId: createResponse?.shareOperationId || descriptor.currentShareOperationId || null,
-            merkleRoot: createResponse?.merkleRoot || descriptor.swmCurrentAssertion || null,
-            responses: (Array.isArray(response.responses) ? response.responses : []).map(item => ({
-              shareOperationId: item.shareOperationId || null,
-              swmShared: item.swmShared === true,
-              publishReady: item.publishReady === true,
-              promotedCount: Number(item.promotedCount || 0),
-            })),
-          }));
-        });
-      ' | sanitize_stream >> "$SEED_MANIFEST"
+    | node "$HARNESS_TOOL" seed-manifest-row \
+      "$ordinal" "$lane" "$label" "$triples" "$payload_bytes" \
+      "$duration_ms" "$expected_digest" "$descriptor" \
+    | sanitize_stream >> "$SEED_MANIFEST"
   printf '\n' >> "$SEED_MANIFEST"
 }
 
@@ -1595,43 +1282,10 @@ seed_named_ka() {
 
 write_seed_summary_artifact() {
   save_artifact "seed-summary.json" "$(
-    PROFILE="$HARNESS_LOAD_PROFILE" PLANNED_KAS="$PLANNED_KA_COUNT" \
-    TRIPLES_PER_KA="$LOAD_TRIPLES_PER_KA" ROOT_KAS="$ROOT_KA_COUNT" \
-    SUB_KAS="$SUB_GRAPH_KA_COUNT" ROOT_TRIPLES_ENV="$ROOT_TRIPLES" \
-    SUB_TRIPLES_ENV="$SUB_GRAPH_TRIPLES" TOTAL_TRIPLES_ENV="$TOTAL_TRIPLES" \
-    SEEDED_KAS="$SEEDED_KA_COUNT" SEEDED_ROOT_KAS="$SEEDED_ROOT_KA_COUNT" \
-    SEEDED_SUB_KAS="$SEEDED_SUB_GRAPH_KA_COUNT" SEEDED_TRIPLES="$SEEDED_TRIPLE_COUNT" \
-    PAYLOAD_BYTES="$SEED_PAYLOAD_BYTES" MAX_PAYLOAD_BYTES="$MAX_SEED_PAYLOAD_BYTES" \
-    DURATION_MS="$SEED_DURATION_MS" node -e '
-      const syncLoad = process.env.PROFILE === "sync-load";
-      const planned = {
-        kaCount: Number(process.env.PLANNED_KAS),
-        triplesPerKa: syncLoad ? Number(process.env.TRIPLES_PER_KA) : null,
-        rootKaCount: Number(process.env.ROOT_KAS),
-        subgraphKaCount: Number(process.env.SUB_KAS),
-        rootTriples: Number(process.env.ROOT_TRIPLES_ENV),
-        subgraphTriples: Number(process.env.SUB_TRIPLES_ENV),
-        totalTriples: Number(process.env.TOTAL_TRIPLES_ENV),
-      };
-      const actual = {
-        kaCount: Number(process.env.SEEDED_KAS),
-        rootKaCount: Number(process.env.SEEDED_ROOT_KAS),
-        subgraphKaCount: Number(process.env.SEEDED_SUB_KAS),
-        totalTriples: Number(process.env.SEEDED_TRIPLES),
-        totalPayloadBytes: Number(process.env.PAYLOAD_BYTES),
-        maxKaPayloadBytes: Number(process.env.MAX_PAYLOAD_BYTES),
-        durationMs: Number(process.env.DURATION_MS),
-      };
-      process.stdout.write(JSON.stringify({
-        profile: process.env.PROFILE,
-        planned,
-        actual,
-        completed: actual.kaCount === planned.kaCount
-          && actual.rootKaCount === planned.rootKaCount
-          && actual.subgraphKaCount === planned.subgraphKaCount
-          && actual.totalTriples === planned.totalTriples,
-      }, null, 2));
-    '
+    node "$HARNESS_TOOL" seed-summary "$WORKLOAD_PLAN_JSON" \
+      "$SEEDED_KA_COUNT" "$SEEDED_ROOT_KA_COUNT" "$SEEDED_SUB_GRAPH_KA_COUNT" \
+      "$SEEDED_TRIPLE_COUNT" "$SEED_PAYLOAD_BYTES" "$MAX_SEED_PAYLOAD_BYTES" \
+      "$SEED_DURATION_MS"
   )"
 }
 
@@ -2123,21 +1777,15 @@ SUBGRAPH_RESPONSE="$(api_call "$CURATOR_NODE" POST /api/sub-graph/create \
 save_artifact "subgraph-create-response.json" "$SUBGRAPH_RESPONSE"
 
 act "Seed $PLANNED_KA_COUNT named KAs / $TOTAL_TRIPLES unique SWM triples"
-if [ "$HARNESS_LOAD_PROFILE" = "sync-load" ]; then
-  for ordinal in $(seq 1 "$PLANNED_KA_COUNT"); do
-    if [ $((ordinal % 2)) -eq 1 ]; then
-      lane=root
-    else
-      lane=subgraph
-    fi
-    printf -v label '%s-ka-%03d' "$lane" "$ordinal"
-    seed_named_ka "$ordinal" "$lane" "$LOAD_TRIPLES_PER_KA" "$label"
-  done
-else
-  seed_named_ka 1 root "$ROOT_TRIPLES" root
-  ROOT_WRITE="$LAST_SEED_WRITE"
-  seed_named_ka 2 subgraph "$SUB_GRAPH_TRIPLES" sub
-  SUB_WRITE="$LAST_SEED_WRITE"
+while IFS=$'\t' read -r ordinal lane label triples; do
+  [ -n "$ordinal" ] || continue
+  seed_named_ka "$ordinal" "$lane" "$triples" "$label"
+  if [ "$HARNESS_LOAD_PROFILE" = "smoke" ]; then
+    [ "$lane" != "root" ] || ROOT_WRITE="$LAST_SEED_WRITE"
+    [ "$lane" != "subgraph" ] || SUB_WRITE="$LAST_SEED_WRITE"
+  fi
+done < <(node "$HARNESS_TOOL" workload-rows-tsv "$WORKLOAD_PLAN_JSON")
+if [ "$HARNESS_LOAD_PROFILE" = "smoke" ]; then
   # Preserve the original smoke-profile artifact names for existing consumers.
   save_artifact "root-write-summary.json" "$ROOT_WRITE"
   save_artifact "subgraph-write-summary.json" "$SUB_WRITE"

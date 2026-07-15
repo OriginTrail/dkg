@@ -83,6 +83,7 @@
   "devDependencies": {
     "@origintrail-official/dkg": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-publisher": "workspace:*",
     "@types/node": "^22",
     "@vitest/coverage-v8": "^4.0.18",
     "esbench": "^0.8.1",
