@@ -9,7 +9,11 @@ import {
   contextGraphMetaUri,
   contextGraphLayerUri,
   MemoryLayer,
+  ASSERTION_SEAL_PREDICATES,
   assertionLifecycleUri,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  decodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
@@ -36,6 +40,8 @@ const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
 const PEER = '12D3KooWPromoteBoundary';
 const PEER_B = '12D3KooWPromoteBoundaryB';
 const ASSERTION_NAME = 'my-assertion';
+const SHARE_OPERATION_ID_PREDICATE = 'http://dkg.io/ontology/shareOperationId';
+const PROMOTE_OPERATION_INTENT_PREDICATE = 'http://dkg.io/ontology/promoteOperationIntent';
 
 const TRIPLES = [
   { subject: 'urn:test:entity:alice', predicate: 'http://schema.org/name', object: '"Alice"' },
@@ -102,6 +108,23 @@ describe('Working Memory Assertion Lifecycle', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
 
+  const createPublisher = async (
+    writeLocks?: Map<string, Promise<void>>,
+    publisherStore: OxigraphStore = store,
+  ): Promise<DKGPublisher> => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    return new DKGPublisher({
+      store: publisherStore,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      ...(writeLocks ? { writeLocks } : {}),
+    });
+  };
+
   const finalizeAssertion = (
     name = ASSERTION_NAME,
     agentAddress = AGENT,
@@ -119,18 +142,69 @@ describe('Working Memory Assertion Lifecycle', () => {
     subGraphName: options.subGraphName,
   });
 
+  const readShareOperationId = async (
+    name = ASSERTION_NAME,
+    agentAddress = AGENT,
+  ): Promise<string | undefined> => {
+    const lifecycle = assertionLifecycleUri(CG_ID, agentAddress, name);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const result = await store.query(
+      `SELECT ?id WHERE { GRAPH <${metaGraph}> { ` +
+        `<${lifecycle}> <${SHARE_OPERATION_ID_PREDICATE}> ?id } } LIMIT 1`,
+    );
+    const object = result.type === 'bindings' ? result.bindings[0]?.['id'] : undefined;
+    return object?.match(/^"(.*)"$/)?.[1] ?? object;
+  };
+
+  const hasPromoteOperationIntent = async (): Promise<boolean> => {
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const result = await store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${lifecycle}> <${PROMOTE_OPERATION_INTENT_PREDICATE}> ?intent } }`,
+    );
+    return result.type === 'boolean' && result.value;
+  };
+
+  const withInjectedOperationSnapshotFailure = async <T>(
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const insert = store.insert.bind(store);
+    let injected = false;
+    store.insert = async (quads) => {
+      if (
+        !injected
+        && quads.some((quad) =>
+          quad.graph.includes('/_shared_memory_snapshots/') && quad.graph.endsWith('/ka'))
+      ) {
+        injected = true;
+        throw new Error('injected operation snapshot failure');
+      }
+      return insert(quads);
+    };
+    try {
+      return await operation();
+    } finally {
+      store.insert = insert;
+      if (!injected) throw new Error('operation snapshot failure injection was not reached');
+    }
+  };
+
   beforeEach(async () => {
     store = new OxigraphStore();
-    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const keypair = await generateEd25519Keypair();
-    publisher = new DKGPublisher({
-      store,
-      chain,
-      eventBus: new TypedEventBus(),
-      keypair,
-      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
-      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
-    });
+    publisher = await createPublisher();
+  });
+
+  it('uses one canonical write-lock domain per store', async () => {
+    const isolatedStore = new OxigraphStore();
+    const suppliedLocks = new Map<string, Promise<void>>();
+    const configuredPublisher = await createPublisher(suppliedLocks, isolatedStore);
+    const defaultPublisher = await createPublisher(undefined, isolatedStore);
+
+    expect(configuredPublisher.writeLocks).toBe(suppliedLocks);
+    expect(defaultPublisher.writeLocks).toBe(suppliedLocks);
+    await expect(
+      createPublisher(new Map<string, Promise<void>>(), isolatedStore),
+    ).rejects.toThrow('must share the same writeLocks map');
   });
 
   it('create returns the correct assertion graph URI', async () => {
@@ -333,6 +407,34 @@ describe('Working Memory Assertion Lifecycle', () => {
       code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
       namedGraphs: [namedGraph],
     });
+  });
+
+  it('rejects private named-graph writes before leaving draft residue', async () => {
+    const name = 'private-named-graph';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+
+    await expect(
+      publisher.assertionWritePrivate(CG_ID, name, AGENT, [{
+        subject: 'urn:test:entity:private',
+        predicate: 'http://schema.org/name',
+        object: '"Private"',
+        graph: 'urn:test:graph:private',
+      }]),
+    ).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: ['urn:test:graph:private'],
+    });
+    expect(await publisher.assertionQueryPrivate(CG_ID, name, AGENT)).toEqual([]);
+
+    await publisher.assertionWritePrivate(CG_ID, name, AGENT, [{
+      subject: 'urn:test:entity:private',
+      predicate: 'http://schema.org/name',
+      object: '"Private"',
+      graph: '',
+    }]);
+    expect(await publisher.assertionQueryPrivate(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({ subject: 'urn:test:entity:private', graph: '' }),
+    ]);
   });
 
   it('discard removes KA-scoped named graph draft content', async () => {
@@ -705,34 +807,795 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
 
-  it('repairs an interrupted exact-SWM commit before exposing the completion marker', async () => {
+  it('validates the exact VM graph before treating a stale promote as a no-op', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
+
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CG_ID,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(finalized.kaUal, finalized.assertionVersion),
+    );
+    await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: vmGraph })));
+    await store.dropGraph(finalized.sharedGraphUri);
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const memoryLayerPredicate = 'http://dkg.io/ontology/memoryLayer';
+    await store.deleteByPattern({ graph: metaGraph, subject: lifecycle, predicate: memoryLayerPredicate });
+    await store.insert([{
+      subject: lifecycle,
+      predicate: memoryLayerPredicate,
+      object: `"${MemoryLayer.VerifiableMemory}"`,
+      graph: metaGraph,
+    }]);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).resolves.toMatchObject({ promotedCount: 0, promotedAllRoots: false });
+
+    await store.delete([{ ...finalized.publicQuads[0]!, graph: vmGraph }]);
+    await store.insert([{
+      subject: 'urn:test:tampered-vm',
+      predicate: 'http://schema.org/name',
+      object: '"Tampered"',
+      graph: vmGraph,
+    }]);
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).rejects.toThrow(/Merkle mismatch/);
+  });
+
+  it('persists the share operation ID before curator confirmation can escape locally', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     const finalized = await finalizeAssertion();
 
+    let confirmedOperationId: string | undefined;
+    const replaceGraph = store.replaceGraph.bind(store);
+    let crashedAfterConfirmation = false;
+    store.replaceGraph = async (graph, quads) => {
+      if (!crashedAfterConfirmation && graph === finalized.sharedGraphUri) {
+        crashedAfterConfirmation = true;
+        throw new Error('injected post-confirmation local crash');
+      }
+      return replaceGraph(graph, quads);
+    };
+    try {
+      await expect(
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER,
+          confirmBeforeCommit: async () => {
+            confirmedOperationId = await readShareOperationId();
+            return { applied: true };
+          },
+        }),
+      ).rejects.toThrow('injected post-confirmation local crash');
+    } finally {
+      store.replaceGraph = replaceGraph;
+    }
+
+    expect(crashedAfterConfirmation).toBe(true);
+    expect(confirmedOperationId).toBeTruthy();
+    expect(await readShareOperationId()).toBe(confirmedOperationId);
+    const repaired = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => ({ applied: true }),
+      },
+    );
+    expect(repaired.shareOperationId).toBe(confirmedOperationId);
+  });
+
+  it('serializes concurrent promotes onto one durable share operation ID', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let confirmationCalls = 0;
+    let activeConfirmations = 0;
+    let maxActiveConfirmations = 0;
+    let releaseFirstConfirmation!: () => void;
+    const firstConfirmationReleased = new Promise<void>((resolve) => {
+      releaseFirstConfirmation = resolve;
+    });
+    let signalFirstConfirmation!: () => void;
+    const firstConfirmationStarted = new Promise<void>((resolve) => {
+      signalFirstConfirmation = resolve;
+    });
+    const confirmBeforeCommit = async (): Promise<{ applied: boolean }> => {
+      confirmationCalls += 1;
+      const call = confirmationCalls;
+      activeConfirmations += 1;
+      maxActiveConfirmations = Math.max(maxActiveConfirmations, activeConfirmations);
+      if (call === 1) {
+        signalFirstConfirmation();
+        await firstConfirmationReleased;
+      }
+      activeConfirmations -= 1;
+      return { applied: true };
+    };
+
+    const firstPromote = publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit,
+    });
+    await firstConfirmationStarted;
+    const secondOptions: NonNullable<Parameters<DKGPublisher['assertionPromote']>[3]> = {
+      publisherPeerId: PEER,
+      confirmBeforeCommit,
+    };
+    const secondPromote = publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      secondOptions,
+    );
+    secondOptions.subGraphName = 'mutated-after-lock-selection';
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(confirmationCalls).toBe(1);
+    releaseFirstConfirmation();
+    const [first, second] = await Promise.all([firstPromote, secondPromote]);
+
+    expect(maxActiveConfirmations).toBe(1);
+    expect(confirmationCalls).toBe(2);
+    expect(first.shareOperationId).toBeTruthy();
+    expect(second.shareOperationId).toBe(first.shareOperationId);
+    expect(await readShareOperationId()).toBe(first.shareOperationId);
+  });
+
+  it('rejects a draft write queued behind a completed promote', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let releaseConfirmation!: () => void;
+    const confirmationReleased = new Promise<void>((resolve) => {
+      releaseConfirmation = resolve;
+    });
+    let signalConfirmationStarted!: () => void;
+    const confirmationStarted = new Promise<void>((resolve) => {
+      signalConfirmationStarted = resolve;
+    });
+    const promote = publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => {
+        signalConfirmationStarted();
+        await confirmationReleased;
+        return { applied: true };
+      },
+    });
+    await confirmationStarted;
+
+    const lateQuad = {
+      subject: 'urn:test:entity:late-draft',
+      predicate: 'http://schema.org/name',
+      object: '"Late draft"',
+    };
+    const write = publisher.assertionWrite(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      [lateQuad],
+    );
+
+    releaseConfirmation();
+    await expect(promote).resolves.toMatchObject({ promotedCount: TRIPLES.length });
+    await expect(write).rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
+  });
+
+  it('serializes lifecycle mutations across publishers sharing one store', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    const otherPublisher = await createPublisher();
+
+    let releaseConfirmation!: () => void;
+    const confirmationReleased = new Promise<void>((resolve) => {
+      releaseConfirmation = resolve;
+    });
+    let signalConfirmationStarted!: () => void;
+    const confirmationStarted = new Promise<void>((resolve) => {
+      signalConfirmationStarted = resolve;
+    });
+    const promote = publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => {
+        signalConfirmationStarted();
+        await confirmationReleased;
+        return { applied: true };
+      },
+    });
+    await confirmationStarted;
+
+    const write = otherPublisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, [{
+      subject: 'urn:test:entity:cross-instance-late-write',
+      predicate: 'http://schema.org/name',
+      object: '"Cross-instance late write"',
+    }]);
+    releaseConfirmation();
+
+    await expect(promote).resolves.toMatchObject({ promotedCount: TRIPLES.length });
+    await expect(write).rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
+    expect(await otherPublisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
+  });
+
+  it('freezes every destructive draft mutation while promote recovery is ambiguous', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          expect(await publisher.hasSwmShareComplete(
+            CG_ID,
+            ASSERTION_NAME,
+            AGENT,
+          )).toBe(false);
+          return { applied: false };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+    const operationId = await readShareOperationId();
+    expect(operationId).toBeTruthy();
+    const sealSubject = contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME);
+    const sealBefore = await store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${sealSubject}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root } }`,
+    );
+    expect(sealBefore).toEqual({ type: 'boolean', value: true });
+
+    const expectedRecoveryError = { code: 'KA_PROMOTE_RECOVERY_REQUIRED' };
+    await expect(
+      publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, [TRIPLES[0]!]),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.assertionWritePrivate(CG_ID, ASSERTION_NAME, AGENT, [{ ...TRIPLES[0]!, graph: '' }]),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.assertionPullFrom(CG_ID, ASSERTION_NAME, AGENT, 'swm'),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.clearAssertionSeal(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.clearWmDraftDataGraph(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject(expectedRecoveryError);
+
+    expect(await readShareOperationId()).toBe(operationId);
+    expect(await hasPromoteOperationIntent()).toBe(true);
+    const remainingPublic = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
+    expect(remainingPublic).toHaveLength(finalized.publicQuads.length);
+    expect(remainingPublic).toEqual(
+      expect.arrayContaining(finalized.publicQuads.map((quad) => expect.objectContaining(quad))),
+    );
+    expect(await publisher.assertionQueryPrivate(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
+    expect(await store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${sealSubject}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root } }`,
+    )).toEqual(sealBefore);
+  });
+
+  it('snapshots caller-owned private quads before waiting for the lifecycle lock', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let releaseConfirmation!: () => void;
+    const confirmationReleased = new Promise<void>((resolve) => {
+      releaseConfirmation = resolve;
+    });
+    let signalConfirmationStarted!: () => void;
+    const confirmationStarted = new Promise<void>((resolve) => {
+      signalConfirmationStarted = resolve;
+    });
+    const promote = publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => {
+        signalConfirmationStarted();
+        await confirmationReleased;
+        return { applied: false, rejected: true };
+      },
+    });
+    await confirmationStarted;
+
+    const input: Quad[] = [{
+      subject: 'urn:test:private:stable',
+      predicate: 'http://schema.org/name',
+      object: '"Stable"',
+      graph: '',
+    }];
+    const write = publisher.assertionWritePrivate(CG_ID, ASSERTION_NAME, AGENT, input);
+    input[0]!.subject = 'urn:dkg:file:mutated-after-validation';
+    input[0]!.graph = 'urn:test:named-after-validation';
+    releaseConfirmation();
+
+    await expect(promote).rejects.toMatchObject({ name: 'CuratorRejectedError' });
+    await expect(write).resolves.toBeUndefined();
+    expect(await publisher.assertionQueryPrivate(CG_ID, ASSERTION_NAME, AGENT)).toEqual([
+      expect.objectContaining({ subject: 'urn:test:private:stable', graph: '' }),
+    ]);
+  });
+
+  it('rejects curator confirmation without a publisher peer before claiming an ID', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let confirmationCalls = 0;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        confirmBeforeCommit: async () => {
+          confirmationCalls += 1;
+          return { applied: true };
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_PUBLISHER_PEER_REQUIRED' });
+
+    expect(confirmationCalls).toBe(0);
+    expect(await readShareOperationId()).toBeUndefined();
+    expect(await hasPromoteOperationIntent()).toBe(false);
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).not.toHaveLength(0);
+  });
+
+  it('retires the prior completion marker before confirming a reopened draft', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
+
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, [{
+      subject: 'urn:test:entity:new-version',
+      predicate: 'http://schema.org/name',
+      object: '"New version"',
+    }]);
+    await finalizeAssertion();
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          expect(await publisher.hasSwmShareComplete(
+            CG_ID,
+            ASSERTION_NAME,
+            AGENT,
+          )).toBe(false);
+          return { applied: false };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+    expect(await readShareOperationId()).toBeTruthy();
+  });
+
+  it('allows at most one cross-instance promote claim to reach confirmation', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    // Distinct store object identities model independent processes while both
+    // proxies still delegate to the same backend. Same-store publisher objects
+    // cannot silently split their lock domain (tested above).
+    const independentStoreView = (): OxigraphStore => new Proxy(store, {
+      get(target, property) {
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const firstClaimPublisher = await createPublisher(undefined, independentStoreView());
+    const otherPublisher = await createPublisher(undefined, independentStoreView());
+
     const insert = store.insert.bind(store);
-    let interrupted = false;
-    store.insert = async (quads) => {
+    const query = store.query.bind(store);
+    let initialClaimReads = 0;
+    let releaseInitialReads!: () => void;
+    const bothInitialReadsFinished = new Promise<void>((resolve) => {
+      releaseInitialReads = resolve;
+    });
+    let claimInsertions = 0;
+    let releaseClaims!: () => void;
+    const bothClaimsInserted = new Promise<void>((resolve) => {
+      releaseClaims = resolve;
+    });
+    store.query = async (sparql) => {
+      const result = await query(sparql);
       if (
-        !interrupted
-        && quads.some((quad) => quad.graph.includes('/_shared_memory_snapshots/') && quad.graph.endsWith('/ka'))
+        sparql.includes('SELECT ?shareOperationId')
+        && sparql.includes(SHARE_OPERATION_ID_PREDICATE)
       ) {
-        interrupted = true;
-        throw new Error('injected operation snapshot failure');
+        initialClaimReads += 1;
+        if (initialClaimReads === 2) releaseInitialReads();
+        await bothInitialReadsFinished;
+      }
+      return result;
+    };
+    store.insert = async (quads) => {
+      const isPromoteClaim = quads.some((quad) => quad.predicate === SHARE_OPERATION_ID_PREDICATE)
+        && quads.some((quad) => quad.predicate === PROMOTE_OPERATION_INTENT_PREDICATE);
+      await insert(quads);
+      if (isPromoteClaim) {
+        claimInsertions += 1;
+        if (claimInsertions === 2) releaseClaims();
+        await bothClaimsInserted;
+      }
+    };
+    let confirmationCalls = 0;
+    try {
+      const settled = await Promise.allSettled([
+        firstClaimPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER,
+          confirmBeforeCommit: async () => {
+            confirmationCalls += 1;
+            return { applied: true };
+          },
+        }),
+        otherPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER_B,
+          confirmBeforeCommit: async () => {
+            confirmationCalls += 1;
+            return { applied: true };
+          },
+        }),
+      ]);
+      expect(settled.filter((result) => result.status === 'fulfilled').length).toBeLessThanOrEqual(1);
+      expect(settled.filter((result) => result.status === 'rejected').length).toBeGreaterThanOrEqual(1);
+      for (const rejected of settled.filter((result) => result.status === 'rejected')) {
+        expect(rejected).toMatchObject({ reason: { code: 'KA_SHARE_OPERATION_ID_CONFLICT' } });
+      }
+    } finally {
+      store.insert = insert;
+      store.query = query;
+    }
+    expect(confirmationCalls).toBeLessThanOrEqual(1);
+    const ids = await store.query(
+      `SELECT ?id WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME)}> ` +
+        `<${SHARE_OPERATION_ID_PREDICATE}> ?id } } LIMIT 2`,
+    );
+    expect(ids.type === 'bindings' ? ids.bindings : []).toHaveLength(confirmationCalls);
+    const intents = await store.query(
+      `SELECT ?intent WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME)}> ` +
+        `<${PROMOTE_OPERATION_INTENT_PREDICATE}> ?intent } } LIMIT 2`,
+    );
+    expect(intents.type === 'bindings' ? intents.bindings : []).toHaveLength(confirmationCalls);
+  });
+
+  it('keeps a completed legacy promotion readable without replaying it', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    const promoted = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(promoted.shareOperationId).toBeTruthy();
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
+
+    await store.deleteByPattern({
+      graph: contextGraphMetaUri(CG_ID),
+      subject: assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME),
+      predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
+    });
+    let confirmationCalls = 0;
+    const retried = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER_B,
+      confirmBeforeCommit: async () => {
+        confirmationCalls += 1;
+        return { applied: true };
+      },
+    });
+
+    expect(retried).toMatchObject({
+      promotedCount: 0,
+      promotedAllRoots: false,
+      shareOperationId: promoted.shareOperationId,
+    });
+    expect(retried.gossipMessage).toBeUndefined();
+    expect(confirmationCalls).toBe(0);
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
+  });
+
+  it('fails closed when a legacy durable operation ID has no immutable intent', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    await expect(withInjectedOperationSnapshotFailure(() => publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    ))).rejects.toThrow('injected operation snapshot failure');
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    await store.deleteByPattern({
+      graph: contextGraphMetaUri(CG_ID),
+      subject: lifecycle,
+      predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
+    });
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_OPERATION_INTENT_MISSING' });
+    expect(await readShareOperationId()).toBeTruthy();
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+  });
+
+  it('clears a stale completion marker before rejecting corrupt recovery intent', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    await expect(withInjectedOperationSnapshotFailure(() => publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    ))).rejects.toThrow('injected operation snapshot failure');
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+    await store.deleteByPattern({
+      graph: metaGraph,
+      subject: lifecycle,
+      predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
+    });
+    await store.insert([{
+      graph: metaGraph,
+      subject: lifecycle,
+      predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
+      object: '"not-json"',
+    }]);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_OPERATION_INTENT_CORRUPT' });
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+  });
+
+  it('releases a provisional share operation ID after definitive curator rejection', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let rejectedOperationId: string | undefined;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          rejectedOperationId = await readShareOperationId();
+          return { applied: false, rejected: true };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorRejectedError' });
+
+    expect(rejectedOperationId).toBeTruthy();
+    expect(await readShareOperationId()).toBeUndefined();
+    expect(await hasPromoteOperationIntent()).toBe(false);
+    const retried = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(retried.shareOperationId).toBeTruthy();
+    expect(retried.shareOperationId).not.toBe(rejectedOperationId);
+  });
+
+  it('retains a durable share operation ID when a later retry is rejected', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => ({ applied: false }),
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+    const durableOperationId = await readShareOperationId();
+    expect(durableOperationId).toBeTruthy();
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => ({ applied: false, rejected: true }),
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorRejectedError' });
+    expect(await readShareOperationId()).toBe(durableOperationId);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_CONFIRMATION_REQUIRED' });
+    const repaired = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => ({ applied: true }),
+    });
+    expect(repaired.shareOperationId).toBe(durableOperationId);
+  });
+
+  it('reuses the immutable promote envelope across ambiguous retries', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let firstMessage: Uint8Array | undefined;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        accessPolicy: 'allowList',
+        allowedPeers: [PEER_B, PEER],
+        confirmBeforeCommit: async (message) => {
+          firstMessage = message;
+          return { applied: false };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+
+    let retryMessage: Uint8Array | undefined;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER_B,
+        accessPolicy: 'public',
+        confirmBeforeCommit: async (message) => {
+          retryMessage = message;
+          return { applied: false };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+
+    expect(firstMessage).toBeDefined();
+    expect(retryMessage).toBeDefined();
+    const first = decodeWorkspacePublishRequest(firstMessage!);
+    const retry = decodeWorkspacePublishRequest(retryMessage!);
+    expect(retry.shareOperationId).toBe(first.shareOperationId);
+    expect(retry.operationId).toBe(first.operationId);
+    expect(String(retry.timestampMs)).toBe(String(first.timestampMs));
+    expect(retry.publisherPeerId).toBe(PEER);
+    expect(retry.accessPolicy).toBe('allowList');
+    expect(retry.allowedPeers).toEqual([PEER, PEER_B].sort());
+  });
+
+  it('fails closed when a lifecycle contains conflicting share operation IDs', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => ({ applied: false }),
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+    const firstOperationId = await readShareOperationId();
+    expect(firstOperationId).toBeTruthy();
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    await store.insert([{
+      subject: lifecycle,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+      object: '"conflicting-operation-id"',
+      graph: contextGraphMetaUri(CG_ID),
+    }]);
+
+    let confirmationCalled = false;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          confirmationCalled = true;
+          return { applied: true };
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'KA_SHARE_OPERATION_ID_CONFLICT' });
+    expect(confirmationCalled).toBe(false);
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(TRIPLES.length);
+    const swmExists = await store.query(
+      `ASK { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`,
+    );
+    expect(swmExists).toEqual({ type: 'boolean', value: false });
+    const ids = await store.query(
+      `SELECT ?id WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${lifecycle}> <${SHARE_OPERATION_ID_PREDICATE}> ?id } }`,
+    );
+    expect(ids.type === 'bindings' ? ids.bindings : []).toHaveLength(2);
+  });
+
+  it('clears an inherited completion marker before fallible SWM repair work', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toThrow('injected operation snapshot failure');
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toThrow('injected operation snapshot failure');
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+  });
+
+  it('preserves the durable share operation ID across an interrupted SWM repair', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const insert = store.insert.bind(store);
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toThrow('injected operation snapshot failure');
+    const durableOperationId = await readShareOperationId();
+    expect(durableOperationId).toBeTruthy();
+
+    store.insert = async (quads) => {
+      if (quads.some((quad) =>
+        quad.subject === lifecycle && quad.predicate === SHARE_OPERATION_ID_PREDICATE)) {
+        throw new Error('injected lifecycle repair failure');
       }
       return insert(quads);
     };
     try {
       await expect(
         publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
-      ).rejects.toThrow('injected operation snapshot failure');
+      ).rejects.toThrow('injected lifecycle repair failure');
     } finally {
       store.insert = insert;
     }
+    expect(await readShareOperationId()).toBe(durableOperationId);
 
-    expect(interrupted).toBe(true);
+    const repaired = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(repaired.shareOperationId).toBe(durableOperationId);
+  });
+
+  it('repairs an interrupted exact-SWM commit before exposing the completion marker', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toThrow('injected operation snapshot failure');
+
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
     expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(true);
+
+    // A marker written before the immutable snapshot/head tail is not proof of
+    // completion. Destructive mutation must still force promote recovery.
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+    await expect(
+      publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
 
     const repaired = await publisher.assertionPromote(
       CG_ID,
@@ -762,6 +1625,49 @@ describe('Working Memory Assertion Lifecycle', () => {
       kaUal: finalized.kaUal,
     });
     expect(head?.shareOperationId).toBe(repaired.shareOperationId);
+  });
+
+  it('does not borrow another KA tail to release a corrupt recovery claim', async () => {
+    const completedName = 'completed-tail-owner';
+    await publisher.assertionCreate(CG_ID, completedName, AGENT);
+    await publisher.assertionWrite(CG_ID, completedName, AGENT, [{
+      subject: 'urn:test:entity:completed-tail-owner',
+      predicate: 'http://schema.org/name',
+      object: '"Completed tail owner"',
+    }]);
+    await finalizeAssertion(completedName);
+    await publisher.assertionPromote(CG_ID, completedName, AGENT, { publisherPeerId: PEER });
+    const completedOperationId = await readShareOperationId(completedName);
+    expect(completedOperationId).toBeTruthy();
+
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toThrow('injected operation snapshot failure');
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    await store.deleteByPattern({
+      graph: metaGraph,
+      subject: lifecycle,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+    });
+    await store.insert([{
+      graph: metaGraph,
+      subject: lifecycle,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+      object: JSON.stringify(completedOperationId),
+    }]);
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+
+    await expect(
+      publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    expect(await readShareOperationId()).toBe(completedOperationId);
   });
 
   it('blocks an unsealed empty draft when legacy structuralTripleCount is zero', async () => {
@@ -1560,7 +2466,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
-  it('full lifecycle: create → write → promote → verify SWM → discard', async () => {
+  it('full lifecycle preserves promoted SWM and rejects post-promote discard', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
@@ -1582,7 +2488,17 @@ describe('Working Memory Assertion Lifecycle', () => {
       expect(count).toBe(3);
     }
 
-    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+    await expect(
+      publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
+    const preservedSwm = await store.query(
+      `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`,
+    );
+    expect(preservedSwm.type).toBe('bindings');
+    if (preservedSwm.type === 'bindings') {
+      const count = Number(String(preservedSwm.bindings[0]?.['c'] ?? '0').match(/\d+/)?.[0] ?? 0);
+      expect(count).toBe(3);
+    }
   });
 });
 
