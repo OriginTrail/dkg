@@ -72,6 +72,14 @@ export class LegacyKnowledgeAssetReadOnlyError extends Error {
 const DETERMINISTIC_KA_UAL_RE = /^did:dkg:([^/]+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)$/;
 
 /**
+ * The on-chain allocator packs `kaId = (uint160(author) << 96) | uint96(number)`.
+ * A number at or above 2^96 would spill into the author bits, so two distinct
+ * UALs could alias one packed kaId. Only numbers that round-trip losslessly
+ * through the packed identity are valid graph identities.
+ */
+export const MAX_KNOWLEDGE_ASSET_NUMBER = (1n << 96n) - 1n;
+
+/**
  * Parse and canonicalize the deterministic Option-1 UAL used as graph identity.
  * Physical graph IRIs never travel on the wire: every node derives its local
  * WM/SWM/VM graph from these validated identity parts.
@@ -93,7 +101,13 @@ export function parseDeterministicKnowledgeAssetUal(
   const [, chainId, rawAgentAddress, rawKaNumber] = match;
   const agentAddress = canonicalKnowledgeAssetAgentAddress(rawAgentAddress);
   // BigInt canonicalisation prevents leading-zero aliases for one graph.
-  const kaNumber = BigInt(rawKaNumber).toString();
+  const kaNumberValue = BigInt(rawKaNumber);
+  if (kaNumberValue > MAX_KNOWLEDGE_ASSET_NUMBER) {
+    throw new Error(
+      `Graph-scoped KA number exceeds the packed uint96 identity domain (max ${MAX_KNOWLEDGE_ASSET_NUMBER}): ${input}`,
+    );
+  }
+  const kaNumber = kaNumberValue.toString();
   return {
     ual: `did:dkg:${chainId}/${agentAddress}/${kaNumber}`,
     chainId,
