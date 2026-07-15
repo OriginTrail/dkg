@@ -210,7 +210,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
   it('swm/share: UNSEALED_SHARE_BLOCKED → 409 { code, error, recovery }', async () => {
     await startWith({
-      promote: async () => {
+      shareWholeKnowledgeAsset: async () => {
         throw Object.assign(
           new Error('Cannot seal "seal-asset" for sharing to Shared Memory — the asset would be left unpublishable and Working Memory was NOT emptied. no local signing key'),
           {
@@ -230,7 +230,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
   it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {
     await startWith({
-      promote: async () => {
+      shareWholeKnowledgeAsset: async () => {
         throw Object.assign(
           new Error('Knowledge Asset contains RDF named-graph quads'),
           {
@@ -246,6 +246,68 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('KA_NAMED_GRAPH_SHARE_UNSUPPORTED');
     expect(String(res.body.error)).toContain('named-graph');
     expect(res.body.namedGraphs).toEqual(['urn:test:graph:one']);
+  });
+
+  it.each([
+    {
+      label: 'root selection',
+      body: { entities: ['urn:test:root'] },
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    },
+    {
+      label: 'empty root selection',
+      body: { entities: [] },
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    },
+    {
+      label: 'malformed root selection',
+      body: { entities: [123] },
+      code: 'KA_ATOMIC_SHARE_REQUIRED',
+    },
+    {
+      label: 'null selector',
+      body: { entities: null },
+      message: 'must be omitted or "all"',
+    },
+    {
+      label: 'unsealed sharing',
+      body: { skipSeal: true },
+      code: 'UNSEALED_SHARE_UNSUPPORTED',
+    },
+  ])('swm/share rejects $label before lifecycle mutation', async ({ body, code, message }) => {
+    let promoteCalls = 0;
+    await startWith({
+      shareWholeKnowledgeAsset: async () => {
+        promoteCalls += 1;
+        return { promotedCount: 1 };
+      },
+    });
+
+    const res = await post('swm/share', { contextGraphId: CG_ID, ...body });
+
+    expect(res.status).toBe(400);
+    if (code) expect(res.body.code).toBe(code);
+    if (message) expect(String(res.body.error)).toContain(message);
+    expect(promoteCalls).toBe(0);
+  });
+
+  it.each([
+    { label: 'omitted selector', body: {} },
+    { label: 'legacy all selector', body: { entities: 'all' } },
+  ])('swm/share sends $label through the selector-free whole-KA lifecycle interface', async ({ body }) => {
+    const shareOptions: Array<Record<string, unknown>> = [];
+    await startWith({
+      shareWholeKnowledgeAsset: async (_contextGraphId: string, _name: string, options: Record<string, unknown>) => {
+        shareOptions.push(options);
+        return { promotedCount: 1 };
+      },
+    });
+
+    const res = await post('swm/share', { contextGraphId: CG_ID, ...body });
+
+    expect(res.status).toBe(200);
+    expect(shareOptions).toHaveLength(1);
+    expect(shareOptions[0]).not.toHaveProperty('entities');
   });
 
   it('wm/finalize (layer:swm): rejects read-only before invoking the engine', async () => {
@@ -388,7 +450,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     // Guard: the new 409 branch must only catch UNSEALED_SHARE_BLOCKED. Any
     // other error rethrows to the outer handler (→ 500 here).
     await startWith({
-      promote: async () => {
+      shareWholeKnowledgeAsset: async () => {
         throw new Error('some unrelated engine failure');
       },
     });
@@ -438,6 +500,57 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
     expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async returns the complete private graph content envelope', async () => {
+    const privateMerkleRoot = `0x${'ab'.repeat(32)}` as `0x${string}`;
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      shareOperationId: 'private-share-op',
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: `did:dkg:31337/${ROOTLESS_AUTHOR}/7`,
+      assertionVersion: '3',
+      publicTripleCount: 1,
+      privateMerkleRoot,
+      privateTripleCount: 2,
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: ROOTLESS_AUTHOR,
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    };
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => intent,
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => 'private-job',
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({
+      jobId: 'private-job',
+      status: 'accepted',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: intent.kaUal,
+      assertionVersion: '3',
+      publicTripleCount: 1,
+      privateMerkleRoot,
+      privateTripleCount: 2,
+      rootsCount: 0,
+    });
   });
 
   it('vm/publish-async rejects before persisting when no runtime can claim jobs', async () => {
@@ -836,7 +949,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         create: async () => { mutations += 1; },
         write: async () => { mutations += 1; },
         finalize: async () => { mutations += 1; },
-        promote: async () => { mutations += 1; },
+        shareWholeKnowledgeAsset: async () => { mutations += 1; },
       });
 
       const res = await postRoot({
@@ -1069,20 +1182,21 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     }
   });
 
-  it('wm/pull-from: UNSEALED_PULL_FROM_BLOCKED → 409 { code, error }', async () => {
+  it.each([
+    ['UNSEALED_PULL_FROM_BLOCKED', 'Cannot pull an unsealed Knowledge Asset into WM'],
+    ['PULL_FROM_EMPTY_SOURCE', 'Cannot pull from an empty source layer'],
+    ['LEGACY_KA_READ_ONLY', 'Legacy Knowledge Assets are read-only'],
+  ])('wm/pull-from: %s → 409 { code, error }', async (code, message) => {
     await startWith({
       pullFrom: async () => {
-        throw Object.assign(
-          new Error('Cannot pull an unsealed Knowledge Asset into WM'),
-          { code: 'UNSEALED_PULL_FROM_BLOCKED' },
-        );
+        throw Object.assign(new Error(message), { code });
       },
     });
 
     const res = await post('wm/pull-from', { contextGraphId: CG_ID, layer: 'swm' });
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('UNSEALED_PULL_FROM_BLOCKED');
-    expect(String(res.body.error)).toContain('unsealed Knowledge Asset');
+    expect(res.body.code).toBe(code);
+    expect(res.body.error).toBe(message);
   });
 
   it('wm/pull-from: an unrelated pull error still propagates (not silently 409ed)', async () => {
@@ -1107,34 +1221,69 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       daemonState.promoteWorkerAvailable = false;
     });
 
-    it('rejects a non-boolean skipSeal with 400', async () => {
+    it.each([
+      {
+        label: 'a non-boolean skipSeal',
+        body: { skipSeal: 'false' },
+        message: 'skipSeal',
+      },
+      {
+        label: 'skipSeal:true',
+        body: { skipSeal: true },
+        message: 'not supported',
+      },
+      {
+        label: 'root selection',
+        body: { entities: ['urn:test:root'] },
+        message: 'atomically',
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      },
+      {
+        label: 'empty root selection',
+        body: { entities: [] },
+        message: 'atomically',
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      },
+      {
+        label: 'malformed root selection',
+        body: { entities: [123] },
+        message: 'atomically',
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      },
+      {
+        label: 'null selector',
+        body: { entities: null },
+        message: 'must be omitted or "all"',
+      },
+    ])('rejects $label before enqueue', async ({ body, message, code }) => {
       daemonState.promoteWorkerAvailable = true;
+      let promoteAsyncCalls = 0;
       await startWith({
-        promoteAsync: async () => ({ jobId: 'should-not-reach' }),
+        shareWholeKnowledgeAssetAsync: async () => {
+          promoteAsyncCalls += 1;
+          return { jobId: 'should-not-reach' };
+        },
       });
-      const res = await post('swm/share-async', { contextGraphId: CG_ID, skipSeal: 'false' });
+      const res = await post('swm/share-async', { contextGraphId: CG_ID, ...body });
       expect(res.status).toBe(400);
-      expect(String(res.body.error)).toContain('skipSeal');
-    });
-
-    it('rejects a truthy boolean skipSeal with 400', async () => {
-      daemonState.promoteWorkerAvailable = true;
-      await startWith({
-        promoteAsync: async () => ({ jobId: 'should-not-reach' }),
-      });
-      const res = await post('swm/share-async', { contextGraphId: CG_ID, skipSeal: true });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toContain('not supported');
+      expect(String(res.body.error)).toContain(message);
+      if (code) expect(res.body.code).toBe(code);
+      expect(promoteAsyncCalls).toBe(0);
     });
 
     it('accepts skipSeal:false (the seal-always default) and enqueues', async () => {
       daemonState.promoteWorkerAvailable = true;
+      let promoteAsyncCalls = 0;
       await startWith({
-        promoteAsync: async () => ({ jobId: 'job-123' }),
+        shareWholeKnowledgeAssetAsync: async () => {
+          promoteAsyncCalls += 1;
+          return { jobId: 'job-123' };
+        },
       });
       const res = await post('swm/share-async', { contextGraphId: CG_ID, skipSeal: false });
       expect(res.status).toBe(200);
       expect(res.body.jobId).toBe('job-123');
+      expect(promoteAsyncCalls).toBe(1);
     });
   });
 

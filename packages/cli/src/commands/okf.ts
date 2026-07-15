@@ -134,7 +134,6 @@ export function registerOkfCommand(program: Command): void {
   ): Promise<void> {
     const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
       subGraphName,
-      entities: 'all',
     });
     if (shareResult.swmShared !== true) {
       throw new Error(`Knowledge Asset "${name}" share did not report swmShared:true`);

@@ -33,7 +33,6 @@ import {
   payloadTooLargeResponseBody,
   readBody,
   safeParseJson,
-  validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
   isWritableQuad,
@@ -72,7 +71,11 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
+import {
+  AsyncLiftJobConflictError,
+  PromoteJobConflictError,
+  serializeKnowledgeAssetContentEnvelope,
+} from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   LegacyKnowledgeAssetReadOnlyError,
@@ -241,6 +244,55 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
 
 function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
+}
+
+type AtomicShareRequest = {
+  skipSeal?: false;
+};
+
+function parseAtomicShareRequest(
+  parsed: any,
+  res: RequestContext["res"],
+  mode: "sync" | "async",
+): AtomicShareRequest | null {
+  const entities = parsed?.entities;
+  if (Array.isArray(entities)) {
+    jsonResponse(res, 400, {
+      code: "KA_ATOMIC_SHARE_REQUIRED",
+      error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+    });
+    return null;
+  }
+  if (entities !== undefined && entities !== "all") {
+    jsonResponse(res, 400, {
+      error: '"entities" must be omitted or "all" for an atomic Knowledge Asset share',
+    });
+    return null;
+  }
+
+  let skipSeal: false | undefined;
+  if (parsed?.skipSeal !== undefined) {
+    if (typeof parsed.skipSeal !== "boolean") {
+      jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
+      return null;
+    }
+    if (parsed.skipSeal === true) {
+      jsonResponse(res, 400, mode === "sync"
+        ? {
+            code: "UNSEALED_SHARE_UNSUPPORTED",
+            error: "skipSeal:true is not supported for graph-scoped Knowledge Assets; finalize and share the complete KA atomically",
+          }
+        : {
+            error: "skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share",
+          });
+      return null;
+    }
+    skipSeal = false;
+  }
+
+  return {
+    ...(skipSeal === false ? { skipSeal } : {}),
+  };
 }
 
 /**
@@ -906,7 +958,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           // Carry the same resolved author into the share. The asset is already
           // sealed (finalize above), so promote shares the existing seal verbatim
           // and passing the author keeps the whole atomic flow in one namespace.
-          const share = await agent.assertion.promote(resolvedContextGraphId, name, {
+          const share = await agent.assertion.shareWholeKnowledgeAsset(resolvedContextGraphId, name, {
             subGraphName,
             ...atomicAuthorLane,
             awaitCuratorAck,
@@ -1237,35 +1289,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // agent config default (`swmAwaitCuratorAck`). The promote aborts with 503
       // (mapped in respondAssertionError) if the curator doesn't confirm.
       const awaitCuratorAck = typeof parsed?.awaitCuratorAck === "boolean" ? parsed.awaitCuratorAck : undefined;
-      if (!validateEntities(parsed.entities, res)) return;
-      if (Array.isArray(parsed.entities)) {
-        return jsonResponse(res, 400, {
-          code: "KA_ATOMIC_SHARE_REQUIRED",
-          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
-        });
-      }
-      // Graph-scoped KAs are seal-before-share. Retain strict parsing and accept
-      // an explicit false for older clients, but reject the removed true mode
-      // before any lifecycle mutation.
-      let skipSeal: boolean | undefined;
-      if (parsed?.skipSeal !== undefined) {
-        if (typeof parsed.skipSeal !== "boolean") {
-          return jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
-        }
-        if (parsed.skipSeal === true) {
-          return jsonResponse(res, 400, {
-            code: "UNSEALED_SHARE_UNSUPPORTED",
-            error: "skipSeal:true is not supported for graph-scoped Knowledge Assets; finalize and share the complete KA atomically",
-          });
-        }
-        skipSeal = parsed.skipSeal;
-      }
+      const shareRequest = parseAtomicShareRequest(parsed, res, "sync");
+      if (!shareRequest) return;
       try {
-        const share = await agent.assertion.promote(contextGraphId, name, {
-          entities: parsed.entities,
+        const share = await agent.assertion.shareWholeKnowledgeAsset(contextGraphId, name, {
           subGraphName,
           awaitCuratorAck,
-          skipSeal,
+          skipSeal: shareRequest.skipSeal,
           ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
         });
         if (share.promotedCount !== 0) {
@@ -1306,38 +1336,18 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // preflight above already decoded/validated `name`, parsed the JSON body,
     // validated `subGraphName`, and resolved `contextGraphId` — so we reuse
     // those here (parity with how `swm/share` reuses them). The worker-
-    // availability 503 guard, `validateEntities` 400, and the conflict/error
-    // mapping match the legacy handler exactly. Self-contained try/catch (like
+    // availability 503 guard and conflict/error mapping match the legacy
+    // handler. Atomic body validation is shared with sync share above.
+    // Self-contained try/catch (like
     // `vm/publish`) so the legacy enqueue error mapping is preserved verbatim
     // and unmatched errors rethrow rather than falling through to the outer
     // `respondAssertionError` catch.
     if (layer === "swm" && verb === "share-async") {
       if (asyncPromoteUnavailable(res)) return;
-      const entities = parsed.entities;
-      if (!validateEntities(entities, res)) return;
-      if (Array.isArray(entities)) {
-        return jsonResponse(res, 400, {
-          code: "KA_ATOMIC_SHARE_REQUIRED",
-          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
-        });
-      }
-      // #1116 (round 5): the sync swm/share validates `skipSeal` as a strict
-      // boolean; the async queue ALWAYS seals (the safe default) and can't carry
-      // skipSeal through the job, so it was silently dropped — a footgun where a
-      // caller asking to skip sealing got a sealed share. Reject a non-boolean
-      // (parity with the sync route) and reject a truthy boolean outright rather
-      // than honoring it differently than requested.
-      if (parsed?.skipSeal !== undefined) {
-        if (typeof parsed.skipSeal !== "boolean") {
-          return jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
-        }
-        if (parsed.skipSeal === true) {
-          return jsonResponse(res, 400, { error: "skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share" });
-        }
-      }
+      const shareRequest = parseAtomicShareRequest(parsed, res, "async");
+      if (!shareRequest) return;
       try {
-        const result = await agent.assertion.promoteAsync(contextGraphId, name, {
-          entities: entities ?? "all",
+        const result = await agent.assertion.shareWholeKnowledgeAssetAsync(contextGraphId, name, {
           subGraphName,
           ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
         });
@@ -1398,11 +1408,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           contextGraphId,
           name,
           shareOperationId: intent.shareOperationId,
-          contentScopeVersion: intent.contentScopeVersion,
-          kaUal: intent.kaUal,
-          assertionVersion: intent.assertionVersion,
-          publicTripleCount: intent.publicTripleCount,
-          privateTripleCount: intent.privateTripleCount,
+          ...serializeKnowledgeAssetContentEnvelope(intent),
+          rootsCount: intent.roots.length,
           sealMerkleRoot: intent.sealMerkleRoot,
           intentKey: intent.intentKey,
           ...(subGraphName ? { subGraphName } : {}),

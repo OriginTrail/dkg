@@ -2322,6 +2322,10 @@ export class DKGAgent extends DKGAgentBase {
   get assertion() {
     const agent = this;
     const agentAddress = this.defaultAgentAddress ?? this.peerId;
+    const selectWholeKnowledgeAsset = <T extends object>(options: T | undefined) => ({
+      ...(options ?? {}),
+      entities: 'all' as const,
+    });
     return {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<string> {
         // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
@@ -2420,6 +2424,26 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
+      },
+      /** Share one complete graph-scoped Knowledge Asset. */
+      async shareWholeKnowledgeAsset(
+        contextGraphId: string,
+        name: string,
+        opts?: {
+          subGraphName?: string;
+          agentAddress?: string;
+          authorAgentAddress?: string;
+          preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+          awaitCuratorAck?: boolean;
+          curatorAckTimeoutMs?: number;
+          skipSeal?: false;
+        },
+      ): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
+        return agent.assertion.promote(
+          contextGraphId,
+          name,
+          selectWholeKnowledgeAsset(opts),
+        );
       },
       async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
@@ -2935,6 +2959,17 @@ export class DKGAgent extends DKGAgentBase {
       // #3); on this surface we only enqueue, inspect, cancel, and
       // recover. No memoryGraphChanged event is emitted at enqueue time
       // — emission happens when the worker reports success.
+      async shareWholeKnowledgeAssetAsync(
+        contextGraphId: string,
+        name: string,
+        opts?: { subGraphName?: string; agentAddress?: string; authorAgentAddress?: string },
+      ): Promise<{ jobId: string }> {
+        return agent.assertion.promoteAsync(
+          contextGraphId,
+          name,
+          selectWholeKnowledgeAsset(opts),
+        );
+      },
       async promoteAsync(
         contextGraphId: string,
         name: string,
