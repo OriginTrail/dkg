@@ -27,17 +27,24 @@ export const SYNC_PAGE_SIZE = 500;
  * 500-row request size, 32 KiB literals already produced ~16 MiB responses and
  * tripped ProtocolRouter's 10 MiB read limit before page parsing. Reserve six
  * MiB for subjects, predicates, graph IRIs, N-Quads syntax, and framing; the
- * remaining four MiB admits 64 maximum-sized literal rows. New requesters work
- * with old responders because `limit` was already part of the wire request;
- * keeping SYNC_PAGE_SIZE above unchanged preserves old-requester compatibility.
+ * remaining four MiB admits 64 maximum-sized literal rows. That value remains
+ * the retry floor for pathological payloads. Normal RDF rows are far smaller,
+ * so request 256 rows first and let the requester halve the limit on transport
+ * retries (256 -> 128 -> 64). New requesters work with old responders because
+ * `limit` was already part of the wire request; keeping SYNC_PAGE_SIZE above
+ * unchanged preserves old-requester compatibility.
  */
 export const SYNC_RESPONSE_FRAME_HEADROOM_BYTES = 6 * 1024 * 1024;
-export const SYNC_REQUEST_PAGE_SIZE = Math.max(
+export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
   1,
   Math.floor(
     (DEFAULT_MAX_READ_BYTES - SYNC_RESPONSE_FRAME_HEADROOM_BYTES) /
     JAVA_WRITE_UTF_MAX_BYTES,
   ),
+);
+export const SYNC_REQUEST_PAGE_SIZE = Math.min(
+  SYNC_PAGE_SIZE,
+  Math.max(SYNC_REQUEST_SAFE_PAGE_SIZE, 256),
 );
 export const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 export const SYNC_TOTAL_TIMEOUT_MS = 120_000;

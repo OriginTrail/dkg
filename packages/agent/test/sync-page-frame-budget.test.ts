@@ -6,6 +6,7 @@ import {
 import {
   SYNC_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
+  SYNC_REQUEST_SAFE_PAGE_SIZE,
   SYNC_RESPONSE_FRAME_HEADROOM_BYTES,
 } from '../src/dkg-agent-constants.js';
 
@@ -19,11 +20,14 @@ function encodedPageBytes(rows: number, literalBytes: number): number {
 }
 
 describe('sync requester transport frame budget', () => {
-  it('keeps a page of maximum supported literals below the protocol read cap', () => {
-    expect(SYNC_REQUEST_PAGE_SIZE).toBe(64);
+  it('keeps the adaptive retry floor below the protocol read cap', () => {
+    expect(SYNC_REQUEST_PAGE_SIZE).toBe(256);
+    expect(SYNC_REQUEST_SAFE_PAGE_SIZE).toBe(64);
     expect(SYNC_RESPONSE_FRAME_HEADROOM_BYTES).toBe(6 * 1024 * 1024);
-    expect(encodedPageBytes(SYNC_REQUEST_PAGE_SIZE, JAVA_WRITE_UTF_MAX_BYTES))
+    expect(encodedPageBytes(SYNC_REQUEST_SAFE_PAGE_SIZE, JAVA_WRITE_UTF_MAX_BYTES))
       .toBeLessThan(DEFAULT_MAX_READ_BYTES);
+    expect(encodedPageBytes(SYNC_REQUEST_PAGE_SIZE, JAVA_WRITE_UTF_MAX_BYTES))
+      .toBeGreaterThan(DEFAULT_MAX_READ_BYTES);
   });
 
   it('reproduces why the legacy 500-row request cannot carry large literals', () => {

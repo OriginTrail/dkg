@@ -16,6 +16,7 @@ import {
 import {
   createRequesterPhaseTelemetry,
 } from '../memory-telemetry.js';
+import { SYNC_REQUEST_SAFE_PAGE_SIZE } from '../../dkg-agent-constants.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -230,6 +231,15 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const resumedFromOffset = offset;
   let bytesReceived = 0;
   let timedOut = false;
+  // Start with the throughput-oriented page size, but reduce it within the
+  // existing bounded retry budget if a response cannot traverse the wire.
+  // ProtocolRouter may surface an oversized response as a generic stream reset,
+  // so the reduction intentionally applies to any retryable transport failure.
+  // A transient failure merely makes the remainder of this phase conservative;
+  // it never changes offsets or responder-session identity.
+  const safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
+  let activePageSize = syncPageSize;
+  let successfulPageSize = syncPageSize;
   const syncSessionId = usesPageSession
     ? (savedResponderSession?.syncSessionId ?? createResponderSessionId(includeSharedMemory, phase))
     : undefined;
@@ -273,7 +283,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // full rationale (codex review on #569 follow-ups #1, #4-#8).
         requestFactory: async () => {
           throwIfAborted(signal);
-          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
+          successfulPageSize = activePageSize;
+          const request = await buildSyncRequest(contextGraphId, curOffset, activePageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
           throwIfAborted(signal);
           return request;
         },
@@ -284,7 +295,14 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           }
         },
         onRetry: (attempt, delay, err) => {
-          logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+          const priorPageSize = activePageSize;
+          if (activePageSize > safePageSize) {
+            activePageSize = Math.max(safePageSize, Math.floor(activePageSize / 2));
+          }
+          const pageSizeNote = activePageSize < priorPageSize
+            ? `; reducing page size ${priorPageSize}->${activePageSize}`
+            : '';
+          logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms${pageSizeNote}): ${err instanceof Error ? err.message : String(err)}`);
         },
       });
       const transportDurationMs = Date.now() - transportStartedAt;
@@ -341,7 +359,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           `Sync progress for "${contextGraphId}" ${includeSharedMemory ? 'shared-memory' : 'durable'} ${phase}: transferred=${allQuads.length} bytes=${bytesReceived} offset=${offset}`,
         );
       }
-      if (parsed.totalQuads < syncPageSize) break;
+      if (parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;
