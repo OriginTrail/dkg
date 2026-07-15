@@ -23,6 +23,7 @@ import {
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import { quadsToNQuads } from '../bounded-rdf.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
@@ -228,7 +229,7 @@ export class OxigraphStore implements TripleStore {
         label: 'OxigraphStore.insert',
       });
     }
-    const nquads = quads.map(quadToNQuad).join('\n') + '\n';
+    const nquads = `${quadsToNQuads(quads)}\n`;
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
     this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
@@ -469,27 +470,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function quadToNQuad(q: DKGQuad): string {
-  const s = formatTerm(q.subject);
-  const p = `<${q.predicate}>`;
-  const o = formatTerm(q.object);
-  const g = q.graph ? ` <${q.graph}>` : '';
-  return `${s} ${p} ${o}${g} .`;
-}
-
-function formatTerm(term: string): string {
-  if (term.startsWith('"')) {
-    // Wrap bare datatype IRIs in angle brackets: "val"^^http://... → "val"^^<http://...>
-    // Anchored to closing quote to avoid matching ^^ inside string content.
-    const m = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-    if (m) return `${m[1]}^^<${m[2]}>`;
-    return term;
-  }
-  if (term.startsWith('_:')) return term;
-  if (term.startsWith('<')) return term;
-  return `<${term}>`;
 }
 
 function parseTerm(term: string): oxigraph.NamedNode | oxigraph.Literal | oxigraph.BlankNode {

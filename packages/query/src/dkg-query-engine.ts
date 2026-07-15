@@ -1,9 +1,13 @@
 import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origintrail-official/dkg-storage';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import {
+  ExactGraphReadError,
+  GraphManager,
+  readExactGraphPaged,
+} from '@origintrail-official/dkg-storage';
 import type {
   QueryResult,
   QueryOptions,
-  QueryEngine,
+  GraphAwareQueryEngine,
   ResolvedGraphKnowledgeAsset,
   ResolvedKnowledgeAsset,
   ResolvedLegacyKnowledgeAsset,
@@ -21,8 +25,8 @@ import {
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  createGraphKnowledgeAssetScope,
-  knowledgeAssetLayerGraphUri,
+  buildGraphKnowledgeAssetMetadataQuery,
+  parseGraphKnowledgeAssetMetadataBindings,
 } from '@origintrail-official/dkg-core';
 import {
   validateReadOnlySparql,
@@ -250,7 +254,7 @@ export function resolveViewGraphs(
  * Isolation). All data must arrive via protocol messages (publish, access,
  * sync) before it can be queried here.
  */
-export class DKGQueryEngine implements QueryEngine {
+export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
   // Collapse the dashboard's parallel WM/SWM/VM count scans without retaining
@@ -941,7 +945,17 @@ export class DKGQueryEngine implements QueryEngine {
     return { bindings: [] };
   }
 
-  async resolveKA(ual: string): Promise<ResolvedKnowledgeAsset> {
+  async resolveKA(ual: string): Promise<ResolvedLegacyKnowledgeAsset> {
+    const resolved = await this.resolveKnowledgeAsset(ual);
+    if (resolved.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      throw new Error(
+        'Graph-scoped Knowledge Assets do not have root entities; use resolveKnowledgeAsset()',
+      );
+    }
+    return resolved;
+  }
+
+  async resolveKnowledgeAsset(ual: string): Promise<ResolvedKnowledgeAsset> {
     const safeUal = assertSafeIri(ual);
     const graphScoped = await this.resolveGraphScopedKA(safeUal);
     if (graphScoped) return graphScoped;
@@ -951,175 +965,45 @@ export class DKGQueryEngine implements QueryEngine {
   private async resolveGraphScopedKA(
     ual: string,
   ): Promise<ResolvedGraphKnowledgeAsset | null> {
-    const DKG = 'http://dkg.io/ontology/';
     const metaResult = await this.store.query(
-      `SELECT ?g ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?ctxGraph ?publicTripleCount ?sgName WHERE {
-        GRAPH ?g {
-          <${ual}> <${DKG}contentScopeVersion> ?scopeVersion .
-          OPTIONAL { <${ual}> <${DKG}kaUal> ?kaUal }
-          OPTIONAL { <${ual}> <${DKG}assertionVersion> ?assertionVersion }
-          OPTIONAL { <${ual}> <${DKG}assertionGraph> ?assertionGraph }
-          OPTIONAL { <${ual}> <${DKG}contextGraph> ?ctxGraph }
-          OPTIONAL { <${ual}> <${DKG}publicTripleCount> ?publicTripleCount }
-          OPTIONAL { <${ual}> <${DKG}subGraphName> ?sgName }
-        }
-      }`,
+      buildGraphKnowledgeAssetMetadataQuery(ual),
     );
+    const parsed = parseGraphKnowledgeAssetMetadataBindings(
+      ual,
+      metaResult.type === 'bindings' ? metaResult.bindings : [],
+    );
+    if (parsed.kind !== 'graph') return null;
+    const metadata = parsed.metadata;
+    const expectedGraph = metadata.assertionGraph;
 
-    if (metaResult.type !== 'bindings' || metaResult.bindings.length === 0) return null;
-    const parseInteger = (value: string | undefined, field: string): bigint => {
-      const match = value?.match(/^"(-?\d+)"/) ?? value?.match(/^(-?\d+)$/);
-      if (!match) {
-        throw new Error(`Graph-scoped KA ${ual} has invalid ${field}: ${value ?? '(missing)'}`);
-      }
-      return BigInt(match[1] as string);
-    };
-    const scopeVersions = [
-      ...new Set(
-        metaResult.bindings.map((row) =>
-          parseInteger(row['scopeVersion'], 'contentScopeVersion').toString(),
-        ),
-      ),
-    ];
-    if (scopeVersions.length !== 1) {
-      throw new Error(`Graph-scoped KA ${ual} has ambiguous contentScopeVersion metadata`);
-    }
-    const scopeVersion = BigInt(scopeVersions[0] as string);
-    if (scopeVersion === 1n) return null;
-    if (scopeVersion !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
-      throw new Error(`Unsupported KA contentScopeVersion: ${scopeVersion}`);
-    }
-    const graphRows = metaResult.bindings;
-
-    const values = (field: string): string[] => [
-      ...new Set(
-        graphRows
-          .map((row) => row[field])
-          .filter((value): value is string => typeof value === 'string' && value.length > 0),
-      ),
-    ];
-    const requireSingle = (field: string): string => {
-      const candidates = values(field);
-      if (candidates.length !== 1) {
+    let quads: Quad[];
+    try {
+      quads = await readExactGraphPaged(this.store, expectedGraph, {
+        expectedQuadCount: metadata.publicTripleCount,
+        queryOptions: { source: 'query.resolveKnowledgeAsset' },
+      });
+    } catch (error) {
+      if (error instanceof ExactGraphReadError && error.code === 'QUAD_COUNT_MISMATCH') {
         throw new Error(
-          `Graph-scoped KA ${ual} has ${candidates.length === 0 ? 'missing' : 'ambiguous'} ${field} metadata`,
+          `Graph-scoped KA ${ual} graph integrity mismatch: metadata declares ` +
+            `${metadata.publicTripleCount} public triples, found ${error.actual ?? 'an unknown count'}`,
         );
       }
-      return candidates[0] as string;
-    };
-    const decodeLiteral = (value: string, field: string): string => {
-      if (!value.startsWith('"')) return value;
-      const end = value.lastIndexOf('"');
-      if (end <= 0) {
-        throw new Error(`Graph-scoped KA ${ual} has invalid ${field}: ${value}`);
-      }
-      try {
-        return JSON.parse(value.slice(0, end + 1)) as string;
-      } catch {
-        throw new Error(`Graph-scoped KA ${ual} has invalid ${field}: ${value}`);
-      }
-    };
-
-    const metadataUal = requireSingle('kaUal');
-    if (metadataUal !== ual) {
-      throw new Error(`Graph-scoped KA metadata UAL mismatch: requested ${ual}, found ${metadataUal}`);
+      throw error;
     }
-    const assertionVersion = parseInteger(
-      requireSingle('assertionVersion'),
-      'assertionVersion',
-    ).toString();
-    const publicTripleCountBig = parseInteger(
-      requireSingle('publicTripleCount'),
-      'publicTripleCount',
-    );
-    if (
-      publicTripleCountBig < 0n
-      || publicTripleCountBig > BigInt(Number.MAX_SAFE_INTEGER)
-    ) {
+    if (quads.length !== metadata.publicTripleCount) {
       throw new Error(
-        `Graph-scoped KA ${ual} has invalid publicTripleCount: ${publicTripleCountBig}`,
-      );
-    }
-    const publicTripleCount = Number(publicTripleCountBig);
-
-    const contextGraphUri = requireSingle('ctxGraph');
-    const contextGraphPrefix = 'did:dkg:context-graph:';
-    if (!contextGraphUri.startsWith(contextGraphPrefix)) {
-      throw new Error(
-        `Graph-scoped KA ${ual} has invalid contextGraph metadata: ${contextGraphUri}`,
-      );
-    }
-    const contextGraphId = contextGraphUri.slice(contextGraphPrefix.length);
-    if (!contextGraphId) {
-      throw new Error(`Graph-scoped KA ${ual} has an empty context graph id`);
-    }
-    const expectedMetaGraph = `${contextGraphUri}/_meta`;
-    const metadataGraph = requireSingle('g');
-    if (metadataGraph !== expectedMetaGraph) {
-      throw new Error(
-        `Graph-scoped KA ${ual} metadata graph mismatch: ` +
-          `expected ${expectedMetaGraph}, found ${metadataGraph}`,
-      );
-    }
-
-    const subGraphValues = values('sgName').map((value) =>
-      decodeLiteral(value, 'subGraphName'),
-    );
-    const uniqueSubGraphs = [...new Set(subGraphValues)];
-    if (uniqueSubGraphs.length > 1) {
-      throw new Error(`Graph-scoped KA ${ual} has ambiguous subGraphName metadata`);
-    }
-    const subGraphName = uniqueSubGraphs[0];
-    if (subGraphName !== undefined) {
-      const validation = validateSubGraphName(subGraphName);
-      if (!validation.valid) {
-        throw new Error(
-          `Graph-scoped KA ${ual} has invalid subGraphName: ${validation.reason}`,
-        );
-      }
-    }
-
-    const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
-    const expectedGraph = knowledgeAssetLayerGraphUri(
-      contextGraphId,
-      MemoryLayer.VerifiableMemory,
-      scope,
-      subGraphName,
-    );
-    const assertionGraph = requireSingle('assertionGraph');
-    if (assertionGraph !== expectedGraph) {
-      throw new Error(
-        `Graph-scoped KA ${ual} assertionGraph mismatch: expected ${expectedGraph}, found ${assertionGraph}`,
-      );
-    }
-
-    const dataResult = await this.store.query(
-      `SELECT ?s ?p ?o WHERE {
-        GRAPH <${assertSafeIri(expectedGraph)}> { ?s ?p ?o }
-      }`,
-    );
-    const quads: Quad[] =
-      dataResult.type === 'bindings'
-        ? dataResult.bindings.map((row) => ({
-            subject: row['s'],
-            predicate: row['p'],
-            object: row['o'],
-            graph: expectedGraph,
-          }))
-        : [];
-    if (quads.length !== publicTripleCount) {
-      throw new Error(
-        `Graph-scoped KA ${ual} graph integrity mismatch: metadata declares ${publicTripleCount} public triples, found ${quads.length}`,
+        `Graph-scoped KA ${ual} graph integrity mismatch: metadata declares ${metadata.publicTripleCount} public triples, found ${quads.length}`,
       );
     }
 
     return {
-      ual: scope.ual,
+      ual: metadata.scope.ual,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      assertionVersion: scope.assertionVersion,
+      assertionVersion: metadata.scope.assertionVersion,
       assertionGraph: expectedGraph,
       rootEntities: [],
-      contextGraphId,
+      contextGraphId: metadata.contextGraphId,
       quads,
     };
   }
@@ -1143,6 +1027,8 @@ export class DKGQueryEngine implements QueryEngine {
           }
           <${ual}> <http://dkg.io/ontology/contextGraph> ?ctxGraph .
           OPTIONAL { <${ual}> <http://dkg.io/ontology/subGraphName> ?sgName }
+          BIND(CONCAT(STR(?ctxGraph), "/_meta") AS ?expectedMetaGraph)
+          FILTER(STR(?g) = ?expectedMetaGraph)
         }
       } ORDER BY ?ka`,
     );

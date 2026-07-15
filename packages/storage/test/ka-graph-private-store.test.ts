@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import {
+  ExactGraphReadError,
   GraphManager,
   OxigraphStore,
   PrivateContentStore,
@@ -81,5 +82,47 @@ describe('graph-scoped private content', () => {
     await expect(
       privateStore.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope),
     ).resolves.toEqual([quad('urn:private:new', '"new"')]);
+  });
+
+  it('fails closed when an optional exact-read count does not match', async () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, 4);
+    await privateStore.replaceKnowledgeAssetPrivateTriples(
+      CONTEXT_GRAPH,
+      scope,
+      [quad('urn:private:only', '"only"')],
+    );
+
+    const error = await privateStore.getKnowledgeAssetPrivateTriples(
+      CONTEXT_GRAPH,
+      scope,
+      undefined,
+      { expectedQuadCount: 2, pageSize: 1 },
+    ).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ExactGraphReadError);
+    expect(error).toMatchObject({
+      kind: 'integrity',
+      code: 'QUAD_COUNT_MISMATCH',
+      expected: 2,
+      actual: 1,
+    });
+  });
+
+  it('discovers the count without materializing the private graph', async () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, 5);
+    const payload = [quad('urn:private:bounded', '"bounded"')];
+    await privateStore.replaceKnowledgeAssetPrivateTriples(
+      CONTEXT_GRAPH,
+      scope,
+      payload,
+    );
+    store.countQuads = async () => {
+      throw new Error('materializing countQuads must not run');
+    };
+
+    await expect(privateStore.getKnowledgeAssetPrivateTriples(
+      CONTEXT_GRAPH,
+      scope,
+    )).resolves.toEqual(payload);
   });
 });

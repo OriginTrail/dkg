@@ -9,6 +9,17 @@ import {
 } from '@origintrail-official/dkg-core';
 import { tryReplaceGraphAtomically, type TripleStore, type Quad } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
+import {
+  readExactGraphPaged,
+  readExactGraphPagedWithDiscoveredCount,
+  type ReadExactGraphPagedOptions,
+} from './bounded-rdf.js';
+
+export interface KnowledgeAssetPrivateReadOptions
+  extends Omit<ReadExactGraphPagedOptions, 'expectedQuadCount' | 'outputGraph'> {
+  /** Trusted metadata count. When omitted, the store's current count is used. */
+  expectedQuadCount?: number;
+}
 
 /**
  * GH #1078 — predicate used for the per-(cg,root[,sub]) "current verifiable
@@ -297,13 +308,20 @@ export class PrivateContentStore {
     contextGraphId: string,
     scope: GraphKnowledgeAssetScope,
     subGraphName?: string,
+    readOptions?: KnowledgeAssetPrivateReadOptions,
   ): Promise<Quad[]> {
     const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
-    const result = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
-    );
-    if (result.type !== 'quads') return [];
-    return result.quads.map((quad) => ({ ...quad, graph: '' }));
+    if (readOptions?.expectedQuadCount !== undefined) {
+      return readExactGraphPaged(this.store, graphUri, {
+        ...readOptions,
+        expectedQuadCount: readOptions.expectedQuadCount,
+        outputGraph: '',
+      });
+    }
+    return readExactGraphPagedWithDiscoveredCount(this.store, graphUri, {
+      ...readOptions,
+      outputGraph: '',
+    });
   }
 
   async deleteKnowledgeAssetPrivateTriples(
