@@ -1,6 +1,6 @@
 {
   "_comment": "#1116 — canonical share-outcome warning strings. The MCP, OpenClaw, and Hermes adapters each keep their own copy of these three constants (no shared module: MCP deliberately has no dkg-core dependency, and creating a package is out of scope). Each adapter's test suite asserts its constants are byte-identical to these values, so drift is caught by a test, not a code comment. If you change a warning, update it HERE and in all three adapters; the parity tests will flag any mismatch.",
-  "SHARE_NOT_PUBLISH_READY_WARNING": "Shared to SWM but NOT publish-ready (sealed:false). Legacy unsealed SWM content is read-only; recreate or pull the asset into Working Memory, then use an atomic full share before publishing.",
+  "SHARE_NOT_PUBLISH_READY_WARNING": "Shared to SWM but NOT publish-ready (sealed:false). Legacy unsealed SWM content is read-only; use the preserved Working Memory draft if available, or recreate the knowledge asset, then use an atomic full share before publishing.",
   "SHARE_SUBSET_NOT_PUBLISH_READY_WARNING": "Shared a SUBSET to SWM for peer visibility. A subset is NOT sealable/publishable. Legacy SWM finalize is read-only. To publish on-chain, share the full asset atomically (entities:\"all\"), or model this subset as its own knowledge asset.",
   "SHARE_INCOMPLETE_PROMOTE_WARNING": "Sealed, but not all roots reached SWM (some roots may be owned by other agents) — not yet publishable; re-share the full asset so every sealed root is in SWM."
 }

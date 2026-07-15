@@ -54,8 +54,8 @@ const formatError = (e: unknown): string =>
 // Legacy SWM content is read-only, so recovery must go through WM + atomic share.
 export const SHARE_NOT_PUBLISH_READY_WARNING =
   'Shared to SWM but NOT publish-ready (sealed:false). Legacy unsealed SWM ' +
-  'content is read-only; recreate or pull the asset into Working Memory, then ' +
-  'use an atomic full share before publishing.';
+  'content is read-only; use the preserved Working Memory draft if available, ' +
+  'or recreate the knowledge asset, then use an atomic full share before publishing.';
 
 // A SUBSET share is publishReady:false too, but unlike a skipSeal full share it is
 // NOT sealable — legacy SWM finalize is read-only.

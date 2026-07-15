@@ -778,7 +778,10 @@ def test_annotate_share_seal_full_skip_seal_warns_read_only(plugin_module):
     out = f({"swmShared": True, "publishReady": False}, None)
     assert "NOT publish-ready (sealed:false)" in out["warning"]
     assert "Legacy unsealed SWM content is read-only" in out["warning"]
+    assert "preserved Working Memory draft" in out["warning"]
     assert "atomic full share" in out["warning"]
+    assert "pull the asset" not in out["warning"]
+    assert "pull-from" not in out["warning"]
     assert "NOT sealable" not in out["warning"]
     # "all" is also a full share → same read-only recovery warning.
     out_all = f({"swmShared": True, "publishReady": False}, "all")

@@ -22,6 +22,8 @@ const fixture = JSON.parse(
 describe('#1116 share-warning parity (OpenClaw vs canonical fixture)', () => {
   it('SHARE_NOT_PUBLISH_READY_WARNING matches the fixture byte-for-byte', () => {
     expect(SHARE_NOT_PUBLISH_READY_WARNING).toBe(fixture.SHARE_NOT_PUBLISH_READY_WARNING);
+    expect(SHARE_NOT_PUBLISH_READY_WARNING).toContain('preserved Working Memory draft');
+    expect(SHARE_NOT_PUBLISH_READY_WARNING).not.toMatch(/pull(?:-|\s)from|pull the asset/i);
   });
 
   it('SHARE_SUBSET_NOT_PUBLISH_READY_WARNING matches the fixture byte-for-byte', () => {
