@@ -309,10 +309,19 @@ export async function materializeGraphScopedSwmRecoveryAsset(params: {
       .filter((quad) => quad.graph === descriptor.publicSnapshotGraph)
       .map((quad) => ({ ...quad, graph: '' }));
   } else {
-    if (!params.publicSnapshotStore || !descriptor.publicSnapshotRef) {
-      throw new Error(`Graph-scoped SWM recovery requires a public snapshot store for ${descriptor.kaUal}`);
+    const inline = params.fetchedDataQuads
+      .filter((quad) => quad.graph === descriptor.assertionGraph)
+      .map((quad) => ({ ...quad, graph: '' }));
+    if (inline.length > 0 || descriptor.publicQuadsCount === 0) {
+      raw = inline;
+    } else {
+      if (!params.publicSnapshotStore || !descriptor.publicSnapshotRef) {
+        throw new Error(
+          `Graph-scoped SWM recovery has neither inline data nor a public snapshot store for ${descriptor.kaUal}`,
+        );
+      }
+      raw = await params.publicSnapshotStore.getSnapshot(descriptor.publicSnapshotRef);
     }
-    raw = await params.publicSnapshotStore.getSnapshot(descriptor.publicSnapshotRef);
   }
   if (!raw) {
     throw new Error(`Graph-scoped SWM snapshot is missing for ${descriptor.kaUal}`);

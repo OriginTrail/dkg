@@ -455,6 +455,58 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       : []).toEqual(['"recovered"']);
   });
 
+  it('recovers digest-only graph-scoped data inline from its exact assertion graph', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const payload: Quad[] = [
+      { subject: 'urn:rootless:inline', predicate: STATUS, object: '"recovered"', graph: '' },
+    ];
+    const fixture = graphBackedFixture({
+      ual: UAL,
+      operationId: 'rootless-inline-op',
+      payload,
+    });
+    const digestOnlyMeta = fixture.meta.filter(
+      (quad) => quad.predicate !== `${DKG}publicSnapshotGraph`,
+    );
+    let snapshotFetches = 0;
+
+    const result = await recoverContextGraphSwm({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase) => {
+        if (phase === 'meta') return page(digestOnlyMeta);
+        if (phase === 'data') {
+          return page(payload.map((quad) => ({ ...quad, graph: fixture.assertionGraph })));
+        }
+        snapshotFetches += 1;
+        return page([]);
+      },
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
+        verifiedData: dataQuads,
+        verifiedMeta: metaQuads,
+        entityCreators: [],
+        droppedDataTriples: 0,
+      }),
+      store,
+      replaceMetaForGraphAssets: async () => {},
+      ensureContextGraph: async () => {},
+      setCheckpoint: () => {},
+      deleteCheckpoint: () => {},
+    });
+
+    expect(result).toMatchObject({ completed: true, replacedGraphs: 1, insertedDataQuads: 1 });
+    expect(snapshotFetches).toBe(0);
+    const recovered = await store.query(
+      `SELECT ?o WHERE { GRAPH <${fixture.assertionGraph}> { <urn:rootless:inline> <${STATUS}> ?o } }`,
+    );
+    expect(recovered.type === 'bindings'
+      ? recovered.bindings.map((row) => row['o'])
+      : []).toEqual(['"recovered"']);
+  });
+
   it('bootstraps graph-scoped subgraphs without admitting remote legacy lanes', async () => {
     const store = new OxigraphStore();
     stores.push(store);

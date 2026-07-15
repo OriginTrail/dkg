@@ -278,9 +278,21 @@ export async function recoverContextGraphSwm(
     excludedSubGraphNames: excluded,
   });
   if (graphScopedDescriptors.length > 0) {
-    const activeGraphMeta = graphScopedDescriptors.flatMap((descriptor) => [
-      ...descriptor.metadataQuads,
-    ]);
+    const inlineGraphScopedAssets = new Set(
+      graphScopedDescriptors
+        .filter((descriptor) => (
+          descriptor.publicQuadsCount === 0
+          || data.quads.some((quad) => quad.graph === descriptor.assertionGraph)
+        ))
+        .map((descriptor) => descriptor.operationSubject),
+    );
+    // Digest-only graph-scoped rows can carry their immutable payload inline
+    // in the exact assertion graph. Do not route those rows through the
+    // snapshot-store synchronizer: the data phase already brought the payload
+    // needed for the same digest/count verification performed below.
+    const activeGraphMeta = graphScopedDescriptors
+      .filter((descriptor) => !inlineGraphScopedAssets.has(descriptor.operationSubject))
+      .flatMap((descriptor) => [...descriptor.metadataQuads]);
     const snapshotSync = await syncPublicSnapshotsForMeta({
       ctx: deps.ctx,
       remotePeerId: deps.remotePeerId,
