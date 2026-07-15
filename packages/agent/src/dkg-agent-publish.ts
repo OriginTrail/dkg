@@ -98,6 +98,7 @@ import {
   withSpan,
   getMetrics,
   assertQuadLiteralsMutf8Safe,
+  LEGACY_ROOT_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import { GraphManager, PrivateContentStore, createTripleStore, loadSharedMemoryQuadsForScope, canonicalSharedMemoryScopeWriteGraph, type SharedMemoryGraphScope, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
@@ -3956,6 +3957,9 @@ export class PublishMethods extends DKGAgentBase {
       kav10Address: ethers.getAddress(request.sealKav10Address),
       finalizedAtIso: request.sealFinalizedAtIso,
       rootEntities: [...request.roots],
+      // Queued VM publish requests are roots-based; normalize exactly like the
+      // on-disk seal parser does for records without a stored discriminator.
+      contentScopeVersion: LEGACY_ROOT_CONTENT_SCOPE_VERSION,
       ...(request.seal.reservedKaId !== undefined ? { reservedKaId: BigInt(request.seal.reservedKaId) } : {}),
     };
     const queuedMerkleRoot = ethers.hexlify(seal.merkleRoot).toLowerCase();

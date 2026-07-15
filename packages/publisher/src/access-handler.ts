@@ -1,12 +1,15 @@
 import type { StreamHandler, EventBus } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
   decodeAccessRequest,
   encodeAccessResponse,
   ed25519Verify,
   assertSafeIri,
+  parseDeterministicKnowledgeAssetUal,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 
@@ -32,6 +35,11 @@ interface KAMeta {
   hasInvalidExplicitPolicy?: boolean;
   publisherPeerId?: string;
   allowedPeers?: string[];
+  /**
+   * Present only for graph-scoped (contentScopeVersion 2) KAs, whose private
+   * content is keyed by `(UAL, assertionVersion)` instead of root membership.
+   */
+  graphScope?: { ual: string; assertionVersion: string };
 }
 
 /**
@@ -91,14 +99,26 @@ export class AccessHandler {
       // are unchanged.
       let servedRootEntity = meta.rootEntity;
       let hasPrivate = false;
-      for (const root of meta.rootEntities) {
-        if (
-          this.privateStore.hasPrivateTriples(meta.contextGraphId, root, meta.subGraphName) ||
-          (await this.privateStore.hasPrivateTriplesInStore(meta.contextGraphId, root, meta.subGraphName))
-        ) {
-          servedRootEntity = root;
-          hasPrivate = true;
-          break;
+      if (meta.graphScope) {
+        // Graph-scoped KAs have no root membership rows: private content lives
+        // in the exact (UAL, assertionVersion)-derived graph.
+        hasPrivate = await this.store.hasGraph(
+          this.privateStore.knowledgeAssetPrivateGraphUri(
+            meta.contextGraphId,
+            createGraphKnowledgeAssetScope(meta.graphScope.ual, meta.graphScope.assertionVersion),
+            meta.subGraphName,
+          ),
+        );
+      } else {
+        for (const root of meta.rootEntities) {
+          if (
+            this.privateStore.hasPrivateTriples(meta.contextGraphId, root, meta.subGraphName) ||
+            (await this.privateStore.hasPrivateTriplesInStore(meta.contextGraphId, root, meta.subGraphName))
+          ) {
+            servedRootEntity = root;
+            hasPrivate = true;
+            break;
+          }
         }
       }
 
@@ -157,18 +177,35 @@ export class AccessHandler {
         }
       }
 
-      const privateQuads = await this.privateStore.getPrivateTriples(
-        meta.contextGraphId,
-        servedRootEntity,
-        meta.subGraphName,
-      );
-
-      const nquads = privateQuads
-        .map(
-          (q) =>
-            `<${q.subject}> <${q.predicate}> ${q.object} <${q.graph}> .`,
-        )
-        .join('\n');
+      let nquads: string;
+      let privateQuads: Quad[];
+      if (meta.graphScope) {
+        privateQuads = await this.privateStore.getKnowledgeAssetPrivateTriples(
+          meta.contextGraphId,
+          createGraphKnowledgeAssetScope(meta.graphScope.ual, meta.graphScope.assertionVersion),
+          meta.subGraphName,
+        );
+        // Physical graph IRIs never travel on the wire for graph-scoped KAs:
+        // serve plain triples (parseSimpleNQuads accepts 3-term lines).
+        nquads = privateQuads
+          .map((q) => {
+            const object = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+            return `<${q.subject}> <${q.predicate}> ${object} .`;
+          })
+          .join('\n');
+      } else {
+        privateQuads = await this.privateStore.getPrivateTriples(
+          meta.contextGraphId,
+          servedRootEntity,
+          meta.subGraphName,
+        );
+        nquads = privateQuads
+          .map(
+            (q) =>
+              `<${q.subject}> <${q.predicate}> ${q.object} <${q.graph}> .`,
+          )
+          .join('\n');
+      }
 
       // Compute real privateMerkleRoot from the actual triples
       let privateMerkleRoot = new Uint8Array(32) as Uint8Array<ArrayBuffer>;
@@ -201,6 +238,10 @@ export class AccessHandler {
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
     const direct = await this.queryKAMeta(kaUal);
     if (direct) return direct;
+    // Graph-scoped (contentScopeVersion 2) KAs write no rootEntity rows, so
+    // the legacy query above cannot see them; resolve by deterministic UAL.
+    const graphScoped = await this.queryGraphScopedKAMeta(kaUal);
+    if (graphScoped) return graphScoped;
     // Read-both (RFC ka-metadata-trim P3.1): older requesters address private
     // content by the legacy token row `<ual>/<n>`; the collapsed shape keys
     // everything on the bare UAL. Strip a numeric suffix and retry once so
@@ -210,6 +251,131 @@ export class AccessHandler {
       return this.queryKAMeta(legacyToken[1]);
     }
     return null;
+  }
+
+  /**
+   * Resolve one graph-scoped KA's access metadata by its deterministic UAL.
+   * Row shape: generateGraphKnowledgeAssetMetadata — everything keyed on the
+   * canonical UAL subject inside `<context-graph>/_meta`, no membership rows.
+   */
+  private async queryGraphScopedKAMeta(kaUal: string): Promise<KAMeta | null> {
+    let canonicalUal: string;
+    try {
+      canonicalUal = parseDeterministicKnowledgeAssetUal(kaUal).ual;
+    } catch {
+      return null; // not a deterministic v2 UAL — nothing to resolve here
+    }
+    const safeUal = assertSafeIri(canonicalUal);
+    const result = await this.store.query(
+      `SELECT ?contextGraph ?assertionVersion ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo ?sgName WHERE {
+        GRAPH ?g {
+          <${safeUal}> <${DKG_NS}contentScopeVersion> ?scopeVersion .
+          <${safeUal}> <${DKG_NS}assertionVersion> ?assertionVersion .
+          <${safeUal}> <${DKG_NS}contextGraph> ?contextGraph .
+          OPTIONAL { <${safeUal}> <${DKG_NS}privateMerkleRoot> ?privateMerkleRoot }
+          OPTIONAL { <${safeUal}> <${DKG_NS}privateTripleCount> ?privateTripleCount }
+          OPTIONAL { <${safeUal}> <${DKG_NS}accessPolicy> ?accessPolicy }
+          OPTIONAL { <${safeUal}> <${DKG_NS}publisherPeerId> ?publisherPeerId }
+          OPTIONAL { <${safeUal}> <http://www.w3.org/ns/prov#wasAttributedTo> ?attributedTo }
+          OPTIONAL { <${safeUal}> <${DKG_NS}subGraphName> ?sgName }
+          BIND(CONCAT(STR(?contextGraph), '/_meta') AS ?expectedMetaGraph)
+          FILTER(STR(?g) = ?expectedMetaGraph)
+          FILTER(?scopeVersion = ${GRAPH_KA_CONTENT_SCOPE_VERSION})
+        }
+      }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      return null;
+    }
+
+    // Interrupted converges can briefly leave rows from a superseded assertion
+    // version; serve the newest version's row set.
+    let best: Record<string, string> | undefined;
+    let bestVersion = -1n;
+    for (const row of result.bindings) {
+      const rawVersion = row['assertionVersion'];
+      if (!rawVersion) continue;
+      let version: bigint;
+      try {
+        version = BigInt(stripLiteral(rawVersion));
+      } catch {
+        continue;
+      }
+      if (version > bestVersion) {
+        bestVersion = version;
+        best = row;
+      }
+    }
+    if (!best || bestVersion < 1n) return null;
+
+    // If the newest version still binds more than one distinct private root,
+    // the meta value cannot be trusted for attestation — drop it so
+    // handleAccess recomputes the root over the actually-served triples.
+    const bestVersionRoots = new Set(
+      result.bindings
+        .filter((b) => {
+          try {
+            return b['assertionVersion'] !== undefined
+              && BigInt(stripLiteral(b['assertionVersion'])) === bestVersion;
+          } catch {
+            return false;
+          }
+        })
+        .map((b) => b['privateMerkleRoot'])
+        .filter(Boolean),
+    );
+    const rawRoot = bestVersionRoots.size === 1 ? best['privateMerkleRoot'] : undefined;
+    const privateMerkleRoot = rawRoot ? parseHexRootLiteral(rawRoot) : undefined;
+
+    const contextGraphUri = best['contextGraph'];
+    if (!contextGraphUri) return null;
+    const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
+
+    const privateTripleCount = best['privateTripleCount']
+      ? Number(stripLiteral(best['privateTripleCount']))
+      : 0;
+    const rawPolicy = best['accessPolicy'];
+    const parsedPolicy = rawPolicy ? stripLiteral(rawPolicy) : undefined;
+    const accessPolicy = isAccessPolicy(parsedPolicy) ? parsedPolicy : undefined;
+    const hasInvalidExplicitPolicy = !!parsedPolicy && !isAccessPolicy(parsedPolicy);
+    const publisherPeerId = best['publisherPeerId']
+      ? stripLiteral(best['publisherPeerId'])
+      : best['attributedTo']
+        ? stripLiteral(best['attributedTo'])
+        : undefined;
+    const subGraphName = best['sgName'] ? stripLiteral(best['sgName']) : undefined;
+
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const allowedPeerRes = await this.store.query(
+      `SELECT ?allowedPeer WHERE {
+        GRAPH <${assertSafeIri(metaGraph)}> {
+          <${safeUal}> <${DKG_NS}allowedPeer> ?allowedPeer .
+        }
+      }`,
+    );
+    const allowedPeers =
+      allowedPeerRes.type === 'bindings'
+        ? [...new Set(
+          allowedPeerRes.bindings
+            .map((b) => b['allowedPeer'])
+            .filter(Boolean)
+            .map((s) => stripLiteral(s)),
+        )]
+        : undefined;
+
+    return {
+      rootEntity: '',
+      rootEntities: [],
+      contextGraphId,
+      subGraphName,
+      privateMerkleRoot,
+      privateTripleCount,
+      accessPolicy,
+      hasInvalidExplicitPolicy,
+      publisherPeerId,
+      allowedPeers,
+      graphScope: { ual: canonicalUal, assertionVersion: bestVersion.toString() },
+    };
   }
 
   private async queryKAMeta(kaUal: string): Promise<KAMeta | null> {
@@ -274,18 +440,8 @@ export class AccessHandler {
     );
     const ambiguousPrivatePairing = distinctRoots.size > 1 || distinctPrivRoots.size > 1;
 
-    let privateMerkleRoot: Uint8Array | undefined;
     const rawRoot = ambiguousPrivatePairing ? undefined : row['privateMerkleRoot'];
-    if (rawRoot) {
-      const hex = stripLiteral(rawRoot).replace(/^0x/, '');
-      if (hex.length > 0) {
-        const buf = new ArrayBuffer(hex.length / 2);
-        const view = new Uint8Array(buf);
-        const pairs = hex.match(/.{2}/g)!;
-        for (let i = 0; i < pairs.length; i++) view[i] = parseInt(pairs[i], 16);
-        privateMerkleRoot = view;
-      }
-    }
+    const privateMerkleRoot = rawRoot ? parseHexRootLiteral(rawRoot) : undefined;
 
     const privateTripleCount = row['privateTripleCount']
       ? Number(stripLiteral(row['privateTripleCount']))
@@ -355,6 +511,15 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+function parseHexRootLiteral(raw: string): Uint8Array | undefined {
+  const hex = stripLiteral(raw).replace(/^0x/, '');
+  if (hex.length === 0) return undefined;
+  const view = new Uint8Array(new ArrayBuffer(hex.length / 2));
+  const pairs = hex.match(/.{2}/g)!;
+  for (let i = 0; i < pairs.length; i++) view[i] = parseInt(pairs[i], 16);
+  return view;
 }
 
 function stripLiteral(s: string): string {

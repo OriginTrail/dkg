@@ -171,6 +171,62 @@ describe('graph-scoped KA publish storage', () => {
     expect(replaced.bindings).toEqual([{ s: 'urn:version:two' }]);
   });
 
+  it('rejects conflicting identity envelopes before any chain or storage work', async () => {
+    // A reserved kaId that disagrees with the UAL would mint an on-chain KA
+    // that can never be materialized locally — it must fail up front.
+    const expectedPackedKaId = (BigInt(AUTHOR) << 96n) | 41n;
+    const payload = [quad('urn:conflict', 'urn:predicate:value', '"conflict"')];
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: payload,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        reservedKaId: expectedPackedKaId + 1n,
+      }),
+    ).rejects.toThrow(/derives packed kaId/);
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    expect(await store.hasGraph(vmGraph)).toBe(false);
+
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: payload,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: 1,
+        precomputedAttestation: {
+          expectedMerkleRoot: new Uint8Array(32),
+          authorAddress: '0x000000000000000000000000000000000000dEaD',
+          signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+          schemeVersion: 1,
+          reservedKaId: expectedPackedKaId,
+        },
+      }),
+    ).rejects.toThrow(/does not match/);
+    expect(await store.hasGraph(vmGraph)).toBe(false);
+
+    // The exact UAL-derived packed id passes the guard.
+    const accepted = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: payload,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+      reservedKaId: expectedPackedKaId,
+    });
+    expect(accepted.ual).toBe(UAL);
+  });
+
   it('rejects legacy and incomplete mutation envelopes before writing', async () => {
     await expect(
       publisher.publish({

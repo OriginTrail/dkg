@@ -450,8 +450,35 @@ function resolveGraphScopedPublishDescriptor(
   if ((options.manifest?.length ?? 0) > 0) {
     throw new Error('Graph-scoped publish must not carry a root-entity manifest');
   }
+  const scope = createGraphKnowledgeAssetScope(options.kaUal, options.assertionVersion);
+  // A conflicting identity envelope must fail BEFORE any chain or storage
+  // work: a reserved id that disagrees with the UAL would otherwise mint
+  // successfully and only fail local validation afterwards, leaving an
+  // on-chain KA that is never materialized.
+  const suppliedReservedKaId =
+    options.reservedKaId ?? options.precomputedAttestation?.reservedKaId;
+  if (suppliedReservedKaId !== undefined) {
+    const expectedPackedKaId =
+      (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+    if (suppliedReservedKaId !== expectedPackedKaId) {
+      throw new Error(
+        `Graph-scoped publish carries reserved kaId ${suppliedReservedKaId}, but UAL ` +
+          `${scope.ual} derives packed kaId ${expectedPackedKaId}`,
+      );
+    }
+  }
+  const attestationAuthor =
+    options.precomputedAttestation?.authorAddress
+    ?? options.precomputedUpdateAttestation?.authorAddress;
+  if (attestationAuthor !== undefined
+    && attestationAuthor.toLowerCase() !== scope.agentAddress) {
+    throw new Error(
+      `Graph-scoped publish attestation author ${attestationAuthor} does not match ` +
+        `the UAL author ${scope.agentAddress}`,
+    );
+  }
   return {
-    scope: createGraphKnowledgeAssetScope(options.kaUal, options.assertionVersion),
+    scope,
     publicTripleCount: options.publicTripleCount!,
     privateTripleCount,
     ...(options.privateMerkleRoot
@@ -3354,6 +3381,27 @@ export class DKGPublisher implements Publisher {
             },
           });
         }
+        if (graphPublish && reservedKaId !== undefined) {
+          // Validate the exact identity about to be minted BEFORE the tx (the
+          // envelope guard cannot see allocator-returned ids). A mismatch after
+          // a successful mint would leave an on-chain KA that never
+          // materializes locally.
+          const expectedPackedKaId =
+            (BigInt(graphPublish.scope.agentAddress) << 96n)
+            | BigInt(graphPublish.scope.kaNumber);
+          if (reservedKaId !== expectedPackedKaId) {
+            throw new Error(
+              `Graph-scoped publish reserved kaId ${reservedKaId} does not derive from ` +
+                `UAL ${graphPublish.scope.ual} (expected ${expectedPackedKaId}); refusing to mint`,
+            );
+          }
+          if (graphPublish.scope.chainId !== this.chain.chainId) {
+            throw new Error(
+              `Graph-scoped publish UAL ${graphPublish.scope.ual} targets chain ` +
+                `${graphPublish.scope.chainId}, but this publisher mints on ${this.chain.chainId}`,
+            );
+          }
+        }
         try {
           // OT-RFC-49 / WS-D — handshake hardening. When the publisher ran the
           // curated catalog path, the chain submit MUST carry the same
@@ -5845,7 +5893,11 @@ export class DKGPublisher implements Publisher {
     const stale = previous.quads.filter(
       (quad) => !nextKeys.has(JSON.stringify([quad.subject, quad.predicate, quad.object])),
     );
-    if (stale.length > 0) await this.store.delete(stale);
+    if (stale.length > 0) {
+      // CONSTRUCT results carry no graph — restore it, or the delete targets
+      // the default graph and every superseded row survives in metaGraph.
+      await this.store.delete(stale.map((quad) => ({ ...quad, graph: metaGraph })));
+    }
   }
 
   /**
