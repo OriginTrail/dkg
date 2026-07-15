@@ -231,6 +231,86 @@ describe('RandomSamplingProver — happy path', () => {
   });
 });
 
+describe('RandomSamplingProver — mid-period update (content pinning)', () => {
+  let store: OxigraphStore;
+  beforeEach(() => {
+    store = new OxigraphStore();
+  });
+
+  it('reuses the proof it already verified when an update flips the live root before a submit retry', async () => {
+    // #1716: the challenge pins root/leaf-count at issuance, but the CONTENT
+    // was re-read live on every retry. First tick builds a valid proof against
+    // the pinned root, then the submit fails transiently. A mid-period UPDATE
+    // then changes the sampled KA's content (new live root). Without the
+    // content pin, the retry re-extracts, fails root-mismatch, and misses an
+    // honest proof. With it, the retry reuses the already-verified material.
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 7n,
+      ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1', 'urn:e:2', 'urn:e:3'],
+      publicTriples: [
+        { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' },
+        { subject: 'urn:e:2', predicate: 'urn:p:k', object: '"b"' },
+        { subject: 'urn:e:3', predicate: 'urn:p:k', object: '"c"' },
+      ],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+    const dataGraph = contextGraphDataUri(`cg-${fixture.cgId}`, fixture.cgId.toString());
+
+    let submitCalls = 0;
+    const submitProof = vi.fn(async () => {
+      submitCalls += 1;
+      if (submitCalls === 1) throw new Error('transient submit failure');
+      return { hash: '0xretry', blockNumber: 1002, success: true };
+    });
+    const challenge = makeChallenge({
+      knowledgeAssetId: fixture.kaId,
+      chunkId: 1n,
+      challengeRoot: root,
+      challengeLeafCount: BigInt(leafCount),
+      activeProofPeriodStartBlock: 1000n,
+      solved: false,
+    });
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: challenge,
+      createChallenge: async () => ({
+        challenge,
+        contextGraphId: fixture.cgId,
+        hash: '0xchallenge',
+        blockNumber: 1000,
+        success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof,
+    });
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+
+    // Tick 1: builds + verifies the proof (pins it), then the submit throws.
+    await expect(prover.tick()).rejects.toThrow('transient submit failure');
+    expect(submitProof).toHaveBeenCalledTimes(1);
+
+    // A mid-period UPDATE mutates the sampled KA's content → new live root,
+    // while the on-chain challenge stays pinned to the original root.
+    await store.delete([
+      { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"', graph: dataGraph },
+    ]);
+    await store.insert([
+      { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"MUTATED"', graph: dataGraph },
+    ]);
+
+    // Tick 2: a fresh extract no longer matches the pinned root, but the prover
+    // submits the material it already verified this period instead of missing.
+    const outcome = await prover.tick();
+    expect(outcome).toMatchObject({ kind: 'submitted', txHash: '0xretry' });
+    expect(submitProof).toHaveBeenCalledTimes(2);
+    await prover.close();
+  });
+});
+
 describe('RandomSamplingProver — curated catalog (OT-RFC-49 WS-C)', () => {
   let store: OxigraphStore;
   beforeEach(() => {

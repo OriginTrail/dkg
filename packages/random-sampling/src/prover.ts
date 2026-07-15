@@ -115,6 +115,27 @@ export class RandomSamplingProver {
   private readonly log: ProverLogger;
   private inflight: Promise<TickOutcome> | null = null;
 
+  /**
+   * Proof material pinned for the active proof period. The prover already pins
+   * the challenge root / leaf-count / curation branch at issuance (WS-B Trap 1),
+   * but the CONTENT was re-read live on every retry — so a mid-period UPDATE to
+   * the sampled KA (typically surfacing on a submit retry after a transient tx
+   * failure) turned an already-valid proof into a `data-corrupted` miss. Once a
+   * proof verifies against the pinned root we keep it and reuse it for the rest
+   * of the period. Keyed by the full challenge identity so a new period never
+   * reuses stale material. In-memory only — a restart mid-period re-extracts,
+   * same as before (restart + mid-period-update + this exact sampled KA is
+   * vanishingly rare).
+   */
+  private pinnedProofMaterial?: {
+    epoch: bigint;
+    periodStartBlock: bigint;
+    kaId: bigint;
+    chunkId: bigint;
+    expectedRoot: Uint8Array;
+    material: Awaited<ReturnType<ProofBuilder['build']>>;
+  };
+
   constructor(deps: RandomSamplingProverDeps) {
     this.chain = deps.chain;
     this.store = deps.store;
@@ -185,6 +206,44 @@ export class RandomSamplingProver {
     }
     const periodEndBlock = existing.activeProofPeriodStartBlock + duration;
     return BigInt(currentBlock) >= periodEndBlock;
+  }
+
+  /** Reuse the proof material already verified for this exact challenge, if any. */
+  private pinnedMaterialFor(
+    periodKey: PeriodKey,
+    kaId: bigint,
+    chunkId: bigint,
+    expectedRoot: Uint8Array,
+  ): Awaited<ReturnType<ProofBuilder['build']>> | undefined {
+    const p = this.pinnedProofMaterial;
+    if (
+      p
+      && p.epoch === periodKey.epoch
+      && p.periodStartBlock === periodKey.periodStartBlock
+      && p.kaId === kaId
+      && p.chunkId === chunkId
+      && uint8ArrayEquals(p.expectedRoot, expectedRoot)
+    ) {
+      return p.material;
+    }
+    return undefined;
+  }
+
+  private pinProofMaterial(
+    periodKey: PeriodKey,
+    kaId: bigint,
+    chunkId: bigint,
+    expectedRoot: Uint8Array,
+    material: Awaited<ReturnType<ProofBuilder['build']>>,
+  ): void {
+    this.pinnedProofMaterial = {
+      epoch: periodKey.epoch,
+      periodStartBlock: periodKey.periodStartBlock,
+      kaId,
+      chunkId,
+      expectedRoot,
+      material,
+    };
   }
 
   private async tickImpl(): Promise<TickOutcome> {
@@ -453,7 +512,24 @@ export class RandomSamplingProver {
       material = await this.builder.build(req);
     } catch (err) {
       const reason = mapBuilderError(err);
-      if (reason) {
+      if (!reason) throw err;
+      // Content changed under us mid-period: an UPDATE to the sampled KA flips
+      // the live root, so a freshly-extracted proof no longer matches the
+      // challenge root. That root is PINNED on the challenge, so if we already
+      // built a proof that verified against it earlier this period, reuse it
+      // instead of missing an honest proof — this rescues the common
+      // submit-retry-after-update path. Otherwise the content genuinely does
+      // not match the pinned commitment: skip as before.
+      const pinned = this.pinnedMaterialFor(periodKey, kaId, chunkId, expectedRoot);
+      if (pinned) {
+        this.log.info('rs.tick.pinned-material-reused', {
+          kaId: kaId.toString(),
+          cgId: cgId.toString(),
+          periodStart: periodKey.periodStartBlock.toString(),
+          reason,
+        });
+        material = pinned;
+      } else {
         const e = err as any;
         this.log.error('rs.tick.data-corrupted', {
           kaId: kaId.toString(),
@@ -478,8 +554,10 @@ export class RandomSamplingProver {
         );
         return { kind: 'data-corrupted', kaId, cgId, reason };
       }
-      throw err;
     }
+    // Pin the verified material so a mid-period update (surfacing here on a
+    // submit retry) reuses it rather than re-extracting stale content.
+    this.pinProofMaterial(periodKey, kaId, chunkId, expectedRoot, material);
 
     await this.wal.append(
       makeWalEntry(periodKey, 'built', {
@@ -556,4 +634,12 @@ function mapBuilderError(err: unknown): 'root-mismatch' | 'leaf-count-mismatch' 
   if (err instanceof V10ProofLeafCountMismatchError) return 'leaf-count-mismatch';
   if (err instanceof V10ProofChunkOutOfRangeError) return 'leaf-count-mismatch';
   return null;
+}
+
+function uint8ArrayEquals(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
