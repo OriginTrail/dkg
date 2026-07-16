@@ -15,7 +15,7 @@ const TEST_DIRECTORY = /(^|\/)(?:test|tests|__tests__|e2e)(?:\/|$)/;
 const EXCLUDED_TREE = /(^|\/)(?:node_modules|dist|build|out|generated|coverage|\.nyc_output|\.turbo)(?:\/|$)/;
 const D1_ARCHIVE_TREE = /(^|\/)(?:test|tests)\/archive(?:\/|$)/;
 const DIRECT_BASES = new Set(['describe', 'it', 'suite', 'test']);
-const DIRECT_MEMBERS = new Set(['skip', 'todo']);
+const DIRECT_MEMBERS = new Set(['skip', 'todo', 'skipIf', 'runIf']);
 const LEGACY_ALIASES = new Set(['xdescribe', 'xit', 'xtest']);
 const TICKET = /^(?:#\d+|https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+|[A-Z][A-Z0-9]*-\d+)$/i;
 
