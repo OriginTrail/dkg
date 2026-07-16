@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { subscribeAndWait } from '../src/v10-publish-lib.js';
+import {
+  queryAnyRemoteWithRetry,
+  subscribeAndWait,
+} from '../src/v10-publish-lib.js';
 
 test('subscribeAndWait enqueues once and polls catch-up through the status endpoint', async () => {
   let subscribeCalls = 0;
@@ -66,4 +69,31 @@ test('subscribeAndWait can preserve a fresh-publish canary after historical catc
   );
 
   assert.equal(result.status, 'failed');
+});
+
+test('Query Remote succeeds when any acknowledged storage candidate serves the UAL', async () => {
+  const calls = [];
+  const client = {
+    queryRemote: async (peerId) => {
+      calls.push(peerId);
+      return peerId === 'ack-peer-2'
+        ? { status: 'OK', ntriples: '<urn:s> <urn:p> <urn:o> .' }
+        : { status: 'OK', ntriples: '' };
+    },
+  };
+
+  const readable = await queryAnyRemoteWithRetry(
+    client,
+    'jenkins-publish-tests',
+    'did:dkg:base:84532/0xabc/1',
+    [
+      { peerId: 'ack-peer-1', name: 'StorageACK core 1' },
+      { peerId: 'ack-peer-2', name: 'StorageACK core 2' },
+    ],
+    0,
+    0,
+  );
+
+  assert.equal(readable.target.peerId, 'ack-peer-2');
+  assert.deepEqual(calls.sort(), ['ack-peer-1', 'ack-peer-2']);
 });

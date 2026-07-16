@@ -265,6 +265,50 @@ function queryHasData(result) {
   return false;
 }
 
+// Query all protocol-backed candidate storage peers in parallel per retry
+// round and accept the first readable copy. A publish's availability contract
+// is backed by its StorageACK cores; requiring one unrelated random beacon to
+// hold the KA measured gossip luck instead of that contract.
+export async function queryAnyRemoteWithRetry(
+  client,
+  contextGraphId,
+  ual,
+  targets,
+  retries = READ_RETRIES,
+  retryDelayMs = READ_RETRY_MS,
+) {
+  let lastFailures = [];
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const outcomes = await Promise.all(targets.map(async (target) => {
+      try {
+        const result = await withTimeout(
+          client.queryRemote(target.peerId, contextGraphId, {
+            lookupType: 'ENTITY_BY_UAL',
+            ual,
+          }),
+          'Query Remote (sync)',
+          target.name,
+        );
+        return { target, result };
+      } catch (error) {
+        return { target, error };
+      }
+    }));
+    const readable = outcomes.find((outcome) => queryHasData(outcome.result));
+    if (readable) return readable;
+
+    lastFailures = outcomes.map(({ target, error }) => (
+      `${target.name}: ${error instanceof Error ? error.message : 'no triples'}`
+    ));
+    if (attempt < retries) await sleep(retryDelayMs);
+  }
+
+  throw new Error(
+    `Query Remote (sync) found no readable copy of ${ual} across ` +
+    `${targets.length} storage candidate(s) — ${lastFailures.join('; ')}`,
+  );
+}
+
 // Resolve (and cache) a node's libp2p peerId via its public /api/status.
 const peerIdCache = new Map();
 async function getPeerId(node) {
@@ -431,6 +475,7 @@ export function defineChainPublishSuite(config) {
           const { quads, rootEntity } = buildQuads(name, i + 1);
 
           let ual = null;
+          let storageAckPeerIds = [];
           let step = 'publish';
 
           // ── 1. publish (mint to Verifiable Memory) ─────────────────────────
@@ -455,6 +500,9 @@ export function defineChainPublishSuite(config) {
             assert.ok(result.kaId !== undefined && result.kaId !== '0', `Publish response missing valid kaId (got ${result.kaId})`);
 
             ual = result.ual || null;
+            storageAckPeerIds = Array.isArray(result.storageAckPeerIds)
+              ? [...new Set(result.storageAckPeerIds.filter((peerId) => typeof peerId === 'string' && peerId.trim()).map((peerId) => peerId.trim()))]
+              : [];
             if (result.publisherAddress) publisherAddresses.add(result.publisherAddress);
             const kasCreated = Array.isArray(result.kas) ? result.kas.length : 'N/A';
             const txInfo = result.txHash ? ` | tx: ${result.txHash}` : '';
@@ -539,15 +587,34 @@ export function defineChainPublishSuite(config) {
             // single-node chain — no peer to sync-check against
             continue;
           }
-          const remoteNode = nodes[otherIndexes[Math.floor(Math.random() * otherIndexes.length)]];
           const remoteStart = Date.now();
           try {
             if (!readUal) throw new Error('Query Remote (sync): publish failed and no DKG_FALLBACK_UAL configured');
-            const remotePeerId = await getPeerId(remoteNode);
-            if (!remotePeerId) throw new Error(`Could not resolve peerId for ${remoteNode.name} (${remoteNode.hostname})`);
-            const result = await readWithRetry('Query Remote (sync)', remoteNode.name, () => client.queryRemote(remotePeerId, contextGraphId, { lookupType: 'ENTITY_BY_UAL', ual: readUal }));
-            assert.ok(queryHasData(result), `Query Remote (sync) returned no triples for ${readUal} from ${remoteNode.name}`);
-            console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the KA (synced)`);
+            const targets = storageAckPeerIds.length > 0
+              ? storageAckPeerIds.map((peerId) => ({
+                  peerId,
+                  name: `StorageACK core …${peerId.slice(-8)}`,
+                }))
+              : (await Promise.all(otherIndexes.map(async (idx) => ({
+                  peerId: await getPeerId(nodes[idx]),
+                  name: nodes[idx].name,
+                })))).filter((target) => target.peerId);
+            if (targets.length === 0) {
+              throw new Error('Query Remote (sync) has no resolvable storage candidates');
+            }
+            const readable = await queryAnyRemoteWithRetry(
+              client,
+              contextGraphId,
+              readUal,
+              targets,
+            );
+            const targetKind = storageAckPeerIds.length > 0
+              ? 'acknowledged storage core'
+              : 'legacy beacon fallback';
+            console.log(
+              `✅ Query Remote (sync) succeeded — ${readable.target.name} has the KA ` +
+              `(${targetKind}; ${targets.length} candidate${targets.length === 1 ? '' : 's'})`,
+            );
             queryRemoteSuccess++;
             queryRemoteDurations.push(Date.now() - remoteStart);
           } catch (error) {
