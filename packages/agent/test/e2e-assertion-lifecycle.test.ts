@@ -111,7 +111,7 @@ describe('Assertion lifecycle (single agent)', () => {
     expect(wmAfter.length).toBe(0);
   }, 15_000);
 
-  it('promote with entity selection only promotes specified entities', async () => {
+  it('rejects entity-subset promotion because a graph-scoped KA is atomic', async () => {
     const agent = await createAgent('SelectivePromote');
 
     await agent.assertion.create(CG_ID, 'selective');
@@ -120,22 +120,10 @@ describe('Assertion lifecycle (single agent)', () => {
       { subject: 'urn:entity:skip', predicate: 'http://schema.org/name', object: '"Skip Me"' },
     ]);
 
-    await agent.assertion.promote(CG_ID, 'selective', {
+    await expect(agent.assertion.promote(CG_ID, 'selective', {
       entities: ['urn:entity:keep'],
-    });
-
-    const kept = await agent.query(
-      'SELECT ?name WHERE { <urn:entity:keep> <http://schema.org/name> ?name }',
-      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
-    );
-    const skipped = await agent.query(
-      'SELECT ?name WHERE { <urn:entity:skip> <http://schema.org/name> ?name }',
-      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
-    );
-
-    expect(kept.bindings.length).toBe(1);
-    expect(kept.bindings[0]?.['name']).toBe('"Keep Me"');
-    expect(skipped.bindings.length).toBe(0);
+    })).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(await agent.assertion.query(CG_ID, 'selective')).toHaveLength(2);
   }, 15_000);
 
   it('multiple assertions are isolated from each other', async () => {
@@ -160,7 +148,7 @@ describe('Assertion lifecycle (single agent)', () => {
     expect(quadsB[0].subject).toBe('urn:b:1');
   }, 15_000);
 
-  it('discard is idempotent — second discard does not throw', async () => {
+  it('discard is terminal — a second mutation is rejected explicitly', async () => {
     const agent = await createAgent('IdempotentDiscard');
 
     await agent.assertion.create(CG_ID, 'ephemeral');
@@ -169,8 +157,8 @@ describe('Assertion lifecycle (single agent)', () => {
     ]);
 
     await agent.assertion.discard(CG_ID, 'ephemeral');
-    // Should not throw
-    await agent.assertion.discard(CG_ID, 'ephemeral');
+    await expect(agent.assertion.discard(CG_ID, 'ephemeral'))
+      .rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
 
     const quads = await agent.assertion.query(CG_ID, 'ephemeral');
     expect(quads.length).toBe(0);
@@ -237,6 +225,13 @@ describe('Assertion promote gossip (2 nodes)', () => {
     await sleep(500);
 
     await nodeA.createContextGraph({ id: CG_ID, name: 'Gossip Promote' });
+    // The context-graph ontology announcement is asynchronous. Wait until the
+    // peer can authorize this public CG before installing its SWM subscription.
+    const discoveryDeadline = Date.now() + 10_000;
+    while (!(await nodeB.contextGraphExists(CG_ID)) && Date.now() < discoveryDeadline) {
+      await sleep(100);
+    }
+    expect(await nodeB.contextGraphExists(CG_ID)).toBe(true);
     nodeB.subscribeToContextGraph(CG_ID);
     await sleep(500);
 

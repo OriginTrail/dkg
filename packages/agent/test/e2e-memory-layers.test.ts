@@ -1081,7 +1081,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(noopShare.shareOperationId).toBeUndefined();
 
     const history = await agent.assertion.history(CG_ID, name);
-    expect(history?.currentShareOperationId).not.toBe(share.shareOperationId);
+    // VM retries are non-mutating and retain the original durable operation
+    // identity for audit/replay; they do not create a new SWM operation.
+    expect(history?.currentShareOperationId).toBe(share.shareOperationId);
     await expect(
       agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name),
     ).rejects.toMatchObject({ code: 'PUBLISH_NOT_FULL_SHARE' });
@@ -1619,7 +1621,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const full = await agent.assertion.promote(CG_ID, name);
     expect(full.sealed).toBe(true);
 
-    // 2. Discard the (now-sealed-in-SWM) asset, then recreate the same name.
+    // 2. Re-open the exact immutable SWM version, discard that mutable draft,
+    // then create a replacement. Direct mutation/discard of sealed SWM is blocked.
+    await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
     await agent.assertion.discard(CG_ID, name);
     await agent.assertion.create(CG_ID, name);
     await writeAB();
@@ -1708,7 +1712,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const first = await agent.assertion.promote(CG_ID, name);
     expect(first.sealed).toBe(true);
 
-    // Recreate the same lifecycle name with the replacement atomic graph {A,B}.
+    // Re-open and discard the immutable SWM version, then write {A,B} as the
+    // next atomic graph. This is the sanctioned replacement lifecycle.
+    await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
     await agent.assertion.discard(CG_ID, name);
     await agent.assertion.create(CG_ID, name);
     await agent.assertion.write(CG_ID, name, [
@@ -2034,11 +2040,10 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(swmAfter.bindings.length).toBe(0);
   }, 30_000);
 
-  // round 11 (reviewer 🔴 #1): the non-sealing seal-clear is TRANSACTIONAL — it
-  // runs only AFTER assertionPromote COMMITS. A non-sealing share whose promote
-  // THROWS must NOT clear a prior full-share seal (the old SWM content + seal stay
-  // valid, so the asset stays publishable until a share actually succeeds).
-  it('round 11: a non-sealing share whose PROMOTE FAILS does NOT clear the prior seal', async () => {
+  // A failed atomic promote must leave both the new WM draft and the last exact
+  // SWM recovery version intact. This is the rootless replacement for the old
+  // selective/non-sealing lifecycle test: partial shares no longer exist.
+  it('a failed atomic promote preserves the draft and the prior exact SWM recovery version', async () => {
     const agent = await createAgent('TxnSealClearFailBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Txn Seal Clear Fail E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -2054,9 +2059,10 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.assertion.promote(CG_ID, name);
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
 
-    // Re-open (no discard) + write, then a SUBSET (non-sealing) share whose
-    // assertionPromote THROWS (simulate a curator-unconfirmed / payload failure).
-    await agent.assertion.create(CG_ID, name);
+    // Enter the sanctioned edit loop. pullFrom archives the exact SWM seal,
+    // clears the active seal, and re-opens a verified WM draft.
+    const reopened = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
+    expect(reopened.seeded).toBe(2);
     await agent.assertion.write(CG_ID, name, [
       { subject: A, predicate: 'http://schema.org/name', object: '"A2"' },
       { subject: B, predicate: 'http://schema.org/name', object: '"B2"' },
@@ -2065,13 +2071,18 @@ describe('rootless graph-scoped KA lifecycle', () => {
       .spyOn(agent.publisher, 'assertionPromote')
       .mockRejectedValue(new Error('simulated promote failure (curator unconfirmed)'));
     try {
-      await expect(agent.assertion.promote(CG_ID, name, { entities: [A] })).rejects.toThrow(/simulated promote failure/);
+      await expect(agent.assertion.promote(CG_ID, name)).rejects.toThrow(/simulated promote failure/);
     } finally {
       spy.mockRestore();
     }
 
-    // The prior seal MUST survive the failed non-sealing share (round 11 fix).
-    expect(await sealExists(agent, CG_ID, name)).toBe(true);
+    // The failed commit leaves WM untouched. Recovery can still select the
+    // archived exact seal and restore the prior two-triple SWM version.
+    expect(await agent.assertion.query(CG_ID, name)).toHaveLength(4);
+    const recovered = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
+    expect(recovered.seeded).toBe(2);
+    expect((await agent.assertion.query(CG_ID, name)).map((quad) => quad.object).sort())
+      .toEqual(['"A"', '"B"']);
   }, 30_000);
 
   it('a selective share is rejected before commit and cannot clear the prior seal', async () => {

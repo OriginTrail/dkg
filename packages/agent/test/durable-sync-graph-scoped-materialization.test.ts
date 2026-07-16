@@ -108,6 +108,80 @@ async function graphQuads(store: OxigraphStore, graph: string): Promise<Quad[]> 
 }
 
 describe('durable graph-scoped KA materialization', () => {
+  it('does not mistake a lifecycle assertionGraph pointer for a second UAL owner', async () => {
+    const v2Data = dataQuad(1);
+    const root = toHex(computeFlatKCRootV10([v2Data], []));
+    const v2Meta = metadata(1, root);
+    v2Meta.push(
+      {
+        subject: ual,
+        predicate: `${DKG}publicTripleCount`,
+        object: `"1"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}privateTripleCount`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+    );
+    const lifecycle = `${ual}/assertion/1`;
+    const lifecycleRows: Quad[] = [
+      ['contentScopeVersion', `"2"^^<${XSD_INTEGER}>`],
+      ['kaUal', ual],
+      ['assertionVersion', `"1"^^<${XSD_INTEGER}>`],
+      ['assertionGraph', assertionGraph],
+    ].map(([predicate, object]) => ({
+      subject: lifecycle,
+      predicate: `${DKG}${predicate}`,
+      object,
+      graph: metaGraph,
+    }));
+    const assets: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset'][] = [];
+    const inserted: Quad[] = [];
+
+    await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-lifecycle-pointer',
+      contextGraphIds: [contextGraphId],
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data'
+          ? page(phase, [v2Data])
+          : page(phase, [...v2Meta, ...lifecycleRows])
+      ),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [v2Data],
+        verifiedMeta: [...v2Meta, ...lifecycleRows],
+        verifiedGraphScopedDataGraphs: [assertionGraph],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: v2Meta.length + lifecycleRows.length,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      storeInsert: async (quads) => { inserted.push(...quads); },
+      storeGraphScopedAsset: async (asset) => {
+        assets.push(asset);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(assets).toHaveLength(1);
+    expect(assets[0]).toMatchObject({ ual, assertionGraph });
+    expect(inserted.filter((quad) => quad.subject === lifecycle)).toEqual(
+      lifecycleRows.filter((quad) => quad.predicate !== `${DKG}assertionVersion`),
+    );
+  });
+
   it('replaces a poisoned v1 union with the verified v2 assertion and metadata', async () => {
     const store = new OxigraphStore();
     const v1Data = dataQuad(1);

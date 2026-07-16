@@ -19,6 +19,7 @@ import type {
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
+const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
@@ -601,7 +602,25 @@ function partitionVerifiedGraphScopedAssets(
     const subjectQuads = metadataBySubject.get(quad.subject) ?? [];
     subjectQuads.push(quad);
     metadataBySubject.set(quad.subject, subjectQuads);
-    if (quad.predicate !== ASSERTION_GRAPH) continue;
+  }
+  // One V2 KA has two legitimate metadata subjects that may point at the same
+  // exact graph: the self-bound UAL descriptor and the name-keyed lifecycle
+  // row. Only the descriptor owns the graph. Treating every assertionGraph
+  // pointer as an owner rejects normal publishes as "2 metadata owners".
+  //
+  // The self-binding is also a fail-closed boundary: a second complete KA
+  // descriptor must carry `<candidate> dkg:kaUal <candidate>` and therefore is
+  // still counted as a conflicting owner, while lifecycle/provenance pointers
+  // cannot impersonate one merely by naming the exact graph.
+  const descriptorSubjects = new Set(
+    [...metadataBySubject.entries()]
+      .filter(([subject, quads]) => quads.some(
+        (quad) => quad.predicate === KA_UAL && stripLiteral(quad.object) === subject,
+      ))
+      .map(([subject]) => subject),
+  );
+  for (const quad of peerSafeMetadata) {
+    if (quad.predicate !== ASSERTION_GRAPH || !descriptorSubjects.has(quad.subject)) continue;
     const graph = stripLiteral(quad.object);
     if (!graphSet.has(graph)) continue;
     const owners = ualByGraph.get(graph) ?? new Set<string>();

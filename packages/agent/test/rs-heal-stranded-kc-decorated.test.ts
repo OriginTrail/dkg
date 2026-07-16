@@ -134,6 +134,66 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(typeof store.update).toBe('function');
   });
 
+  it('forwards atomic graph-and-subject replacement through the agent decorator', async () => {
+    const replaceGraphAndSubject = vi.fn(async () => undefined);
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'replaceGraphAndSubject') return replaceGraphAndSubject;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let invalidations = 0;
+    const dirtyQuads: Quad[][] = [];
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      adapter,
+      () => { invalidations += 1; },
+      (quads) => { dirtyQuads.push([...(quads ?? [])]); },
+    );
+    const graphQuads: Quad[] = [{
+      subject: 'urn:data:s', predicate: 'urn:data:p', object: '"data"', graph: 'urn:data',
+    }];
+    const metadataQuads: Quad[] = [{
+      subject: 'urn:ual', predicate: 'urn:meta:p', object: '"meta"', graph: 'urn:meta',
+    }];
+    const options: QueryOptions = { source: 'test.atomic-replace', priority: 'background' };
+
+    await expect(wrapped.replaceGraphAndSubject?.(
+      'urn:data',
+      graphQuads,
+      'urn:meta',
+      'urn:ual',
+      metadataQuads,
+      options,
+    )).resolves.toBeUndefined();
+    expect(replaceGraphAndSubject).toHaveBeenCalledWith(
+      'urn:data',
+      graphQuads,
+      'urn:meta',
+      'urn:ual',
+      metadataQuads,
+      options,
+    );
+    expect(invalidations).toBe(1);
+    expect(dirtyQuads).toEqual([[...graphQuads, ...metadataQuads]]);
+
+    await wrapped.close();
+  });
+
+  it('does not advertise graph-and-subject replacement when the inner store lacks it', () => {
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'replaceGraphAndSubject') return undefined;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(adapter, () => undefined);
+
+    expect(wrapped.replaceGraphAndSubject).toBeUndefined();
+    return wrapped.close();
+  });
+
   it('forwards pressure telemetry and hasGraph admission options through the agent decorator', async () => {
     const pressure = {
       ackInflight: 1,
