@@ -622,6 +622,7 @@ export class GossipPublishHandler {
               metaGraph,
               graphPublish.scope.ual,
               incomingVersion,
+              BigInt(graphPublish.scope.assertionVersion),
             ))) {
               return 'stale' as const;
             }

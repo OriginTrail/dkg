@@ -164,6 +164,7 @@ describe('bounded rootless durable progress', () => {
       ...fixtures[2]!.payload.slice(0, 2),
     ];
     const inserted: Quad[][] = [];
+    const materialized: Array<{ dataQuads: Quad[] }> = [];
     const checkpoints: Array<[string, number]> = [];
 
     const summary = await runDurableSync({
@@ -190,6 +191,10 @@ describe('bounded rootless durable progress', () => {
         }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async (quads) => { inserted.push(quads); },
+      storeGraphScopedAsset: async (entry) => {
+        materialized.push(entry);
+        return 'applied';
+      },
       deleteCheckpoint: () => {},
       setCheckpoint: (key, offset) => { checkpoints.push([key, offset]); },
       logInfo: () => {},
@@ -201,11 +206,13 @@ describe('bounded rootless durable progress', () => {
     expect(summary.timedOutPhases).toBe(1);
     expect(summary.insertedDataTriples).toBe(8);
     expect(checkpoints).toContainEqual([`${CONTEXT_GRAPH_ID}:data`, 8]);
-    expect(inserted[0]).toEqual([
+    expect(materialized.flatMap((entry) => entry.dataQuads)).toEqual([
       ...fixtures[0]!.payload,
       ...fixtures[1]!.payload,
     ]);
-    expect(inserted.flat().some((quad) => quad.graph === fixtures[2]!.graph)).toBe(false);
+    expect(materialized.flatMap((entry) => entry.dataQuads)
+      .some((quad) => quad.graph === fixtures[2]!.graph)).toBe(false);
+    expect(inserted.flat().some((quad) => fixtures.some((entry) => entry.graph === quad.graph))).toBe(false);
   });
 
   it('verifies the remaining suffix and cleanly completes a resumed snapshot', async () => {
@@ -213,6 +220,7 @@ describe('bounded rootless durable progress', () => {
     const meta = fixtures.flatMap((entry) => entry.meta);
     const suffix = fixtures[2]!.payload;
     const inserted: Quad[][] = [];
+    const materialized: Array<{ dataQuads: Quad[] }> = [];
     const deleted: string[] = [];
 
     const summary = await runDurableSync({
@@ -240,6 +248,10 @@ describe('bounded rootless durable progress', () => {
         }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async (quads) => { inserted.push(quads); },
+      storeGraphScopedAsset: async (entry) => {
+        materialized.push(entry);
+        return 'applied';
+      },
       deleteCheckpoint: (key) => { deleted.push(key); },
       setCheckpoint: () => {},
       logInfo: () => {},
@@ -252,7 +264,8 @@ describe('bounded rootless durable progress', () => {
     expect(summary.insertedDataTriples).toBe(4);
     expect(summary.completedPhases).toBe(2);
     expect(deleted).toContain(`${CONTEXT_GRAPH_ID}:data`);
-    expect(inserted[0]).toEqual(suffix);
+    expect(materialized.flatMap((entry) => entry.dataQuads)).toEqual(suffix);
+    expect(inserted.flat().some((quad) => quad.graph === fixtures[2]!.graph)).toBe(false);
   });
 
   it('fails closed for mixed legacy and graph-scoped metadata', () => {

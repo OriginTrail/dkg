@@ -3281,6 +3281,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     });
   }
 
+  vmReconcileSwmGenSupportsDurableNegative(this: DKGAgent, swmGen: string): boolean {
+    // A changelog cursor covers every descendant graph mutation. The fallback
+    // fingerprint covers only the bare SWM bucket, so an operation whose data
+    // later lands in a per-KA child graph must fail open after restart.
+    return swmGen.startsWith('changelog:') || !this.vmReconcileSwmGenHasOperations(swmGen);
+  }
+
   vmReconcileSwmGenContainsSnapshot(this: DKGAgent, cachedSwmGen: string, currentSwmGen: string): boolean {
     return cachedSwmGen === currentSwmGen || cachedSwmGen.split('|').includes(currentSwmGen);
   }
@@ -3347,16 +3354,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
             typeof item?.metaGraph === 'string' && typeof item?.dataGraph === 'string') &&
           typeof durable.peerTopologyKey === 'string'
         ) {
-          cached = {
-            localCgId: durable.localCgId,
-            failures: durable.failures,
-            nextRetryAt: durable.nextRetryAt,
-            swmGen: durable.swmGen,
-            candidateNamespaces: durable.candidateNamespaces,
-            peerTopologyKey: durable.peerTopologyKey,
-          };
-          this.vmReconcileNegativeCache.set(cacheKey, cached);
-          this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
+          if (!this.vmReconcileSwmGenSupportsDurableNegative(durable.swmGen)) {
+            await this.config.contextGraphSubscriptionStore
+              ?.deleteVmReconcileNegative?.(cacheKey);
+          } else {
+            cached = {
+              localCgId: durable.localCgId,
+              failures: durable.failures,
+              nextRetryAt: durable.nextRetryAt,
+              swmGen: durable.swmGen,
+              candidateNamespaces: durable.candidateNamespaces,
+              peerTopologyKey: durable.peerTopologyKey,
+            };
+            this.vmReconcileNegativeCache.set(cacheKey, cached);
+            this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
+          }
         }
       } catch {
         // Persistence is an accelerator only. Fail open to an authoritative scan.
@@ -3462,12 +3474,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileNegativeCache.set(cacheKey, record);
     this.vmReconcileNegativeCacheHydrated.add(cacheKey);
     this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
-    void this.config.contextGraphSubscriptionStore?.saveVmReconcileNegative?.({
-      cacheKey,
-      ...record,
-    }).catch(() => {
-      // Persistence is an accelerator only; the process-local gate still works.
-    });
+    const durableStore = this.config.contextGraphSubscriptionStore;
+    if (this.vmReconcileSwmGenSupportsDurableNegative(record.swmGen)) {
+      void durableStore?.saveVmReconcileNegative?.({
+        cacheKey,
+        ...record,
+      }).catch(() => {
+        // Persistence is an accelerator only; the process-local gate still works.
+      });
+    } else {
+      void durableStore?.deleteVmReconcileNegative?.(cacheKey).catch(() => {
+        // Fail open after restart even if best-effort cleanup cannot complete.
+      });
+    }
     this.pruneVmReconcileState();
   }
 

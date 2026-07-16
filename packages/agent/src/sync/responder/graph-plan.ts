@@ -2783,7 +2783,7 @@ function durableDeltaWhereClauseForGraphs(
       GRAPH ?g { ?s ?p ?o }
       OPTIONAL {
         {
-          SELECT ?deltaRoot ?deltaBid WHERE {
+          SELECT ?deltaRoot ?deltaGraph ?deltaBid WHERE {
             VALUES ?deltaMg { ${values} }
             GRAPH ?deltaMg {
               {
@@ -2798,11 +2798,22 @@ function durableDeltaWhereClauseForGraphs(
                 ?deltaKa <${DKG_ROOT_ENTITY}> ?deltaRoot ;
                          <${DKG_BATCH_ID}> ?deltaBid .
               }
+              UNION
+              {
+                ?deltaKa <${DKG_ASSERTION_GRAPH}> ?deltaGraph ;
+                         <${DKG_BATCH_ID}> ?deltaBid .
+              }
               FILTER(REGEX(STR(?deltaBid), "^-?\\\\d+$"))
             }
           }
         }
-        FILTER(sameTerm(?s, ?deltaRoot) || STRSTARTS(STR(?s), CONCAT(STR(?deltaRoot), "/.well-known/genid/")))
+        FILTER(
+          IF(
+            BOUND(?deltaGraph),
+            sameTerm(?g, ?deltaGraph),
+            sameTerm(?s, ?deltaRoot) || STRSTARTS(STR(?s), CONCAT(STR(?deltaRoot), "/.well-known/genid/"))
+          )
+        )
         BIND(xsd:integer(STR(?deltaBid)) AS ?deltaBatch)
       }
     `;

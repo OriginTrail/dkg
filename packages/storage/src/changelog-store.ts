@@ -10,6 +10,7 @@ import type {
 } from './triple-store.js';
 import {
   UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
@@ -356,6 +357,52 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       // The adapter's internal staging graph never crosses this decorator.
       // Sync sees exactly one logical upsert/drop for the canonical graph.
       await this.markPostMutation([graphUri], options);
+    });
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraphAndSubject !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraphAndSubject',
+        'ChangelogStore',
+      );
+    }
+    if (!this.enabled) {
+      return this.inner.replaceGraphAndSubject(
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+        options,
+      );
+    }
+    this.assertNotReserved(graphUri, 'replaceGraphAndSubject');
+    this.assertNotReserved(metaGraphUri, 'replaceGraphAndSubject');
+    await this.runExclusive(async () => {
+      try {
+        await this.inner.replaceGraphAndSubject!(
+          graphUri,
+          graphQuads,
+          metaGraphUri,
+          metadataSubject,
+          metadataQuads,
+          options,
+        );
+      } catch (error) {
+        if (!isReplaceGraphAndSubjectCapabilityRefusal(error)) {
+          this.flagReconcile('replaceGraphAndSubject(indeterminate-failure)');
+        }
+        throw error;
+      }
+      await this.markPostMutation([graphUri, metaGraphUri], options);
     });
   }
 

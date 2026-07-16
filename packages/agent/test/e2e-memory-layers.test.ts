@@ -22,6 +22,7 @@ import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import {
   assertionLifecycleUri,
   contextGraphMetaUri,
+  contextGraphSharedMemoryMetaUri,
   contextGraphAssertionUri,
   contextGraphLayerUri,
   ASSERTION_SEAL_PREDICATES,
@@ -665,13 +666,14 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(receiptUal).not.toBe(intent.kaUal);
     const recoveryPublisher = (agent as any).publisher;
     const recoveryCleanup = vi.spyOn(recoveryPublisher, 'clearPublishedKnowledgeAssetSwm');
+    const recoveryRequest = { ...intent, clearSharedMemoryAfter: true } as const;
     const recoveryInput = {
       walletId: 'wallet-1',
-      request: intent,
+      request: recoveryRequest,
       job: {
         jobId: 'recovery-job',
         jobSlug: 'recovery-job',
-        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: intent },
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: recoveryRequest },
         status: 'broadcast',
         broadcast: {
           txHash,
@@ -731,7 +733,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
       intent.kaUal!,
       intent.assertionVersion!,
     );
+    const wrongLocalChain = queuedScope.chainId === 'evm:1' ? 'evm:2' : 'evm:1';
     for (const invalidGraphUal of [
+      `did:dkg:${wrongLocalChain}/${queuedScope.agentAddress}/${queuedScope.kaNumber}`,
       `did:dkg:${queuedScope.chainId}/0x0000000000000000000000000000000000000001/${queuedScope.kaNumber}`,
       `did:dkg:${queuedScope.chainId}/${queuedScope.agentAddress}/${BigInt(queuedScope.kaNumber) + 1n}`,
     ]) {
@@ -740,6 +744,14 @@ describe('rootless graph-scoped KA lifecycle', () => {
         request: { ...recoveryInput.request, kaUal: invalidGraphUal },
       } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
     }
+
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: {
+        ...recoveryInput.request,
+        publicTripleCount: recoveryInput.request.publicTripleCount! + 1,
+      },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
 
     await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       ...recoveryInput,
@@ -776,6 +788,31 @@ describe('rootless graph-scoped KA lifecycle', () => {
       },
     } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
     expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+
+    const snapshotOutage = new Error('operation snapshot store unavailable');
+    const originalQuery = store.query.bind(store);
+    const snapshotQuery = vi.spyOn(store, 'query').mockImplementation(
+      async (sparql: string, ...args: unknown[]) => {
+        if (sparql.includes('publicSnapshotRef')) throw snapshotOutage;
+        return originalQuery(sparql, ...args);
+      },
+    );
+    await expect(
+      agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any),
+    ).rejects.toBe(snapshotOutage);
+    snapshotQuery.mockRestore();
+
+    const operationSubject = `urn:dkg:share:${CG_ID}:${intent.shareOperationId}`;
+    await store.deleteByPattern({
+      graph: contextGraphSharedMemoryMetaUri(CG_ID),
+      subject: operationSubject,
+    });
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
+    } as any)).rejects.toMatchObject({
+      code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
+    });
 
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
@@ -818,11 +855,64 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.assertion.finalize(CG_ID, name);
     await agent.assertion.promote(CG_ID, name);
     const updateIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
-    const updated = await agent.publishFromFinalizedAssertion(CG_ID, name);
-    expect(updated.status).toBe('confirmed');
     expect(updateIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
 
+    // The v1 chain transaction remains recoverable after an unpublished v2
+    // advances the mutable workspace head. Recovery stamps its lost receipt
+    // without regressing the current v2 SWM lifecycle back to published v1.
+    for (const predicate of Object.values(ASSERTION_PUBLISH_RECEIPT_PREDICATES)) {
+      await store.deleteByPattern({ subject: assertionUri, predicate, graph: metaGraph });
+    }
+    const beforeStagedRecovery = await agent.assertion.history(CG_ID, name);
+    expect(beforeStagedRecovery?.state).toBe('promoted');
+    expect(beforeStagedRecovery?.swmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
+    expect(beforeStagedRecovery?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
+
+    // Simulate a crash between the workspace-head delete and insert. The named
+    // lifecycle has already advanced to v2, so v1 recovery must use that
+    // independent signal and refuse to stamp the lifecycle backward.
+    const sharedMetaGraph = contextGraphSharedMemoryMetaUri(CG_ID);
+    const workspaceHeadSubject = `${intent.kaUal}#dkg-swm-head`;
+    const workspaceHeadRows = await store.query(
+      `CONSTRUCT { <${workspaceHeadSubject}> ?p ?o } WHERE { GRAPH <${sharedMetaGraph}> {
+        <${workspaceHeadSubject}> ?p ?o
+      } }`,
+    );
+    if (workspaceHeadRows.type !== 'quads' || workspaceHeadRows.quads.length === 0) {
+      throw new Error('expected staged v2 workspace head');
+    }
+    await store.deleteByPattern({ graph: sharedMetaGraph, subject: workspaceHeadSubject });
+
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+
+    const afterStagedRecovery = await agent.assertion.history(CG_ID, name);
+    expect(afterStagedRecovery?.state).toBe('promoted');
+    expect(afterStagedRecovery?.swmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
+    expect(afterStagedRecovery?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
+    const recoveredStagedReceipt = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> "${txHash}" .
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_BLOCK}> ?block .
+    } }`);
+    expect(recoveredStagedReceipt).toMatchObject({ type: 'boolean', value: true });
+
+    await store.insert(workspaceHeadRows.quads);
+
+    const updated = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(updated.status).toBe('confirmed');
+
+    const actualContextGraphId = BigInt((await agent.getContextGraphOnChainId(CG_ID))!);
+    const contextGraphBinding = vi.spyOn((agent as any).chain, 'getKAContextGraphId')
+      .mockResolvedValueOnce(actualContextGraphId + 1n);
+    await expect(
+      agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any),
+    ).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    contextGraphBinding.mockRestore();
+
+    const currentFinalizer = agent.getOrCreateFinalizationHandler();
+    const supersededReconcile = vi.spyOn(currentFinalizer, 'handleChainReconciledKC');
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    expect(supersededReconcile).not.toHaveBeenCalled();
+    supersededReconcile.mockRestore();
     const afterSupersededRecovery = await agent.assertion.history(CG_ID, name);
     expect(afterSupersededRecovery?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
   }, 90_000);

@@ -89,7 +89,7 @@ function encodedPublicByteLength(quads: Quad[]): number {
   return nquadsEncoder.encode(quads.map(serializePublicQuad).join('\n')).length;
 }
 
-function buildPublicQuadsWithByteSize(targetBytes: number): Quad[] {
+function buildPublicQuadsWithByteSize(targetBytes: number, graph = ''): Quad[] {
   const quads: Quad[] = [];
   const maxSafeLiteralBytes = 50_000;
 
@@ -100,7 +100,7 @@ function buildPublicQuadsWithByteSize(targetBytes: number): Quad[] {
       subject,
       predicate,
       object: '""',
-      graph: '',
+      graph,
     });
     const currentBytes = encodedPublicByteLength(quads);
     const separatorBytes = quads.length === 0 ? 0 : 1;
@@ -115,7 +115,7 @@ function buildPublicQuadsWithByteSize(targetBytes: number): Quad[] {
       subject,
       predicate,
       object: `"${'x'.repeat(literalBytes)}"`,
-      graph: '',
+      graph,
     });
 
     const size = encodedPublicByteLength(quads);
@@ -505,7 +505,10 @@ describe('Workspace: publishFromSharedMemory', () => {
 
   it('omits staging quads for over-limit internal public SWM first ACK attempts', async () => {
     const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
-    const selectedQuads = buildPublicQuadsWithByteSize(targetBytes);
+    // The publisher prices/ACKs the canonical data-graph N-Quads, not the
+    // caller's graphless SWM input. Build the boundary fixture with that exact
+    // graph name so targetBytes remains the actual wire byte size.
+    const selectedQuads = buildPublicQuadsWithByteSize(targetBytes, DATA_GRAPH);
     expect(encodedPublicByteLength(selectedQuads)).toBe(targetBytes);
 
     await publisher.share(

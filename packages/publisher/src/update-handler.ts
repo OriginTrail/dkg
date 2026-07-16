@@ -718,6 +718,7 @@ export class UpdateHandler {
           metaGraph,
           graphUpdate.scope.ual,
           updateVersion,
+          BigInt(graphUpdate.scope.assertionVersion),
         ))) {
           return 'stale' as const;
         }

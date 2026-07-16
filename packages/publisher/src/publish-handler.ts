@@ -612,6 +612,7 @@ export class PublishHandler {
           metaGraph,
           graphPublish.scope.ual,
           { blockNumber: 0, txIndex: 0 },
+          BigInt(graphPublish.scope.assertionVersion),
         ))) {
           return 'stale' as const;
         }

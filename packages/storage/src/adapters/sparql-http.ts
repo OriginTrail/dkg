@@ -42,6 +42,7 @@ import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import {
+  buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
@@ -283,7 +284,7 @@ export class SparqlHttpStore implements TripleStore {
     update: string,
     options?: QueryOptions,
     operation = 'update',
-  ): Promise<Response> {
+  ): Promise<void> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
@@ -294,12 +295,18 @@ export class SparqlHttpStore implements TripleStore {
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
       try {
-        return await fetch(this.updateEndpoint, {
+        const res = await fetch(this.updateEndpoint, {
           method: 'POST',
           headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
           body: update,
           signal,
         });
+        if (!res.ok) {
+          // Keep scheduler admission until the response body has settled too;
+          // otherwise retries can dispatch while an error body is unwinding.
+          const text = await res.text().catch(() => '');
+          throw new Error(`SPARQL HTTP ${operation} failed (${res.status}): ${text.slice(0, 300)}`);
+        }
       } catch (error) {
         if (signal.aborted) {
           getMetrics().storeCancellationCompletedTotal.add(1, {
@@ -334,14 +341,10 @@ export class SparqlHttpStore implements TripleStore {
       }
     }
     const update = `INSERT DATA {\n  ${parts.join('\n  ')}\n}`;
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.insert',
     }, 'insert');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP insert failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites(byGraph.keys());
   }
@@ -357,14 +360,10 @@ export class SparqlHttpStore implements TripleStore {
     // structure over the SPARQL protocol. See the helper for details.
     const update = buildBlankNodeSafeDelete(quads);
     if (!update) return;
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.delete',
     }, 'delete');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP delete failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
   }
@@ -387,14 +386,10 @@ export class SparqlHttpStore implements TripleStore {
       // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
       update = `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`;
     }
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern',
     }, 'deleteByPattern');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP deleteByPattern failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     if (graphUri) this.writeGen.recordGraphWrites([graphUri]);
     else this.writeGen.recordUnscopedWrite();
@@ -412,14 +407,10 @@ export class SparqlHttpStore implements TripleStore {
     });
     const escapedPrefix = escapeString(prefix);
     const update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapedPrefix}")) } }`;
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix',
     }, 'deleteBySubjectPrefix');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP deleteBySubjectPrefix failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
     const after = await this.countQuads(graphUri, {
@@ -435,14 +426,10 @@ export class SparqlHttpStore implements TripleStore {
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    const res = await this.postUpdate(sparql, {
+    await this.postUpdate(sparql, {
       ...options,
       source: options?.source ?? 'sparql-http.update',
     }, 'update');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP update failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     // `touchedGraphs` hints only membership changes, not every graph whose
     // CONTENT a raw UPDATE mutates — an unscoped bump is the only sound scope.
@@ -467,13 +454,7 @@ export class SparqlHttpStore implements TripleStore {
     });
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
     const execute = async (update: string, source: string): Promise<void> => {
-      const res = await this.postUpdate(update, { ...options, source }, 'replaceGraph');
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        throw new Error(
-          `SPARQL HTTP replaceGraph failed (${res.status}): ${body.slice(0, 300)}`,
-        );
-      }
+      await this.postUpdate(update, { ...options, source }, 'replaceGraph');
     };
     try {
       await execute(plan.update, options?.source ?? 'sparql-http.replaceGraph');
@@ -486,6 +467,45 @@ export class SparqlHttpStore implements TripleStore {
     }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: DKGQuad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.atomicUpdates) {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraphAndSubject',
+        'SparqlHttpStore',
+      );
+    }
+    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceGraphAndSubject',
+    });
+    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
+    const execute = async (update: string, source: string): Promise<void> => {
+      await this.postUpdate(update, { ...options, source }, 'replaceGraphAndSubject');
+    };
+    try {
+      await execute(plan.update, options?.source ?? 'sparql-http.replaceGraphAndSubject');
+    } catch (error) {
+      await execute(plan.cleanup, 'sparql-http.replaceGraphAndSubject.cleanup').catch(() => undefined);
+      this.invalidateListGraphsCache();
+      throw error;
+    }
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
@@ -565,14 +585,10 @@ export class SparqlHttpStore implements TripleStore {
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
     const update = `DROP SILENT GRAPH <${escapeUri(graphUri)}>`;
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.dropGraph',
     }, 'dropGraph');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP dropGraph failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
   }

@@ -102,6 +102,34 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     await this.inner.replaceGraph(graphUri, externalized, options);
   }
 
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraphAndSubject !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraphAndSubject',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    const [externalizedGraph, externalizedMetadata] = await Promise.all([
+      Promise.all(graphQuads.map((quad) => this.externalizeInsertQuad(quad))),
+      Promise.all(metadataQuads.map((quad) => this.externalizeInsertQuad(quad))),
+    ]);
+    await this.inner.replaceGraphAndSubject(
+      graphUri,
+      externalizedGraph,
+      metaGraphUri,
+      metadataSubject,
+      externalizedMetadata,
+      options,
+    );
+  }
+
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('update', 'SharedMemoryLiteralBlobStore');
