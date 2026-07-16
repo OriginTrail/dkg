@@ -12,6 +12,8 @@ const ts = require('typescript');
 const SOURCE_EXTENSION = /\.[cm]?[jt]sx?$/i;
 const TEST_FILE_NAME = /(?:^|\.)(?:test|spec)\.[cm]?[jt]sx?$/i;
 const TEST_DIRECTORY = /(^|\/)(?:test|tests|__tests__|e2e)(?:\/|$)/;
+const EXCLUDED_TREE = /(^|\/)(?:node_modules|dist|build|out|generated|coverage|\.nyc_output|\.turbo)(?:\/|$)/;
+const D1_ARCHIVE_TREE = /(^|\/)(?:test|tests)\/archive(?:\/|$)/;
 const DIRECT_BASES = new Set(['describe', 'it', 'suite', 'test']);
 const DIRECT_MEMBERS = new Set(['skip', 'todo']);
 const LEGACY_ALIASES = new Set(['xdescribe', 'xit', 'xtest']);
@@ -30,6 +32,8 @@ function normalizedPath(filePath) {
 export function isD1ScannableFile(filePath) {
   const candidate = normalizedPath(filePath);
   return SOURCE_EXTENSION.test(candidate)
+    && !EXCLUDED_TREE.test(candidate)
+    && !D1_ARCHIVE_TREE.test(candidate)
     && (TEST_FILE_NAME.test(path.posix.basename(candidate)) || TEST_DIRECTORY.test(candidate));
 }
 
