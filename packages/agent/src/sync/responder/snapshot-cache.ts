@@ -140,41 +140,59 @@ interface GenerationAwareInflight<T> {
   refreshGeneration?: string;
 }
 
-const NO_COMPATIBLE_INFLIGHT = Symbol('no-compatible-inflight');
+type GenerationInflightDecision<T> =
+  | { kind: 'claim' }
+  | { kind: 'wait'; result: Promise<GenerationInflightWaitResult<T>> };
+
+type GenerationInflightWaitResult<T> =
+  | { kind: 'joined'; value: T }
+  | { kind: 'retry' };
 
 /**
  * Coalesce callers from the same responder-session generation while making a
  * newer generation wait for, then supersede, an older in-flight load. Waiting
  * is abortable per caller; the shared loader itself remains owner-independent.
  */
-function awaitCompatibleGenerationInflight<T>(
+function decideGenerationInflight<T>(
   getPending: () => GenerationAwareInflight<T> | undefined,
   requestedGeneration: string | undefined,
   signal: AbortSignal | undefined,
-): Promise<T | typeof NO_COMPATIBLE_INFLIGHT> | typeof NO_COMPATIBLE_INFLIGHT {
+): GenerationInflightDecision<T> {
   const firstPending = getPending();
-  if (!firstPending) return NO_COMPATIBLE_INFLIGHT;
+  if (!firstPending) return { kind: 'claim' };
   const supersedesFirst = requestedGeneration !== undefined &&
     requestedGeneration !== firstPending.refreshGeneration;
-  if (!supersedesFirst) return raceAgainstAbort(firstPending.promise, signal);
+  if (!supersedesFirst) {
+    return {
+      kind: 'wait',
+      result: raceAgainstAbort(firstPending.promise, signal)
+        .then((value) => ({ kind: 'joined', value })),
+    };
+  }
 
-  return (async () => {
-    let pending: GenerationAwareInflight<T> | undefined = firstPending;
-    while (pending) {
-      const supersedesPending = requestedGeneration !== undefined &&
-        requestedGeneration !== pending.refreshGeneration;
-      if (!supersedesPending) return raceAgainstAbort(pending.promise, signal);
-      try {
-        await raceAgainstAbort(pending.promise, signal);
-      } catch {
-        // A newer generation owns an independent attempt. Do not inherit an
-        // older load failure, but preserve the waiting caller's local abort.
-        throwIfAborted(signal);
+  return {
+    kind: 'wait',
+    result: (async () => {
+      let pending: GenerationAwareInflight<T> | undefined = firstPending;
+      while (pending) {
+        const supersedesPending = requestedGeneration !== undefined &&
+          requestedGeneration !== pending.refreshGeneration;
+        if (!supersedesPending) {
+          const value = await raceAgainstAbort(pending.promise, signal);
+          return { kind: 'joined', value };
+        }
+        try {
+          await raceAgainstAbort(pending.promise, signal);
+        } catch {
+          // A newer generation owns an independent attempt. Do not inherit an
+          // older load failure, but preserve the waiting caller's local abort.
+          throwIfAborted(signal);
+        }
+        pending = getPending();
       }
-      pending = getPending();
-    }
-    return NO_COMPATIBLE_INFLIGHT;
-  })();
+      return { kind: 'retry' };
+    })(),
+  };
 }
 
 export interface GenerationAwareTtlSingleFlightMemo<T> {
@@ -216,14 +234,14 @@ export function createGenerationAwareTtlSingleFlightMemo<T>(
       throwIfAborted(options?.signal);
       const requestedGeneration = options?.refreshGeneration;
       while (true) {
-        const pendingResult = awaitCompatibleGenerationInflight(
+        const decision = decideGenerationInflight(
           () => inflight.get(key),
           requestedGeneration,
           options?.signal,
         );
-        if (pendingResult === NO_COMPATIBLE_INFLIGHT) break;
-        const joined = await pendingResult;
-        if (joined !== NO_COMPATIBLE_INFLIGHT) return joined;
+        if (decision.kind === 'claim') break;
+        const result = await decision.result;
+        if (result.kind === 'joined') return result.value;
         // Multiple callers for the same newer generation can all finish
         // waiting on the older load together. Re-enter the synchronous claim
         // path so the first installs the replacement and the rest join it.
@@ -457,14 +475,14 @@ export function createResponderSyncRowListMemo(
       // store read. Re-check in a loop so concurrent refreshes serialize rather
       // than racing two writers against the same cache key.
       while (true) {
-        const pendingResult = awaitCompatibleGenerationInflight(
+        const decision = decideGenerationInflight(
           () => inflight.get(key),
           options?.refreshGeneration,
           options?.signal,
         );
-        if (pendingResult === NO_COMPATIBLE_INFLIGHT) break;
-        const joined = await pendingResult;
-        if (joined !== NO_COMPATIBLE_INFLIGHT) return joined;
+        if (decision.kind === 'claim') break;
+        const result = await decision.result;
+        if (result.kind === 'joined') return result.value;
       }
 
       const now = Date.now();

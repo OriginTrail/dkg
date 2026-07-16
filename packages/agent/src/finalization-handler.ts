@@ -261,6 +261,20 @@ function finalizationSwmResultBudget(): SharedMemoryResultBudget {
   };
 }
 
+function finalizationAcceptancePolicyKey(
+  privateRoots: readonly Uint8Array[],
+  allowGeneratedCatalogFloor: boolean,
+): string {
+  const canonicalPrivateRoots = privateRoots
+    .map((root) => ethers.hexlify(root))
+    .sort()
+    .join('\u0001');
+  return [
+    canonicalPrivateRoots,
+    allowGeneratedCatalogFloor ? 'generated-catalog-floor' : 'strict-merkle',
+  ].join('\u0002');
+}
+
 type NegativeSnapshotMemoEntry = {
   /** Write generation for the CG's graph prefix observed BEFORE the scan. */
   writeGen: number;
@@ -1868,8 +1882,7 @@ export class FinalizationHandler {
       safeRoots.slice().sort().join('\u0001'),
       kaGraphBound ? `${kaGraphBound.agentAddress}:${kaGraphBound.startNumber}:${kaGraphBound.endNumber}` : '*',
       ethers.hexlify(expectedMerkleRoot),
-      privateRoots.map((root) => ethers.hexlify(root)).join('\u0001'),
-      allowGeneratedCatalogFloor ? 'generated-catalog-floor' : 'strict-merkle',
+      finalizationAcceptancePolicyKey(privateRoots, allowGeneratedCatalogFloor),
       String(writeGen ?? 'unknown'),
     ].join('\u0000');
     return this.runScanSingleFlight(key, async () => {

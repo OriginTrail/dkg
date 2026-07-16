@@ -25,7 +25,6 @@ import {
   filterOversizedSyncQuads,
   insertWithOversizeGuard,
   splitStoreRejectedQuads,
-  SyncInsertBlankNodeComponentTooLargeError,
   SYNC_STORE_INSERT_BATCH_MAX_BYTES,
   type OversizeDrop,
 } from '../src/sync/oversize-filter.js';
@@ -278,8 +277,9 @@ describe('insertWithOversizeGuard', () => {
       ['_:a', '_:b', '_:c'].includes(q.graph))).toHaveLength(chainedComponent.length);
   });
 
-  it('rejects an over-bound blank-node component before any insert mutation', async () => {
-    const { hooks } = collect();
+  it('quarantines an over-bound blank-node component before inserting an earlier valid unit', async () => {
+    const { drops, hooks } = collect();
+    const valid = quad(lit(10), SWM_GRAPH, 'http://ex.org/valid');
     const detail = lit(50_000);
     const component = [
       quad('_:huge-section', SWM_GRAPH, 'http://ex.org/doc'),
@@ -292,12 +292,15 @@ describe('insertWithOversizeGuard', () => {
 
     await expect(insertWithOversizeGuard(
       async (batch) => { batches.push(batch); },
-      component,
+      [valid, ...component],
       hooks,
       'swm-sync',
-    )).rejects.toBeInstanceOf(SyncInsertBlankNodeComponentTooLargeError);
+    )).resolves.toEqual([valid]);
 
-    expect(batches).toEqual([]);
+    expect(batches).toEqual([[valid]]);
+    expect(drops).toHaveLength(component.length);
+    expect(drops.every(({ drop }) => drop.kind === 'blank-node-component-quarantine')).toBe(true);
+    expect(drops.every(({ seam }) => seam === 'swm-sync:blank-node-component-quarantine')).toBe(true);
   });
 
   it('rethrows an oversize error the split cannot explain (real store bug, loud failure)', async () => {
@@ -330,14 +333,18 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
   const goodA = quad(lit(10), DATA_GRAPH, 'http://ex.org/a');
   const goodB = quad(lit(10), DATA_GRAPH, 'http://ex.org/b');
 
-  function makeContext(storeInsert: (quads: Quad[]) => Promise<void>) {
+  function makeContext(
+    storeInsert: (quads: Quad[]) => Promise<void>,
+    dataQuads: Quad[] = [goodA, bad, goodB],
+  ) {
     const deletedCheckpoints: string[] = [];
     const setCheckpoints: Array<{ key: string; offset: number }> = [];
+    let dataFetchCalls = 0;
     const page = (phase: 'data' | 'meta'): SyncPageResult => ({
-      quads: phase === 'data' ? [goodA, bad, goodB] : [],
+      quads: phase === 'data' ? dataQuads : [],
       bytesReceived: 100,
       resumedFromOffset: 0,
-      nextOffset: 3,
+      nextOffset: dataQuads.length,
       checkpointKey: `cp|${phase}`,
       completed: true,
       timedOut: false,
@@ -345,12 +352,16 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
     return {
       deletedCheckpoints,
       setCheckpoints,
+      get dataFetchCalls() { return dataFetchCalls; },
       context: {
         ctx: createOperationContext('sync'),
         remotePeerId: 'peerR',
         contextGraphIds: ['agents'],
         createContextGraphSyncDeadline: () => Date.now() + 10_000,
-        fetchSyncPages: async (_c: unknown, _p: string, _cg: string, _swm: boolean, phase: 'data' | 'meta') => page(phase),
+        fetchSyncPages: async (_c: unknown, _p: string, _cg: string, _swm: boolean, phase: 'data' | 'meta') => {
+          if (phase === 'data') dataFetchCalls += 1;
+          return page(phase);
+        },
         processDurableBatchInWorker: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
           verifiedData: dataQuads,
           verifiedMeta: metaQuads,
@@ -406,6 +417,41 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
       kind: 'oversize',
       seam: 'durable-sync',
       predicate: 'https://schema.org/description',
+    });
+  });
+
+  it('consumes a page containing an over-bound blank-node component instead of retrying it', async () => {
+    const valid = quad(lit(10), SWM_GRAPH, 'http://ex.org/valid-before-huge-component');
+    const detail = lit(50_000);
+    const component = [
+      quad('_:huge-section', SWM_GRAPH, 'http://ex.org/huge-doc'),
+      ...Array.from({ length: 170 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:huge-section'),
+        predicate: `http://ex.org/huge-detail-${index}`,
+      })),
+    ];
+    const stored: Quad[][] = [];
+    const tomb = new OversizeTombstoneLog({ logWarn: () => {} });
+    const guarded = async (quads: Quad[]) => {
+      await insertWithOversizeGuard(
+        async (kept) => { stored.push(kept); },
+        quads,
+        { recordDrops: (drops, seam) => tomb.record(drops, seam) },
+        'durable-sync',
+      );
+    };
+    const run = makeContext(guarded, [valid, ...component]);
+
+    const summary = await runDurableSync(run.context as never);
+
+    expect(summary.failedPhases).toBe(0);
+    expect(stored).toEqual([[valid]]);
+    expect(run.deletedCheckpoints).toEqual(expect.arrayContaining(['cp|meta', 'cp|data']));
+    expect(run.dataFetchCalls).toBe(1);
+    expect(tomb.size).toBe(component.length);
+    expect(tomb.list(component.length)[0]).toMatchObject({
+      kind: 'blank-node-component-quarantine',
+      seam: 'durable-sync:blank-node-component-quarantine',
     });
   });
 });

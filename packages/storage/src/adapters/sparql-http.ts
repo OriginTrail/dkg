@@ -49,6 +49,10 @@ import {
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
+  isBlankNodeTerm,
+  partitionConnectedBlankNodeComponents,
+} from '../blank-node-components.js';
+import {
   assertQuadLiteralsMutf8Safe,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
@@ -808,53 +812,7 @@ function escapeString(s: string): string {
   return s.replace(/[\\"]/g, '\\$&');
 }
 
-/** True when an N-Quads term string denotes an RDF blank node (`_:label`). */
-export function isBlankNodeTerm(term: string): boolean {
-  return typeof term === 'string' && term.startsWith('_:');
-}
-
-/**
- * Partition blank-node-bearing quads into connected components: two quads are
- * connected when they share a blank-node label (directly or transitively). A
- * union-find over the blank-node labels does the grouping.
- *
- * Each component is later deleted as ONE `DELETE … WHERE …` so its shared
- * blank-node variables join correctly and any ground terms anchor the match.
- * Disjoint components must be emitted as SEPARATE statements: a single WHERE
- * holding two independent patterns is a cross-product, so if one pattern has
- * no match the whole row is empty and NOTHING is deleted — a silent
- * data-retention bug. Splitting by component avoids that.
- */
-function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
-  const parent = new Map<string, string>();
-  const add = (x: string) => { if (!parent.has(x)) parent.set(x, x); };
-  const find = (x: string): string => {
-    while (parent.get(x) !== x) {
-      parent.set(x, parent.get(parent.get(x)!)!); // path halving
-      x = parent.get(x)!;
-    }
-    return x;
-  };
-  const union = (a: string, b: string) => { parent.set(find(a), find(b)); };
-
-  for (const q of quads) {
-    const labels: string[] = [];
-    if (isBlankNodeTerm(q.subject)) labels.push(q.subject);
-    if (isBlankNodeTerm(q.object)) labels.push(q.object);
-    labels.forEach(add);
-    if (labels.length === 2) union(labels[0], labels[1]);
-  }
-
-  const groups = new Map<string, DKGQuad[]>();
-  for (const q of quads) {
-    const label = isBlankNodeTerm(q.subject) ? q.subject : q.object;
-    const root = find(label);
-    let arr = groups.get(root);
-    if (!arr) { arr = []; groups.set(root, arr); }
-    arr.push(q);
-  }
-  return [...groups.values()];
-}
+export { isBlankNodeTerm } from '../blank-node-components.js';
 
 /**
  * Build a spec-legal SPARQL Update that deletes exactly `quads`, including any
@@ -864,7 +822,7 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  *  - Ground quads (no blank nodes) → a single `DELETE DATA { … }` block —
  *    exact and fast (identical to the legacy behaviour for the common case).
  *  - Blank-node quads → grouped into connected components ({@link
- *    connectedBlankNodeComponents}); each component becomes a
+ *    partitionConnectedBlankNodeComponents}); each component becomes a
  *    `DELETE { … } WHERE { … }` with every blank node rewritten to a fresh
  *    query variable. This is the only spec-legal way to remove existing
  *    blank-node structure over the SPARQL protocol (`DELETE DATA` forbids
@@ -910,7 +868,11 @@ export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
       arr.push(q);
     }
     for (const [graph, list] of byGraph) {
-      for (const component of connectedBlankNodeComponents(list)) {
+      const components = partitionConnectedBlankNodeComponents(
+        list,
+        (q) => [q.subject, q.object],
+      );
+      for (const { items: component } of components) {
         const vars = new Map<string, string>();
         const render = (t: string): string => {
           if (!isBlankNodeTerm(t)) return formatTerm(t);

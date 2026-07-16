@@ -49,7 +49,10 @@ import {
   rdfLiteralTermMutf8ByteLength,
   isOversizedRdfLiteralError,
 } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  partitionConnectedBlankNodeComponents,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 
 // Match `_shared_memory` / `_verifiable_memory` as a full path SEGMENT — the
 // bucket graph (`…/_shared_memory`) and its per-KA descendants
@@ -61,7 +64,11 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 const SHARED_MEMORY_SEGMENT_RE = /\/_shared_memory(\/|$)/;
 const VERIFIABLE_MEMORY_SEGMENT_RE = /\/_verifiable_memory(\/|$)/;
 
-export type OversizeDropKind = 'oversize' | 'vm-quarantine' | 'store-reject';
+export type OversizeDropKind =
+  | 'oversize'
+  | 'vm-quarantine'
+  | 'store-reject'
+  | 'blank-node-component-quarantine';
 
 export interface OversizeDrop {
   quad: Quad;
@@ -83,21 +90,6 @@ export interface OversizeFilterResult {
 export const SYNC_STORE_INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024;
 
 const SYNC_STORE_INSERT_QUAD_SYNTAX_BYTES = 256;
-
-export class SyncInsertBlankNodeComponentTooLargeError extends Error {
-  constructor(
-    public readonly estimatedBytes: number,
-    public readonly maxBytes: number,
-    public readonly quadCount: number,
-    public readonly blankNodeCount: number,
-  ) {
-    super(
-      `Sync insert blank-node component is too large: estimated ${estimatedBytes} bytes ` +
-      `across ${quadCount} quads and ${blankNodeCount} blank nodes (max ${maxBytes} bytes)`,
-    );
-    this.name = 'SyncInsertBlankNodeComponentTooLargeError';
-  }
-}
 
 /**
  * Conservative cross-adapter serialized-size estimate. Generic SPARQL and
@@ -131,18 +123,9 @@ export function estimateSyncStoreInsertQuadBytes(quad: Quad): number {
   return bytes;
 }
 
-function quadBlankNodeLabels(quad: Quad): string[] {
-  const labels = new Set<string>();
-  for (const term of [quad.subject, quad.object, quad.graph]) {
-    if (term?.startsWith('_:')) labels.add(term);
-  }
-  return [...labels];
-}
-
 interface SyncInsertUnit {
   quads: Quad[];
   estimatedBytes: number;
-  firstIndex: number;
   blankNodeLabels: Set<string>;
 }
 
@@ -154,73 +137,45 @@ interface SyncInsertUnit {
  * graph even when the same label text appears in both calls.
  */
 function buildSyncInsertUnits(quads: readonly Quad[]): SyncInsertUnit[] {
-  const parents = quads.map((_, index) => index);
-  const ranks = quads.map(() => 0);
-  const labelsByQuad = quads.map(quadBlankNodeLabels);
-  const firstQuadByLabel = new Map<string, number>();
+  return partitionConnectedBlankNodeComponents(
+    quads,
+    (quad) => [quad.subject, quad.object, quad.graph],
+  ).map((component) => ({
+    quads: component.items,
+    estimatedBytes: component.items.reduce(
+      (total, quad) => total + estimateSyncStoreInsertQuadBytes(quad),
+      0,
+    ),
+    blankNodeLabels: component.blankNodeLabels,
+  }));
+}
 
-  const find = (index: number): number => {
-    let root = index;
-    while (parents[root] !== root) root = parents[root]!;
-    while (parents[index] !== index) {
-      const next = parents[index]!;
-      parents[index] = root;
-      index = next;
-    }
-    return root;
-  };
-
-  const union = (left: number, right: number): void => {
-    let leftRoot = find(left);
-    let rightRoot = find(right);
-    if (leftRoot === rightRoot) return;
-    if (ranks[leftRoot]! < ranks[rightRoot]!) [leftRoot, rightRoot] = [rightRoot, leftRoot];
-    parents[rightRoot] = leftRoot;
-    if (ranks[leftRoot] === ranks[rightRoot]) ranks[leftRoot]! += 1;
-  };
-
-  for (let index = 0; index < quads.length; index += 1) {
-    for (const label of labelsByQuad[index]!) {
-      const firstIndex = firstQuadByLabel.get(label);
-      if (firstIndex === undefined) firstQuadByLabel.set(label, index);
-      else union(index, firstIndex);
+/**
+ * Classify indivisible components before the first store mutation. A component
+ * larger than the adapter-neutral insert bound cannot be split without changing
+ * blank-node identity, so sync deliberately tombstones the complete component
+ * and consumes the page instead of throwing before cursor advancement.
+ */
+function quarantineOversizedBlankNodeComponents(quads: readonly Quad[]): OversizeFilterResult {
+  const kept: Quad[] = [];
+  const dropped: OversizeDrop[] = [];
+  for (const unit of buildSyncInsertUnits(quads)) {
+    if (
+      unit.blankNodeLabels.size > 0 &&
+      unit.estimatedBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES
+    ) {
+      for (const quad of unit.quads) {
+        dropped.push({
+          quad,
+          bytes: estimateSyncStoreInsertQuadBytes(quad),
+          kind: 'blank-node-component-quarantine',
+        });
+      }
+    } else {
+      kept.push(...unit.quads);
     }
   }
-
-  const componentUnits = new Map<number, SyncInsertUnit>();
-  const units: SyncInsertUnit[] = [];
-  for (let index = 0; index < quads.length; index += 1) {
-    const quad = quads[index]!;
-    const labels = labelsByQuad[index]!;
-    const estimatedBytes = estimateSyncStoreInsertQuadBytes(quad);
-    if (labels.length === 0) {
-      units.push({
-        quads: [quad],
-        estimatedBytes,
-        firstIndex: index,
-        blankNodeLabels: new Set(),
-      });
-      continue;
-    }
-
-    const root = find(index);
-    let unit = componentUnits.get(root);
-    if (!unit) {
-      unit = {
-        quads: [],
-        estimatedBytes: 0,
-        firstIndex: index,
-        blankNodeLabels: new Set(),
-      };
-      componentUnits.set(root, unit);
-      units.push(unit);
-    }
-    unit.quads.push(quad);
-    unit.estimatedBytes += estimatedBytes;
-    for (const label of labels) unit.blankNodeLabels.add(label);
-  }
-
-  return units.sort((left, right) => left.firstIndex - right.firstIndex);
+  return { kept, dropped };
 }
 
 async function insertInBoundedBatches(
@@ -228,23 +183,6 @@ async function insertInBoundedBatches(
   quads: readonly Quad[],
 ): Promise<void> {
   const units = buildSyncInsertUnits(quads);
-
-  // Validate every indivisible blank-node component before the first durable
-  // mutation. A too-large component cannot be split safely, and inserting
-  // earlier units before rejecting it would leave a needless partial apply.
-  for (const unit of units) {
-    if (
-      unit.blankNodeLabels.size > 0 &&
-      unit.estimatedBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES
-    ) {
-      throw new SyncInsertBlankNodeComponentTooLargeError(
-        unit.estimatedBytes,
-        SYNC_STORE_INSERT_BATCH_MAX_BYTES,
-        unit.quads.length,
-        unit.blankNodeLabels.size,
-      );
-    }
-  }
 
   let batch: Quad[] = [];
   let batchBytes = 0;
@@ -389,15 +327,19 @@ export async function insertWithOversizeGuard(
   hooks: OversizeGuardHooks,
   seam: string,
 ): Promise<Quad[]> {
-  const { kept, dropped } = filterOversizedSyncQuads(quads);
-  if (dropped.length > 0) hooks.recordDrops(dropped, seam);
-  if (kept.length === 0) return kept;
+  const literalFilter = filterOversizedSyncQuads(quads);
+  if (literalFilter.dropped.length > 0) hooks.recordDrops(literalFilter.dropped, seam);
+  const componentFilter = quarantineOversizedBlankNodeComponents(literalFilter.kept);
+  if (componentFilter.dropped.length > 0) {
+    hooks.recordDrops(componentFilter.dropped, `${seam}:blank-node-component-quarantine`);
+  }
+  if (componentFilter.kept.length === 0) return componentFilter.kept;
   try {
-    await insertInBoundedBatches(insert, kept);
-    return kept;
+    await insertInBoundedBatches(insert, componentFilter.kept);
+    return componentFilter.kept;
   } catch (err) {
     if (!isOversizedRdfLiteralError(err)) throw err;
-    const backstop = splitStoreRejectedQuads(kept);
+    const backstop = splitStoreRejectedQuads(componentFilter.kept);
     if (backstop.dropped.length === 0) throw err; // not size-explicable → real error
     hooks.recordDrops(backstop.dropped, `${seam}:store-reject`);
     if (backstop.kept.length === 0) return [];
