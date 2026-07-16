@@ -40,3 +40,36 @@ test('file audit reports direct disabled declarations at their source locations'
     `${fixturePath}:6:1: D1 xdescribe`,
   ]);
 });
+
+test('file audit reports declarations only from active test sources', (t) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-scope-'));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const fixtures = new Map([
+    ['src/widget.spec.ts', "// test.skip('commented');\nconst example = \"xit('string')\";"],
+    ['packages/example/test/support.ts', "test.skip('active support', () => {});"],
+    ['src/support.ts', "test.skip('ordinary source', () => {});"],
+    ['node_modules/example/test/dependency.ts', "test.skip('dependency', () => {});"],
+    ['dist/tests/compiled.ts', "test.skip('distribution output', () => {});"],
+    ['build/test/generated.ts', "test.skip('build output', () => {});"],
+    ['coverage/test/instrumented.ts', "test.skip('coverage output', () => {});"],
+    ['test/archive/legacy.test.ts', "test.skip('archived test', () => {});"],
+    ['tests/archive/legacy.test.ts', "test.skip('archived tests', () => {});"],
+  ]);
+  const fixturePaths = [];
+  for (const [relativePath, source] of fixtures) {
+    const fixturePath = path.join(fixtureRoot, relativePath);
+    fs.mkdirSync(path.dirname(fixturePath), { recursive: true });
+    fs.writeFileSync(fixturePath, source);
+    fixturePaths.push(fixturePath);
+  }
+
+  const result = spawnSync(process.execPath, [LINT_SCRIPT, '--files', ...fixturePaths], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  });
+
+  const activePath = path.join(fixtureRoot, 'packages/example/test/support.ts');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), `${activePath}:1:1: D1 test.skip`);
+});
