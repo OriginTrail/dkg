@@ -49,6 +49,51 @@ test('analysis reports only static test-targeting Vitest discovery exclusions', 
   );
 });
 
+test('full-tree audit reports tracked static D2 baseline without failing', (t) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-d2-audit-'));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const configPath = 'packages/example/vitest.config.ts';
+  const configSource = [
+    "import { defineConfig } from 'vitest/config';",
+    "const LEGACY_TESTS = 'tests/legacy/**';",
+    'export default defineConfig({',
+    '  test: {',
+    '    exclude: [',
+    "      'test/e2e.test.ts',",
+    '      LEGACY_TESTS,',
+    "      '**/dist/**',",
+    '    ],',
+    '  },',
+    '});',
+  ].join('\n');
+  fs.mkdirSync(path.join(fixtureRoot, 'packages/example'), { recursive: true });
+  fs.writeFileSync(path.join(fixtureRoot, configPath), configSource);
+  fs.mkdirSync(path.join(fixtureRoot, 'build'), { recursive: true });
+  fs.writeFileSync(path.join(fixtureRoot, 'build/vitest.config.ts'), configSource);
+
+  for (const args of [
+    ['init', '-q'],
+    ['config', 'user.email', 'audit@example.invalid'],
+    ['config', 'user.name', 'audit'],
+    ['add', '-A'],
+  ]) {
+    const git = spawnSync('git', args, { cwd: fixtureRoot, encoding: 'utf8' });
+    assert.equal(git.status, 0, git.stderr);
+  }
+
+  const result = spawnSync(process.execPath, [LINT_SCRIPT, '--all'], {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split('\n'), [
+    `${configPath}:6:7: D2 vitest.exclude`,
+    `${configPath}:7:7: D2 vitest.exclude`,
+  ]);
+});
+
 test('analysis reports every conditional test suppression occurrence', () => {
   const source = [
     "test.skipIf(isWindows)('Windows test', () => {});",
