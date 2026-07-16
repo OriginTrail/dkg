@@ -11,7 +11,7 @@
     "build:packages": "turbo build",
     "build:runtime:packages": "node scripts/build-runtime-packages.mjs",
     "build:runtime": "pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui",
-    "test": "turbo test --concurrency=2 && pnpm run test:scripts",
+    "test": "turbo test && pnpm run test:scripts",
     "test:scripts": "node --test scripts/lib/__tests__/*.test.mjs",
     "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "turbo test:coverage",
