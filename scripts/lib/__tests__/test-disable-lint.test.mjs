@@ -64,7 +64,10 @@ test('analysis resolves exclusion constants through lexical scope', () => {
 
   assert.deepEqual(
     analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
-    [{ line: 5, value: 'spec/callback/**' }],
+    [
+      { line: 5, value: 'spec/callback/**' },
+      { line: 8, value: 'OUTER_EXCLUSION' },
+    ],
   );
 });
 
@@ -100,7 +103,7 @@ test('analysis resolves exclusion constants declared in switch cases', () => {
   );
 });
 
-test('analysis does not fall through catch bindings to outer constants', () => {
+test('analysis reports catch-bound exclusions without resolving outer constants', () => {
   const source = [
     "const EXCLUSION = 'tests/outer/**';",
     'try {',
@@ -110,10 +113,13 @@ test('analysis does not fall through catch bindings to outer constants', () => {
     '}',
   ].join('\n');
 
-  assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 5, value: 'EXCLUSION' }],
+  );
 });
 
-test('analysis does not fall through for-of bindings to outer constants', () => {
+test('analysis reports for-of exclusions without resolving outer constants', () => {
   const source = [
     "const EXCLUSION = 'tests/outer/**';",
     'for (const EXCLUSION of exclusions) {',
@@ -121,10 +127,13 @@ test('analysis does not fall through for-of bindings to outer constants', () => 
     '}',
   ].join('\n');
 
-  assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 3, value: 'EXCLUSION' }],
+  );
 });
 
-test('analysis does not fall through for-in bindings to outer constants', () => {
+test('analysis reports for-in exclusions without resolving outer constants', () => {
   const source = [
     "const EXCLUSION = 'tests/outer/**';",
     'for (const EXCLUSION in exclusions) {',
@@ -132,7 +141,10 @@ test('analysis does not fall through for-in bindings to outer constants', () => 
     '}',
   ].join('\n');
 
-  assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 3, value: 'EXCLUSION' }],
+  );
 });
 
 test('analysis recognizes custom Vitest configuration filenames', () => {

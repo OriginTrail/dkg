@@ -63,8 +63,9 @@ function d1Fingerprint(pattern, titleNode, fallbackNode, sourceFile) {
   return createHash('sha1').update(`D1:${pattern}:${identity}`).digest('hex');
 }
 
-function d2Fingerprint(value) {
-  return createHash('sha1').update(`D2:vitest.exclude:${value}`).digest('hex');
+function d2Fingerprint(value, opaque) {
+  const pattern = opaque ? 'opaque' : 'static';
+  return createHash('sha1').update(`D2:vitest.exclude:${pattern}:${value}`).digest('hex');
 }
 
 function propertyNameText(name) {
@@ -156,23 +157,73 @@ function lexicalBinding(scope, identifier) {
   return undefined;
 }
 
-function staticStringConstant(node) {
+function staticConstantInitializer(node) {
   for (let scope = node.parent; scope; scope = scope.parent) {
     const binding = lexicalBinding(scope, node.text);
     if (!binding) continue;
     return binding.isConst
+      && ts.isIdentifier(binding.declaration.name)
       && binding.declaration.initializer
-      && ts.isStringLiteralLike(binding.declaration.initializer)
-      ? binding.declaration.initializer.text
+      ? binding.declaration.initializer
       : undefined;
   }
   return undefined;
 }
 
-function staticExclusionValue(node) {
-  if (ts.isStringLiteralLike(node)) return node.text;
-  if (ts.isIdentifier(node)) return staticStringConstant(node);
-  return undefined;
+function unwrapTransparentExpression(node) {
+  let expression = node;
+  while (
+    ts.isParenthesizedExpression(expression)
+    || ts.isAsExpression(expression)
+    || ts.isSatisfiesExpression(expression)
+    || ts.isTypeAssertionExpression(expression)
+  ) {
+    expression = expression.expression;
+  }
+  return expression;
+}
+
+function exclusionEntries(node, sourceFile, arraysAllowed = false, seen = new Set()) {
+  node = unwrapTransparentExpression(node);
+  if (ts.isOmittedExpression(node)) return [];
+  if (ts.isStringLiteralLike(node)) return [{ value: node.text, opaque: false }];
+  if (ts.isIdentifier(node)) {
+    const initializer = staticConstantInitializer(node);
+    if (!initializer || seen.has(initializer)) {
+      return [{ value: normalizedFragment(node, sourceFile), opaque: true }];
+    }
+    return exclusionEntries(
+      initializer,
+      sourceFile,
+      arraysAllowed,
+      new Set([...seen, initializer]),
+    );
+  }
+  if (!arraysAllowed || !ts.isArrayLiteralExpression(node)) {
+    return [{ value: normalizedFragment(node, sourceFile), opaque: true }];
+  }
+
+  const entries = [];
+  for (const element of node.elements) {
+    const resolved = ts.isSpreadElement(element)
+      ? exclusionEntries(element.expression, sourceFile, true, seen)
+      : exclusionEntries(element, sourceFile, false, seen);
+    entries.push(...resolved);
+  }
+  return entries;
+}
+
+function exclusionElements(node) {
+  if (ts.isArrayLiteralExpression(node)) return node.elements;
+  return [node];
+}
+
+function resolvedExclusionEntries(element, sourceFile, arrayInitializer) {
+  if (ts.isSpreadElement(element)) {
+    return exclusionEntries(element.expression, sourceFile, true);
+  }
+  if (!arrayInitializer) return exclusionEntries(element, sourceFile, true);
+  return exclusionEntries(element, sourceFile);
 }
 
 function isTestTargetingExclusion(value) {
@@ -322,6 +373,7 @@ export function analyzeD2Source(source, filePath) {
     true,
     scriptKindFor(filePath),
   );
+  const comments = sourceComments(source, sourceFile, filePath);
   const findings = [];
 
   const visit = (node) => {
@@ -334,20 +386,24 @@ export function analyzeD2Source(source, filePath) {
         (property) => ts.isPropertyAssignment(property)
           && propertyNameText(property.name) === 'exclude',
       );
-      if (exclude && ts.isArrayLiteralExpression(exclude.initializer)) {
-        for (const element of exclude.initializer.elements) {
-          const value = staticExclusionValue(element);
-          if (value === undefined || !isTestTargetingExclusion(value)) continue;
-          const location = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile));
-          findings.push({
-            rule: 'D2',
-            api: 'vitest.exclude',
-            value,
-            fingerprint: d2Fingerprint(value),
-            filePath,
-            line: location.line + 1,
-            column: location.character + 1,
-          });
+      if (exclude) {
+        const initializer = unwrapTransparentExpression(exclude.initializer);
+        const arrayInitializer = ts.isArrayLiteralExpression(initializer);
+        for (const element of exclusionElements(initializer)) {
+          const entries = resolvedExclusionEntries(element, sourceFile, arrayInitializer);
+          for (const entry of entries) {
+            if (!entry.opaque && !isTestTargetingExclusion(entry.value)) continue;
+            const location = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile));
+            findings.push({
+              rule: 'D2',
+              api: 'vitest.exclude',
+              value: entry.value,
+              fingerprint: d2Fingerprint(entry.value, entry.opaque),
+              filePath,
+              line: location.line + 1,
+              column: location.character + 1,
+            });
+          }
         }
       }
     }
@@ -355,7 +411,7 @@ export function analyzeD2Source(source, filePath) {
   };
 
   visit(sourceFile);
-  return findings;
+  return findings.filter((finding) => !isAllowed(finding, comments));
 }
 
 export function auditFiles(filePaths) {
@@ -616,18 +672,217 @@ function auditModesSelfTest() {
   }
 }
 
+function staticD2ArraySelfTest() {
+  const source = [
+    "const TEST_EXCLUSIONS = ['tests/unit/**'];",
+    "const NESTED_EXCLUSIONS = ['coverage/**', ...TEST_EXCLUSIONS];",
+    "const EXCLUSIONS = [...NESTED_EXCLUSIONS, '**/*.spec.ts'];",
+    'export default { test: { exclude: EXCLUSIONS } };',
+  ].join('\n');
+  const values = analyzeD2Source(source, 'vitest.config.ts').map(({ value }) => value);
+  const expected = ['tests/unit/**', '**/*.spec.ts'];
+  const pass = JSON.stringify(values) === JSON.stringify(expected);
+  if (!pass) {
+    process.stderr.write(
+      `SELF-TEST FAIL: static D2 arrays expected ${JSON.stringify(expected)}, `
+        + `received ${JSON.stringify(values)}\n`,
+    );
+  }
+  return pass;
+}
+
+function wrappedD2ArraySelfTest() {
+  const source = [
+    "const OUTPUT_EXCLUSIONS = (['coverage/**'] as const);",
+    "const TEST_EXCLUSIONS = (['tests/unit/**'] as const);",
+    "const TEST_FILE = ('**/*.test.ts' as const) satisfies string;",
+    "const SPEC_EXCLUSIONS = ['**/*.spec.ts'] satisfies readonly string[];",
+    'export default {',
+    '  test: {',
+    '    exclude: ([',
+    '      ...OUTPUT_EXCLUSIONS,',
+    '      ...TEST_EXCLUSIONS,',
+    '      TEST_FILE,',
+    '      ...SPEC_EXCLUSIONS,',
+    '    ] as const) satisfies readonly string[],',
+    '  },',
+    '};',
+  ].join('\n');
+  const values = analyzeD2Source(source, 'vitest.config.ts').map(({ value }) => value);
+  const expected = ['tests/unit/**', '**/*.test.ts', '**/*.spec.ts'];
+  const pass = JSON.stringify(values) === JSON.stringify(expected);
+  if (!pass) {
+    process.stderr.write(
+      `SELF-TEST FAIL: wrapped D2 arrays expected ${JSON.stringify(expected)}, `
+        + `received ${JSON.stringify(values)}\n`,
+    );
+  }
+  return pass;
+}
+
+function opaqueD2RatchetSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-opaque-d2-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const configPath = path.join(fixtureRoot, 'vitest.config.ts');
+    writeFileSync(configPath, [
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      '      legacyExclusions(),',
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n'));
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    writeFileSync(configPath, [
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      '      legacyExclusions(),',
+      '',
+      '      // test-disable-allow: D2 #123 -- generated test inventory',
+      '      allowedExclusions(),',
+      '',
+      '',
+      '',
+      '      // test-disable-allow: D1 #124 -- wrong rule cannot allow D2',
+      '      wrongRuleExclusions(),',
+      '',
+      '',
+      '',
+      '      newExclusions(),',
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n'));
+    git('add', '-A');
+    git('commit', '-qm', 'head');
+    const head = git('rev-parse', 'HEAD').trim();
+
+    const cli = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const diagnostics = cli.stdout.trim().split('\n');
+    const expected = [
+      'vitest.config.ts:12:7: D2 vitest.exclude',
+      'vitest.config.ts:16:7: D2 vitest.exclude',
+    ];
+    const pass = cli.status === 1
+      && JSON.stringify(diagnostics) === JSON.stringify(expected);
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: opaque D2 ratchet exit=${cli.status}\n`
+          + `stdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function destructuredD2RatchetSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-destructured-d2-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const configPath = path.join(fixtureRoot, 'vitest.config.ts');
+    const configSource = (exclusion) => [
+      'const [legacyExclusion, replacementExclusion] = loadExclusions();',
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      `      ${exclusion},`,
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n');
+    writeFileSync(configPath, configSource('legacyExclusion'));
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    writeFileSync(configPath, configSource('replacementExclusion'));
+    git('add', '-A');
+    git('commit', '-qm', 'head');
+    const head = git('rev-parse', 'HEAD').trim();
+
+    const cli = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const expected = 'vitest.config.ts:5:7: D2 vitest.exclude';
+    const pass = cli.status === 1 && cli.stdout.trim() === expected;
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: destructured D2 ratchet exit=${cli.status}\n`
+          + `stdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
 function selfTest({ report = true } = {}) {
   const movePasses = semanticMoveSelfTest();
   const growthPasses = semanticGrowthSelfTest();
   const auditsPass = auditModesSelfTest();
+  const staticD2ArraysPass = staticD2ArraySelfTest();
+  const wrappedD2ArraysPass = wrappedD2ArraySelfTest();
+  const opaqueD2RatchetPass = opaqueD2RatchetSelfTest();
+  const destructuredD2RatchetPass = destructuredD2RatchetSelfTest();
   if (report) {
     process.stdout.write(
       `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
         + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
-        + `audit modes ${auditsPass ? 'pass' : 'FAIL'}.\n`,
+        + `audit modes ${auditsPass ? 'pass' : 'FAIL'}, `
+        + `static D2 arrays ${staticD2ArraysPass ? 'pass' : 'FAIL'}, `
+        + `wrapped D2 arrays ${wrappedD2ArraysPass ? 'pass' : 'FAIL'}, `
+        + `opaque D2 ratchet ${opaqueD2RatchetPass ? 'pass' : 'FAIL'}, `
+        + `destructured D2 ratchet ${destructuredD2RatchetPass ? 'pass' : 'FAIL'}.\n`,
     );
   }
-  return movePasses && growthPasses && auditsPass ? 0 : 1;
+  return movePasses
+    && growthPasses
+    && auditsPass
+    && staticD2ArraysPass
+    && wrappedD2ArraysPass
+    && opaqueD2RatchetPass
+    && destructuredD2RatchetPass
+    ? 0
+    : 1;
 }
 
 function validateScanner() {
