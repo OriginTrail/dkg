@@ -485,9 +485,17 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
 
     const partial = await recover();
     expect(partial.completed).toBe(false);
-    expect(partial.replacedGraphs).toBe(0);
+    expect(partial.replacedGraphs).toBe(1);
     await expect(snapshotStore.getSnapshot(assets[0]!.digest)).resolves.toEqual(assets[0]!.payload);
     await expect(snapshotStore.getSnapshot(assets[1]!.digest)).resolves.toBeNull();
+    const firstVisible = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${assets[0]!.assertionGraph}> { ?s ?p ?o } }`,
+    );
+    const secondStillHidden = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${assets[1]!.assertionGraph}> { ?s ?p ?o } }`,
+    );
+    expect(firstVisible.type === 'bindings' ? firstVisible.bindings : []).toHaveLength(1);
+    expect(secondStillHidden.type === 'bindings' ? secondStillHidden.bindings : []).toHaveLength(0);
 
     round = 2;
     const completed = await recover();

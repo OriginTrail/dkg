@@ -361,6 +361,15 @@ export async function syncPublicSnapshotsForMeta(params: {
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
+  /**
+   * Optional recovery hook invoked only after the complete immutable snapshot
+   * has passed its signed digest/count check. Callers may make that one KA
+   * visible immediately; an unverified prefix never reaches this hook.
+   */
+  onSnapshotReady?: (
+    snapshot: PublicSnapshotMetadata,
+    source: 'cache' | 'network',
+  ) => Promise<void>;
 }): Promise<{
   bytesReceived: number;
   resumedPhases: number;
@@ -400,6 +409,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   let readySnapshots = 0;
   for (const snapshot of snapshots) {
     if (await hasValidSnapshot(params.publicSnapshotStore, snapshot)) {
+      await params.onSnapshotReady?.(snapshot, 'cache');
       readySnapshots += 1;
       continue;
     }
@@ -468,6 +478,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       );
     }
     await params.publicSnapshotStore.putSnapshot({ digest: snapshot.digest, quads: snapshotQuads });
+    await params.onSnapshotReady?.(snapshot, 'network');
     completedPhases += 1;
     readySnapshots += 1;
   }

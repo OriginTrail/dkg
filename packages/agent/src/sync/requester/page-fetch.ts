@@ -244,6 +244,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
   let activePageSize = syncPageSize;
   let successfulPageSize = syncPageSize;
+  let consecutiveSuccessfulPages = 0;
   const syncSessionId = usesPageSession
     ? (savedResponderSession?.syncSessionId ?? createResponderSessionId(includeSharedMemory, phase))
     : undefined;
@@ -301,14 +302,14 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         onRetry: (attempt, delay, err) => {
           const priorPageSize = activePageSize;
           if (activePageSize > safePageSize) {
-            // A failed multi-thousand-row response should not spend two more
-            // attempts walking down through still-large pages. Drop directly
-            // to the proven frame-safe floor. Legacy-sized callers retain the
-            // historical halving behaviour used by mixed-version tests.
-            activePageSize = usesByteBudgetPagination
-              ? safePageSize
-              : Math.max(safePageSize, Math.floor(activePageSize / 2));
+            // Adapt to the actual path capacity instead of falling all the way
+            // from 8192 rows to the 64-row emergency floor. A lossy relay can
+            // often carry 1k-4k rows reliably; halving finds that stable point
+            // within the existing retry budget without turning the remainder
+            // of the phase into hundreds of tiny round trips.
+            activePageSize = Math.max(safePageSize, Math.floor(activePageSize / 2));
           }
+          consecutiveSuccessfulPages = 0;
           const pageSizeNote = activePageSize < priorPageSize
             ? `; reducing page size ${priorPageSize}->${activePageSize}`
             : '';
@@ -362,10 +363,19 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
       appendInPlace(allQuads, parsed.quads);
       offset += parsed.totalQuads;
-      // One conservative retry must not throttle the rest of a healthy phase.
-      // The next request returns to the byte-budget hint; if it fails again the
-      // same bounded fallback applies independently.
-      if (usesByteBudgetPagination) activePageSize = syncPageSize;
+      // Keep the size that actually crossed the path. Probe upward only after
+      // three consecutive successful pages, and at most double at a time.
+      // This avoids the old 8192 -> 64 -> 8192 oscillation where every useful
+      // page paid for a doomed large request and its timeout first.
+      if (usesByteBudgetPagination && activePageSize < syncPageSize) {
+        consecutiveSuccessfulPages += 1;
+        if (consecutiveSuccessfulPages >= 3) {
+          activePageSize = Math.min(syncPageSize, activePageSize * 2);
+          consecutiveSuccessfulPages = 0;
+        }
+      } else {
+        consecutiveSuccessfulPages = 0;
+      }
 
       if (debugSyncProgress) {
         logInfo(

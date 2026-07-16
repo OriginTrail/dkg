@@ -103,6 +103,53 @@ describe('byte-budget sync pagination', () => {
     expect(result.completed).toBe(true);
   });
 
+  it('keeps a successful fallback size sticky and probes upward gradually', async () => {
+    const requestedSizes: number[] = [];
+    let sends = 0;
+    const result = await fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: true,
+      phase: 'snapshot',
+      graphUri: '',
+      snapshotRef: 'snapshot-ref',
+      deadline: Date.now() + 15_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 2,
+      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: '/dkg/test/sync',
+      checkpointStore: new MemorySyncCheckpointStore(),
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 100 }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) throw new Error('relay stream reset');
+        return sends <= 4
+          ? new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .')
+          : new Uint8Array();
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    expect(requestedSizes).toEqual([
+      SYNC_REQUEST_PAGE_SIZE,
+      SYNC_REQUEST_PAGE_SIZE / 2,
+      SYNC_REQUEST_PAGE_SIZE / 2,
+      SYNC_REQUEST_PAGE_SIZE / 2,
+      SYNC_REQUEST_PAGE_SIZE,
+    ]);
+    expect(result.completed).toBe(true);
+  });
+
   it('serializes a UTF-8-correct prefix inside the response target', () => {
     const rows: SyncRow[] = Array.from({ length: 20 }, (_, i) => ({
       s: `urn:subject:${i}`,
