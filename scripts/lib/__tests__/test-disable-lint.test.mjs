@@ -100,6 +100,19 @@ test('analysis resolves exclusion constants declared in switch cases', () => {
   );
 });
 
+test('analysis does not fall through catch bindings to outer constants', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    'try {',
+    '  configure();',
+    '} catch (EXCLUSION) {',
+    '  const config = { test: { exclude: [EXCLUSION] } };',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
+});
+
 test('analysis recognizes custom Vitest configuration filenames', () => {
   const source = [
     "import { defineConfig } from 'vitest/config';",
