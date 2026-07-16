@@ -5,10 +5,49 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { analyzeD1Source } from '../../test-disable-lint.mjs';
+import { analyzeD1Source, analyzeD2Source } from '../../test-disable-lint.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const LINT_SCRIPT = path.join(REPO_ROOT, 'scripts/test-disable-lint.mjs');
+
+test('analysis reports only static test-targeting Vitest discovery exclusions', () => {
+  const source = [
+    "import { defineConfig } from 'vitest/config';",
+    "const TEST_FILE = '**/*.test.ts';",
+    "const SPEC_DIRECTORY = 'spec/**';",
+    "const DISTRIBUTION = '**/dist/**';",
+    '',
+    'export default defineConfig({',
+    '  test: {',
+    '    exclude: [',
+    "      'test/unit/slow.test.ts',",
+    "      '**/*.spec.ts',",
+    '      TEST_FILE,',
+    '      SPEC_DIRECTORY,',
+    "      '**/node_modules/**',",
+    '      DISTRIBUTION,',
+    "      'build/**',",
+    "      'coverage/**',",
+    '    ],',
+    "    coverage: { exclude: ['src/generated.test.ts'] },",
+    '  },',
+    '});',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ api, line, value }) => ({
+      api,
+      line,
+      value,
+    })),
+    [
+      { api: 'vitest.exclude', line: 9, value: 'test/unit/slow.test.ts' },
+      { api: 'vitest.exclude', line: 10, value: '**/*.spec.ts' },
+      { api: 'vitest.exclude', line: 11, value: '**/*.test.ts' },
+      { api: 'vitest.exclude', line: 12, value: 'spec/**' },
+    ],
+  );
+});
 
 test('analysis reports every conditional test suppression occurrence', () => {
   const source = [
