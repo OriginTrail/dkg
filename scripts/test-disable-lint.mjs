@@ -110,6 +110,17 @@ function lexicalBinding(scope, identifier) {
       };
     }
   }
+  if (ts.isForOfStatement(scope) && ts.isVariableDeclarationList(scope.initializer)) {
+    const declaration = scope.initializer.declarations.find(
+      ({ name }) => bindingNameIncludes(name, identifier),
+    );
+    if (declaration) {
+      return {
+        declaration,
+        isConst: Boolean(scope.initializer.flags & ts.NodeFlags.Const),
+      };
+    }
+  }
   if (ts.isCaseBlock(scope)) {
     for (const clause of scope.clauses) {
       for (const statement of clause.statements) {
@@ -146,7 +157,9 @@ function staticStringConstant(node) {
   for (let scope = node.parent; scope; scope = scope.parent) {
     const binding = lexicalBinding(scope, node.text);
     if (!binding) continue;
-    return binding.isConst && ts.isStringLiteralLike(binding.declaration.initializer)
+    return binding.isConst
+      && binding.declaration.initializer
+      && ts.isStringLiteralLike(binding.declaration.initializer)
       ? binding.declaration.initializer.text
       : undefined;
   }
