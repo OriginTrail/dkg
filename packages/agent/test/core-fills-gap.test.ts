@@ -43,8 +43,14 @@ import {
   contextGraphWorkspaceMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
-import type { ReplicationEvent, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
+import type {
+  ReplicationEvent,
+  ContextGraphSubscriptionRecord,
+  ContextGraphSubscriptionStore,
+  VmReconcileNegativeRecord,
+} from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
+import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -52,10 +58,21 @@ interface AgentInternals {
   recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
   reconcileChainOrdinal(localCgId: string, onChainCgId: bigint, ordinal: number, headBlock: number | undefined): Promise<{ status: string }>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
-  runVmReconcileForCg(localCgId: string): Promise<void>;
+  runVmReconcileForCg(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
+    status: string;
+    attempted: boolean;
+    headOrdinal: number;
+    watermarkBefore: number;
+    watermarkAfter: number;
+  }>;
   runVmReconcileSweep(): Promise<void>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
-  reconcileCoalescer: { trigger: (cg: string) => void } | null;
+  vmReconcileDispatcher: {
+    triggerLive: (cg: string) => void;
+    triggerPeriodic: (cg: string) => void;
+    tryTriggerPeriodic: (cg: string) => boolean;
+    dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
+  } | null;
   store: TripleStore;
   chain: MockChainAdapter & {
     getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
@@ -700,9 +717,13 @@ describe('Phase D - VM reconcile damping', () => {
     }
   });
 
-  async function boot(): Promise<AgentInternals> {
+  async function boot(contextGraphSubscriptionStore?: ContextGraphSubscriptionStore): Promise<AgentInternals> {
     const chain = new MockChainAdapter();
-    agent = await DKGAgent.create({ name: 'VmReconcileDamping', chainAdapter: chain });
+    agent = await DKGAgent.create({
+      name: 'VmReconcileDamping',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore,
+    });
     stubNode(agent);
     return agent as unknown as AgentInternals;
   }
@@ -743,6 +764,44 @@ describe('Phase D - VM reconcile damping', () => {
     await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBe(0);
+  });
+
+  it('rehydrates a generation-gated miss after restart without repeating the scan', async () => {
+    const durable = new Map<string, VmReconcileNegativeRecord>();
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
+      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
+      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
+      deleteVmReconcileNegativesForContextGraph: async (cg) => {
+        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
+      },
+    };
+    const onChainCgId = 52n;
+    let internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
+    (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
+    await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
+    expect(durable.size).toBe(1);
+
+    await agent!.stop();
+    agent = null;
+    internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+    await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
+    expect(expensiveScans).toBe(0);
+    expect(fetch.calls).toHaveLength(0);
   });
 
   it('does not reuse a negative cache entry after catchup peer topology changes', async () => {
@@ -946,7 +1005,7 @@ describe('Phase D - VM reconcile damping', () => {
     );
 
     await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertWorkspaceDataTriple(internals.store, '48', entity, value);
 
@@ -1013,7 +1072,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '52', entity, staleValue);
 
     await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await replaceWorkspaceDataTriple(internals.store, '52', entity, freshValue);
 
@@ -1047,7 +1106,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '49', entity, value);
 
     await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
 
@@ -1283,7 +1342,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
-  it('does not negative-cache misses once candidate SWM operation metadata exists', async () => {
+  it('negative-caches unchanged incomplete SWM operations and invalidates on namespace/content changes', async () => {
     const internals = await boot();
     const onChainCgId = 43n;
     registerUnmatchedKC(internals.chain, 9002n, onChainCgId);
@@ -1307,7 +1366,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
     expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertWorkspaceOperationMeta(
       internals.store,
@@ -1635,13 +1694,146 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     internals.subscribedContextGraphs.set('100', { subscribed: false, coreHosted: true, onChainId: '100' });
     internals.subscribedContextGraphs.set('200', { subscribed: false, onChainId: '200' }); // neither subscribed nor hosted
 
-    const triggered: string[] = [];
-    internals.reconcileCoalescer = { trigger: (cg: string) => { triggered.push(cg); } };
+    const liveTriggered: string[] = [];
+    const periodicTriggered: string[] = [];
+    internals.vmReconcileDispatcher = {
+      triggerLive: (cg: string) => { liveTriggered.push(cg); },
+      triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
+      tryTriggerPeriodic: (cg: string) => {
+        periodicTriggered.push(cg);
+        return true;
+      },
+      dispatch: async (cg: string, source: 'live' | 'periodic' | 'manual') => {
+        if (source === 'periodic') periodicTriggered.push(cg);
+        else if (source === 'live') liveTriggered.push(cg);
+        return {};
+      },
+    };
 
     await internals.runVmReconcileSweep();
 
-    expect(triggered).toContain('100');     // hosted → swept
-    expect(triggered).not.toContain('200'); // neither → skipped
+    expect(periodicTriggered).toContain('100');     // hosted → swept
+    expect(periodicTriggered).not.toContain('200'); // neither → skipped
+    expect(liveTriggered).toEqual([]);
+  });
+
+  it('carries bounded periodic admission forward so every CG is eventually swept', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillSweepFairness', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    internals.subscribedContextGraphs.clear();
+
+    const contextGraphIds = Array.from({ length: 7 }, (_, index) => `fair-${index}`);
+    for (const [index, contextGraphId] of contextGraphIds.entries()) {
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        subscribed: false,
+        coreHosted: true,
+        onChainId: String(index + 1),
+      });
+    }
+
+    const swept: string[] = [];
+    const dispatcher = new VmReconcileDispatcher(
+      async (contextGraphId) => { swept.push(contextGraphId); },
+      () => undefined,
+      { concurrency: 1, maxPending: 1 },
+    );
+    internals.vmReconcileDispatcher = dispatcher;
+
+    for (let sweep = 0; sweep < 4; sweep += 1) {
+      await internals.runVmReconcileSweep();
+      await dispatcher.waitForIdle();
+    }
+
+    expect(new Set(swept)).toEqual(new Set(contextGraphIds));
+  });
+
+  it('skips ordinal reconciliation when the durable watermark equals chain head', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillEvidenceGate', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const onChainCgId = 321n;
+    internals.subscribedContextGraphs.set('evidence-current', {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: onChainCgId.toString(),
+      lastReconciledOrdinal: 2,
+    });
+    chain.getContextGraphKCCount = async () => 2n;
+    const reconcileOrdinal = recorder(async () => {
+      throw new Error('must not reconcile an ordinal when evidence is current');
+    });
+    (internals as any).reconcileChainOrdinal = reconcileOrdinal;
+
+    const result = await internals.runVmReconcileForCg('evidence-current', 'manual');
+
+    expect(result).toMatchObject({
+      status: 'current',
+      attempted: false,
+      headOrdinal: 2,
+      watermarkBefore: 2,
+      watermarkAfter: 2,
+    });
+    expect(reconcileOrdinal.calls).toEqual([]);
+  });
+
+  it('reports a durable watermark ahead of the chain head without ordinal work', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkAhead', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    internals.subscribedContextGraphs.set('evidence-ahead', {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '323',
+      lastReconciledOrdinal: 5,
+    });
+    chain.getContextGraphKCCount = async () => 3n;
+    const reconcileOrdinal = recorder(async () => {
+      throw new Error('watermark-ahead evidence must not enter ordinal reconciliation');
+    });
+    (internals as any).reconcileChainOrdinal = reconcileOrdinal;
+
+    const result = await internals.runVmReconcileForCg('evidence-ahead', 'manual');
+
+    expect(result).toMatchObject({
+      status: 'watermark-ahead',
+      attempted: false,
+      headOrdinal: 3,
+      watermarkBefore: 5,
+      watermarkAfter: 5,
+    });
+    expect(reconcileOrdinal.calls).toEqual([]);
+  });
+
+  it('routes periodic, live, and manual work through the unified dispatcher', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillAdmissionPriority', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    internals.subscribedContextGraphs.set('priority-current', {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '322',
+      lastReconciledOrdinal: 0,
+    });
+    chain.getContextGraphKCCount = async () => 0n;
+
+    const sources: string[] = [];
+    (internals as any).vmReconcileDispatcher = {
+      dispatch: async (_key: string, source: string) => {
+        sources.push(source);
+        return {};
+      },
+    };
+
+    await internals.runVmReconcileForCg('priority-current', 'periodic');
+    await internals.runVmReconcileForCg('priority-current', 'live');
+    await internals.runVmReconcileForCg('priority-current', 'manual');
+
+    expect(sources).toEqual(['periodic', 'live', 'manual']);
   });
 
   it('a host-only reconcile promotes the missed KA to VM and emits core-fill', async () => {
@@ -1685,5 +1877,23 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(coreFill).toBeDefined();
     expect(coreFill?.reconciled).toBe(1);
     expect(coreFill?.contextGraphId).toBe(localCgId);
+  });
+
+  it('surfaces a production chain failure from runVmReconcileForCg to its scheduler', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillFailure', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const failure = new Error('store deadline exceeded');
+
+    internals.subscribedContextGraphs.set('500', {
+      subscribed: true,
+      onChainId: '500',
+    });
+    chain.getContextGraphKCCount = async () => {
+      throw failure;
+    };
+
+    await expect(internals.runVmReconcileForCg('500')).rejects.toBe(failure);
   });
 });

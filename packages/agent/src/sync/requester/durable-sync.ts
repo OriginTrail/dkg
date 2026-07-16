@@ -3,6 +3,8 @@ import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
+import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
+import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -21,11 +23,23 @@ export interface DurableSyncSummary {
   deniedPhases: number;
   emptyResponses: number;
   metaOnlyResponses: number;
+  verifiedPrivateOnlyResponses: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure: number;
+}
+
+/** Graph inventory from one clean, complete legacy full snapshot. */
+export interface VerifiedFullSnapshot {
+  contextGraphId: string;
+  verifiedDataGraphs: ReadonlySet<string>;
+  verifiedMetaGraphs: ReadonlySet<string>;
+  /** False only when this CG's metadata phase was intentionally disabled. */
+  metaFetched: boolean;
 }
 
 interface DurableSyncContext {
@@ -63,17 +77,28 @@ interface DurableSyncContext {
    */
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   stopOnBackoffWorthyFailure?: boolean;
-  processDurableBatchInWorker: (dataQuads: Quad[], metaQuads: Quad[], ctx: OperationContext, acceptUnverified: boolean) => Promise<{
+  processDurableBatchInWorker: (
+    dataQuads: Quad[],
+    metaQuads: Quad[],
+    ctx: OperationContext,
+    acceptUnverified: boolean,
+    mode: DurableBatchVerificationMode,
+  ) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
+    verifiedGraphScopedDataGraphs?: string[];
+    droppedSyncControlTriples?: number;
     totalFetchedDataQuads: number;
     totalFetchedMetaQuads: number;
     rejectedKcs: number;
     emptyResponses: number;
     metaOnlyResponses: number;
+    verifiedPrivateOnlyResponses: number;
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (quads: Quad[]) => Promise<void>;
+  /** Runs after verified snapshot writes and before phase checkpoints advance. */
+  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -95,6 +120,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
+    onVerifiedFullSnapshot,
     deleteCheckpoint,
     setCheckpoint,
     logInfo,
@@ -116,19 +142,36 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     deniedPhases: 0,
     emptyResponses: 0,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
     rejectedKcs: 0,
     failedPeers: 0,
     failedPhases: 0,
     backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
   };
 
-  const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean; countProgress?: boolean }) => {
+  const recordPhaseOutcome = (
+    result: SyncPageResult,
+    options: {
+      updateCheckpoint: boolean;
+      countProgress?: boolean;
+      emptyPhase?: boolean;
+    },
+  ) => {
     const countProgress = options.countProgress ?? true;
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
     if (options.updateCheckpoint && countProgress) {
-      if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+      if (
+        result.completed &&
+        !result.timedOut &&
+        (
+          options.emptyPhase === true ||
+          result.resumedFromOffset > 0 ||
+          result.nextOffset > result.resumedFromOffset
+        )
+      ) {
         summary.completedPhases += 1;
       }
       if (result.nextOffset > result.resumedFromOffset) {
@@ -191,15 +234,67 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         endPhase();
         break;
       }
-      const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
+      const sinceBatchId = sinceBatchIdFor?.(pid);
+      const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchId);
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
 
+      let effectiveDataResult = dataResult;
+      let dataForVerification = dataResult.quads;
+      let verificationMode: DurableBatchVerificationMode = sinceBatchId === undefined
+        ? { kind: 'fullSnapshot' }
+        : { kind: 'sinceBatchId', sinceBatchId };
+
+      // A rootless full snapshot is a deterministic concatenation of complete
+      // exact graphs. When the deadline cuts the final graph mid-page, verify
+      // and persist only the preceding complete graphs, then checkpoint their
+      // absolute row boundary. The partial graph is deliberately discarded and
+      // retried. This gives large V2 snapshots bounded memory and monotonic
+      // progress without weakening legacy/mixed-layout fail-closed behaviour.
+      if (
+        sinceBatchId === undefined
+        && !isSystemContextGraph
+        && (dataResult.timedOut || dataResult.resumedFromOffset > 0)
+      ) {
+        const bounded = planBoundedGraphScopedDurableBatch(
+          dataResult.quads,
+          metaResult.quads,
+          dataResult.resumedFromOffset,
+          dataResult.nextOffset,
+          dataResult.completed,
+        );
+        if (bounded) {
+          dataForVerification = bounded.dataQuads;
+          effectiveDataResult = {
+            ...dataResult,
+            quads: bounded.dataQuads,
+            nextOffset: bounded.safeNextOffset,
+          };
+          verificationMode = {
+            kind: 'changelogPage',
+            changedDataGraphs: bounded.changedDataGraphs,
+          };
+          logInfo(
+            ctx,
+            `Rootless durable progress for "${pid}": `
+              + `${bounded.completedGraphCount} complete graph(s), `
+              + `safe offset ${dataResult.resumedFromOffset}->${bounded.safeNextOffset} `
+              + `(raw ${dataResult.nextOffset})`,
+          );
+        }
+      }
+
       startPhase('verify');
       const verifyStartedAt = Date.now();
-      const processed = await processDurableBatchInWorker(dataResult.quads, metaResult.quads, ctx, isSystemContextGraph);
+      const processed = await processDurableBatchInWorker(
+        dataForVerification,
+        metaResult.quads,
+        ctx,
+        isSystemContextGraph,
+        verificationMode,
+      );
       endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
 
@@ -210,12 +305,64 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
       summary.emptyResponses += processed.emptyResponses;
       summary.metaOnlyResponses += processed.metaOnlyResponses;
+      summary.verifiedPrivateOnlyResponses += processed.verifiedPrivateOnlyResponses;
       summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
 
+      // A rejected KA means this page cannot be acknowledged safely. We may
+      // still persist independently verified KAs from the page, but keeping
+      // both cursors unchanged makes the next pass retry the rejected content
+      // instead of silently skipping it.
+      const batchVerifiedCleanly = processed.rejectedKcs === 0;
+      if (!batchVerifiedCleanly) {
+        logWarn(
+          ctx,
+          `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
+        );
+        summary.rejectedKcs += processed.rejectedKcs;
+      }
+
+      const notifyVerifiedFullSnapshot = async (): Promise<void> => {
+        if (
+          !onVerifiedFullSnapshot
+          || sinceBatchId !== undefined
+          || !batchVerifiedCleanly
+          || processed.dataRejectedMissingMeta !== 0
+          || !effectiveDataResult.completed
+          || effectiveDataResult.timedOut
+          || effectiveDataResult.resumedFromOffset !== 0
+          || (!skipAgentsMeta && (!metaResult.completed || metaResult.timedOut))
+          || (!skipAgentsMeta && metaResult.resumedFromOffset !== 0)
+        ) return;
+
+        const verifiedDataGraphs = new Set(processed.verifiedData.map((quad) => quad.graph));
+        for (const graph of processed.verifiedGraphScopedDataGraphs ?? []) {
+          verifiedDataGraphs.add(graph);
+        }
+        await onVerifiedFullSnapshot({
+          contextGraphId: pid,
+          verifiedDataGraphs,
+          verifiedMetaGraphs: new Set(processed.verifiedMeta.map((quad) => quad.graph)),
+          metaFetched: !skipAgentsMeta,
+        });
+      };
+
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
-      const updateMetaCheckpoint = processed.dataRejectedMissingMeta === 0
-        && (!metadataOnlyResponse || processed.verifiedMeta.length > 0);
-      const updateDataCheckpoint = processed.dataRejectedMissingMeta === 0 && !metadataOnlyResponse;
+      const droppedSyncControlTriples = processed.droppedSyncControlTriples ?? 0;
+      const discardedOnlyMetadataResponse = metadataOnlyResponse
+        && processed.verifiedData.length === 0
+        && processed.verifiedMeta.length === 0
+        && droppedSyncControlTriples > 0
+        && droppedSyncControlTriples === processed.totalFetchedMetaQuads;
+      const updateMetaCheckpoint = batchVerifiedCleanly
+        && processed.dataRejectedMissingMeta === 0
+        && (
+          !metadataOnlyResponse
+          || processed.verifiedMeta.length > 0
+          || discardedOnlyMetadataResponse
+        );
+      const updateDataCheckpoint = batchVerifiedCleanly
+        && processed.dataRejectedMissingMeta === 0
+        && !metadataOnlyResponse;
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -223,9 +370,22 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         processed.dataRejectedMissingMeta > 0 ||
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
-        recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-        recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
-        if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+        await notifyVerifiedFullSnapshot();
+        // The verifier reports an empty batch only when both fetched phase
+        // payloads are empty. Record each phase independently: a completed
+        // zero-offset phase is a real clean-empty response, while a sibling
+        // timeout remains incomplete.
+        const emptyPhase = processed.emptyResponses > 0;
+        recordPhaseOutcome(metaResult, {
+          updateCheckpoint: updateMetaCheckpoint,
+          countProgress: !metadataOnlyResponse,
+          emptyPhase,
+        });
+        recordPhaseOutcome(effectiveDataResult, {
+          updateCheckpoint: updateDataCheckpoint,
+          emptyPhase,
+        });
+        if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
         }
         continue;
@@ -243,10 +403,11 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
+      await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-      recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
+      recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
       endPhase();
-      if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+      if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
       const storeDurationMs = Date.now() - storeStartedAt;
@@ -258,10 +419,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         );
       }
 
-      if (processed.rejectedKcs > 0) {
-        logWarn(ctx, `Rejected ${processed.rejectedKcs} KCs with invalid merkle roots from ${remotePeerId}`);
-        summary.rejectedKcs += processed.rejectedKcs;
-      }
     } catch (pidErr) {
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);

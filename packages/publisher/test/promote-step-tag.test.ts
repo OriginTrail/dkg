@@ -78,8 +78,7 @@ describe('#1464 promote step tagging — assertionPromote integration', () => {
     const store = new OxigraphStore();
     const boom = new Error('SPARQL HTTP query failed (500): oxigraph worker unavailable');
     (boom as { code?: unknown }).code = 'OXIGRAPH_DOWN';
-    // The first pre-insert awaited op in assertionPromote is
-    // wmGraphUri → resolveKaNumber → store.query. Reject there.
+    // The graph-scoped lifecycle write gate is the first pre-insert store read.
     store.query = async () => {
       throw boom;
     };
@@ -97,10 +96,10 @@ describe('#1464 promote step tagging — assertionPromote integration', () => {
         'my-assertion',
         '0x1234567890abcdef1234567890abcdef12345678',
       ),
-    ).rejects.toThrow(/^\[promote:wmGraphUri\] SPARQL HTTP query failed \(500\)/);
+    ).rejects.toThrow(/^\[promote:assertGraphScopedLifecycleWritable\] SPARQL HTTP query failed \(500\)/);
 
     // Original error identity + classification code preserved for PR2.
-    expect(boom.message).toContain('[promote:wmGraphUri]');
+    expect(boom.message).toContain('[promote:assertGraphScopedLifecycleWritable]');
     expect((boom as { code?: unknown }).code).toBe('OXIGRAPH_DOWN');
   });
 });

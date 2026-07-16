@@ -1,5 +1,10 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  LegacyKnowledgeAssetReadOnlyError,
+  createGraphKnowledgeAssetScope,
+} from '@origintrail-official/dkg-core';
 import type { PhaseCallback, PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
@@ -19,9 +24,10 @@ import {
   type KnowledgeAssetVmPublishRequest,
   type LiftPublishRequestMetadata,
   type LiftPublishSnapshotRequest,
-  type RawLiftRequest,
 } from './lift-job.js';
 import type {
+  AsyncKnowledgeAssetVmPublishJobHandler,
+  AsyncKnowledgeAssetVmPublishRecoveryResolver,
   AsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
@@ -33,7 +39,7 @@ import {
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
 import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
-import { canonicalRootIri, validateLiftPublishPayload } from './async-lift-validation.js';
+import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
@@ -51,7 +57,6 @@ import {
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
-  createRawLiftJobRequest,
   createJobSlug,
   expectBindings,
   getRecoveryTxHash,
@@ -78,6 +83,72 @@ type AsyncLiftJobHandler = {
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
 };
 
+function assertGraphScopedLiftSnapshot(request: LiftPublishSnapshotRequest): void {
+  if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new LegacyKnowledgeAssetReadOnlyError();
+  }
+  if (request.roots.length !== 0) {
+    throw new Error('Graph-scoped async publish must not contain root entities');
+  }
+  if (request.entityProofs === true) {
+    throw new Error('Graph-scoped async publish does not support entityProofs');
+  }
+  if (
+    request.kaUal === undefined
+    || request.assertionVersion === undefined
+    || request.publicTripleCount === undefined
+    || request.privateTripleCount === undefined
+  ) {
+    throw new Error('Graph-scoped async publish requires a complete KA content envelope');
+  }
+  createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+  if (
+    !Number.isSafeInteger(request.publicTripleCount)
+    || request.publicTripleCount < 0
+    || !Number.isSafeInteger(request.privateTripleCount)
+    || request.privateTripleCount < 0
+    || (request.publicTripleCount === 0 && request.privateTripleCount === 0)
+  ) {
+    throw new Error('Graph-scoped async publish has invalid public/private triple counts');
+  }
+  if (
+    request.privateTripleCount > 0
+    && !/^0x[0-9a-f]{64}$/i.test(request.privateMerkleRoot ?? '')
+  ) {
+    throw new Error('Graph-scoped async publish with private content requires one 32-byte privateMerkleRoot');
+  }
+  if (request.privateTripleCount === 0 && request.privateMerkleRoot !== undefined) {
+    throw new Error('Graph-scoped async publish privateMerkleRoot requires private content');
+  }
+  const accessPolicy = request.accessPolicy
+    ?? (request.privateTripleCount > 0 ? 'ownerOnly' : 'public');
+  const allowedPeers = [...new Set(
+    (request.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+  )];
+  if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+    throw new Error('Graph-scoped async publish allowList policy requires allowedPeers');
+  }
+  if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
+    throw new Error('Graph-scoped async publish allowedPeers requires allowList policy');
+  }
+}
+
+function resolveKnowledgeAssetVmPublishHandler(
+  config: AsyncLiftPublisherConfig,
+): AsyncKnowledgeAssetVmPublishJobHandler | undefined {
+  if (config.knowledgeAssetVmPublishHandler) {
+    return config.knowledgeAssetVmPublishHandler;
+  }
+  if (!config.knowledgeAssetVmPublishExecutor) {
+    return undefined;
+  }
+  return {
+    execute: config.knowledgeAssetVmPublishExecutor,
+    preflight: config.knowledgeAssetVmPublishPreflight,
+    finalizeRecovered: config.knowledgeAssetVmPublishRecoveryFinalizer,
+  };
+}
+
 export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
@@ -95,9 +166,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly now: () => number;
   private readonly idGenerator: () => string;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
+  private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
-  private readonly knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
-  private readonly knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
@@ -144,33 +215,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
+    this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
-    this.knowledgeAssetVmPublishExecutor = config.knowledgeAssetVmPublishExecutor;
-    this.knowledgeAssetVmPublishPreflight = config.knowledgeAssetVmPublishPreflight;
+    this.knowledgeAssetVmPublishHandler = resolveKnowledgeAssetVmPublishHandler(config);
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
     this.graphManager = new GraphManager(store);
-  }
-
-  async lift(request: RawLiftRequest): Promise<string> {
-    await this.ensureGraph();
-
-    const now = this.now();
-    const jobId = this.idGenerator();
-    const jobRequest = createRawLiftJobRequest(request);
-    const job: LiftJobAccepted = {
-      jobId,
-      jobSlug: createJobSlug(jobRequest),
-      request: jobRequest,
-      status: 'accepted',
-      timestamps: { acceptedAt: now, updatedAt: now },
-      retries: { retryCount: 0, maxRetries: this.maxRetries },
-      controlPlane: { jobRef: jobSubject(jobId) },
-    };
-
-    await this.writeJob(job);
-    await this.stampCanonicalAnchorsInWorkspace(request);
-    return jobId;
   }
 
   async enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string> {
@@ -179,9 +229,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if (!request.shareOperationId.trim()) {
         throw new Error('Knowledge asset VM publish requires a shareOperationId');
       }
-      if (request.roots.length === 0) {
-        throw new Error('Knowledge asset VM publish requires at least one shared root');
-      }
+      assertGraphScopedLiftSnapshot(request);
       const existing = await this.findActiveKnowledgeAssetVmPublishJob(request);
       if (existing?.compatible) {
         if (isFailedJob(existing.job)) {
@@ -213,42 +261,6 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     });
   }
 
-  // Adapt the lift's canonicalization to the SWM partition: for every
-  // request root that already has private staging from the share, insert
-  // a `<canonical> dkg:privateDataAnchor "true"` triple into
-  // `<cg>/_shared_memory`. The canonical IRI is the same one the
-  // validator will produce later (`dkg:<cg>:<ns>:<scope>/<name>-<hash>`)
-  // when it canonicalizes the chain payload, so EPCIS partition-aware
-  // queries can JOIN the public anchor in SWM with the canonical payload
-  // that lands in `<cg>/_private` after `processNext` completes. The
-  // source-IRI anchor stamped by `agent.publishAsync` stays in place for
-  // legacy joins; this is purely additive.
-  private async stampCanonicalAnchorsInWorkspace(request: RawLiftRequest): Promise<void> {
-    if (!request.roots || request.roots.length === 0) return;
-    const privateStore = new PrivateContentStore(this.store, this.graphManager);
-    const swmGraph = this.graphManager.sharedMemoryUri(request.contextGraphId, request.subGraphName);
-    const anchors: Quad[] = [];
-    for (const sourceRoot of request.roots) {
-      const staged = await privateStore.getPrivateTriplesForOperation(
-        request.contextGraphId,
-        request.shareOperationId,
-        sourceRoot,
-        request.subGraphName,
-      );
-      if (staged.length === 0) continue;
-      const canonical = canonicalRootIri(request, sourceRoot);
-      if (canonical === sourceRoot) continue;
-      anchors.push({
-        subject: canonical,
-        predicate: 'http://dkg.io/ontology/privateDataAnchor',
-        object: '"true"',
-        graph: swmGraph,
-      });
-    }
-    if (anchors.length > 0) {
-      await this.store.insert(anchors);
-    }
-  }
 
   async claimNext(walletId: string): Promise<LiftJob | null> {
     return this.withClaimLock(async () => {
@@ -433,8 +445,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   private async processKnowledgeAssetVmPublish(claimed: LiftJob, walletId: string): Promise<LiftJob> {
-    if (!this.knowledgeAssetVmPublishExecutor) {
-      throw new Error('Async knowledge asset VM publish requires a configured knowledgeAssetVmPublishExecutor');
+    if (!this.knowledgeAssetVmPublishHandler) {
+      throw new Error('Async knowledge asset VM publish requires a configured knowledgeAssetVmPublishHandler');
     }
     if (!isKnowledgeAssetVmPublishJobRequest(claimed.request)) {
       throw new Error(`LiftJob ${claimed.jobId} is not a knowledge asset VM publish job`);
@@ -446,7 +458,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     let executorReturned = false;
     try {
-      const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
+      const preflight = await this.knowledgeAssetVmPublishHandler.preflight?.(preflightInput);
       if (preflight?.action === 'noop') {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
@@ -485,7 +497,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     }
 
     try {
-      const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
+      const preflight = await this.knowledgeAssetVmPublishHandler.preflight?.(preflightInput);
       if (preflight?.action === 'noop') {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
@@ -509,7 +521,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           onPhase,
         },
       };
-      const publishResult = await this.knowledgeAssetVmPublishExecutor(executionInput);
+      const publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
       executorReturned = true;
       return await this.recordPublishResult(claimed.jobId, publishResult, {
         publicByteSize,
@@ -557,30 +569,60 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   private async recoverKnowledgeAssetVmPublishInterrupted(job: LiftJob): Promise<boolean> {
-    if (job.status === 'broadcast') {
-      const recoverable = job as LiftJobBroadcast;
-      if (this.chainRecoveryResolver) {
-        const resolved = await this.chainRecoveryResolver(recoverable);
-        if (resolved || this.hasInconclusiveRecoveryTimedOut(recoverable)) {
+    if (job.status !== 'broadcast' && job.status !== 'included') return false;
+
+    const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
+    if (this.knowledgeAssetVmPublishRecoveryResolver) {
+      const resolved = await this.knowledgeAssetVmPublishRecoveryResolver(recoverable);
+      if (resolved) {
+        if (
+          this.knowledgeAssetVmPublishHandler?.finalizeRecovered &&
+          isKnowledgeAssetVmPublishJobRequest(recoverable.request)
+        ) {
+          try {
+            await this.knowledgeAssetVmPublishHandler.finalizeRecovered({
+              walletId: recoverable.broadcast.walletId,
+              request: recoverable.request.knowledgeAssetVmPublish,
+              job: recoverable,
+              recovery: resolved,
+            });
+          } catch {
+            // Chain success is authoritative, but local lifecycle repair may be
+            // temporarily blocked (for example while SWM catch-up is still in
+            // progress). Keep the job tx-bearing and retry recovery later. It
+            // is never safe to reset this job and submit a second transaction.
+            //
+            // Holding the wallet lock here does not strand the wallet even if
+            // the repair never succeeds: the lock carries the claim lease taken
+            // at claim time (`claimLeaseExpiresAt`), `syncWalletLockForJob`
+            // re-writes that same fixed deadline rather than extending it, and
+            // `recover()` sweeps expired locks before it retries. The wallet is
+            // freed at the lease deadline; the job stays tx-bearing regardless.
+            return false;
+          }
+
           await this.releaseWalletLockForJob(job);
-          await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+          await this.writeJob(this.finalizeRecoveredJob(
+            recoverable,
+            resolved.inclusion,
+            resolved.finalization,
+          ));
           return true;
         }
-        return false;
+
+        // A chain resolver without the named-lifecycle finalizer cannot safely
+        // claim local recovery. Preserve the explicit terminal diagnosis rather
+        // than silently marking the queue job finalized.
+        await this.releaseWalletLockForJob(job);
+        await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+        return true;
       }
-      if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) {
-        return false;
-      }
-      await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
-      return true;
     }
-    if (job.status === 'included' && this.hasInconclusiveRecoveryTimedOut(job as LiftJobIncluded)) {
-      await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(job as LiftJobIncluded));
-      return true;
-    }
-    return false;
+
+    if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) return false;
+    await this.releaseWalletLockForJob(job);
+    await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+    return true;
   }
 
   private async findActiveKnowledgeAssetVmPublishJob(

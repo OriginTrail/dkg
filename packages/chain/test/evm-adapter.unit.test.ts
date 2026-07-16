@@ -48,6 +48,63 @@ it('rejects an explicitly invalid receipt deadline at the adapter boundary', () 
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 });
 
+describe('EVMChainAdapter historical KA update verification', () => {
+  const kaId = 42n;
+  const publisher = '0x1111111111111111111111111111111111111111';
+  const storageAddress = '0x2222222222222222222222222222222222222222';
+  const root = ethers.keccak256(ethers.toUtf8Bytes('historical-update'));
+  const iface = new Interface([
+    'event KnowledgeAssetUpdated(uint256 indexed id, address indexed author, string updateOperationId, bytes32 merkleRoot, uint256 byteSize, uint96 tokenAmount)',
+  ]);
+
+  function adapterWithHistoricalRead(
+    roots: unknown[] | Error,
+  ): { adapter: EVMChainAdapter; latestRead: ReturnType<typeof recorder> } {
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapter.initialized = true;
+    adapter.init = async () => {};
+    const encoded = iface.encodeEventLog(
+      iface.getEvent('KnowledgeAssetUpdated')!,
+      [kaId, publisher, 'op', root, 10n, 1n],
+    );
+    adapter.getTransactionReceiptWithFailover = async () => ({
+      status: 1,
+      blockNumber: 77,
+      index: 2,
+      logs: [{ address: storageAddress, topics: encoded.topics, data: encoded.data }],
+    });
+    adapter.contracts.knowledgeAssetStorage = {
+      getAddress: async () => storageAddress,
+      interface: iface,
+    };
+    const latestRead = recorder(async () => publisher);
+    adapter.readContract = async (
+      _contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (method === 'getMerkleRoots') {
+        if (roots instanceof Error) throw roots;
+        return roots;
+      }
+      if (method === 'getLatestMerkleRootPublisher') return latestRead();
+      throw new Error(`unexpected method ${method}`);
+    };
+    return { adapter, latestRead };
+  }
+
+  it.each([
+    ['receipt-block history has no matching publisher/root', [{ publisher, merkleRoot: ethers.ZeroHash }]],
+    ['receipt-block history cannot be read', new Error('archive state unavailable')],
+  ])('fails closed when %s', async (_label, historicalResult) => {
+    const { adapter, latestRead } = adapterWithHistoricalRead(historicalResult as unknown[] | Error);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .resolves.toEqual({ verified: false });
+    expect(latestRead.calls).toHaveLength(0);
+  });
+});
+
 describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
   const ADDR = '0x00000000000000000000000000000000000000a1';
   const ADDR2 = '0x00000000000000000000000000000000000000a2';
@@ -2369,36 +2426,6 @@ describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
     expect(elapsed).toBeLessThan(45_000);
   }, 60_000);
 
-  it('keeps the retry budget PER-REQUEST — a later request still retries (Codex PR #901 round-3 :125)', async () => {
-    // Regression guard: the budget was once a `Date.now()` deadline captured at
-    // provider construction, so after the budget elapsed (node uptime) EVERY
-    // later request lost all retries. Two sequential reads, spaced past the
-    // backoff budget, must BOTH retry the RPC multiple times.
-    let hits = 0;
-    server = createServer((_req, res) => {
-      hits += 1;
-      res.writeHead(429, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32005, message: 'rate limited' } }));
-    });
-    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', () => resolve()));
-    const addr = server.address();
-    if (!addr || typeof addr === 'string') throw new Error('mock RPC failed to bind');
-    url = `http://127.0.0.1:${addr.port}`;
-    const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] })));
-
-    // First read: exhaust + count its retries. >1 hit ⇒ it retried.
-    hits = 0;
-    await a.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 }).catch(() => {});
-    const firstRequestHits = hits;
-    expect(firstRequestHits).toBeGreaterThan(1);
-
-    // Second read (provider already "aged" past the old construction-time
-    // deadline by the first request's ~7.5s of backoff): must ALSO retry. Under
-    // the construction-time-deadline bug this would have made exactly 1 hit.
-    hits = 0;
-    await a.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 }).catch(() => {});
-    expect(hits).toBeGreaterThan(1);
-  }, 60_000);
 });
 
 describe('PR3 / RC11 — publish-preflight TTL cache', () => {

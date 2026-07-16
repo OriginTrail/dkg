@@ -1,8 +1,12 @@
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { DKGEvent, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import {
+  classifyDurableProgress,
+  type DKGAgent,
+  type DurableProgressSummary,
+} from '@origintrail-official/dkg-agent';
+import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -23,14 +27,34 @@ export interface CatchupJobResult {
   peersResponded: number;
   /**
    * Subset of `peersTried` whose per-peer sync round finished without a
-   * transport failure, without an explicit ACL denial, and with either real
+   * transport failure, timeout, or explicit ACL denial, and with either real
    * progress or a clean non-metadata-only empty completion.
    */
   peersSucceeded: number;
+  /** Context Graph phases deferred by this node's local sync scheduler. */
+  deferredBackpressure: number;
   dataSynced: number;
   sharedMemorySynced: number;
   denied: boolean;
   deniedPeers: number;
+  /**
+   * Per-plane evidence produced before peer results are aggregated. Aggregate
+   * diagnostics intentionally retain every timeout/denial for observability,
+   * but readiness must not let one bad peer mask another peer that completed
+   * the same plane cleanly and stored verified data.
+   */
+  cleanPlaneCompletions?: {
+    durable: {
+      verifiedDataPeers: number;
+      /** Peers that cleanly verified one or more V2 KAs with no public triples. */
+      verifiedPrivateOnlyPeers: number;
+      emptyPeers: number;
+    };
+    sharedMemory: {
+      verifiedDataPeers: number;
+      emptyPeers: number;
+    };
+  };
   diagnostics?: {
     noProtocolPeers: number;
     durable: {
@@ -45,10 +69,14 @@ export interface CatchupJobResult {
       checkpointAdvances: number;
       emptyResponses: number;
       metaOnlyResponses: number;
+      /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
+      verifiedPrivateOnlyResponses: number;
       dataRejectedMissingMeta: number;
       rejectedKcs: number;
       failedPeers: number;
       failedPhases: number;
+      deferredBackpressure: number;
+      deniedPhases?: number;
     };
     sharedMemory: {
       fetchedMetaTriples: number;
@@ -64,6 +92,8 @@ export interface CatchupJobResult {
       droppedDataTriples: number;
       failedPeers: number;
       failedPhases: number;
+      deferredBackpressure: number;
+      deniedPhases?: number;
     };
   };
 }
@@ -73,17 +103,15 @@ export interface CatchupRunRequest {
   includeSharedMemory: boolean;
 }
 
-export interface CatchupPhaseProgress {
-  timedOutPhases?: number;
-  resumedPhases?: number;
-  completedPhases?: number;
-  checkpointAdvances?: number;
-  failedPeers?: number;
-  failedPhases?: number;
-  insertedTriples?: number;
-  insertedDataTriples?: number;
-  insertedMetaTriples?: number;
-  metaOnlyResponses?: number;
+export interface CatchupPhaseProgress extends DurableProgressSummary {
+  bytesReceived?: number;
+  emptyResponses?: number;
+}
+
+export function catchupPlaneCompletedWithoutFailure(
+  progress: CatchupPhaseProgress | null | undefined,
+): boolean {
+  return classifyDurableProgress(progress).completedWithoutFailure;
 }
 
 export function catchupPeerSucceeded(
@@ -91,36 +119,43 @@ export function catchupPeerSucceeded(
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
 ): boolean {
-  if (!catchupPeerResponded(durable, shared) || peerDenied) return false;
-  const peerTransportFailed = (durable.failedPeers ?? 0) > 0 || (shared ? (shared.failedPeers ?? 0) > 0 : false);
+  const durableProgress = classifyDurableProgress(durable);
+  const sharedProgress = shared ? classifyDurableProgress(shared) : null;
+  if (
+    !catchupPeerResponded(durable, shared)
+    || peerDenied
+    || durableProgress.denied
+    || Boolean(sharedProgress?.denied)
+  ) return false;
+  if (durableProgress.deferredByBackpressure || sharedProgress?.deferredByBackpressure) return false;
+  const peerTransportFailed = durableProgress.transportFailed || Boolean(sharedProgress?.transportFailed);
   if (peerTransportFailed) return false;
-  const peerPhaseFailed = (durable.failedPhases ?? 0) > 0 || (shared ? (shared.failedPhases ?? 0) > 0 : false);
+  const peerPhaseFailed = durableProgress.phaseFailed || Boolean(sharedProgress?.phaseFailed);
   if (peerPhaseFailed) return false;
-  const durableProgress = (durable.insertedDataTriples ?? durable.insertedTriples ?? 0) > 0
-    || (durable.checkpointAdvances ?? 0) > 0
-    || ((durable.completedPhases ?? 0) > 0 && (durable.resumedPhases ?? 0) > 0);
-  const sharedProgress = shared
-    ? (shared.insertedDataTriples ?? shared.insertedTriples ?? 0) > 0
-      || (shared.checkpointAdvances ?? 0) > 0
-      || ((shared.completedPhases ?? 0) > 0 && (shared.resumedPhases ?? 0) > 0)
-    : false;
-  const peerMadeProgress = durableProgress || sharedProgress;
-  const peerMetadataOnly = !peerMadeProgress && (
-    (durable.insertedMetaTriples ?? 0) > 0
-    || (durable.metaOnlyResponses ?? 0) > 0
-    || (shared ? (shared.insertedMetaTriples ?? 0) > 0 : false)
-  );
-  const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);
-  return peerMadeProgress || (!peerTimedOut && !peerMetadataOnly);
+  if (durableProgress.integrityRejected || sharedProgress?.integrityRejected) return false;
+  const peerMadeProgress = durableProgress.madeReadinessProgress
+    || Boolean(sharedProgress?.madeReadinessProgress);
+  const peerMetadataOnly = !peerMadeProgress
+    && (durableProgress.hasMetadataEvidence || Boolean(sharedProgress?.hasMetadataEvidence));
+  const peerTimedOut = durableProgress.timedOut || Boolean(sharedProgress?.timedOut);
+  return !peerTimedOut && (peerMadeProgress || !peerMetadataOnly);
 }
 
 export function catchupPeerResponded(
   durable: CatchupPhaseProgress,
   shared: CatchupPhaseProgress | null | undefined,
 ): boolean {
-  const durableFailed = (durable.failedPeers ?? 0) > 0;
-  const sharedFailed = shared ? (shared.failedPeers ?? 0) > 0 : false;
-  return shared ? !durableFailed || !sharedFailed : !durableFailed;
+  const phaseResponded = (phase: CatchupPhaseProgress): boolean => {
+    const progress = classifyDurableProgress(phase);
+    if (progress.transportFailed) return false;
+    if (!progress.deferredByBackpressure) return true;
+    return (phase.bytesReceived ?? 0) > 0
+      || (phase.completedPhases ?? 0) > 0
+      || (phase.emptyResponses ?? 0) > 0
+      || (phase.insertedMetaTriples ?? 0) > 0
+      || (phase.insertedDataTriples ?? phase.insertedTriples ?? 0) > 0;
+  };
+  return phaseResponded(durable) || Boolean(shared && phaseResponded(shared));
 }
 
 export interface CatchupRunner {
@@ -263,19 +298,12 @@ class WorkerCatchupRunner implements CatchupRunner {
         return agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId]);
       }
       case 'finalizeCatchup': {
-        const [contextGraphId, dataSynced, sharedMemorySynced] = args as [string, number, number];
+        const [contextGraphId] = args as [string, number, number];
         await agent.refreshMetaSyncedFlags([contextGraphId]);
-        if (dataSynced > 0 || sharedMemorySynced > 0) {
-          agent.markContextGraphSubscriptionState?.(contextGraphId, {
-            synced: true,
-            ...(sharedMemorySynced > 0 ? { sharedMemorySynced: true } : {}),
-          });
-          agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
-            contextGraphId,
-            dataSynced,
-            sharedMemorySynced,
-          });
-        }
+        // Readiness is classified by the daemon route after the worker returns
+        // its complete per-plane diagnostics. Insert counts alone can describe
+        // an early page followed by a timeout; marking here would persist a
+        // false-ready window before the route can reject that partial result.
         return null;
       }
       default:

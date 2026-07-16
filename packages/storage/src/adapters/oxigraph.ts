@@ -19,6 +19,11 @@ import {
 } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
+import {
+  buildAtomicGraphReplaceUpdate,
+  isAtomicGraphReplaceStagingGraph,
+} from '../atomic-graph-replace.js';
+import { quadsToNQuads } from '../bounded-rdf.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
@@ -224,7 +229,7 @@ export class OxigraphStore implements TripleStore {
         label: 'OxigraphStore.insert',
       });
     }
-    const nquads = quads.map(quadToNQuad).join('\n') + '\n';
+    const nquads = `${quadsToNQuads(quads)}\n`;
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
     this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
@@ -319,6 +324,35 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordGraphWrites([graphUri]);
   }
 
+  async replaceGraph(graphUri: string, quads: DKGQuad[]): Promise<void> {
+    const guarded = quads.filter(
+      (q) => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)),
+    );
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.replaceGraph',
+      });
+    }
+    const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    try {
+      this.store.update(plan.update);
+    } catch (error) {
+      if (plan.cleanup) {
+        try {
+          this.store.update(plan.cleanup);
+        } catch {
+          // Keep the replacement error. Internal staging graphs are hidden
+          // from enumeration and can be reaped independently.
+        }
+        this.scheduleFlush();
+      }
+      throw error;
+    }
+    this.scheduleFlush();
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
+
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
     // Index-read enumeration shared with SparqlHttpStore — see the rationale on
@@ -333,7 +367,7 @@ export class OxigraphStore implements TripleStore {
         const g = row.get('g');
         return g ? g.value : '';
       })
-      .filter(Boolean);
+      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
   }
 
   async deleteBySubjectPrefix(
@@ -436,27 +470,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-}
-
-function quadToNQuad(q: DKGQuad): string {
-  const s = formatTerm(q.subject);
-  const p = `<${q.predicate}>`;
-  const o = formatTerm(q.object);
-  const g = q.graph ? ` <${q.graph}>` : '';
-  return `${s} ${p} ${o}${g} .`;
-}
-
-function formatTerm(term: string): string {
-  if (term.startsWith('"')) {
-    // Wrap bare datatype IRIs in angle brackets: "val"^^http://... → "val"^^<http://...>
-    // Anchored to closing quote to avoid matching ^^ inside string content.
-    const m = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-    if (m) return `${m[1]}^^<${m[2]}>`;
-    return term;
-  }
-  if (term.startsWith('_:')) return term;
-  if (term.startsWith('<')) return term;
-  return `<${term}>`;
 }
 
 function parseTerm(term: string): oxigraph.NamedNode | oxigraph.Literal | oxigraph.BlankNode {

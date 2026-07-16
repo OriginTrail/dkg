@@ -37,8 +37,8 @@ export interface SubGraphBinding {
   timelinePredicate?: string;
   /**
    * Name of the WM assertion this sub-graph's importer writes into.
-   * Needed by the verify-on-DKG flow to promote a single entity WM -> SWM
-   * (the promote API takes an assertion name, not just a URI).
+   * Needed by the verify-on-DKG flow to share the entity's complete owning
+   * Knowledge Asset from WM to SWM (the API is keyed by assertion name).
    */
   sourceAssertion?: string;
 }

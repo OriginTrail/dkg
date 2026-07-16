@@ -10,6 +10,8 @@ import {
   type ProtocolOutboxMetadata,
   type ProtocolOutboxMetadataCapability,
   type ProtocolOutboxStore,
+  type ContextGraphJoinPolicyRecord,
+  parseContextGraphJoinPolicyRecord,
 } from '@origintrail-official/dkg-core';
 
 export {
@@ -17,19 +19,23 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 24;
+const SCHEMA_VERSION = 29;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
 // hash mismatch on boot). 90 days had been chosen for "metrics history",
 // but logs were the dominant grower (~1M rows/12d) and pruning was a no-op
-// on any DB younger than 90 days. 14 days is still long enough for any
-// realistic operator-driven post-mortem while bounding worst-case growth
-// of the (now FTS5-less) logs table to ~150 MB. Operators who want longer
+// on any DB younger than 90 days. 14 days is still long enough for a useful
+// operator-driven post-mortem, but the mainnet sync storm proved that time
+// retention alone cannot bound worst-case growth. Operators who want longer
 // retention can override via `setRetentionDays()`; the setting is persisted
-// in the `settings` table and re-read on next boot.
+// in the `settings` table and re-read on next boot. Time alone is not a hard
+// size bound during a log storm, so routine info/debug rows also have a count
+// ceiling. Warning/error rows keep the full operator-selected time window.
 const DEFAULT_RETENTION_DAYS = 14;
 const LEGACY_IMPLICIT_RETENTION_DAYS = 90;
+const DEFAULT_ROUTINE_LOG_ROW_CAP = 1_000_000;
+const DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS = 25_000;
 const LOGS_VACUUM_DELETE_THRESHOLD = 10_000;
 // SQLite reports reusable-but-not-yet-reclaimed pages via freelist_count.
 // With the default 4 KiB page size this is roughly 4 MiB, large enough
@@ -108,6 +114,86 @@ export interface DashboardDBOptions {
    * `DKG_DASHBOARD_CACHE_TTL_MS` env var, then a 2000ms default.
    */
   cacheTtlMs?: number;
+  /** Maximum retained info/debug/unknown log rows. Warning/error rows are time-bound only. */
+  routineLogRowCap?: number;
+  /** Maximum oldest routine rows removed by one bounded catch-up tick. */
+  logVolumePruneBatchRows?: number;
+}
+
+export interface LogVolumePruneResult {
+  deleted: number;
+  status: 'more' | 'reclaim-pending' | 'done' | 'done-compacted';
+}
+
+export type StoredContextGraphJoinPolicy = ContextGraphJoinPolicyRecord;
+
+export interface ContextGraphJoinPolicyAuditInput {
+  timestamp: number;
+  contextGraphId: string;
+  eventType: string;
+  actor?: string;
+  agentAddress?: string;
+  outcome: string;
+  reason?: string;
+  requestDigest?: string;
+  policyVersion?: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ContextGraphJoinPolicyRateReservationInput {
+  contextGraphId: string;
+  timestamp: number;
+  contextGraphLimit: number;
+  nodeLimit: number;
+  actor: string;
+  agentAddress: string;
+  requestDigest: string;
+  policyVersion: number;
+  policyEpoch: number;
+}
+
+export interface ContextGraphJoinPolicyRateReservationResult {
+  allowed: boolean;
+  contextGraphApprovalsLastHour: number;
+  nodeApprovalsLastHour: number;
+  reason?: 'context-graph-rate-limit' | 'node-rate-limit';
+}
+
+export interface ContextGraphAutomaticApprovalCommitInput {
+  contextGraphId: string;
+  timestamp: number;
+  actor: string;
+  agentAddress: string;
+  requestDigest: string;
+  policyEpoch: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ContextGraphAutomaticApprovalRepairInput {
+  contextGraphId: string;
+  requestDigest: string;
+  policyEpoch: number;
+}
+
+export interface ContextGraphAutomaticApprovalRepairRecord {
+  policyEpoch: number;
+  actor: string;
+  agentAddress: string;
+}
+
+type ContextGraphAutomaticApprovalLedgerState = 'reserved' | 'committed';
+
+interface ContextGraphAutomaticApprovalLedgerRow {
+  context_graph_id: string;
+  request_digest: string;
+  policy_epoch: number;
+  reserved_at: number;
+  state: ContextGraphAutomaticApprovalLedgerState;
+  committed_at: number | null;
+  actor: string;
+  agent_address: string;
+  policy_version: number;
+  repair_pending: number;
 }
 
 /**
@@ -137,11 +223,21 @@ export class DashboardDB {
   readonly dataDir: string;
   private retentionDays: number;
   private readonly explicitRetentionDays: boolean;
+  private readonly routineLogRowCap: number;
+  private readonly logVolumePruneBatchRows: number;
 
   constructor(opts: DashboardDBOptions) {
     this.dataDir = opts.dataDir;
     this.explicitRetentionDays = opts.retentionDays !== undefined;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
+    this.routineLogRowCap = Math.max(
+      0,
+      Math.floor(opts.routineLogRowCap ?? DEFAULT_ROUTINE_LOG_ROW_CAP),
+    );
+    this.logVolumePruneBatchRows = Math.max(
+      1,
+      Math.floor(opts.logVolumePruneBatchRows ?? DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS),
+    );
     this._memoTtlMs = resolveCacheTtlMs(opts.cacheTtlMs);
     const dbPath = join(opts.dataDir, 'node-ui.db');
     this.db = new Database(dbPath);
@@ -170,7 +266,49 @@ export class DashboardDB {
   private migrate(): void {
     const version = this.db.pragma('user_version', { simple: true }) as number;
     const upgradedExistingDb = version > 0 && version < SCHEMA_VERSION;
-    if (version >= SCHEMA_VERSION) return;
+    const ensureJoinPolicyAuditCapTrigger = () => this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS cap_cg_join_policy_audit_rows
+      AFTER INSERT ON context_graph_join_policy_audit
+      BEGIN
+        DELETE FROM context_graph_join_policy_audit
+        WHERE id <= NEW.id - 100000
+          AND event_type NOT IN (
+            'join_admission_committed',
+            'join_policy_changed'
+          );
+      END;
+    `);
+    const ensureJoinApprovalRepairMarker = () => {
+      const table = this.db.prepare(`
+        SELECT 1 AS found FROM sqlite_master
+        WHERE type = 'table' AND name = 'context_graph_join_approval_ledger'
+      `).get() as { found: number } | undefined;
+      if (!table) return;
+      const columns = this.db.pragma(
+        'table_info(context_graph_join_approval_ledger)',
+      ) as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'repair_pending')) {
+        this.db.exec(`
+          ALTER TABLE context_graph_join_approval_ledger
+          ADD COLUMN repair_pending INTEGER NOT NULL DEFAULT 0
+            CHECK (repair_pending IN (0, 1));
+        `);
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_repair
+          ON context_graph_join_approval_ledger(
+            context_graph_id, request_digest, repair_pending, reserved_at DESC
+          );
+      `);
+    };
+    if (version > SCHEMA_VERSION) return;
+    if (version === SCHEMA_VERSION) {
+      // Repair restored/development databases that carry the current version
+      // but lost an idempotent schema adjunct.
+      ensureJoinApprovalRepairMarker();
+      ensureJoinPolicyAuditCapTrigger();
+      return;
+    }
 
     if (version < 1) {
       this.db.exec(`
@@ -848,6 +986,191 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 25) {
+      // Durable security audit for private-CG open enrollment. V25/V26 also
+      // used this table as admission state; V27 projects those legacy rows into
+      // the typed operational ledger below.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_join_policy_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          context_graph_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          actor TEXT,
+          agent_address TEXT,
+          outcome TEXT NOT NULL,
+          reason TEXT,
+          request_digest TEXT,
+          policy_version INTEGER,
+          details TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_ts
+          ON context_graph_join_policy_audit(ts);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_cg_ts
+          ON context_graph_join_policy_audit(context_graph_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_event_ts
+          ON context_graph_join_policy_audit(event_type, ts);
+      `);
+    }
+
+    if (version < 26) {
+      // Bound flood-generated decision noise without letting that same flood
+      // erase the two records needed to reconstruct a private-CG admission:
+      // who changed the policy, and who was automatically admitted under it.
+      // V26 additionally retained live reservations because they still enforced
+      // the rolling one-hour ceilings. V27 removes that dependency below.
+      //
+      // V25 already installed this trigger, so DROP before CREATE is required:
+      // CREATE TRIGGER IF NOT EXISTS would silently preserve the old predicate
+      // on an upgraded database.
+      this.db.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
+    }
+
+    if (version < 27) {
+      // Operational admission state is deliberately separate from the audit
+      // stream. Audit retention and event naming must never alter rate-limit,
+      // epoch, or commit-idempotency behaviour.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_join_approval_ledger (
+          context_graph_id TEXT NOT NULL,
+          request_digest TEXT NOT NULL,
+          policy_epoch INTEGER NOT NULL,
+          reserved_at INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('reserved', 'committed')),
+          committed_at INTEGER,
+          actor TEXT NOT NULL,
+          agent_address TEXT NOT NULL,
+          policy_version INTEGER NOT NULL,
+          PRIMARY KEY (context_graph_id, request_digest, policy_epoch),
+          CHECK (length(context_graph_id) > 0),
+          CHECK (length(request_digest) > 0),
+          CHECK (typeof(policy_epoch) = 'integer'),
+          CHECK (typeof(reserved_at) = 'integer'),
+          CHECK (committed_at IS NULL OR typeof(committed_at) = 'integer'),
+          CHECK (typeof(policy_version) = 'integer'),
+          CHECK (
+            (state = 'reserved' AND committed_at IS NULL)
+            OR (state = 'committed' AND committed_at IS NOT NULL)
+          )
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_reserved_at
+          ON context_graph_join_approval_ledger(reserved_at);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_cg_reserved_at
+          ON context_graph_join_approval_ledger(context_graph_id, reserved_at);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_digest_reserved_at
+          ON context_graph_join_approval_ledger(context_graph_id, request_digest, reserved_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_committed_at
+          ON context_graph_join_approval_ledger(committed_at);
+      `);
+
+      // Best-effort one-time projection for V25/V26 databases. Invalid legacy
+      // JSON cannot abort startup; only rows with a typed numeric epoch can be
+      // authoritative operational state. For duplicate audit reservations,
+      // retain the newest row for each (CG, digest, epoch).
+      this.db.exec(`
+        WITH raw_reservations AS (
+          SELECT
+            id,
+            context_graph_id,
+            request_digest,
+            CASE
+              WHEN json_valid(details)
+                AND json_type(details, '$.policyEpoch') IN ('integer', 'real')
+                THEN CAST(json_extract(details, '$.policyEpoch') AS INTEGER)
+              ELSE NULL
+            END AS policy_epoch,
+            ts AS reserved_at,
+            COALESCE(actor, '') AS actor,
+            COALESCE(agent_address, '') AS agent_address,
+            COALESCE(policy_version, 1) AS policy_version
+          FROM context_graph_join_policy_audit
+          WHERE event_type = 'join_auto_reservation'
+            AND outcome = 'reserved'
+            AND request_digest IS NOT NULL
+        ),
+        ranked_reservations AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY context_graph_id, request_digest, policy_epoch
+            ORDER BY reserved_at DESC, id DESC
+          ) AS rank
+          FROM raw_reservations
+          WHERE policy_epoch IS NOT NULL
+        ),
+        raw_commits AS (
+          SELECT
+            context_graph_id,
+            request_digest,
+            CASE
+              WHEN json_valid(details)
+                AND json_type(details, '$.policyEpoch') IN ('integer', 'real')
+                THEN CAST(json_extract(details, '$.policyEpoch') AS INTEGER)
+              ELSE NULL
+            END AS policy_epoch,
+            MIN(ts) AS committed_at
+          FROM context_graph_join_policy_audit
+          WHERE event_type = 'join_admission_committed'
+            AND outcome = 'approved'
+            AND request_digest IS NOT NULL
+          GROUP BY context_graph_id, request_digest, policy_epoch
+        )
+        INSERT OR IGNORE INTO context_graph_join_approval_ledger (
+          context_graph_id, request_digest, policy_epoch, reserved_at,
+          state, committed_at, actor, agent_address, policy_version
+        )
+        SELECT
+          reservation.context_graph_id,
+          reservation.request_digest,
+          reservation.policy_epoch,
+          reservation.reserved_at,
+          CASE WHEN commit_row.committed_at IS NULL THEN 'reserved' ELSE 'committed' END,
+          commit_row.committed_at,
+          reservation.actor,
+          reservation.agent_address,
+          reservation.policy_version
+        FROM ranked_reservations AS reservation
+        LEFT JOIN raw_commits AS commit_row
+          ON commit_row.context_graph_id = reservation.context_graph_id
+         AND commit_row.request_digest = reservation.request_digest
+         AND commit_row.policy_epoch = reservation.policy_epoch
+        WHERE reservation.rank = 1;
+      `);
+
+      // V26's trigger protected live reservation audit rows because they were
+      // operational state. The ledger makes that coupling obsolete, so replace
+      // the trigger while preserving the flood-resistant proof exemptions.
+      this.db.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
+    }
+
+    if (version < 28) {
+      // A reservation alone does not prove that admission crossed its
+      // membership boundary. Persist that distinction so an exact retry can
+      // finish moderation/audit after delegation expiry or daemon restart.
+      ensureJoinApprovalRepairMarker();
+    }
+
+    // Keep this repair outside the version gate. Restored/development DBs can
+    // carry the current user_version while missing a trigger; recreating it is
+    // idempotent and keeps the audit bound fail-closed on every open.
+    ensureJoinPolicyAuditCapTrigger();
+
+    if (version < 29) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS vm_reconcile_negative_cache (
+          cache_key TEXT PRIMARY KEY,
+          context_graph_id TEXT NOT NULL,
+          failures INTEGER NOT NULL,
+          next_retry_at INTEGER NOT NULL,
+          swm_gen TEXT NOT NULL,
+          candidate_namespaces TEXT NOT NULL,
+          peer_topology_key TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_cg
+          ON vm_reconcile_negative_cache(context_graph_id);
+        CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_retry
+          ON vm_reconcile_negative_cache(next_retry_at);
+      `);
+    }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -884,7 +1207,21 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM chat_persistence_jobs WHERE updated_at < ${cutoff} AND status IN ('stored', 'failed')`);
     this.db.exec(`DELETE FROM notifications WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM replication_events WHERE ts < ${cutoff}`);
+    this.db.exec(`DELETE FROM context_graph_join_policy_audit WHERE ts < ${cutoff}`);
+    // The admission ledger has its own typed lifetime. It intentionally does
+    // not depend on whether the corresponding audit rows still exist. Preserve
+    // the historical retention envelope for durable commit idempotency while
+    // allowing fully expired reservation/commit state to age out.
+    this.db.prepare(`
+      DELETE FROM context_graph_join_approval_ledger
+      WHERE reserved_at < ?
+        AND (committed_at IS NULL OR committed_at < ?)
+    `).run(cutoff, cutoff);
     this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(Date.now());
+    // Reconcile negatives are accelerators, never historical records. Once the
+    // retry window elapses they must not survive indefinitely or accumulate one
+    // row per previously-seen KA across restarts.
+    this.db.prepare(`DELETE FROM vm_reconcile_negative_cache WHERE next_retry_at < ?`).run(Date.now());
     // Universal Messenger idempotency table. Shorter TTL than the
     // operator retention: no realistic dedup window extends beyond
     // a day. The protocol_outbox table is intentionally not pruned
@@ -893,19 +1230,12 @@ export class DashboardDB {
     const messengerCutoff = Date.now() - 24 * 60 * 60 * 1000;
     this.db.exec(`DELETE FROM message_idempotency WHERE ts < ${messengerCutoff}`);
 
-    // Reclaim free pages from the file. Without this, the SQLite file
-    // size only ever grows — DELETE / DROP just marks pages reusable,
-    // it does not return them to the OS. Vacuum when prune removed a
-    // meaningful number of log rows, or when a previous migration/drop
-    // left a large freelist behind without deleting any retained logs.
-    const freePages = Number(this.db.pragma('freelist_count', { simple: true }) ?? 0);
-    if (logsDeleted > LOGS_VACUUM_DELETE_THRESHOLD || freePages > VACUUM_FREE_PAGE_THRESHOLD) {
-      try {
-        this.db.exec(`VACUUM`);
-      } catch {
-        // VACUUM requires an exclusive lock. If another connection is
-        // holding the DB open we skip and retry on the next prune.
-      }
+    // Avoid rebuilding an oversized DB at startup while millions of routine
+    // rows are still live. The daemon trims that backlog in bounded batches;
+    // the final batch performs one compacting VACUUM. Databases already under
+    // the cap retain the established time-prune reclamation behaviour.
+    if (!this.hasRoutineLogOverflow()) {
+      this.reclaimFreePagesIfNeeded(logsDeleted > LOGS_VACUUM_DELETE_THRESHOLD);
     }
 
     // Return the WAL file itself to the OS. journal_size_limit bounds it
@@ -914,6 +1244,103 @@ export class DashboardDB {
     // which rewrites the whole DB through the WAL and momentarily grows
     // it. Runs unconditionally — independent of the VACUUM gate — because
     // an idle node still wants its -wal reclaimed.
+    this.truncateWal('prune');
+  }
+
+  /**
+   * Remove one bounded batch of the oldest routine (non-warning/error) logs.
+   * A count cap complements time retention: a high-rate sync storm can create
+   * millions of rows inside a single day, long before a 14-day cutoff applies.
+   *
+   * Deletion is deliberately incremental so an upgrade does not block node
+   * startup on a multi-GB transaction. Once the backlog reaches the cap, one
+   * VACUUM returns the accumulated free pages to the OS and the file shrinks.
+   */
+  pruneLogVolumeBatch(): LogVolumePruneResult {
+    const overflowCutoff = this.routineLogOverflowCutoff();
+    if (overflowCutoff === null) {
+      const reclaim = this.reclaimFreePagesIfNeeded(false);
+      if (!reclaim.reclaimPending) this.truncateWal('log-volume prune');
+      return {
+        deleted: 0,
+        status: reclaim.reclaimPending
+          ? 'reclaim-pending'
+          : reclaim.compacted
+            ? 'done-compacted'
+            : 'done',
+      };
+    }
+
+    const deleted = this.db.prepare(`
+      DELETE FROM logs
+      WHERE id IN (
+        SELECT id
+        FROM logs
+        WHERE id <= @cutoff
+          AND level NOT IN ('warn', 'error')
+        ORDER BY id ASC
+        LIMIT @batchRows
+      )
+    `).run({
+      cutoff: overflowCutoff,
+      batchRows: this.logVolumePruneBatchRows,
+    }).changes;
+
+    // If the batch filled, conservatively schedule another tick. An exact-size
+    // final batch costs one extra cheap probe before compaction, which is safer
+    // than running a second million-row count after every deletion.
+    const hasMore = deleted === this.logVolumePruneBatchRows;
+    const reclaim = hasMore
+      ? { compacted: false, reclaimPending: false }
+      : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);
+    if (!hasMore && !reclaim.reclaimPending) this.truncateWal('log-volume prune');
+    return {
+      deleted,
+      status: hasMore
+        ? 'more'
+        : reclaim.reclaimPending
+          ? 'reclaim-pending'
+          : reclaim.compacted
+            ? 'done-compacted'
+            : 'done',
+    };
+  }
+
+  private routineLogOverflowCutoff(): number | null {
+    const row = this.db.prepare(`
+      SELECT id
+      FROM logs
+      WHERE level NOT IN ('warn', 'error')
+      ORDER BY id DESC
+      LIMIT 1 OFFSET ?
+    `).get(this.routineLogRowCap) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
+  private hasRoutineLogOverflow(): boolean {
+    return this.routineLogOverflowCutoff() !== null;
+  }
+
+  private reclaimFreePagesIfNeeded(force: boolean): {
+    compacted: boolean;
+    reclaimPending: boolean;
+  } {
+    // DELETE / DROP only marks pages reusable; VACUUM is what returns them to
+    // the OS. A failed exclusive-lock/disk attempt remains pending for a later
+    // background retry and never prevents the node from running.
+    const freePages = Number(this.db.pragma('freelist_count', { simple: true }) ?? 0);
+    if (!force && freePages <= VACUUM_FREE_PAGE_THRESHOLD) {
+      return { compacted: false, reclaimPending: false };
+    }
+    try {
+      this.db.exec(`VACUUM`);
+      return { compacted: true, reclaimPending: false };
+    } catch {
+      return { compacted: false, reclaimPending: true };
+    }
+  }
+
+  private truncateWal(reason: string): void {
     try {
       // wal_checkpoint signals reader contention through its result row
       // (`busy = 1`), NOT by throwing — so a busy checkpoint leaves the
@@ -928,7 +1355,7 @@ export class DashboardDB {
       }>;
       if (checkpoint?.busy) {
         console.warn(
-          `[DashboardDB] wal_checkpoint(TRUNCATE) busy — WAL not reclaimed this prune ` +
+          `[DashboardDB] wal_checkpoint(TRUNCATE) busy — WAL not reclaimed during ${reason} ` +
             `(log=${checkpoint.log}, checkpointed=${checkpoint.checkpointed}); retried next prune`,
         );
       }
@@ -940,7 +1367,7 @@ export class DashboardDB {
       // stalled WAL reclaim is visible in the daemon log instead of only
       // showing up later as unexplained disk growth. Never block prune.
       console.warn(
-        `[DashboardDB] wal_checkpoint(TRUNCATE) failed — WAL not reclaimed this prune: ` +
+        `[DashboardDB] wal_checkpoint(TRUNCATE) failed — WAL not reclaimed during ${reason}: ` +
           `${err instanceof Error ? err.message : String(err)}`,
       );
     }
@@ -1093,7 +1520,391 @@ export class DashboardDB {
   }
 
   deleteContextGraphSubscription(contextGraphId: string): void {
-    this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
+    const remove = this.db.transaction(() => {
+      this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
+      this.stmt('deleteContextGraphReadinessProvenance', 'DELETE FROM settings WHERE key = ?')
+        .run(this.contextGraphReadinessProvenanceKey(contextGraphId));
+    });
+    remove();
+  }
+
+  /**
+   * CLI-owned, durable provenance for context-graph readiness flags.
+   *
+   * Subscription rows predate per-plane proof and can therefore contain the
+   * v10.0.6 false-ready shape (`synced=1`, `shared_memory_synced=1`) after an
+   * unrelated peer returned an empty response.  Keep the proof out of the
+   * agent-owned subscription upsert so older/custom agent stores remain
+   * source-compatible and routine subscription persistence cannot overwrite a
+   * proof established by the daemon's catch-up classifier.
+   */
+  getContextGraphReadinessProvenance(contextGraphId: string): ContextGraphReadinessProvenance | null {
+    const row = this.stmt(
+      'getContextGraphReadinessProvenance',
+      'SELECT value FROM settings WHERE key = ?',
+    ).get(this.contextGraphReadinessProvenanceKey(contextGraphId)) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as Partial<ContextGraphReadinessProvenance>;
+      if (!Number.isInteger(parsed.version) || (parsed.version ?? 0) < 1) return null;
+      return {
+        version: parsed.version!,
+        durableVerified: parsed.durableVerified === true,
+        sharedMemoryVerified: parsed.sharedMemoryVerified === true,
+        updatedAt: typeof parsed.updatedAt === 'number' && Number.isFinite(parsed.updatedAt)
+          ? parsed.updatedAt
+          : 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  setContextGraphReadinessProvenance(
+    contextGraphId: string,
+    provenance: Omit<ContextGraphReadinessProvenance, 'updatedAt'> & { updatedAt?: number },
+  ): void {
+    const record: ContextGraphReadinessProvenance = {
+      version: provenance.version,
+      durableVerified: provenance.durableVerified,
+      sharedMemoryVerified: provenance.sharedMemoryVerified,
+      updatedAt: provenance.updatedAt ?? Date.now(),
+    };
+    this.stmt(
+      'setContextGraphReadinessProvenance',
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+    ).run(this.contextGraphReadinessProvenanceKey(contextGraphId), JSON.stringify(record));
+  }
+
+  private contextGraphReadinessProvenanceKey(contextGraphId: string): string {
+    return `contextGraphReadiness:${contextGraphId}`;
+  }
+
+  // --- Private context-graph join policy + audit ---
+
+  getContextGraphJoinPolicy(contextGraphId: string): StoredContextGraphJoinPolicy | null {
+    const row = this.stmt(
+      'getContextGraphJoinPolicy',
+      'SELECT value FROM settings WHERE key = ?',
+    ).get(this.contextGraphJoinPolicyKey(contextGraphId)) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      return parseContextGraphJoinPolicyRecord(JSON.parse(row.value), contextGraphId);
+    } catch {
+      // Corrupt policy state is indistinguishable from no policy. The agent's
+      // default is manual, so this is intentionally fail-closed.
+      return null;
+    }
+  }
+
+  setContextGraphJoinPolicy(record: StoredContextGraphJoinPolicy): void {
+    this.stmt(
+      'setContextGraphJoinPolicy',
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+    ).run(this.contextGraphJoinPolicyKey(record.contextGraphId), JSON.stringify(record));
+  }
+
+  setContextGraphJoinPolicyWithAudit(
+    record: StoredContextGraphJoinPolicy,
+    event: ContextGraphJoinPolicyAuditInput,
+  ): void {
+    const transition = this.db.transaction(() => {
+      this.setContextGraphJoinPolicy(record);
+      this.appendContextGraphJoinPolicyAudit(event);
+    });
+    transition();
+  }
+
+  appendContextGraphJoinPolicyAudit(event: ContextGraphJoinPolicyAuditInput): void {
+    this.stmt('appendContextGraphJoinPolicyAudit', `
+      INSERT INTO context_graph_join_policy_audit (
+        ts, context_graph_id, event_type, actor, agent_address, outcome,
+        reason, request_digest, policy_version, details
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      event.timestamp,
+      event.contextGraphId,
+      event.eventType,
+      event.actor ?? null,
+      event.agentAddress ?? null,
+      event.outcome,
+      event.reason ?? null,
+      event.requestDigest ?? null,
+      event.policyVersion ?? null,
+      event.details ? JSON.stringify(event.details) : null,
+    );
+  }
+
+  reserveContextGraphAutomaticApproval(
+    input: ContextGraphJoinPolicyRateReservationInput,
+  ): ContextGraphJoinPolicyRateReservationResult {
+    const reserve = this.db.transaction((): ContextGraphJoinPolicyRateReservationResult => {
+      const since = input.timestamp - 60 * 60 * 1000;
+      const cgRow = this.stmt('countContextGraphAutomaticApprovalReservations', `
+        SELECT COUNT(*) AS count
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
+          AND reserved_at >= ?
+      `).get(input.contextGraphId, since) as { count: number };
+      const nodeRow = this.stmt('countNodeAutomaticApprovalReservations', `
+        SELECT COUNT(*) AS count
+        FROM context_graph_join_approval_ledger
+        WHERE reserved_at >= ?
+      `).get(since) as { count: number };
+      const contextGraphCount = Number(cgRow?.count ?? 0);
+      const nodeCount = Number(nodeRow?.count ?? 0);
+      const existing = this.stmt('findContextGraphAutomaticApprovalReservation', `
+        SELECT 1 AS found
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
+          AND request_digest = ?
+          AND policy_epoch = ?
+          AND reserved_at >= ?
+        LIMIT 1
+      `).get(
+        input.contextGraphId,
+        input.requestDigest,
+        input.policyEpoch,
+        since,
+      ) as { found: number } | undefined;
+      if (existing) {
+        return {
+          allowed: true,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+        };
+      }
+      if (contextGraphCount >= input.contextGraphLimit) {
+        return {
+          allowed: false,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+          reason: 'context-graph-rate-limit',
+        };
+      }
+      if (nodeCount >= input.nodeLimit) {
+        return {
+          allowed: false,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+          reason: 'node-rate-limit',
+        };
+      }
+
+      // The typed ledger row and its audit projection share one transaction:
+      // failures cannot consume quota without an audit event or emit an audit
+      // reservation without durable operational state. An expired replay of
+      // the same digest+epoch refreshes its reservation timestamp and consumes
+      // the rolling-window quota again, matching the former append-only model.
+      this.stmt('upsertContextGraphAutomaticApprovalReservation', `
+        INSERT INTO context_graph_join_approval_ledger (
+          context_graph_id, request_digest, policy_epoch, reserved_at,
+          state, committed_at, actor, agent_address, policy_version
+        ) VALUES (?, ?, ?, ?, 'reserved', NULL, ?, ?, ?)
+        ON CONFLICT(context_graph_id, request_digest, policy_epoch) DO UPDATE SET
+          reserved_at = excluded.reserved_at,
+          actor = excluded.actor,
+          agent_address = excluded.agent_address,
+          policy_version = excluded.policy_version
+      `).run(
+        input.contextGraphId,
+        input.requestDigest,
+        input.policyEpoch,
+        input.timestamp,
+        input.actor,
+        input.agentAddress,
+        input.policyVersion,
+      );
+      this.appendContextGraphJoinPolicyAudit({
+        timestamp: input.timestamp,
+        contextGraphId: input.contextGraphId,
+        eventType: 'join_auto_reservation',
+        actor: input.actor,
+        agentAddress: input.agentAddress,
+        outcome: 'reserved',
+        requestDigest: input.requestDigest,
+        policyVersion: input.policyVersion,
+        details: {
+          contextGraphLimit: input.contextGraphLimit,
+          nodeLimit: input.nodeLimit,
+          policyEpoch: input.policyEpoch,
+        },
+      });
+      return {
+        allowed: true,
+        contextGraphApprovalsLastHour: contextGraphCount + 1,
+        nodeApprovalsLastHour: nodeCount + 1,
+      };
+    });
+    return reserve();
+  }
+
+  markContextGraphAutomaticApprovalRepairPending(
+    input: ContextGraphAutomaticApprovalRepairInput,
+  ): boolean {
+    const marked = this.stmt('markContextGraphAutomaticApprovalRepairPending', `
+      UPDATE context_graph_join_approval_ledger
+      SET repair_pending = 1
+      WHERE context_graph_id = ?
+        AND request_digest = ?
+        AND policy_epoch = ?
+        AND state = 'reserved'
+    `).run(input.contextGraphId, input.requestDigest, input.policyEpoch);
+    return marked.changes === 1;
+  }
+
+  getContextGraphAutomaticApprovalRepair(
+    contextGraphId: string,
+    requestDigest: string,
+  ): ContextGraphAutomaticApprovalRepairRecord | null {
+    const repair = this.stmt('getContextGraphAutomaticApprovalRepair', `
+      SELECT policy_epoch, actor, agent_address
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ?
+        AND request_digest = ?
+        AND state = 'reserved'
+        AND repair_pending = 1
+      ORDER BY reserved_at DESC
+      LIMIT 1
+    `).get(contextGraphId, requestDigest) as Pick<
+      ContextGraphAutomaticApprovalLedgerRow,
+      'policy_epoch' | 'actor' | 'agent_address'
+    > | undefined;
+    return repair
+      ? {
+          policyEpoch: repair.policy_epoch,
+          actor: repair.actor,
+          agentAddress: repair.agent_address,
+        }
+      : null;
+  }
+
+  commitContextGraphAutomaticApproval(
+    input: ContextGraphAutomaticApprovalCommitInput,
+  ): boolean {
+    const commit = this.db.transaction((): boolean => {
+      const reservation = this.stmt('findExactContextGraphAutomaticApprovalReservation', `
+        SELECT context_graph_id, request_digest, policy_epoch, reserved_at,
+               state, committed_at, actor, agent_address, policy_version
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
+          AND request_digest = ?
+          AND policy_epoch = ?
+        LIMIT 1
+      `).get(
+        input.contextGraphId,
+        input.requestDigest,
+        input.policyEpoch,
+      ) as ContextGraphAutomaticApprovalLedgerRow | undefined;
+      if (!reservation) return false;
+      if (reservation.state === 'committed') return true;
+
+      const updated = this.stmt('commitContextGraphAutomaticApprovalReservation', `
+        UPDATE context_graph_join_approval_ledger
+        SET state = 'committed', committed_at = ?, repair_pending = 0
+        WHERE context_graph_id = ?
+          AND request_digest = ?
+          AND policy_epoch = ?
+          AND state = 'reserved'
+      `).run(
+        input.timestamp,
+        reservation.context_graph_id,
+        reservation.request_digest,
+        reservation.policy_epoch,
+      );
+      if (updated.changes !== 1) return false;
+
+      this.appendContextGraphJoinPolicyAudit({
+        timestamp: input.timestamp,
+        contextGraphId: input.contextGraphId,
+        eventType: 'join_admission_committed',
+        actor: reservation.actor || input.actor,
+        agentAddress: reservation.agent_address || input.agentAddress,
+        outcome: 'approved',
+        requestDigest: input.requestDigest,
+        policyVersion: reservation.policy_version,
+        details: {
+          ...input.details,
+          policyEpoch: reservation.policy_epoch,
+        },
+      });
+      return true;
+    });
+    return commit();
+  }
+
+  getContextGraphAutomaticApprovalUsage(
+    contextGraphId: string,
+    timestamp: number,
+  ): { contextGraphApprovalsLastHour: number; nodeApprovalsLastHour: number } {
+    const since = timestamp - 60 * 60 * 1000;
+    const contextGraphApprovalsLastHour = Number((this.stmt('getContextGraphAutomaticApprovalUsage', `
+      SELECT COUNT(*) AS count
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ?
+        AND reserved_at >= ?
+    `).get(contextGraphId, since) as { count: number } | undefined)?.count ?? 0);
+    const nodeApprovalsLastHour = Number((this.stmt('getNodeAutomaticApprovalUsage', `
+      SELECT COUNT(*) AS count
+      FROM context_graph_join_approval_ledger
+      WHERE reserved_at >= ?
+    `).get(since) as { count: number } | undefined)?.count ?? 0);
+    return { contextGraphApprovalsLastHour, nodeApprovalsLastHour };
+  }
+
+  listContextGraphJoinPolicyAudit(contextGraphId: string): Array<Record<string, unknown>> {
+    return this.stmt('listContextGraphJoinPolicyAudit', `
+      SELECT id, ts, context_graph_id, event_type, actor, agent_address,
+             outcome, reason, request_digest, policy_version, details
+      FROM context_graph_join_policy_audit
+      WHERE context_graph_id = ?
+      ORDER BY id ASC
+    `).all(contextGraphId) as Array<Record<string, unknown>>;
+  }
+
+  private contextGraphJoinPolicyKey(contextGraphId: string): string {
+    return `contextGraphJoinPolicy:${contextGraphId}`;
+  }
+
+  upsertVmReconcileNegative(record: VmReconcileNegativeRow): void {
+    this.stmt('upsertVmReconcileNegative', `
+      INSERT INTO vm_reconcile_negative_cache (
+        cache_key, context_graph_id, failures, next_retry_at, swm_gen,
+        candidate_namespaces, peer_topology_key, updated_at
+      ) VALUES (
+        @cache_key, @context_graph_id, @failures, @next_retry_at, @swm_gen,
+        @candidate_namespaces, @peer_topology_key, @updated_at
+      )
+      ON CONFLICT(cache_key) DO UPDATE SET
+        context_graph_id = excluded.context_graph_id,
+        failures = excluded.failures,
+        next_retry_at = excluded.next_retry_at,
+        swm_gen = excluded.swm_gen,
+        candidate_namespaces = excluded.candidate_namespaces,
+        peer_topology_key = excluded.peer_topology_key,
+        updated_at = excluded.updated_at
+    `).run(record);
+  }
+
+  getVmReconcileNegative(cacheKey: string): VmReconcileNegativeRow | undefined {
+    return this.stmt(
+      'getVmReconcileNegative',
+      'SELECT * FROM vm_reconcile_negative_cache WHERE cache_key = ?',
+    ).get(cacheKey) as VmReconcileNegativeRow | undefined;
+  }
+
+  deleteVmReconcileNegative(cacheKey: string): void {
+    this.stmt(
+      'deleteVmReconcileNegative',
+      'DELETE FROM vm_reconcile_negative_cache WHERE cache_key = ?',
+    ).run(cacheKey);
+  }
+
+  deleteVmReconcileNegativesForContextGraph(contextGraphId: string): void {
+    this.stmt(
+      'deleteVmReconcileNegativesForContextGraph',
+      'DELETE FROM vm_reconcile_negative_cache WHERE context_graph_id = ?',
+    ).run(contextGraphId);
   }
 
   // --- Phase F: chain-driven VM reconciliation telemetry ---
@@ -3266,6 +4077,24 @@ export interface ContextGraphSubscriptionRow {
   last_reconciled_ordinal: number | null;
   core_hosted: number | null;
   sync_scoped: number;
+  updated_at: number;
+}
+
+export interface ContextGraphReadinessProvenance {
+  version: number;
+  durableVerified: boolean;
+  sharedMemoryVerified: boolean;
+  updatedAt: number;
+}
+
+export interface VmReconcileNegativeRow {
+  cache_key: string;
+  context_graph_id: string;
+  failures: number;
+  next_retry_at: number;
+  swm_gen: string;
+  candidate_namespaces: string;
+  peer_topology_key: string;
   updated_at: number;
 }
 

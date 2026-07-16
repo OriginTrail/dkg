@@ -70,13 +70,14 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
   isSkolemizedUri,
   selectACKCandidatePeers,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type AsyncLiftPublisherConfig,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -146,8 +147,16 @@ import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
+import {
+  migrateLegacyContextGraphReadiness,
+  registerProjectSyncedReadinessPersistence,
+  resetContextGraphReadinessForMissingMetadata,
+  writeContextGraphReadiness,
+  type ContextGraphReadinessStore,
+} from '../context-graph-readiness.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -854,12 +863,13 @@ type StartupGenesisValidation =
 
 type StartupGenesisValidationInput = Partial<Pick<NetworkConfig, '_status' | 'genesisId' | 'networkId' | 'networkName' | 'relays'>>;
 
-type KnowledgeAssetVmPublishExecutor = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor']>;
-type KnowledgeAssetVmPublishPreflight = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight']>;
+type KnowledgeAssetVmPublishHandler = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']>;
 type QueuedKnowledgeAssetVmPublishOptions = Parameters<DKGAgent['publishQueuedKnowledgeAssetVmPublish']>[2];
 
-export function createKnowledgeAssetVmPublishExecutor(agent: DKGAgent): KnowledgeAssetVmPublishExecutor {
-  return async ({ request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput) => {
+export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): KnowledgeAssetVmPublishHandler {
+  const execute: KnowledgeAssetVmPublishHandler['execute'] = async (
+    { request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput,
+  ) => {
     const publishOpts: QueuedKnowledgeAssetVmPublishOptions = {
       ...(publisher ? { publisherOverride: publisher } : {}),
     };
@@ -887,14 +897,16 @@ export function createKnowledgeAssetVmPublishExecutor(agent: DKGAgent): Knowledg
       );
     }
   };
-}
-
-export function createKnowledgeAssetVmPublishPreflight(agent: DKGAgent): KnowledgeAssetVmPublishPreflight {
-  return async ({ request, publisher }) =>
-    agent.preflightQueuedKnowledgeAssetVmPublishExecution(
-      request,
-      publisher ? { publisherOverride: publisher } : undefined,
-    );
+  return {
+    execute,
+    preflight: ({ request, publisher }) =>
+      agent.preflightQueuedKnowledgeAssetVmPublishExecution(
+        request,
+        publisher ? { publisherOverride: publisher } : undefined,
+      ),
+    finalizeRecovered: (input: AsyncKnowledgeAssetVmPublishRecoveryInput) =>
+      agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input),
+  };
 }
 
 export async function validateStartupGenesis(
@@ -979,6 +991,129 @@ export async function resolveDaemonPublishEncryption(
     encryptInlinePayload,
     encryptInlineChunked,
   };
+}
+
+/**
+ * Activate operator/network-configured context graphs without inventing a
+ * local definition for an unknown namespaced graph.
+ *
+ * A configured context graph is a sync target, not a declaration that this
+ * node owns or knows its access policy.  In particular, calling
+ * `ensureContextGraphLocal()` for an unknown private graph creates a public
+ * local shadow and marks it fully synced before its authoritative `_meta`
+ * graph has arrived.  That false state suppresses the authenticated metadata
+ * bootstrap required by curated graphs.
+ *
+ * System graphs are activated by `DKGAgent.start()`. Network defaults and
+ * caller-supplied local-bootstrap IDs retain their intentional local semantics
+ * (devnets rely on this before registering seed graphs). A configured graph,
+ * bare or namespaced, is otherwise a remote sync target: both forms are
+ * accepted by the CG API and therefore neither spelling proves ownership.
+ * Confirmed local subscriptions keep their existing state; every other target
+ * remains fail-closed until sync supplies its authoritative definition.
+ */
+export async function bootstrapConfiguredContextGraphs(input: {
+  agent: DKGAgent;
+  configuredContextGraphIds: Iterable<string>;
+  networkDefaultContextGraphIds: Iterable<string>;
+  localBootstrapContextGraphIds?: Iterable<string>;
+  readinessStore?: Partial<ContextGraphReadinessStore>;
+  log: (message: string) => void;
+}): Promise<void> {
+  const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
+  const configuredContextGraphIds = new Set(input.configuredContextGraphIds);
+  const networkDefaultContextGraphIds = new Set(input.networkDefaultContextGraphIds);
+  const localBootstrapContextGraphIds = new Set([
+    ...networkDefaultContextGraphIds,
+    ...(input.localBootstrapContextGraphIds ?? []),
+  ]);
+  const contextGraphIds = new Set([
+    ...configuredContextGraphIds,
+    ...networkDefaultContextGraphIds,
+  ]);
+
+  for (const contextGraphId of contextGraphIds) {
+    if (systemContextGraphs.has(contextGraphId)) {
+      input.log(`Context graph "${contextGraphId}" is a system graph — using the built-in subscription`);
+      continue;
+    }
+
+    if (localBootstrapContextGraphIds.has(contextGraphId)) {
+      try {
+        await input.agent.ensureContextGraphLocal({
+          id: contextGraphId,
+          name: contextGraphId,
+          description: `Default context graph: ${contextGraphId}`,
+        });
+        const subscription = input.agent.getSubscribedContextGraphs().get(contextGraphId);
+        writeContextGraphReadiness(input.readinessStore ?? {}, contextGraphId, {
+          durableVerified: subscription?.synced === true,
+          sharedMemoryVerified: subscription?.sharedMemorySynced === true,
+        });
+        input.log(`Ensured local/default context graph: ${contextGraphId}`);
+      } catch (err) {
+        input.log(
+          `Context graph "${contextGraphId}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`,
+        );
+        input.agent.subscribeToContextGraph(contextGraphId);
+      }
+      continue;
+    }
+
+    const existing = input.agent.getSubscribedContextGraphs().get(contextGraphId);
+    input.agent.subscribeToContextGraph(contextGraphId);
+
+    let hasAuthoritativeMetadata = false;
+    let locallyCurated = false;
+    if (existing?.metaSynced === true) {
+      try {
+        locallyCurated = await input.agent.isCuratorOf(contextGraphId);
+      } catch (err) {
+        input.log(
+          `Context graph "${contextGraphId}" ownership check failed: ${err instanceof Error ? err.message : String(err)} — treating it as remote`,
+        );
+      }
+    }
+
+    if (existing?.metaSynced === true) {
+      try {
+        // Explicit local ownership is the only safe exception to rejecting an
+        // unregistered placeholder. createContextGraph() stamps ownership;
+        // the legacy configured-graph shadow created by
+        // ensureContextGraphLocal() deliberately has no creator/curator.
+        hasAuthoritativeMetadata = await input.agent.hasConfirmedMetaState(
+          contextGraphId,
+          { rejectUnregisteredPlaceholder: !locallyCurated },
+        );
+      } catch (err) {
+        input.log(
+          `Context graph "${contextGraphId}" metadata check failed: ${err instanceof Error ? err.message : String(err)} — treating metadata as pending`,
+        );
+      }
+    }
+
+    if (!hasAuthoritativeMetadata) {
+      // Legacy ensureContextGraphLocal() shadows contain an `unregistered`
+      // marker and stale metaSynced=true. The explicit remote proof above
+      // rejects that marker without depending on mutable subscription state;
+      // only now do we persist the fail-closed bootstrap classification.
+      const reset = await resetContextGraphReadinessForMissingMetadata({
+        agent: input.agent,
+        store: input.readinessStore ?? {},
+        contextGraphId,
+      });
+      // PROJECT_SYNCED persistence shares the same readiness lock and may
+      // have proved this graph while bootstrap was working from `existing`.
+      // Its live metadata revalidation wins over the stale snapshot.
+      if (!reset) hasAuthoritativeMetadata = true;
+    }
+
+    if (hasAuthoritativeMetadata) {
+      input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata already confirmed)`);
+      continue;
+    }
+    input.log(`Subscribed to configured context graph: ${contextGraphId} (metadata pending)`);
+  }
 }
 
 export async function runDaemonInner(
@@ -1597,6 +1732,8 @@ export async function runDaemonInner(
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,
     syncGlobalQueueLimit: config.syncGlobalQueueLimit,
+    syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
+    syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
@@ -1672,8 +1809,75 @@ export async function runDaemonInner(
       delete: async (contextGraphId) => {
         dashDb.deleteContextGraphSubscription(contextGraphId);
       },
+      loadVmReconcileNegative: async (cacheKey) => {
+        const row = dashDb.getVmReconcileNegative(cacheKey);
+        if (!row) return null;
+        try {
+          const candidateNamespaces = JSON.parse(row.candidate_namespaces) as Array<{
+            metaGraph: string;
+            dataGraph: string;
+          }>;
+          if (!Array.isArray(candidateNamespaces)) return null;
+          return {
+            cacheKey: row.cache_key,
+            localCgId: row.context_graph_id,
+            failures: row.failures,
+            nextRetryAt: row.next_retry_at,
+            swmGen: row.swm_gen,
+            candidateNamespaces,
+            peerTopologyKey: row.peer_topology_key,
+          };
+        } catch {
+          dashDb.deleteVmReconcileNegative(cacheKey);
+          return null;
+        }
+      },
+      saveVmReconcileNegative: async (record) => {
+        dashDb.upsertVmReconcileNegative({
+          cache_key: record.cacheKey,
+          context_graph_id: record.localCgId,
+          failures: record.failures,
+          next_retry_at: record.nextRetryAt,
+          swm_gen: record.swmGen,
+          candidate_namespaces: JSON.stringify(record.candidateNamespaces),
+          peer_topology_key: record.peerTopologyKey,
+          updated_at: Date.now(),
+        });
+      },
+      deleteVmReconcileNegative: async (cacheKey) => {
+        dashDb.deleteVmReconcileNegative(cacheKey);
+      },
+      deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
+        dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
+      },
     },
     contextGraphMembershipStore: {
+      loadAll: async () => dashDb.listContextGraphMembers().map((row) => {
+        let metadata: Record<string, unknown> | undefined;
+        if (row.metadata) {
+          try {
+            const parsed = JSON.parse(row.metadata) as unknown;
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              metadata = parsed as Record<string, unknown>;
+            }
+          } catch {
+            // Membership identity/status fields remain usable even if an old
+            // optional metadata blob is malformed.
+          }
+        }
+        return {
+          contextGraphId: row.context_graph_id,
+          principalType: row.principal_type,
+          principalId: row.principal_id,
+          role: row.role ?? undefined,
+          status: row.status,
+          source: row.source ?? undefined,
+          displayName: row.display_name ?? undefined,
+          ...(metadata ? { metadata } : {}),
+          firstSeenAt: row.first_seen_at,
+          updatedAt: row.updated_at,
+        };
+      }),
       upsert: async (record) => {
         dashDb.upsertContextGraphMember({
           context_graph_id: record.contextGraphId,
@@ -1691,6 +1895,28 @@ export async function runDaemonInner(
       delete: async (contextGraphId, principalType, principalId) => {
         dashDb.deleteContextGraphMember(contextGraphId, principalType, principalId);
       },
+    },
+    contextGraphJoinPolicyStore: {
+      load: async (contextGraphId) => dashDb.getContextGraphJoinPolicy(contextGraphId),
+      save: async (record) => {
+        dashDb.setContextGraphJoinPolicy(record);
+      },
+      appendAudit: async (event) => {
+        dashDb.appendContextGraphJoinPolicyAudit(event);
+      },
+      saveWithAudit: async (record, event) => {
+        dashDb.setContextGraphJoinPolicyWithAudit(record, event);
+      },
+      getAutomaticApprovalUsage: async (contextGraphId, timestamp) =>
+        dashDb.getContextGraphAutomaticApprovalUsage(contextGraphId, timestamp),
+      reserveAutomaticApproval: async (input) =>
+        dashDb.reserveContextGraphAutomaticApproval(input),
+      markAutomaticApprovalRepairPending: async (input) =>
+        dashDb.markContextGraphAutomaticApprovalRepairPending(input),
+      getAutomaticApprovalRepair: async (contextGraphId, requestDigest) =>
+        dashDb.getContextGraphAutomaticApprovalRepair(contextGraphId, requestDigest),
+      commitAutomaticApproval: async (input) =>
+        dashDb.commitContextGraphAutomaticApproval(input),
     },
     messengerStores: {
       idempotencyStore: messengerIdempotencyStore,
@@ -1824,7 +2050,39 @@ export async function runDaemonInner(
     log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag}: ${text}`);
   });
 
+  // Register before network startup. A queued join approval can arrive as
+  // soon as the messenger is live, before the later UI/SSE listeners are
+  // installed, and its automatic catch-up proof must survive restart.
+  registerProjectSyncedReadinessPersistence({
+    agent,
+    store: dashDb,
+    log,
+  });
+
   await agent.start();
+
+  // Classify configured graphs before migrating legacy readiness. Explicit
+  // local-bootstrap targets receive current provenance here; configured
+  // remote targets are subscribed fail-closed so migration cannot mistake a
+  // durable membership record for proof that catch-up completed.
+  await bootstrapConfiguredContextGraphs({
+    agent,
+    configuredContextGraphIds: resolveContextGraphs(config),
+    networkDefaultContextGraphIds: resolveNetworkDefaultContextGraphs(network),
+    localBootstrapContextGraphIds: config.localBootstrapContextGraphs,
+    readinessStore: dashDb,
+    log,
+  });
+
+  // Rows written before per-plane provenance existed cannot distinguish a
+  // complete catch-up from v10.0.6's clean-empty false-ready state. Migrate
+  // once before the API becomes available: private/unconfirmed rows retry,
+  // while confirmed public rows retain their historical empty-CG semantics.
+  await migrateLegacyContextGraphReadiness({
+    agent,
+    store: dashDb,
+    log,
+  });
 
   // Core-only post-start checks (PR-5 NAT-status watcher + PR-3 relay
   // prereq sanity check). Edge nodes skip both — they don't need to be
@@ -1977,8 +2235,7 @@ export async function runDaemonInner(
             log,
           }),
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
-          knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
-          knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
+          knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
           log,
         });
         publisherState = outcome;
@@ -2036,26 +2293,6 @@ export async function runDaemonInner(
       });
   }, 0);
   if (relayRegistryTimer.unref) relayRegistryTimer.unref();
-
-  // Ensure configured context graphs + network defaults are subscribed and available.
-  // Uses ensureContextGraphLocal (idempotent) to avoid duplicate creator claims
-  // and to survive "already exists" gracefully.
-  const contextGraphsToSubscribe = new Set(syncContextGraphs);
-  for (const p of contextGraphsToSubscribe) {
-    try {
-      await agent.ensureContextGraphLocal({
-        id: p,
-        name: p,
-        description: `Default context graph: ${p}`,
-      });
-      log(`Ensured context graph: ${p}`);
-    } catch (err) {
-      log(
-        `Context graph "${p}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`,
-      );
-      agent.subscribeToContextGraph(p);
-    }
-  }
 
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
@@ -2598,6 +2835,15 @@ export async function runDaemonInner(
     void pruneRuntimeState();
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
+
+  // A time window cannot bound a same-day log storm. The focused maintenance
+  // helper owns bounded catch-up batches, compaction retries, and timer cleanup;
+  // daemon lifecycle only starts and stops it.
+  const logVolumePruner = startDashboardLogVolumePruner({
+    dashDb,
+    log,
+    intervals: { steadyIntervalMs: PRUNE_INTERVAL_MS },
+  });
 
   // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent
   // ~$200 of RPC credits in a day with nothing measuring it). The whole
@@ -3454,6 +3700,7 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        logVolumePruner.stop();
         // Clears the timer AND performs the final best-effort drain (BEFORE
         // telemetry stops), so a partial window still reaches Loki — keeps
         // log-derived request totals exact across process lifecycles.

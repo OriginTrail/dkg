@@ -864,25 +864,21 @@ describe("DkgNodePlugin", () => {
     });
 
 
-    it('dkg_knowledge_asset_share forwards snake_case → camelCase body and accepts the "all" sentinel (CONTRACT §B)', async () => {
+    it('dkg_knowledge_asset_share sends only the atomic KA scope and rejects root selection', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
       await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
-        entities: ['urn:root-1', 'urn:root-2'],
         sub_graph_name: 'protocols',
       });
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(url).toBe('http://localhost:9200/api/knowledge-assets/notes/swm/share');
       expect(JSON.parse(init.body as string)).toEqual({
         contextGraphId: 'ctx',
-        entities: ['urn:root-1', 'urn:root-2'],
         subGraphName: 'protocols',
       });
 
-      // CONTRACT §B: the "all" string sentinel is accepted and passed through to
-      // the wire unchanged (the daemon reads parsed.entities and treats "all" as a
-      // full share). It is NOT coerced to [] or omitted.
+      // Compatibility-only "all" is accepted but never serialized.
       fetchMock.mockClear();
       await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
@@ -893,11 +889,10 @@ describe("DkgNodePlugin", () => {
       const [, allInit] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(JSON.parse(allInit.body as string)).toEqual({
         contextGraphId: 'ctx',
-        entities: 'all',
       });
 
-      // An empty array is still rejected client-side (fail fast — the daemon would
-      // 400 it anyway).
+      // Any array is rejected before HTTP so an old subset request can never
+      // silently widen into a complete-KA share.
       fetchMock.mockClear();
       const bad = await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
@@ -905,18 +900,18 @@ describe("DkgNodePlugin", () => {
         entities: [],
       });
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(bad.content[0].text).toContain('entities');
+      expect(bad.content[0].text).toContain('shared atomically');
     });
 
-    it('dkg_knowledge_asset_share trims whitespace from each entity URI before the wire (FIX K)', async () => {
+    it('dkg_knowledge_asset_share rejects root-selection arrays before the wire', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
-      await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
+      const res = await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         entities: [' urn:root-1 ', '\turn:root-2\n'],
       });
-      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(JSON.parse(init.body as string).entities).toEqual(['urn:root-1', 'urn:root-2']);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toContain('shared atomically');
     });
 
 
@@ -932,18 +927,17 @@ describe("DkgNodePlugin", () => {
     });
 
 
-    // ── #1116 share seal: skip_seal forwarding + publishReady warning branch ──
+    // ── Atomic-share boundary + defensive mixed-version warnings ──
 
-    it('dkg_knowledge_asset_share forwards skip_seal:true as skipSeal on the wire (#1116)', async () => {
+    it('dkg_knowledge_asset_share rejects skip_seal:true before the wire', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ swmShared: true, promotedCount: 1, sealed: false, publishReady: false });
-      await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
+      const res = await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         skip_seal: true,
       });
-      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe('http://localhost:9200/api/knowledge-assets/notes/swm/share');
-      expect(JSON.parse(init.body as string).skipSeal).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toContain('always sealed');
     });
 
     it('dkg_knowledge_asset_share rejects a non-boolean skip_seal at the boundary (#1116)', async () => {
@@ -957,31 +951,25 @@ describe("DkgNodePlugin", () => {
       expect(res.details?.error).toMatch(/skip_seal.*boolean/);
     });
 
-    it('dkg_knowledge_asset_share on a FULL share with publishReady:false emits the seal-it warning (#1116)', async () => {
+    it('dkg_knowledge_asset_share with publishReady:false emits the atomic retry warning', async () => {
       const { byName } = setupPluginWithFetch({ swmShared: true, promotedCount: 2, sealed: false, publishReady: false });
       const res = await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
-        skip_seal: true,
       });
-      // A skip_seal FULL share IS sealable later → the "seal it with finalize" hint.
-      expect(res.details?.warning).toContain('NOT publish-ready (sealed:false)');
-      expect(res.details?.warning).toContain('layer:swm works after sharing');
-      expect(res.details?.warning).not.toContain('NOT sealable');
+      expect(res.details?.warning).toContain('did not become publish-ready (sealed:false)');
+      expect(res.details?.warning).toContain('retry the complete Knowledge Asset share');
     });
 
-    it('dkg_knowledge_asset_share on a SUBSET with publishReady:false emits the not-sealable warning (#1116)', async () => {
-      const { byName } = setupPluginWithFetch({ swmShared: true, promotedCount: 1, sealed: false, publishReady: false });
+    it('dkg_knowledge_asset_share rejects a legacy subset request without widening it', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ swmShared: true, promotedCount: 1, sealed: false, publishReady: false });
       const res = await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         entities: ['urn:a'],
       });
-      // A subset is NOT sealable (finalize layer:swm rejects it) → the full-share /
-      // new-asset recovery, NOT the dead-end "seal it" advice.
-      expect(res.details?.warning).toContain('A subset is NOT sealable/publishable');
-      expect(res.details?.warning).toContain('entities:"all"');
-      expect(res.details?.warning).not.toContain('Seal it with');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toContain('shared atomically');
     });
 
     it('dkg_knowledge_asset_share with publishReady:true emits NO warning (#1116)', async () => {
@@ -1002,14 +990,11 @@ describe("DkgNodePlugin", () => {
         context_graph_id: 'ctx',
         name: 'notes',
       });
-      expect(res.details?.warning).toContain('not all roots reached SWM');
-      expect(res.details?.warning).toContain('re-share the full asset');
-      // Must NOT recommend the dead-end finalize layer:swm here (it would reject).
-      expect(res.details?.warning).not.toContain('layer:swm works after sharing');
-      expect(res.details?.warning).not.toContain('NOT sealable');
+      expect(res.details?.warning).toContain('complete sealed Knowledge Asset did not reach SWM');
+      expect(res.details?.warning).toContain('retry the atomic share');
     });
 
-    it('dkg_knowledge_asset_share surfaces a 409 UNSEALED_SHARE_BLOCKED recovery verbatim (#1116)', async () => {
+    it('dkg_knowledge_asset_share replaces obsolete 409 recovery with atomic guidance (#1116)', async () => {
       const recovery = 'No local signing key; pass skip_seal:true to share unsealed.';
       const fetchMock = vi.fn(async () =>
         new Response(JSON.stringify({ code: 'UNSEALED_SHARE_BLOCKED', recovery }), {
@@ -1026,8 +1011,9 @@ describe("DkgNodePlugin", () => {
         context_graph_id: 'ctx',
         name: 'notes',
       });
-      // The handler surfaces the daemon's recovery hint verbatim as the tool error.
-      expect(res.details?.error).toBe(recovery);
+      expect(res.details?.error).toContain('Resolve the local signing capability');
+      expect(res.details?.error).toContain('atomic Knowledge Asset share');
+      expect(res.details?.error).not.toContain('skip_seal');
     });
 
     it('dkg_knowledge_asset_share falls back to the generic error for a non-matching 409 (#1116)', async () => {
@@ -1053,16 +1039,15 @@ describe("DkgNodePlugin", () => {
 
     // ── #1116 finalize layer ──────────────────────────────────────────────
 
-    it('dkg_knowledge_asset_finalize forwards layer:"swm" on the wire (#1116)', async () => {
+    it('dkg_knowledge_asset_finalize rejects legacy SWM finalization before the wire', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ merkleRoot: '0xroot', eip712Digest: '0xdig' });
-      await byName.get('dkg_knowledge_asset_finalize')!.execute('tc', {
+      const res = await byName.get('dkg_knowledge_asset_finalize')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         layer: 'swm',
       });
-      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe('http://localhost:9200/api/knowledge-assets/notes/wm/finalize');
-      expect(JSON.parse(init.body as string).layer).toBe('swm');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toContain('read-only');
     });
 
     it('dkg_knowledge_asset_finalize rejects an invalid layer at the boundary (#1116)', async () => {
@@ -1073,7 +1058,7 @@ describe("DkgNodePlugin", () => {
         layer: 'vm',
       });
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(res.details?.error).toMatch(/layer.*"wm".*"swm"/);
+      expect(res.details?.error).toContain('Only Working Memory finalization');
     });
 
     it('dkg_knowledge_asset_finalize rejects a NON-STRING layer, nothing on the wire (#1116)', async () => {
@@ -1088,7 +1073,7 @@ describe("DkgNodePlugin", () => {
           layer: bad as never,
         });
         expect(fetchMock, `layer: ${JSON.stringify(bad)}`).not.toHaveBeenCalled();
-        expect(res.details?.error).toMatch(/layer.*"wm".*"swm"/);
+        expect(res.details?.error).toContain('Only Working Memory finalization');
       }
     });
 

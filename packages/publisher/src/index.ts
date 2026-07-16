@@ -1,7 +1,17 @@
 export * from './publisher.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
+export {
+  KNOWLEDGE_ASSET_SKOLEM_PREFIX,
+  KNOWLEDGE_ASSET_PRIVATE_SKOLEM_PREFIX,
+  assertNoUserAuthoredKnowledgeAssetSkolemTerms,
+  skolemizeKnowledgeAsset,
+  skolemizeKnowledgeAssetParts,
+  type SkolemizeKnowledgeAssetOptions,
+  type SkolemizedKnowledgeAssetParts,
+} from './ka-skolemization.js';
 export { skolemizeByEntity, autoPartition } from './auto-partition.js';
+export { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 export {
   ASSERTION_NAMED_GRAPH_PREFIX,
   assertionOriginalGraph,
@@ -21,12 +31,26 @@ export {
   catalogTripleKey,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
+  appendMissingGeneratedPrivateCatalogFloor,
+  prepareGeneratedPrivateCatalogFloor,
+  replaceCatalogPartitionWithGeneratedPrivateFloor,
+  replaceGeneratedPrivateCatalogFloor,
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
   type TrustedCatalogTripleKeys,
   type TrustedCatalogRootSplit,
+  type PrepareGeneratedPrivateCatalogFloorOptions,
+  type PreparedGeneratedPrivateCatalogFloor,
 } from './catalog-trust.js';
-export { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
+export {
+  resolveKnowledgeAssetWorkspaceHead,
+  resolveKnowledgeAssetOperationPublicQuads,
+  resolveLiftWorkspaceSlice,
+  storeKnowledgeAssetWorkspaceHead,
+  storeKnowledgeAssetOperationPublicQuads,
+  type KnowledgeAssetWorkspaceHead,
+  type KnowledgeAssetOperationPublicSnapshot,
+} from './workspace-resolution.js';
 export {
   computeTripleHash,
   computePublicRoot,
@@ -44,7 +68,7 @@ export {
   computeKCRootV10,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
 export { pruneSupersededAgentRegistryMeta, insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 export {
   DKGPublisher,
@@ -53,6 +77,7 @@ export {
   MultiRootPublishNotAtomicError,
   CuratorUnconfirmedError,
   CuratorRejectedError,
+  assertValidPrecomputedUpdateAttestation,
   type DKGPublisherConfig,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
@@ -63,6 +88,7 @@ export {
 } from './dkg-publisher.js';
 export {
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolver,
@@ -219,8 +245,12 @@ export {
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishJobHandler,
   type AsyncKnowledgeAssetVmPublishPreflightInput,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
+  type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  type AsyncKnowledgeAssetVmPublishRecoveryInput,
+  type AsyncKnowledgeAssetVmPublishRecoveryResolver,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,

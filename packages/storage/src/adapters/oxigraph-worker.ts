@@ -651,6 +651,10 @@ export class OxigraphWorkerStore implements TripleStore {
     // (`touchedGraphs` hints only membership changes) — unscoped bump.
     this.writeGen.recordUnscopedWrite();
   }
+  async replaceGraph(graphUri: string, quads: Quad[]): Promise<void> {
+    await this.call('replaceGraph', graphUri, quads);
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
   }

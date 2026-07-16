@@ -1,7 +1,11 @@
 import { beforeAll, beforeEach, afterAll, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  TypedEventBus,
+  generateEd25519Keypair,
+} from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -13,6 +17,7 @@ import {
   QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
   createLiftJobFailureMetadata,
+  storeKnowledgeAssetOperationPublicQuads,
   type AsyncLiftPublisherConfig,
   type AsyncLiftPublisherRecoveryResult,
   type LiftRequest,
@@ -45,6 +50,7 @@ import {
   serializeWalletLock,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
+import { withLegacyRawLiftTestSeeder } from './_helpers/legacy-raw-lift.js';
 
 describe('TripleStoreAsyncLiftPublisher', () => {
   let now = 1_000;
@@ -55,6 +61,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   let _kav10Address: string;
   let _provider: ethers.JsonRpcProvider;
   const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  const ROOTLESS_UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
 
   function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
     // OT-RFC-43 Option-1: wire a KA-number allocator so the real EVM adapter
@@ -104,7 +111,12 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       contextGraphId: 'music-social',
       name: 'albums',
       shareOperationId: 'share-op-1',
-      roots: ['urn:album:one', 'urn:album:two'],
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: ROOTLESS_UAL,
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
         authorAddress: authorAddress as `0x${string}`,
@@ -123,10 +135,27 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       wmCurrentAssertion: '12'.repeat(32),
       swmCurrentAssertion: '12'.repeat(32),
       kaNumber: kaNumber.toString(),
-      reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+      reservedUal: ROOTLESS_UAL,
     };
     return { ...base, ...overrides };
   };
+
+  async function stageRootlessSnapshot(shareOperationId: string): Promise<void> {
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: 'music-social',
+      shareOperationId,
+      kaUal: ROOTLESS_UAL,
+      assertionVersion: 1,
+      quads: [
+        { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+        { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+      ],
+      publisherPeerId: 'peer-1',
+      accessPolicy: 'public',
+    });
+  }
 
   beforeEach(() => {
     store = new OxigraphStore();
@@ -140,12 +169,20 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       config?: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainRecoveryResolver'>;
     } = {},
   ) {
-    return new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++now,
-      idGenerator: () => `job-${++ids}`,
+    const clock = () => ++now;
+    const nextId = () => `job-${++ids}`;
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: clock,
+      idGenerator: nextId,
       chainRecoveryResolver:
         options.recoveryResult === undefined ? undefined : async () => options.recoveryResult ?? null,
       ...options.config,
+    });
+    return withLegacyRawLiftTestSeeder(publisher, store, {
+      now: clock,
+      idGenerator: nextId,
+      maxRetries: options.config?.maxRetries,
+      graphUri: options.config?.graphUri,
     });
   }
 
@@ -189,10 +226,14 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     return Number.parseInt(match[1] as string, 10);
   }
 
-  it('creates accepted jobs and returns status', async () => {
+  it('restores accepted legacy records without mutating workspace data', async () => {
     const publisher = createPublisher();
+    const privateStore = new PrivateContentStore(store, new GraphManager(store));
+    await privateStore.storePrivateTriplesForOperation('music-social', 'op-1', 'urn:local:/rihana', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/secret', object: '"legacy"', graph: '' },
+    ]);
 
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     const job = await publisher.getStatus(jobId);
 
     expect(jobId).toBe('job-1');
@@ -207,6 +248,20 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     expect(job?.retries.maxRetries).toBe(10);
+    const workspaceMutation = await store.query(
+      'ASK { GRAPH <did:dkg:context-graph:music-social/_shared_memory> { ?s ?p ?o } }',
+    );
+    expect(workspaceMutation).toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('does not expose a raw-root enqueue path on the concrete runtime publisher', async () => {
+    const runtimePublisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => ++now,
+      idGenerator: () => `runtime-job-${++ids}`,
+    });
+
+    expect((runtimePublisher as unknown as { lift?: unknown }).lift).toBeUndefined();
+    await expect(runtimePublisher.list()).resolves.toEqual([]);
   });
 
   it('normalizes and processes legacy persisted raw lift job payloads', async () => {
@@ -234,7 +289,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       ...request(),
       shareOperationId: share.shareOperationId,
     };
-    const jobId = await publisher.lift(legacyRequest);
+    const jobId = await publisher.seedLegacyRawLift(legacyRequest);
     const stored = await publisher.getStatus(jobId);
     expect(stored?.request.jobType).toBe('lift');
     if (!stored) throw new Error('expected stored job');
@@ -274,19 +329,27 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       publishEpochs: 3,
       clearSharedMemoryAfter: false,
       publisherNodeIdentityIdOverride: '42',
+      accessPolicy: 'allowList',
+      allowedPeers: ['peer-a', 'peer-b'],
+      entityProofs: false,
     }));
     const job = await publisher.getStatus(jobId);
 
     expect(jobId).toBe('job-1');
     expect(job?.status).toBe('accepted');
-    expect(job?.jobSlug).toBe('music-social/knowledge-assets/albums/vm-publish/share-op-1/one-two');
+    expect(job?.jobSlug).toBe('music-social/knowledge-assets/albums/vm-publish/share-op-1/no-roots');
     expect(job?.request.jobType).toBe('knowledge-asset-vm-publish');
     expect(job?.request.knowledgeAssetVmPublish).toEqual({
       contextGraphId: 'music-social',
       name: 'albums',
       subGraphName: 'research',
       shareOperationId: 'share-op-1',
-      roots: ['urn:album:one', 'urn:album:two'],
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: ROOTLESS_UAL,
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: `0x${'12'.repeat(32)}`,
         authorAddress: '0x1111111111111111111111111111111111111111',
@@ -305,7 +368,10 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       wmCurrentAssertion: '12'.repeat(32),
       swmCurrentAssertion: '12'.repeat(32),
       kaNumber: '7',
-      reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+      reservedUal: ROOTLESS_UAL,
+      accessPolicy: 'allowList',
+      allowedPeers: ['peer-a', 'peer-b'],
+      entityProofs: false,
       publishEpochs: 3,
       clearSharedMemoryAfter: false,
       publisherNodeIdentityIdOverride: '42',
@@ -313,6 +379,15 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect((job?.request as any).scope).toBeUndefined();
     expect((job?.request as any).namespace).toBeUndefined();
     expect((job?.request as any).authority).toBeUndefined();
+  });
+
+  it('rejects unsupported entity proofs before persisting a graph-scoped job', async () => {
+    const publisher = createPublisher();
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ entityProofs: true })),
+    ).rejects.toThrow(/does not support entityProofs/);
+    expect(await publisher.list()).toEqual([]);
   });
 
   it('rejects duplicate active knowledge asset VM publish jobs', async () => {
@@ -393,11 +468,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(claimed?.jobId).toBe(jobId);
     await publisher.update(jobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one', 'urn:album:two'],
-        canonicalRootMap: {
-          'urn:album:one': 'urn:album:one',
-          'urn:album:two': 'urn:album:two',
-        },
+        canonicalRoots: [],
+        canonicalRootMap: {},
         swmQuadCount: 2,
         authorityProofRef: 'urn:dkg:publish-async:share-op-1',
         transitionType: 'CREATE',
@@ -442,11 +514,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await publisher.claimNext('wallet-1');
     const validation = {
-      canonicalRoots: ['urn:album:one', 'urn:album:two'],
-      canonicalRootMap: {
-        'urn:album:one': 'urn:album:one',
-        'urn:album:two': 'urn:album:two',
-      },
+      canonicalRoots: [],
+      canonicalRootMap: {},
       swmQuadCount: 2,
       authorityProofRef: 'urn:dkg:publish-async:share-op-1',
       transitionType: 'CREATE' as const,
@@ -488,27 +557,19 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const calls: unknown[] = [];
     const publisher = createPublisher({
       config: {
-        knowledgeAssetVmPublishExecutor: async (input) => {
-          calls.push(input);
-          return confirmedPublishResult();
+        knowledgeAssetVmPublishHandler: {
+          execute: async (input) => {
+            calls.push(input);
+            return confirmedPublishResult();
+          },
         },
       },
     });
-    const publisherContract: Publisher = makeTestPublisher({
-      store,
-      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-      eventBus: new TypedEventBus(),
-      keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
-      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
-    });
-    const share = await publisherContract.share('music-social', [
-      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-    ], { publisherPeerId: 'peer-1' });
+    const shareOperationId = 'rootless-execution-op';
+    await stageRootlessSnapshot(shareOperationId);
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
-      shareOperationId: share.shareOperationId,
+      shareOperationId,
       clearSharedMemoryAfter: true,
     }));
     const processed = await publisher.processNext('wallet-1');
@@ -522,8 +583,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         request: {
           contextGraphId: 'music-social',
           name: 'albums',
-          shareOperationId: share.shareOperationId,
-          roots: ['urn:album:one', 'urn:album:two'],
+          shareOperationId,
+          roots: [],
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: ROOTLESS_UAL,
+          assertionVersion: '1',
+          publicTripleCount: 2,
+          privateTripleCount: 0,
           seal: {
             merkleRoot: `0x${'12'.repeat(32)}`,
             authorAddress: '0x1111111111111111111111111111111111111111',
@@ -541,11 +607,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
           wmCurrentAssertion: '12'.repeat(32),
           swmCurrentAssertion: '12'.repeat(32),
           kaNumber: '7',
-          reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+          reservedUal: ROOTLESS_UAL,
           clearSharedMemoryAfter: true,
         },
         validation: {
-          canonicalRoots: ['urn:album:one', 'urn:album:two'],
+          canonicalRoots: [],
           swmQuadCount: 2,
           transitionType: 'CREATE',
         },
@@ -554,12 +620,13 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
         publishOptions: {
           publisherPeerId: 'peer-1',
-          quads: [
+          quads: expect.arrayContaining([
             { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
             { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-          ],
+          ]),
         },
       });
+    expect((calls[0] as { publishOptions: { quads: unknown[] } }).publishOptions.quads).toHaveLength(2);
   });
 
   it('finalizes knowledge asset VM publish jobs as no-op when execution preflight says already published', async () => {
@@ -567,31 +634,23 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const preflightCalls: unknown[] = [];
     const publisher = createPublisher({
       config: {
-        knowledgeAssetVmPublishPreflight: async (input) => {
-          preflightCalls.push(input);
-          return { action: 'noop', reason: 'already-published' };
-        },
-        knowledgeAssetVmPublishExecutor: async () => {
-          executorCalls++;
-          throw new Error('executor should not run for preflight no-op');
+        knowledgeAssetVmPublishHandler: {
+          preflight: async (input) => {
+            preflightCalls.push(input);
+            return { action: 'noop', reason: 'already-published' };
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run for preflight no-op');
+          },
         },
       },
     });
-    const publisherContract: Publisher = makeTestPublisher({
-      store,
-      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-      eventBus: new TypedEventBus(),
-      keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
-      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
-    });
-    const share = await publisherContract.share('music-social', [
-      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-    ], { publisherPeerId: 'peer-1' });
+    const shareOperationId = 'rootless-noop-op';
+    await stageRootlessSnapshot(shareOperationId);
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
-      shareOperationId: share.shareOperationId,
+      shareOperationId,
     }));
     const processed = await publisher.processNext('wallet-1');
     const reloaded = await publisher.getStatus(jobId);
@@ -608,33 +667,25 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     let executorCalls = 0;
     const publisher = createPublisher({
       config: {
-        knowledgeAssetVmPublishPreflight: async () => {
-          throw Object.assign(
-            new Error('queued VM publish intent is stale'),
-            { code: 'PUBLISH_INTENT_STALE' },
-          );
-        },
-        knowledgeAssetVmPublishExecutor: async () => {
-          executorCalls++;
-          throw new Error('executor should not run for stale preflight');
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            throw Object.assign(
+              new Error('queued VM publish intent is stale'),
+              { code: 'PUBLISH_INTENT_STALE' },
+            );
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run for stale preflight');
+          },
         },
       },
     });
-    const publisherContract: Publisher = makeTestPublisher({
-      store,
-      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-      eventBus: new TypedEventBus(),
-      keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
-      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
-    });
-    const share = await publisherContract.share('music-social', [
-      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-    ], { publisherPeerId: 'peer-1' });
+    const shareOperationId = 'rootless-stale-op';
+    await stageRootlessSnapshot(shareOperationId);
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
-      shareOperationId: share.shareOperationId,
+      shareOperationId,
     }));
     const processed = await publisher.processNext('wallet-1');
 
@@ -664,7 +715,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('stores explicit LiftJob and LiftRequest control-plane triples', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift({ ...request(), subGraphName: 'research' });
+    const jobId = await publisher.seedLegacyRawLift({ ...request(), subGraphName: 'research' });
 
     const result = await store.query(`SELECT ?p ?o WHERE {
       GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
@@ -709,8 +760,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('claims the oldest accepted job for a wallet', async () => {
     const publisher = createPublisher();
 
-    await publisher.lift(request());
-    await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    await publisher.seedLegacyRawLift(request());
+    await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
 
     const claimed = await publisher.claimNext('wallet-1');
     const remaining = await publisher.list({ status: 'accepted' });
@@ -724,7 +775,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('persists wallet locks in a separate control-plane graph and releases them on terminal states', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
 
@@ -763,8 +814,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('renews wallet lock leases while jobs remain active', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
-    await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const jobId = await publisher.seedLegacyRawLift(request());
+    await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
 
     await publisher.claimNext('wallet-1');
     const originalExpiresAt = await readLockExpiresAt('wallet-1');
@@ -789,7 +840,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('releases stale wallet locks during recovery', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
 
@@ -811,7 +862,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('clears orphan wallet locks for terminal jobs during recovery', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'failed', {
@@ -850,8 +901,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('rejects a stale release without deleting a newer wallet lock', async () => {
     const publisher = createPublisher();
-    const jobA = await publisher.lift(request());
-    const jobB = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const jobA = await publisher.seedLegacyRawLift(request());
+    const jobB = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
 
     await publisher.claimNext('wallet-1');
     await publisher.update(jobA, 'validated', {
@@ -905,7 +956,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('serializes concurrent claims so only one wallet gets the job', async () => {
     const publisher = createPublisher();
-    await publisher.lift(request());
+    await publisher.seedLegacyRawLift(request());
 
     const [first, second] = await Promise.all([
       publisher.claimNext('wallet-1'),
@@ -923,7 +974,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('serializes claims across publisher instances in the same process', async () => {
     const first = createPublisher();
     const second = createPublisher();
-    await first.lift(request());
+    await first.seedLegacyRawLift(request());
 
     const [jobA, jobB] = await Promise.all([
       first.claimNext('wallet-1'),
@@ -941,7 +992,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('derives readable root-range slugs for multiple roots', async () => {
     const publisher = createPublisher();
 
-    const jobId = await publisher.lift({
+    const jobId = await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: 'op-9',
       roots: ['urn:local:/manson', 'urn:local:/rihana'],
@@ -953,7 +1004,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('updates jobs through the MVP state machine', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
 
     await publisher.update(jobId, 'validated', {
@@ -989,7 +1040,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('records canonical publish results back into LiftJob progress states', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1051,7 +1102,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('rejects publish results whose tx differs from persisted broadcast tx', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1097,7 +1148,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('records canonical publish failures back into LiftJob failed state', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1171,7 +1222,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     ]);
     expect(await privateStore.getPrivateTriples('music-social', 'urn:local:/rihana')).toEqual([]);
 
-    const jobId = await publisher.lift({
+    const jobId = await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: write.shareOperationId,
     });
@@ -1209,7 +1260,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: write.shareOperationId,
     });
@@ -1245,7 +1296,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: write.shareOperationId,
     });
@@ -1264,7 +1315,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('persists unknown included-phase failures as terminal failed jobs', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
@@ -1304,7 +1355,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(write.shareOperationId).toContain('swm-');
 
-    const jobId = await publisher.lift({
+    const jobId = await publisher.seedLegacyRawLift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],
@@ -1419,7 +1470,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/genre', object: '"Pop"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       contextGraphId: CONTEXT_GRAPH,
       shareOperationId: write.shareOperationId,
@@ -1472,7 +1523,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       contextGraphId: CONTEXT_GRAPH,
       shareOperationId: write.shareOperationId,
@@ -1513,7 +1564,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: write.shareOperationId,
       authority: { type: 'owner', proofRef: 'proof:owner:1' },
@@ -1533,7 +1584,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
       },
     });
-    await publisher.lift({
+    await publisher.seedLegacyRawLift({
       ...request(),
       shareOperationId: 'op-1',
     });
@@ -1555,8 +1606,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('lists and counts jobs by status', async () => {
     const publisher = createPublisher();
-    const acceptedId = await publisher.lift(request());
-    const failedId = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const acceptedId = await publisher.seedLegacyRawLift(request());
+    const failedId = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
     await publisher.claimNext('wallet-1');
     await publisher.claimNext('wallet-2');
     await publisher.update(failedId, 'failed', {
@@ -1594,8 +1645,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
 
-    const claimedId = await publisher.lift(request());
-    const broadcastId = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const claimedId = await publisher.seedLegacyRawLift(request());
+    const broadcastId = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
     const privateStore = new PrivateContentStore(store, new GraphManager(store));
     await privateStore.storePrivateTriplesForOperation('music-social', 'op-2', 'urn:local:/rihana', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/secret', object: '"recover-secret"', graph: '' },
@@ -1631,7 +1682,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {
     const publisher = createPublisher({ recoveryResult: null });
-    const broadcastId = await publisher.lift(request());
+    const broadcastId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
     await publisher.update(broadcastId, 'validated', {
@@ -1662,7 +1713,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         recoveryLookupTimeoutMs: 50,
       },
     });
-    const broadcastId = await publisher.lift(request());
+    const broadcastId = await publisher.seedLegacyRawLift(request());
 
     await publisher.claimNext('wallet-1');
     await publisher.update(broadcastId, 'validated', {
@@ -1691,14 +1742,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('finalizes retry_recovery jobs from broadcast with correct recoveredFromStatus', async () => {
     let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
-    const publisher = new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++now,
-      idGenerator: () => `job-${++ids}`,
+    const clock = () => ++now;
+    const nextId = () => `job-${++ids}`;
+    const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
+      now: clock,
+      idGenerator: nextId,
       chainRecoveryResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
-    });
+    }), store, { now: clock, idGenerator: nextId });
 
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1736,14 +1789,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('finalizes retry_recovery jobs from included with correct recoveredFromStatus', async () => {
     let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
-    const publisher = new TripleStoreAsyncLiftPublisher(store, {
-      now: () => ++now,
-      idGenerator: () => `job-${++ids}`,
+    const clock = () => ++now;
+    const nextId = () => `job-${++ids}`;
+    const publisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(store, {
+      now: clock,
+      idGenerator: nextId,
       chainRecoveryResolver: async () => resolverResult,
       recoveryLookupTimeoutMs: 50,
-    });
+    }), store, { now: clock, idGenerator: nextId });
 
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.seedLegacyRawLift(request());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
@@ -1789,7 +1844,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRoots: [],
         canonicalRootMap: {},
         swmQuadCount: 2,
         authorityProofRef: 'knowledge-asset-lifecycle',
@@ -1828,7 +1883,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRoots: [],
         canonicalRootMap: {},
         swmQuadCount: 2,
         authorityProofRef: 'knowledge-asset-lifecycle',
@@ -1857,9 +1912,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('supports pause, resume, cancel, retry, and clear', async () => {
     const publisher = createPublisher();
-    const cancelId = await publisher.lift(request());
-    const retryId = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
-    const clearId = await publisher.lift({ ...request(), shareOperationId: 'op-3' });
+    const cancelId = await publisher.seedLegacyRawLift(request());
+    const retryId = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-2' });
+    const clearId = await publisher.seedLegacyRawLift({ ...request(), shareOperationId: 'op-3' });
 
     await publisher.pause();
     expect(await publisher.claimNext('wallet-1')).toBeNull();

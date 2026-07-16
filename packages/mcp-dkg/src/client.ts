@@ -72,6 +72,14 @@ function optionalContextGraphId(contextGraphIdOrUri: string | undefined): string
   return normalizeContextGraphId(contextGraphIdOrUri) || undefined;
 }
 
+function pcaAccountIdPayload(value: string | bigint): string {
+  const normalized = typeof value === 'bigint' ? value.toString() : value.trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw new Error('pcaAccountId must be a positive decimal integer');
+  }
+  return normalized;
+}
+
 /**
  * Author attestation produced by an external signer. Mirrors the
  * `packages/cli/src/api-client.ts` reference so finalize / create KA flows can
@@ -656,30 +664,30 @@ export class DkgClient {
     );
   }
 
-  /** Promote specific entity URIs from WM → SWM. */
+  /**
+   * @deprecated Use {@link knowledgeAssetShare}. Knowledge Assets now share
+   * atomically; omitted/`"all"` scope remains a compatibility alias, while a
+   * legacy entity subset is rejected by the canonical share boundary.
+   */
   async promoteAssertion(args: {
     contextGraphId: string;
     assertionName: string;
     subGraphName?: string;
-    entities: string[];
+    entities?: string[] | 'all';
   }): Promise<void> {
-    const body: Record<string, unknown> = {
-      contextGraphId: normalizeContextGraphId(args.contextGraphId),
-      entities: args.entities,
-    };
-    if (args.subGraphName) body.subGraphName = args.subGraphName;
-    await this.request(
-      'POST',
-      `/api/knowledge-assets/${encodeURIComponent(args.assertionName)}/swm/share`,
-      body,
-    );
+    await this.knowledgeAssetShare({
+      contextGraphId: args.contextGraphId,
+      name: args.assertionName,
+      ...(args.subGraphName ? { subGraphName: args.subGraphName } : {}),
+      ...(args.entities !== undefined ? { entities: args.entities } : {}),
+    });
   }
 
   /**
    * Create an empty Working Memory assertion graph (idempotent — duplicate
    * names land as `alreadyExists: true` rather than throwing). The
    * canonical write flow is `createAssertion` → `writeAssertion` →
-   * `promoteAssertion` (or `discardAssertion` to roll back).
+   * `knowledgeAssetShare` (or `discardAssertion` to roll back).
    */
   async createAssertion(args: {
     contextGraphId: string;
@@ -1038,6 +1046,8 @@ export class DkgClient {
   async registerContextGraph(args: {
     id: string;
     accessPolicy?: number;
+    publishPolicy?: number;
+    pcaAccountId?: string | bigint;
   }): Promise<{
     registered: string;
     onChainId?: string;
@@ -1053,7 +1063,11 @@ export class DkgClient {
         hint?: string;
       }>('POST', '/api/context-graph/register', {
         id: normalizeContextGraphId(args.id),
-        accessPolicy: args.accessPolicy,
+        ...(args.accessPolicy !== undefined ? { accessPolicy: args.accessPolicy } : {}),
+        ...(args.publishPolicy !== undefined ? { publishPolicy: args.publishPolicy } : {}),
+        ...(args.pcaAccountId !== undefined
+          ? { pcaAccountId: pcaAccountIdPayload(args.pcaAccountId) }
+          : {}),
       });
       return { ...response, alreadyRegistered: false };
     } catch (err) {
@@ -1198,12 +1212,18 @@ export class DkgClient {
     authorAgentAddress?: string;
     preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
     schemeVersion?: number;
-    // #1116: optional layer selects WHERE the content to seal lives. "wm"
-    // (default) seals the open WM draft; "swm" reconstructs a draft from an
-    // already-shared SWM asset and seals it (recover-without-recreate).
+    /** @deprecated Only WM finalization is supported. `swm` fails read-only. */
     layer?: 'wm' | 'swm';
   }): Promise<{ merkleRoot: string; eip712Digest: string }> {
     assertExclusiveAuthorFields(args);
+    if (args.layer === 'swm') {
+      throw Object.assign(new Error('Legacy root-scoped Knowledge Assets are read-only'), {
+        code: 'LEGACY_KA_READ_ONLY',
+      });
+    }
+    if (args.layer !== undefined && args.layer !== 'wm') {
+      throw new TypeError('Only Working Memory finalization is supported');
+    }
     const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
     };
@@ -1213,7 +1233,6 @@ export class DkgClient {
       body.preSignedAuthorAttestation = args.preSignedAuthorAttestation;
     }
     if (args.schemeVersion !== undefined) body.schemeVersion = args.schemeVersion;
-    if (args.layer !== undefined) body.layer = args.layer;
     return this.request<{ merkleRoot: string; eip712Digest: string }>(
       'POST',
       `/api/knowledge-assets/${encodeURIComponent(args.name)}/wm/finalize`,
@@ -1264,18 +1283,33 @@ export class DkgClient {
     contextGraphId: string;
     name: string;
     subGraphName?: string;
+    /** @deprecated Knowledge Assets are shared atomically. */
     entities?: string[] | 'all';
-    // #1116: a full share SEALS BY DEFAULT (publish-ready). `skipSeal:true`
-    // opts out into an unsealed SWM share. A subset share is SWM-only and is
-    // never sealed regardless of this flag.
+    /** @deprecated Unsealed Knowledge Asset shares are unsupported. */
     skipSeal?: boolean;
   }): Promise<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }> {
+    if (Array.isArray(args.entities)) {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
+    if (args.entities !== undefined && args.entities !== 'all') {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
+    if (args.skipSeal === true) {
+      throw Object.assign(new Error('Knowledge Assets are always sealed before sharing'), {
+        code: 'UNSEALED_SHARE_BLOCKED',
+      });
+    }
+    if (args.skipSeal !== undefined && args.skipSeal !== false) {
+      throw new TypeError('skipSeal must be false or omitted');
+    }
     const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
     };
     if (args.subGraphName) body.subGraphName = args.subGraphName;
-    if (args.entities !== undefined) body.entities = args.entities;
-    if (args.skipSeal !== undefined) body.skipSeal = args.skipSeal;
     return this.request<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }>(
       'POST',
       `/api/knowledge-assets/${encodeURIComponent(args.name)}/swm/share`,

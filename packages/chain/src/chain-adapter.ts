@@ -171,6 +171,8 @@ export interface OnChainPublishResult {
   batchId: bigint;
   /** Greenfield: equals `batchId` when tokenId == kaId. */
   kaId?: bigint;
+  /** Merkle root emitted by the exact publish transaction being resolved. */
+  merkleRoot?: Uint8Array;
   /** `DKGKnowledgeAssets` contract address used in the UAL path segment. */
   knowledgeAssetsContract?: string;
   /** Absent for updates (no new KAs minted). */
@@ -269,6 +271,8 @@ export interface KAUpdateVerification {
   blockNumber?: number;
   /** The transaction index within the block (for deterministic same-block ordering). */
   txIndex?: number;
+  /** Chain-truth Merkle-root array length after this update. */
+  merkleRootCount?: bigint;
 }
 
 export interface ChainEvent {
@@ -1010,9 +1014,10 @@ export interface ChainAdapter {
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
-   * Used by the daemon's curated-CG registration preflight to enforce
-   * `local curator == ownerOf(pcaAccountId)` so an agent wallet cannot
-   * impersonate ownership when tying a CG to a PCA.
+   * Used by the daemon's curated-CG registration preflight to populate the
+   * coherence-required publishAuthority. Registration authorization is then
+   * checked separately: the tx signer must be this owner or an agent registered
+   * to the exact PCA.
    */
   getPublishingConvictionAccountOwner?(accountId: bigint): Promise<string>;
 
@@ -1237,6 +1242,17 @@ export interface ChainAdapter {
    */
   hasContractCode?(address: string): Promise<boolean>;
 
+  /**
+   * Verify an EIP-1271 signature for a contract-backed author. Update
+   * preparation uses this before durable staging; omitting the capability for
+   * an address with code makes that preparation fail closed.
+   */
+  verifyContractSignature?(
+    address: string,
+    digest: string,
+    signature: string,
+  ): Promise<boolean>;
+
   // On-Chain Context Graphs (ContextGraphs contract)
   createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
   verify?(params: VerifyParams): Promise<TxResult>;
@@ -1271,6 +1287,13 @@ export interface ChainAdapter {
 
   /** Deployed `DKGKnowledgeAssets` (or legacy `KnowledgeCollectionStorage`) address. */
   getDKGKnowledgeAssetsAddress?(): Promise<string>;
+
+  /**
+   * Live ERC-721 owner of a V10 Knowledge Asset. Update preparation requires
+   * this capability before it may replace durable local SWM/private staging;
+   * adapters that cannot resolve ownership must fail that preparation closed.
+   */
+  getKnowledgeAssetOwner?(kaId: bigint): Promise<string>;
 
   /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
   getMinimumRequiredSignatures?(): Promise<number>;

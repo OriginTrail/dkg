@@ -55,6 +55,10 @@ const LOCAL_PEER_ID = '12D3KooWLateJoinerDeferGossip';
 interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
   defaultAgentAddress?: string;
+  subscribedContextGraphs: Map<string, {
+    onChainId?: string;
+    onChainHash?: string;
+  }>;
   refreshMetaSyncedFlags(contextGraphIds: Iterable<string>): Promise<void>;
 }
 
@@ -112,6 +116,7 @@ async function insertCgMetaWithAllowlist(
 ): Promise<void> {
   const contextGraphUri = contextGraphDataUri(contextGraphId);
   const metaGraph = contextGraphMetaUri(contextGraphId);
+  const onChainHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
   await agent.store.insert([
     {
       subject: contextGraphUri,
@@ -127,6 +132,18 @@ async function insertCgMetaWithAllowlist(
     },
     {
       subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CREATOR,
+      object: `did:dkg:agent:${LOCAL_PEER_ID}`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: `did:dkg:agent:${agentAddress}`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
       object: `"${LOCAL_PEER_ID}"`,
       graph: metaGraph,
@@ -135,6 +152,18 @@ async function insertCgMetaWithAllowlist(
       subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
       object: `"${agentAddress}"`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: '"106"',
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
+      object: `"${onChainHash.toUpperCase().replace(/^0X/, '0x')}"`,
       graph: metaGraph,
     },
   ]);
@@ -198,8 +227,9 @@ describe('SWM late-joiner deferred gossip subscribe (#885 Codex)', () => {
 
     // Step 2: simulate `runImmediatePostApprovalSync` landing `_meta`
     // by writing the curator's CG metadata + ACL into the local store.
-    // `hasConfirmedMetaState` returns true once `_meta` has any quads,
-    // which in turn unlocks `refreshMetaSyncedFlags`'s SWM re-queue.
+    // `hasConfirmedMetaState` returns true once `_meta` has the complete
+    // private definition plus allowlist, which in turn unlocks
+    // `refreshMetaSyncedFlags`'s SWM re-queue.
     await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress);
 
     // Step 3: drive the same call site that `runCatchupOverPeers` uses
@@ -213,6 +243,10 @@ describe('SWM late-joiner deferred gossip subscribe (#885 Codex)', () => {
     // newly approved peer would never receive SWM gossip updates
     // until the next catchup cycle (~minutes).
     expect(gossip.subscribed.has(workspaceTopic(contextGraphId))).toBe(true);
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      onChainId: '106',
+      onChainHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+    });
   });
 
   it('without deferSharedMemoryGossipSubscribe, SWM workspace topic subscribes immediately when the ACL allows', async () => {

@@ -9,6 +9,7 @@ import type { KnowledgeAssetFinalizedPublishOptions } from '../src/api-client.js
 const PORT = 8899;
 const originalDkgHome = process.env.DKG_HOME;
 const originalDkgApiPort = process.env.DKG_API_PORT;
+const originalDkgAuthToken = process.env.DKG_AUTH_TOKEN;
 
 interface FetchCall {
   url: string;
@@ -86,6 +87,7 @@ describe('ApiClient', () => {
   beforeEach(async () => {
     client = new ApiClient(PORT, 'test-token');
     tempDir = await mkdtemp(join(tmpdir(), 'api-client-test-'));
+    delete process.env.DKG_AUTH_TOKEN;
   });
 
   afterEach(async () => {
@@ -94,6 +96,8 @@ describe('ApiClient', () => {
     else process.env.DKG_HOME = originalDkgHome;
     if (originalDkgApiPort === undefined) delete process.env.DKG_API_PORT;
     else process.env.DKG_API_PORT = originalDkgApiPort;
+    if (originalDkgAuthToken === undefined) delete process.env.DKG_AUTH_TOKEN;
+    else process.env.DKG_AUTH_TOKEN = originalDkgAuthToken;
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -108,6 +112,20 @@ describe('ApiClient', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/status`);
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
+    });
+
+    it('connect() gives DKG_AUTH_TOKEN precedence over the selected home token file', async () => {
+      process.env.DKG_HOME = tempDir;
+      process.env.DKG_API_PORT = String(PORT);
+      process.env.DKG_AUTH_TOKEN = 'environment-token';
+      await writeFile(join(tempDir, 'auth.token'), 'file-token\n', 'utf8');
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect();
+      await connected.agents();
+
+      expect((calls[0].opts.headers as any).Authorization).toBe('Bearer environment-token');
     });
 
     it('connect() can use the selected home config for status when control-plane files are missing', async () => {
@@ -310,6 +328,27 @@ describe('ApiClient', () => {
       expect(result.contextGraphs).toHaveLength(1);
     });
 
+    it('getContextGraphJoinPolicy() GETs the encoded per-CG endpoint', async () => {
+      const body = {
+        contextGraphId: '0xOwner/private graph',
+        mode: 'open',
+        maxMembers: 50,
+        maxApprovalsPerHour: 20,
+        updatedAt: 1_752_490_123_456,
+      };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      const result = await client.getContextGraphJoinPolicy('0xOwner/private graph');
+      const updatedAt: number | null | undefined = result.updatedAt;
+      expect(result).toEqual(body);
+      expect(updatedAt).toBe(1_752_490_123_456);
+      expect(calls[0].url).toBe(
+        `http://127.0.0.1:${PORT}/api/context-graph/0xOwner%2Fprivate%20graph/join-policy`,
+      );
+      expect(calls[0].opts.method).toBeUndefined();
+    });
+
     it('contextGraphExists() calls correct URL with encoded id', async () => {
       const body = { id: 'my contextGraph', exists: true };
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
@@ -330,6 +369,52 @@ describe('ApiClient', () => {
       expect(url).toContain('name=incident');
       expect(url).toContain('contextType=review');
       expect(url).toContain('includeBody=true');
+    });
+  });
+
+  describe('PUT endpoints', () => {
+    it('setContextGraphJoinPolicy() enables bounded open enrollment with explicit acknowledgement', async () => {
+      const response = {
+        contextGraphId: 'private/cg',
+        mode: 'open',
+        maxMembers: 12,
+        maxApprovalsPerHour: 4,
+      };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: response });
+      globalThis.fetch = fetch;
+
+      await client.setContextGraphJoinPolicy('private/cg', {
+        mode: 'open',
+        maxMembers: 12,
+        maxApprovalsPerHour: 4,
+        acknowledgeOpenEnrollment: true,
+      });
+
+      expect(calls[0].url).toBe(
+        `http://127.0.0.1:${PORT}/api/context-graph/private%2Fcg/join-policy`,
+      );
+      expect(calls[0].opts.method).toBe('PUT');
+      expect((calls[0].opts.headers as any).Authorization).toBe('Bearer test-token');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        mode: 'open',
+        maxMembers: 12,
+        maxApprovalsPerHour: 4,
+        acknowledgeOpenEnrollment: true,
+      });
+    });
+
+    it('setContextGraphJoinPolicy() sends only manual mode when disabling open enrollment', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { contextGraphId: 'private/cg', mode: 'manual' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.setContextGraphJoinPolicy('private/cg', { mode: 'manual' });
+
+      expect(calls[0].opts.method).toBe('PUT');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({ mode: 'manual' });
     });
   });
 
@@ -892,17 +977,13 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     let calls = track({ swmShared: true, promotedCount: 2 });
     await client.knowledgeAssetShare('cg', 'f', {
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
       awaitCuratorAck: true,
-      skipSeal: true,
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
       awaitCuratorAck: true,
-      skipSeal: true,
     });
 
     calls = track({ kaId: '7', status: 'confirmed' });
@@ -946,28 +1027,34 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(publishAsyncBody.options).not.toHaveProperty('subGraphName');
   });
 
-  it('knowledgeAssetFinalize can target WM or SWM layer', async () => {
+  it('knowledgeAssetShare rejects root selection and unsealed sharing before HTTP serialization', async () => {
+    const calls = track({ swmShared: true, promotedCount: 1 });
+    await expect(client.knowledgeAssetShare('cg', 'f', {
+      entities: ['urn:entity:1'],
+    })).rejects.toThrow('Knowledge Assets are shared atomically');
+    await expect(client.knowledgeAssetShare('cg', 'f', {
+      skipSeal: true,
+    })).rejects.toThrow('always seal-before-share');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('knowledgeAssetFinalize rejects the legacy SWM write bridge before HTTP serialization', async () => {
     const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
-    await client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' });
-    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/wm/finalize`);
-    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
-      contextGraphId: 'cg',
-      layer: 'swm',
-      subGraphName: 'notes',
-    });
+    await expect(
+      client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' }),
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(calls).toHaveLength(0);
   });
 
   it('knowledgeAssetShareAsync and share job helpers use lifecycle routes', async () => {
     let calls = track({ jobId: 'share-job-1', state: 'queued' });
     await client.knowledgeAssetShareAsync('cg', 'f', {
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share-async`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
     });
 
     calls = track({ jobs: [] });
@@ -997,7 +1084,10 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     const calls = track({ jobId: 'should-not-reach', state: 'queued' });
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       skipSeal: true,
-    } as any)).rejects.toThrow('skipSeal is not supported for async share');
+    } as any)).rejects.toThrow('skipSeal is not supported');
+    await expect(client.knowledgeAssetShareAsync('cg', 'f', {
+      entities: ['urn:entity:1'],
+    })).rejects.toThrow('Knowledge Assets are shared atomically');
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       awaitCuratorAck: true,
     } as any)).rejects.toThrow('awaitCuratorAck is not supported for async share');

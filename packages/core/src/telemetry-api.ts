@@ -177,10 +177,30 @@ export interface DkgMetrics {
   storageAckInflight: Histogram;
   /** queue_depth sample for background/normal store work competing with ACK */
   syncBackgroundQueueDepth: Histogram;
-  /** priority={ack|normal|background}, reason={queue_full|queue_wait_timeout} */
+  /** priority={ack|health|normal|background}, reason={queue_full|queue_wait_timeout} */
   storeSchedulerRejectionsTotal: Counter;
+  /** ms; priority and operation identify the bounded admission lane and static caller */
+  storeSchedulerQueueWaitMs: Histogram;
+  /** active admitted operations by priority and operation */
+  storeSchedulerActive: UpDownCounter;
+  /** scope={finalization|reconcile} */
+  storeScanSingleFlightJoinsTotal: Counter;
+  /** active unique scans by scope */
+  storeScanSingleFlightActive: UpDownCounter;
+  /** bounded materialized result rows by static source */
+  storeQueryResultRows: Histogram;
+  /** conservative bounded materialized bytes by static source */
+  storeQueryResultBytesEstimate: Histogram;
+  /** operation and source are bounded adapter/static caller labels */
+  storeCancellationCompletedTotal: Counter;
+  /** scope and reason identify the bounded retry loop; attempt is capped */
+  storeRetryAttemptsTotal: Counter;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
+  /** ms; lane and priority_class are bounded sync scheduler enums */
+  syncSchedulerQueueWaitMs: Histogram;
+  /** lane, priority_class, outcome={started|rejected|displaced|aged|aborted} */
+  syncSchedulerDecisionsTotal: Counter;
   /** currently retained responder snapshots; phase is a bounded enum */
   syncResponderSnapshots: UpDownCounter;
   /** currently retained responder snapshot rows; phase is a bounded enum */
@@ -279,8 +299,45 @@ function buildMetrics(): DkgMetrics {
     storeSchedulerRejectionsTotal: meter.createCounter('dkg.store.scheduler_rejections_total', {
       description: 'External-store work rejected before dispatch by bounded priority and reason',
     }),
+    storeSchedulerQueueWaitMs: meter.createHistogram('dkg.store.scheduler_queue_wait_ms', {
+      unit: 'ms',
+      description: 'External-store admission queue wait by lane and static caller',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeSchedulerActive: meter.createUpDownCounter('dkg.store.scheduler_active', {
+      description: 'Currently admitted external-store operations by lane and static caller',
+    }),
+    storeScanSingleFlightJoinsTotal: meter.createCounter('dkg.store.scan_singleflight_joins_total', {
+      description: 'Equivalent expensive scans joined to an already running promise',
+    }),
+    storeScanSingleFlightActive: meter.createUpDownCounter('dkg.store.scan_singleflight_active', {
+      description: 'Currently running unique expensive scans',
+    }),
+    storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
+      description: 'Rows retained by bounded expensive store reads',
+      advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
+    }),
+    storeQueryResultBytesEstimate: meter.createHistogram('dkg.store.query_result_bytes_estimate', {
+      unit: 'By',
+      description: 'Estimated bytes retained by bounded expensive store reads',
+      advice: { explicitBucketBoundaries: BYTE_BUCKETS },
+    }),
+    storeCancellationCompletedTotal: meter.createCounter('dkg.store.cancellation_completed_total', {
+      description: 'Store attempts whose adapter cancellation completed before returning control',
+    }),
+    storeRetryAttemptsTotal: meter.createCounter('dkg.store.retry_attempts_total', {
+      description: 'Bounded expensive-work retry attempts',
+    }),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
+    }),
+    syncSchedulerQueueWaitMs: meter.createHistogram('dkg.sync.scheduler.queue_wait_ms', {
+      unit: 'ms',
+      description: 'Process-local sync scheduler queue wait by bounded lane and priority class',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    syncSchedulerDecisionsTotal: meter.createCounter('dkg.sync.scheduler.decisions_total', {
+      description: 'Process-local sync scheduler outcomes by bounded lane and priority class',
     }),
     syncResponderSnapshots: meter.createUpDownCounter('dkg.sync.responder.snapshots', {
       description: 'Currently retained sync responder snapshots',

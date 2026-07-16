@@ -103,7 +103,11 @@ function emptySyncPage(phase: string): SyncPageResult {
 
 async function createAgentWithSend(
   sendToPeer: (...args: unknown[]) => Promise<Uint8Array>,
-  backpressure?: { syncGlobalMaxInflight: number; syncGlobalQueueLimit: number },
+  backpressure?: {
+    syncGlobalMaxInflight: number;
+    syncGlobalQueueLimit: number;
+    syncContextGraphPriorities?: Record<string, number>;
+  },
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'SyncFetchCoalescing',
@@ -164,7 +168,6 @@ describe('DKGAgent sync fetch coalescing', () => {
       { name: 'includeSharedMemory', base: {}, variant: { includeSharedMemory: true, graphUri: 'did:dkg:context-graph:coalesced-cg/_shared_memory' } },
       { name: 'phase', base: {}, variant: { phase: 'meta', graphUri: 'did:dkg:context-graph:coalesced-cg/_meta' } },
       { name: 'graphUri', base: {}, variant: { graphUri: 'did:dkg:context-graph:coalesced-cg/_alternate' } },
-      { name: 'deadline', base: {}, variant: { deadline: DEFAULT_DEADLINE + 1 } },
       {
         name: 'snapshotRef',
         base: { includeSharedMemory: true, phase: 'snapshot', graphUri: '', snapshotRef: 'snapshot-a' },
@@ -194,6 +197,29 @@ describe('DKGAgent sync fetch coalescing', () => {
       } finally {
         await agent.stop().catch(() => {});
       }
+    }
+  });
+
+  it('coalesces equivalent fetches whose callers computed different deadlines', async () => {
+    const response = deferred<Uint8Array>();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => {
+      sends++;
+      return response.promise;
+    });
+
+    try {
+      const first = fetchPages(agent, { deadline: DEFAULT_DEADLINE });
+      await flushMicrotasks();
+      const second = fetchPages(agent, { deadline: DEFAULT_DEADLINE + 1 });
+      await flushMicrotasks();
+
+      expect(sends).toBe(1);
+      response.resolve(new Uint8Array(0));
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(firstResult).toBe(secondResult);
+    } finally {
+      await agent.stop().catch(() => {});
     }
   });
 
@@ -420,21 +446,26 @@ describe('DKGAgent sync fetch coalescing', () => {
       eligibleContextGraphIds: ['private-cg'],
       publicContextGraphIds: [] as string[],
       privateRecoverFromCurator: ['private-cg'],
+      expectedAdmissionLanes: ['swm-recovery:'],
     },
     {
       name: 'mixed public/private',
       eligibleContextGraphIds: ['public-cg', 'private-cg'],
       publicContextGraphIds: ['public-cg'],
       privateRecoverFromCurator: ['private-cg'],
+      expectedAdmissionLanes: ['shared-memory:', 'swm-recovery:'],
+      syncContextGraphPriorities: { 'private-cg': 100, 'public-cg': -10 },
     },
-  ])('uses one global admission for $name shared-memory aggregation', async ({
+  ])('uses per-CG global admission for $name shared-memory aggregation', async ({
     eligibleContextGraphIds,
     publicContextGraphIds,
     privateRecoverFromCurator,
+    expectedAdmissionLanes,
+    syncContextGraphPriorities,
   }) => {
     const agent = await createAgentWithSend(
       async () => new Uint8Array(0),
-      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0, syncContextGraphPriorities },
     );
     const backpressureLogs: string[] = [];
     (agent as any).log.info = (_ctx: unknown, message: string) => {
@@ -469,9 +500,15 @@ describe('DKGAgent sync fetch coalescing', () => {
       const runningAdmissions = backpressureLogs.filter((message) => (
         message.startsWith('Sync backpressure running ')
       ));
-      expect(runningAdmissions).toHaveLength(1);
-      expect(runningAdmissions[0]).toContain('running shared-memory:');
-      expect(runningAdmissions[0]).not.toContain('swm-recovery:');
+      expect(runningAdmissions).toHaveLength(expectedAdmissionLanes.length);
+      for (const expectedLane of expectedAdmissionLanes) {
+        expect(runningAdmissions.some((message) => message.includes(`running ${expectedLane}`))).toBe(true);
+      }
+      expect(runningAdmissions.map((message) => (
+        expectedAdmissionLanes.find((lane) => message.includes(`running ${lane}`))
+      ))).toEqual(syncContextGraphPriorities
+        ? ['swm-recovery:', 'shared-memory:']
+        : expectedAdmissionLanes);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -541,6 +578,40 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(durableSyncs).toBe(2);
       durableResponse.resolve(cleanDurableSyncResult());
       await expect(third).resolves.toMatchObject({ peersTried: 1 });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not promote catch-up readiness when durable integrity verification rejects a KA', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('coalesced-cg');
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).syncFromPeerDetailed = async () => ({
+        ...cleanDurableSyncResult(),
+        insertedTriples: 3,
+        insertedDataTriples: 3,
+        rejectedKcs: 1,
+      });
+
+      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg');
+
+      expect(result.peersResponded).toBe(1);
+      expect(result.peersSucceeded).toBe(0);
+      expect(result.dataSynced).toBe(3);
+      expect(result.diagnostics.durable.rejectedKcs).toBe(1);
+      expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).not.toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

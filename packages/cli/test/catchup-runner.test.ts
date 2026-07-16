@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { catchupPeerResponded, catchupPeerSucceeded } from '../src/catchup-runner.js';
+import {
+  catchupPeerResponded,
+  catchupPeerSucceeded,
+  catchupPlaneCompletedWithoutFailure,
+} from '../src/catchup-runner.js';
 
 describe('catchup runner progress accounting', () => {
-  it('does not count no-progress timeouts as peer success', () => {
+  it('does not count timed-out peers as success, including after partial progress', () => {
     expect(catchupPeerSucceeded({
       failedPeers: 0,
       timedOutPhases: 1,
@@ -25,14 +29,14 @@ describe('catchup runner progress accounting', () => {
       resumedPhases: 1,
       checkpointAdvances: 0,
       insertedTriples: 0,
-    }, null, false)).toBe(true);
+    }, null, false)).toBe(false);
 
     expect(catchupPeerSucceeded({
       failedPeers: 0,
       timedOutPhases: 1,
       completedPhases: 0,
       checkpointAdvances: 1,
-    }, null, false)).toBe(true);
+    }, null, false)).toBe(false);
 
     expect(catchupPeerSucceeded({
       failedPeers: 0,
@@ -41,7 +45,7 @@ describe('catchup runner progress accounting', () => {
       checkpointAdvances: 0,
       insertedTriples: 1,
       insertedDataTriples: 1,
-    }, null, false)).toBe(true);
+    }, null, false)).toBe(false);
   });
 
   it('does not count metadata-only delivery as peer success', () => {
@@ -163,5 +167,72 @@ describe('catchup runner progress accounting', () => {
       completedPhases: 0,
       checkpointAdvances: 0,
     }, false)).toBe(false);
+  });
+
+  it.each([
+    ['rejected KCs', { rejectedKcs: 1 }],
+    ['data rejected without metadata', { dataRejectedMissingMeta: 1 }],
+  ])('does not treat durable integrity rejection as clean completion or peer success: %s', (_label, rejection) => {
+    const durable = {
+      failedPeers: 0,
+      failedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 1,
+      checkpointAdvances: 1,
+      insertedTriples: 1,
+      insertedDataTriples: 1,
+      deferredBackpressure: 0,
+      deniedPhases: 0,
+      ...rejection,
+    };
+
+    expect(catchupPeerResponded(durable, null)).toBe(true);
+    expect(catchupPlaneCompletedWithoutFailure(durable)).toBe(false);
+    expect(catchupPeerSucceeded(durable, null, false)).toBe(false);
+  });
+
+  it('treats a clean verified private-only durable response as peer progress', () => {
+    const durable = {
+      failedPeers: 0,
+      failedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 1,
+      checkpointAdvances: 0,
+      insertedTriples: 8,
+      insertedDataTriples: 0,
+      insertedMetaTriples: 8,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 1,
+      rejectedKcs: 0,
+      dataRejectedMissingMeta: 0,
+      deferredBackpressure: 0,
+      deniedPhases: 0,
+    };
+
+    expect(catchupPlaneCompletedWithoutFailure(durable)).toBe(true);
+    expect(catchupPeerSucceeded(durable, null, false)).toBe(true);
+  });
+
+  it('classifies local scheduler deferral separately from a remote response or success', () => {
+    const deferredBeforeFetch = {
+      failedPeers: 0,
+      failedPhases: 0,
+      deferredBackpressure: 1,
+      bytesReceived: 0,
+      completedPhases: 0,
+      emptyResponses: 0,
+      insertedTriples: 0,
+    };
+    expect(catchupPeerResponded(deferredBeforeFetch, null)).toBe(false);
+    expect(catchupPeerSucceeded(deferredBeforeFetch, null, false)).toBe(false);
+
+    const partialThenDeferred = {
+      ...deferredBeforeFetch,
+      bytesReceived: 10,
+      insertedTriples: 1,
+      insertedDataTriples: 1,
+    };
+    expect(catchupPeerResponded(partialThenDeferred, null)).toBe(true);
+    expect(catchupPeerSucceeded(partialThenDeferred, null, false)).toBe(false);
   });
 });

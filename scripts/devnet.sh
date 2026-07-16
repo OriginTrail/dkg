@@ -19,6 +19,12 @@
 # Environment:
 #   DEVNET_DIR    Base directory for devnet data (default: .devnet)
 #   HARDHAT_PORT  Hardhat node port (default: 8545)
+#   DEVNET_BLAZEGRAPH_PORT
+#                 Host port for the devnet Blazegraph container (default: 9999)
+#   DEVNET_OXIGRAPH_SERVER_PORT_5 / DEVNET_OXIGRAPH_SERVER_PORT_6
+#                 Host ports for edge-node Oxigraph containers (defaults: 7878/7879)
+#   DEVNET_DOCKER_NAME_PREFIX
+#                 Prefix for devnet store container names (default: devnet)
 #   UI_PORT       node-ui Vite port (default: 5173)
 #   UI_NODE_ID    Which devnet node the UI talks to (default: 1)
 #   NUM_CORE_NODES
@@ -66,16 +72,17 @@ NUM_OP_WALLETS=3
 # overwhelming the prover loop. Set to 0 to disable (fall back to per-tx
 # mining) for tests that need deterministic block-per-tx semantics.
 HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
-BLAZEGRAPH_PORT=9999
-BLAZEGRAPH_CONTAINER="devnet-blazegraph"
+DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
+BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
+BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
 # Webapp context path: the 2.1.5 Docker image serves under /bigdata; a native
 # 2.1.6 JAR (the Apple-silicon workaround) serves under /blazegraph. Override with
 # DEVNET_BLAZEGRAPH_CTX to match whichever Blazegraph is actually running.
 BLAZEGRAPH_CTX="${DEVNET_BLAZEGRAPH_CTX:-bigdata}"
-OXIGRAPH_SERVER_PORT_5=7878
-OXIGRAPH_SERVER_PORT_6=7879
-OXIGRAPH_CONTAINER_5="devnet-oxigraph-5"
-OXIGRAPH_CONTAINER_6="devnet-oxigraph-6"
+OXIGRAPH_SERVER_PORT_5="${DEVNET_OXIGRAPH_SERVER_PORT_5:-7878}"
+OXIGRAPH_SERVER_PORT_6="${DEVNET_OXIGRAPH_SERVER_PORT_6:-7879}"
+OXIGRAPH_CONTAINER_5="${DEVNET_DOCKER_NAME_PREFIX}-oxigraph-5"
+OXIGRAPH_CONTAINER_6="${DEVNET_DOCKER_NAME_PREFIX}-oxigraph-6"
 
 # Hardhat default accounts (first 10 of the well-known mnemonic)
 # "test test test test test test test test test test test junk"
@@ -440,11 +447,11 @@ start_oxigraph_servers() {
     return 0
   fi
   if ! docker_responsive 3; then
-    log "Docker not responsive within 3s — nodes 5-6 will use Oxigraph (in-process) instead of Oxigraph server"
+    log "Docker not responsive within 3s — nodes 5-6 will use daemon-managed Oxigraph instead of external Oxigraph"
     return 0
   fi
   if ! docker image inspect oxigraph/oxigraph:latest > /dev/null 2>&1; then
-    log "Oxigraph Docker image not found locally — nodes 5-6 will use in-process Oxigraph (pull oxigraph/oxigraph:latest to enable)"
+    log "Oxigraph Docker image not found locally — nodes 5-6 will use daemon-managed Oxigraph (pull oxigraph/oxigraph:latest to enable the external endpoint)"
     return 0
   fi
 
@@ -464,7 +471,7 @@ start_oxigraph_servers() {
       oxigraph/oxigraph:latest serve --bind 0.0.0.0:7878 > /dev/null 2>&1; then
       log "Oxigraph server started ($name)"
     else
-      log "WARNING: Failed to start Oxigraph server $name — nodes 5-6 will use in-process Oxigraph"
+      log "WARNING: Failed to start external Oxigraph server $name — nodes 5-6 will use daemon-managed Oxigraph"
       return 0
     fi
   done
@@ -559,8 +566,11 @@ create_node_config() {
   #             backend and deterministically reproduces SPARQL-over-HTTP-only
   #             bugs such as #996 — which the old `oxigraph-worker` default hid.)
   #   Node 3-4: blazegraph (if Docker) else oxigraph  (in-process baseline)
-  #   Node 5-6: sparql-http → external Dockerized Oxigraph  (EXTRA coverage of the
-  #             generic external-endpoint path; Docker-only, optional)
+  #   Node 5-6: sparql-http → external Dockerized Oxigraph when available;
+  #             otherwise daemon-managed oxigraph-server on distinct ports.
+  #             Do not omit the store block here: the implicit embedded fallback
+  #             persists by dumping the complete store through one JS string and
+  #             cannot restart a >=512 MiB devnet dataset.
   local store_block=""
   if [ "$node_num" -ge 1 ] && [ "$node_num" -le 2 ]; then
     # The managed oxigraph-server defaults to port 7878; multiple nodes on one
@@ -584,6 +594,8 @@ create_node_config() {
       local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
       local ox_port="${!ox_port_var}"
       store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
+    else
+      store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
     fi
   fi
 
@@ -625,6 +637,7 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
+  "localBootstrapContextGraphs": ["devnet-test", "devnet-isolation"],
   ${swm_sync_block}
   "publisher": {
     "enabled": true,
@@ -1275,7 +1288,7 @@ cmd_start() {
   # their absence a hard failure for full-matrix CI.
   local bg_state ox_extra
   if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then bg_state="blazegraph"; else bg_state="oxigraph in-process (blazegraph Docker unavailable)"; fi
-  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_extra="sparql-http → external Oxigraph"; else ox_extra="(skipped — external Oxigraph Docker unavailable)"; fi
+  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_extra="sparql-http → external Oxigraph"; else ox_extra="oxigraph-server managed fallback (external Docker unavailable)"; fi
   log "Store-backend matrix:  nodes 1-2: oxigraph-server (managed, no Docker)  |  nodes 3-4: $bg_state  |  nodes 5-6: $ox_extra"
   if [ "$BLAZEGRAPH_AVAILABLE" != true ] || [ "$OXIGRAPH_SERVER_AVAILABLE" != true ]; then
     if [ "${DEVNET_REQUIRE_ALL_BACKENDS:-0}" = "1" ]; then
@@ -1785,7 +1798,7 @@ cmd_start() {
       [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"
     fi
     if [ "$i" -ge 5 ]; then
-      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="oxigraph-server" || store_label="oxigraph-worker"
+      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="sparql-http → external Oxigraph" || store_label="oxigraph-server"
     fi
     log "Node $i ($role, $store_label): http://127.0.0.1:$api_port/ui"
   done

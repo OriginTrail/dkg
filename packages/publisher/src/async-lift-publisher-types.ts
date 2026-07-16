@@ -5,11 +5,11 @@ import type {
   LiftJobFinalizationMetadata,
   LiftJobIncluded,
   LiftJobInclusionMetadata,
+  LiftJobHex,
   LiftJobState,
   LiftJobValidationMetadata,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
-  RawLiftRequest,
 } from './lift-job.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
@@ -30,7 +30,6 @@ export class AsyncLiftJobConflictError extends Error {
 }
 
 export interface AsyncLiftPublisher {
-  lift(request: RawLiftRequest): Promise<string>;
   enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
@@ -52,6 +51,15 @@ export interface AsyncLiftPublisher {
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationMetadata;
+}
+
+/** Required immutable transaction evidence for named-KA lifecycle recovery. */
+export interface AsyncKnowledgeAssetVmPublishRecoveryEvidence
+  extends AsyncLiftPublisherRecoveryResult {
+  readonly publishProof: {
+    readonly merkleRoot: LiftJobHex;
+    readonly authorAddress: LiftJobHex;
+  };
 }
 
 export interface AsyncLiftPublishExecutionInput {
@@ -78,13 +86,42 @@ export interface AsyncKnowledgeAssetVmPublishPreflightInput {
   readonly publisher?: DKGPublisher;
 }
 
+/**
+ * Chain-confirmed recovery input for a named Knowledge Asset publish that was
+ * interrupted after the transaction hash had been durably recorded.
+ *
+ * The finalizer is intentionally separate from the normal executor: recovery
+ * must reconcile local VM/lifecycle state without submitting a second
+ * transaction.
+ */
+export interface AsyncKnowledgeAssetVmPublishRecoveryInput {
+  readonly walletId: string;
+  readonly request: KnowledgeAssetVmPublishRequest;
+  readonly job: LiftJobBroadcast | LiftJobIncluded;
+  readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
+  readonly publisher?: DKGPublisher;
+}
+
 export type AsyncKnowledgeAssetVmPublishPreflightResult =
   | { readonly action: 'execute' }
   | { readonly action: 'noop'; readonly reason?: string };
 
+/** Cohesive lifecycle boundary for one named-KA async queue job. */
+export interface AsyncKnowledgeAssetVmPublishJobHandler {
+  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<PublishResult>;
+  preflight?(
+    input: AsyncKnowledgeAssetVmPublishPreflightInput,
+  ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
+  finalizeRecovered?(input: AsyncKnowledgeAssetVmPublishRecoveryInput): Promise<void>;
+}
+
 export type AsyncLiftPublisherRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
 ) => Promise<AsyncLiftPublisherRecoveryResult | null>;
+
+export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
+  job: LiftJobBroadcast | LiftJobIncluded,
+) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
 
 export interface AsyncLiftPublisherConfig {
   graphUri?: string;
@@ -95,11 +132,21 @@ export interface AsyncLiftPublisherConfig {
   now?: () => number;
   idGenerator?: () => string;
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
+  knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
-  knowledgeAssetVmPublishExecutor?: (input: AsyncKnowledgeAssetVmPublishExecutionInput) => Promise<PublishResult>;
+  knowledgeAssetVmPublishHandler?: AsyncKnowledgeAssetVmPublishJobHandler;
+  /** @deprecated Use knowledgeAssetVmPublishHandler.execute. */
+  knowledgeAssetVmPublishExecutor?: (
+    input: AsyncKnowledgeAssetVmPublishExecutionInput,
+  ) => Promise<PublishResult>;
+  /** @deprecated Use knowledgeAssetVmPublishHandler.preflight. */
   knowledgeAssetVmPublishPreflight?: (
     input: AsyncKnowledgeAssetVmPublishPreflightInput,
   ) => Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
+  /** @deprecated Use knowledgeAssetVmPublishHandler.finalizeRecovered. */
+  knowledgeAssetVmPublishRecoveryFinalizer?: (
+    input: AsyncKnowledgeAssetVmPublishRecoveryInput,
+  ) => Promise<void>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }

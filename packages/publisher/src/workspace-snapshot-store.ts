@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
@@ -14,6 +15,17 @@ export interface WorkspacePublicSnapshotStore {
     readonly quads: readonly Quad[];
   }): Promise<{ readonly ref: string; readonly byteLength: number }>;
   getSnapshot(ref: string): Promise<Quad[] | null>;
+  /**
+   * Read one immutable snapshot page without materializing the complete file.
+   * Optional for compatibility with custom/legacy stores; sync responders fall
+   * back to `getSnapshot().slice(...)` when it is not implemented.
+   */
+  getSnapshotPage?(
+    ref: string,
+    offset: number,
+    limit: number,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<Quad[] | null>;
 }
 
 export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshotStore {
@@ -53,6 +65,52 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     }
 
     return parseWorkspacePublicSnapshotNQuads(raw, ref);
+  }
+
+  async getSnapshotPage(
+    ref: string,
+    offset: number,
+    limit: number,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<Quad[] | null> {
+    const safeOffset = Math.max(0, Math.floor(offset));
+    const safeLimit = Math.max(0, Math.floor(limit));
+    if (safeLimit === 0) return [];
+    const hash = snapshotHash(ref);
+    const nquadsPath = snapshotPath(this.directory, hash, 'nq');
+    let file: Awaited<ReturnType<typeof open>>;
+    try {
+      file = await open(nquadsPath, 'r');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      const legacy = await this.getLegacyJsonSnapshot(ref, hash);
+      return legacy?.slice(safeOffset, safeOffset + safeLimit) ?? null;
+    }
+
+    const input = file.createReadStream({
+      encoding: 'utf8',
+      autoClose: false,
+      signal: options?.signal,
+    });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    const page: Quad[] = [];
+    let row = 0;
+    try {
+      for await (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (row >= safeOffset) {
+          page.push(parseNQuadLine(line, ref, row));
+          if (page.length >= safeLimit) break;
+        }
+        row += 1;
+      }
+      return page;
+    } finally {
+      lines.close();
+      input.destroy();
+      await file.close().catch(() => {});
+    }
   }
 
   private async getLegacyJsonSnapshot(ref: string, hash: string): Promise<Quad[] | null> {

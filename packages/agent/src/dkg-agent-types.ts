@@ -28,11 +28,11 @@ import type {
   CompatibleProtocolOutboxStore,
   MessageIdempotencyStore,
   SwmSenderKeyPackageAckReasonCode,
+  ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
+  ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
-  LiftTransitionType,
-  LiftAuthorityProof,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
   CursorPersistence as ChainEventCursorPersistence,
@@ -46,6 +46,10 @@ import type { JsonLdContent } from './dkg-agent-utils.js';
 import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
+import type {
+  SyncContextGraphPriorityConfig,
+  SyncResponderSnapshotLimitsConfig,
+} from './sync/policy.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -65,6 +69,8 @@ import type { SyncPhase } from './sync/auth/request-build.js';
  */
 export type PreSignedAuthorAttestation = {
   address: string;
+  /** Optional caller commitment checked against the canonicalized KA before sealing. */
+  expectedMerkleRoot?: Uint8Array;
   /**
    * OT-RFC-43 §F2 — the packed reservedKaId the self-sovereign author signed the
    * AuthorAttestation over `(uint160(address)<<96)|uint96(number)`. Required: the
@@ -312,12 +318,16 @@ export interface PublishOpts {
 }
 
 export interface PublishAsyncOpts extends PublishOpts {
-  namespace?: string;
-  scope?: string;
-  transitionType?: LiftTransitionType;
-  authority?: LiftAuthorityProof;
-  /** Prior KC reference; required for MUTATE/REVOKE. */
-  priorVersion?: string;
+  /** @deprecated Raw-root lifts were removed; async publish always creates one KA. */
+  namespace?: never;
+  /** @deprecated Raw-root lifts were removed; async publish always creates one KA. */
+  scope?: never;
+  /** @deprecated Use the named KA mutation API for updates or revocation. */
+  transitionType?: never;
+  /** @deprecated Authorship is carried by the canonical KA seal. */
+  authority?: never;
+  /** @deprecated Use the named KA mutation API for updates. */
+  priorVersion?: never;
   /** V10 selective-disclosure: per-entity kaRoot instead of flat-hash KC. */
   entityProofs?: boolean;
   localOnly?: boolean;
@@ -655,6 +665,31 @@ export interface ContextGraphSub {
   pendingMeta?: boolean;
 }
 
+/**
+ * Metadata that passive discovery is allowed to contribute to the local
+ * Context Graph catalogue.
+ *
+ * Discovery deliberately cannot choose membership, sync, hosting, or VM
+ * reconciliation state. Those transitions belong to explicit edge intent or
+ * to the temporary core compatibility activation performed by DKGAgent after
+ * recording a newly discovered graph (remove with host-mode separation #1611).
+ */
+export interface ContextGraphDiscoveryMetadata {
+  name?: string;
+  onChainId?: string;
+  onChainHash?: string;
+  participantAgents?: string[];
+}
+
+export interface ContextGraphDiscoveryOptions {
+  /**
+   * Whether a newly discovered core subscription joins the ordinary catch-up
+   * scope. Chain registry discovery historically installed gossip handlers
+   * without joining that scope, so its caller passes false.
+   */
+  trackSyncScope?: boolean;
+}
+
 export interface ContextGraphSubscriptionRecord {
   id: string;
   name?: string;
@@ -681,6 +716,21 @@ export interface ContextGraphSubscriptionStore {
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+  loadVmReconcileNegative?(cacheKey: string): Promise<VmReconcileNegativeRecord | null>;
+  saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
+  deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
+  deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
+}
+
+/** Restart-durable, generation-gated record of one authoritative no-match scan. */
+export interface VmReconcileNegativeRecord {
+  cacheKey: string;
+  localCgId: string;
+  failures: number;
+  nextRetryAt: number;
+  swmGen: string;
+  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  peerTopologyKey: string;
 }
 
 export interface ContextGraphSubscriptionRehydrationStatus {
@@ -761,8 +811,124 @@ export interface ContextGraphMembershipRecord {
 }
 
 export interface ContextGraphMembershipStore {
+  /**
+   * Load persisted membership facts for restart recovery. Optional so custom
+   * stores written before membership rehydration remain source-compatible.
+   */
+  loadAll?(): Promise<Array<ContextGraphMembershipRecord & {
+    firstSeenAt?: number;
+    updatedAt: number;
+  }>>;
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
+}
+
+/**
+ * Curator-controlled admission policy for a single private context graph.
+ *
+ * `manual` is the fail-closed default. `open` means that a valid incoming
+ * join request may be admitted without a human click, subject to the owner,
+ * privacy, revocation, encryption-key, capacity, and rate checks enforced by
+ * the agent at decision time.
+ */
+export type ContextGraphJoinPolicyMode = CoreContextGraphJoinPolicyMode;
+export type ContextGraphJoinPolicyRecord = CoreContextGraphJoinPolicyRecord;
+
+export type ContextGraphJoinPolicyAuditEventType =
+  | 'join_policy_changed'
+  | 'join_auto_reservation'
+  | 'join_auto_decision'
+  | 'join_admission_committed'
+  | 'join_admission_throttled'
+  | 'join_admission_failed';
+
+export interface ContextGraphJoinPolicyAuditEvent {
+  timestamp: number;
+  contextGraphId: string;
+  eventType: ContextGraphJoinPolicyAuditEventType;
+  actor?: string;
+  agentAddress?: string;
+  outcome: string;
+  reason?: string;
+  /** SHA-256 digest of the signed request; the raw signature is never logged. */
+  requestDigest?: string;
+  policyVersion?: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ContextGraphJoinPolicyRateReservation {
+  allowed: boolean;
+  contextGraphApprovalsLastHour: number;
+  nodeApprovalsLastHour: number;
+  reason?: 'context-graph-rate-limit' | 'node-rate-limit';
+}
+
+/**
+ * Durable policy + audit adapter. Production backs this with node-ui.db.
+ * The rate reservation must atomically count and, when allowed, append the
+ * reservation row so concurrent admissions cannot overrun either ceiling.
+ */
+export interface ContextGraphJoinPolicyStore {
+  load(contextGraphId: string): Promise<ContextGraphJoinPolicyRecord | null>;
+  save(record: ContextGraphJoinPolicyRecord): Promise<void>;
+  appendAudit(event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
+  /** Atomically persist a policy transition and its security audit event. */
+  saveWithAudit(
+    record: ContextGraphJoinPolicyRecord,
+    event: ContextGraphJoinPolicyAuditEvent,
+  ): Promise<void>;
+  getAutomaticApprovalUsage(
+    contextGraphId: string,
+    timestamp: number,
+  ): Promise<{
+    contextGraphApprovalsLastHour: number;
+    nodeApprovalsLastHour: number;
+  }>;
+  reserveAutomaticApproval(input: {
+    contextGraphId: string;
+    timestamp: number;
+    contextGraphLimit: number;
+    nodeLimit: number;
+    actor: string;
+    agentAddress: string;
+    requestDigest: string;
+    policyVersion: number;
+    /** Monotonic generation of the exact policy that authorized this request. */
+    policyEpoch: number;
+  }): Promise<ContextGraphJoinPolicyRateReservation>;
+  /**
+   * Durably mark the exact reservation before crossing the membership
+   * mutation boundary. This distinguishes an admission repair from an unused
+   * or abandoned rate-limit reservation after a daemon restart.
+   */
+  markAutomaticApprovalRepairPending(input: {
+    contextGraphId: string;
+    requestDigest: string;
+    policyEpoch: number;
+  }): Promise<boolean>;
+  /** Load an unfinished post-mutation repair without relying on delegation validity. */
+  getAutomaticApprovalRepair(
+    contextGraphId: string,
+    requestDigest: string,
+  ): Promise<{
+    policyEpoch: number;
+    actor: string;
+    agentAddress: string;
+  } | null>;
+  /**
+   * Idempotently record the durable admission authorized by the exact policy
+   * snapshot that reserved it. Returns false when no matching reservation
+   * exists; callers must never infer recency from wall-clock timestamps.
+   */
+  commitAutomaticApproval(input: {
+    contextGraphId: string;
+    timestamp: number;
+    actor: string;
+    agentAddress: string;
+    requestDigest: string;
+    policyEpoch: number;
+    details?: Record<string, unknown>;
+  }): Promise<boolean>;
 }
 
 // ── Sync diagnostics ────────────────────────────────────────────────
@@ -779,11 +945,15 @@ export interface DurableSyncDiagnostics {
   checkpointAdvances: number;
   emptyResponses: number;
   metaOnlyResponses: number;
+  /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
+  verifiedPrivateOnlyResponses: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures?: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure?: number;
 }
 
 export interface SharedMemorySyncDiagnostics {
@@ -801,6 +971,8 @@ export interface SharedMemorySyncDiagnostics {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures?: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure?: number;
 }
 
 export interface CatchupSyncDiagnostics {
@@ -947,6 +1119,10 @@ export interface DKGAgentConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Daemon-local retained responder snapshot row/estimated-byte policy. */
+  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** Local requester/responder priority by Context Graph ID. Higher runs first. */
+  syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**
@@ -1220,6 +1396,8 @@ export interface DKGAgentConfig {
   maxRehydratedContextGraphSubscriptions?: number;
   /** Durable local cache for nodes/agents known to be members of a context graph. */
   contextGraphMembershipStore?: ContextGraphMembershipStore;
+  /** Durable, fail-closed per-CG curator join policy and admission audit store. */
+  contextGraphJoinPolicyStore?: ContextGraphJoinPolicyStore;
   /**
    * Universal Messenger substrate stores (rc.9 plan PR-2). When
    * supplied, the `Messenger` instance gets durable receiver-side

@@ -116,8 +116,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -240,7 +239,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -357,9 +356,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -455,15 +451,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // access control stay consistent.
     //
     // The `subscribed === true` filter is what Codex review on PR #431
-    // (round 3) flagged. `discoverContextGraphsFromStore()` seeds entries
-    // for OPEN CGs we merely learned about with `subscribed: false` (we
-    // don't auto-subscribe public CGs — explicit user opt-in only). Without
-    // this filter, those discovery-only entries would be advertised in
-    // `contextGraphsServed`, so other peers would route join attempts to a
-    // node that doesn't actually host the CG. The curated/private discovery
-    // path immediately calls `subscribeToContextGraph()` (which flips
-    // `subscribed: true`) before adding to the gossip mesh, so this filter
-    // does not regress invited-curated discovery.
+    // (round 3) flagged. Edge discovery seeds OPEN entries as catalogue-only,
+    // so advertising every known row would route peers to an edge that does
+    // not host the CG. Cores currently auto-subscribe newly discovered graphs
+    // as an ACK-custody compatibility bridge, so their public discoveries are
+    // intentionally advertised. Curated graphs remain excluded by the policy
+    // check below regardless of role.
     //
     // System CGs (`agents`, `ontology`) are excluded — they are universal
     // and don't need to be re-advertised in every profile.

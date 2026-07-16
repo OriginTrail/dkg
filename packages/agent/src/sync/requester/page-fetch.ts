@@ -1,6 +1,9 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { sendSyncRequest } from '../../p2p/sync-transport.js';
+import {
+  sendSyncRequest,
+  type SingleUseSyncSender,
+} from '../../p2p/sync-transport.js';
 import { markSyncPeerResponded } from '../error-tags.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
@@ -13,6 +16,7 @@ import {
 import {
   createRequesterPhaseTelemetry,
 } from '../memory-telemetry.js';
+import { SYNC_REQUEST_SAFE_PAGE_SIZE } from '../../dkg-agent-constants.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -96,6 +100,14 @@ interface FetchSyncPagesParams {
   protocolSync: string;
   checkpointStore: SyncCheckpointStore;
   /**
+   * Discard both the saved offset and the requester-side responder-session
+   * token before this fetch. A caller applying an authoritative snapshot uses
+   * this to guarantee that offset zero carries a NEW syncSessionId, which
+   * forces the responder to rebuild its cached row list instead of replaying
+   * an unfinished session's stale offset-zero view.
+   */
+  forceFreshSession?: boolean;
+  /**
    * R9/R10 — member SWM recovery marker. Forks BOTH the checkpoint namespace
    * (R10: distinct `|recovery` cursor + responder-session scope so it never
    * mutates the shared incremental-sync cursor) AND the request envelope (R9:
@@ -124,16 +136,11 @@ interface FetchSyncPagesParams {
    * enabled silent replay of stale cached responses past sync's
    * app-layer freshness gate (`SYNC_AUTH_MAX_AGE_MS`). Fresh-per-
    * attempt is the only design that holds under all timing scenarios —
-   * see jsdoc on `sendSyncRequest` for the full rationale.
+   * see jsdoc on `sendSyncRequest` for the full rationale. Production creates
+   * this hook with `createSingleUseSyncSender`, which prevents lower layers
+   * from replaying an envelope before the outer retry can rebuild it.
    */
-  send: (
-    peerId: string,
-    protocolId: string,
-    data: Uint8Array,
-    timeoutMs: number,
-    messageId: string,
-    signal?: AbortSignal,
-  ) => Promise<Uint8Array>;
+  send: SingleUseSyncSender;
   logWarn: (ctx: OperationContext, message: string) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -189,6 +196,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     debugSyncProgress,
     protocolSync,
     checkpointStore,
+    forceFreshSession,
     recovery,
     buildSyncRequest,
     sinceBatchId,
@@ -206,6 +214,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   throwIfAborted(signal);
   const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
+  if (forceFreshSession) {
+    checkpointStore.delete(checkpointKey);
+    unfinishedSyncResponderSessions.delete(checkpointKey);
+  }
   let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
@@ -219,6 +231,15 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const resumedFromOffset = offset;
   let bytesReceived = 0;
   let timedOut = false;
+  // Start with the throughput-oriented page size, but reduce it within the
+  // existing bounded retry budget if a response cannot traverse the wire.
+  // ProtocolRouter may surface an oversized response as a generic stream reset,
+  // so the reduction intentionally applies to any retryable transport failure.
+  // A transient failure merely makes the remainder of this phase conservative;
+  // it never changes offsets or responder-session identity.
+  const safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
+  let activePageSize = syncPageSize;
+  let successfulPageSize = syncPageSize;
   const syncSessionId = usesPageSession
     ? (savedResponderSession?.syncSessionId ?? createResponderSessionId(includeSharedMemory, phase))
     : undefined;
@@ -262,7 +283,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // full rationale (codex review on #569 follow-ups #1, #4-#8).
         requestFactory: async () => {
           throwIfAborted(signal);
-          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
+          successfulPageSize = activePageSize;
+          const request = await buildSyncRequest(contextGraphId, curOffset, activePageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
           throwIfAborted(signal);
           return request;
         },
@@ -273,7 +295,14 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           }
         },
         onRetry: (attempt, delay, err) => {
-          logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+          const priorPageSize = activePageSize;
+          if (activePageSize > safePageSize) {
+            activePageSize = Math.max(safePageSize, Math.floor(activePageSize / 2));
+          }
+          const pageSizeNote = activePageSize < priorPageSize
+            ? `; reducing page size ${priorPageSize}->${activePageSize}`
+            : '';
+          logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms${pageSizeNote}): ${err instanceof Error ? err.message : String(err)}`);
         },
       });
       const transportDurationMs = Date.now() - transportStartedAt;
@@ -330,7 +359,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           `Sync progress for "${contextGraphId}" ${includeSharedMemory ? 'shared-memory' : 'durable'} ${phase}: transferred=${allQuads.length} bytes=${bytesReceived} offset=${offset}`,
         );
       }
-      if (parsed.totalQuads < syncPageSize) break;
+      if (parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;

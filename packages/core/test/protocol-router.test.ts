@@ -316,6 +316,67 @@ describe('ProtocolRouter', () => {
       };
     }
 
+    it('honors a per-registration read cap without changing the router-wide limit', async () => {
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
+      try {
+        const inbound = new Map<
+          string,
+          (stream: FakeInboundStream, connection: unknown) => Promise<void>
+        >();
+        const node = {
+          libp2p: {
+            handle: (
+              protocol: string,
+              handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>,
+            ) => {
+              inbound.set(protocol, handler);
+            },
+            unhandle: () => undefined,
+          },
+        } as unknown as DKGNode;
+        const router = new ProtocolRouter(node, { maxReadBytes: 4 });
+        const cappedProtocol = `${PROTOCOL}/capped`;
+        const defaultProtocol = `${PROTOCOL}/default`;
+        let cappedHandlerCalls = 0;
+        let defaultHandlerCalls = 0;
+
+        router.register(cappedProtocol, async (data) => {
+          cappedHandlerCalls += 1;
+          return data;
+        }, { maxReadBytes: 2 });
+        router.register(defaultProtocol, async (data) => {
+          defaultHandlerCalls += 1;
+          return data;
+        });
+
+        const connection = {
+          remotePeer: {
+            toString: () => REMOTE_PEER,
+            toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+          },
+        };
+        const cappedStream = new FakeInboundStream([new Uint8Array([1, 2, 3])]);
+        const defaultStream = new FakeInboundStream([new Uint8Array([1, 2, 3])]);
+
+        await inbound.get(cappedProtocol)!(cappedStream, connection);
+        await inbound.get(defaultProtocol)!(defaultStream, connection);
+
+        expect(cappedHandlerCalls).toBe(0);
+        expect(cappedStream.sent).toBeNull();
+        expect(errorSpy.calls).toContainEqual([
+          expect.stringContaining(cappedProtocol),
+          'Read limit exceeded (2 bytes)',
+        ]);
+        expect(defaultHandlerCalls).toBe(1);
+        expect(defaultStream.sent).toEqual(new Uint8Array([1, 2, 3]));
+        expect(router.maxReadBytes).toBe(4);
+      } finally {
+        console.error = originalError;
+      }
+    });
+
     it('passes a live AbortSignal to raw handlers and preserves it through close', async () => {
       let seenSignal: AbortSignal | undefined;
       const fixture = makeInboundFixture();
@@ -866,6 +927,67 @@ describe('ProtocolRouter', () => {
       // attempts, all hitting the same empty peerStore.
       expect(dialCalls).toBe(3);
       expect(resolveCalls).toBe(3);
+    });
+
+    it('uses one one-shot attempt for a single-use payload and skips pooling', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      let poolCalls = 0;
+      const protocolId = '/dkg/test/single-use/1.0.0';
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('The operation was aborted due to timeout');
+        },
+      });
+      (router as any).pooledByLogical.set(protocolId, {
+        logicalProtocolId: protocolId,
+        wireProtocolId: '/dkg/test/single-use-pooled/1.0.0',
+        pool: {
+          send: async () => {
+            poolCalls += 1;
+            return new Uint8Array([0xFF]);
+          },
+        },
+      });
+
+      await expect(
+        router.send(
+          FAKE_PEER_ID,
+          protocolId,
+          new Uint8Array([1, 2, 3]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        ),
+      ).rejects.toThrow(/timeout/);
+
+      expect(poolCalls).toBe(0);
+      expect(dialCalls).toBe(1);
+      expect(resolveCalls).toBe(1);
+    });
+
+    it('rejects multi-path fan-out for a single-use payload before any wire attempt', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          return makeStubStream(new Uint8Array([0xFF])) as any;
+        },
+      });
+
+      await expect(
+        router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/single-use/1.0.0',
+          new Uint8Array([1, 2, 3]),
+          { payloadReuse: 'single-use', parallelPaths: 2 },
+        ),
+      ).rejects.toThrow(/single-use payloads cannot use parallelPaths > 1/);
+
+      expect(dialCalls).toBe(0);
+      expect(resolveCalls).toBe(0);
     });
 
     it('stops retrying once a resolver-re-prime followed by dial succeeds', async () => {

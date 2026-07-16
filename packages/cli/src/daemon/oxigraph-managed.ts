@@ -67,10 +67,18 @@ function resolvePositiveIntegerOption(
     : undefined;
 }
 
-function resolveManagedQueryClientTimeoutMs(queryTimeoutS: number | undefined): number | undefined {
+function clampNodeTimerMs(value: number): number {
+  return Math.min(value, MAX_NODE_TIMER_MS);
+}
+
+function resolveManagedQueryClientTimeoutMs(
+  clientTimeoutMs: number | undefined,
+  queryTimeoutS: number | undefined,
+): number | undefined {
+  if (clientTimeoutMs !== undefined) return clampNodeTimerMs(clientTimeoutMs);
   return queryTimeoutS === undefined
     ? undefined
-    : Math.min(queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS, MAX_NODE_TIMER_MS);
+    : clampNodeTimerMs(queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS);
 }
 
 interface StoreConfigLike {
@@ -123,6 +131,8 @@ export interface ManagedOxigraphPlan {
   readyTimeoutMs?: number;
   /** Native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
   queryTimeoutS?: number;
+  /** SPARQL HTTP client deadline, independent from Oxigraph's native timeout. */
+  clientTimeoutMs?: number;
   /** Finite limits applied to an isolated systemd user scope. */
   memoryLimits?: OxigraphMemoryLimits;
   /**
@@ -150,6 +160,10 @@ export function planManagedOxigraph(
   const port = resolveManagedOxigraphPort(options);
   const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
   const queryTimeoutS = resolvePositiveIntegerOption(options, 'queryTimeoutS');
+  const clientTimeoutMs = resolveManagedQueryClientTimeoutMs(
+    resolvePositiveIntegerOption(options, 'clientTimeoutMs'),
+    queryTimeoutS,
+  );
   const memoryLimits = normalizeOxigraphMemoryLimits({
     highMiB: options.memoryHighMiB,
     maxMiB: options.memoryMaxMiB,
@@ -191,9 +205,9 @@ export function planManagedOxigraph(
     // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
     options: {
       managedByDkg: true,
-      ...(queryTimeoutS === undefined
+      ...(clientTimeoutMs === undefined
         ? {}
-        : { timeout: resolveManagedQueryClientTimeoutMs(queryTimeoutS) }),
+        : { timeout: clientTimeoutMs }),
     },
   };
   if (graphSetIndex !== undefined) {
@@ -208,6 +222,7 @@ export function planManagedOxigraph(
     largeLiteralStorage,
     readyTimeoutMs,
     queryTimeoutS,
+    clientTimeoutMs,
     memoryLimits,
     sharedMemoryPublicSnapshotStorage,
   };

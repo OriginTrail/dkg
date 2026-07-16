@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
@@ -51,6 +51,33 @@ function emptyDetailedSync(overrides: Record<string, number> = {}) {
 }
 
 describe('sync-on-connect churn gates', () => {
+  it('keeps agents, ontology, and configured graphs in the sync-on-connect metadata scope', async () => {
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const configuredGraph = 'configured-default-cg';
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [configuredGraph],
+      getSharedMemorySyncContextGraphs: () => [],
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(refreshMetaSyncedFlags.calls).toHaveLength(1);
+    expect([...refreshMetaSyncedFlags.calls[0][0]]).toEqual([
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      configuredGraph,
+    ]);
+  });
+
   it('dedupes repeated reconnect scheduling across a short relay flap', async () => {
     const agent = await createUnstartedAgent('SyncReconnectFlapDedup');
     const calls: string[] = [];
@@ -206,6 +233,7 @@ describe('sync-on-connect churn gates', () => {
     const recovery = await (agent as any).recoverContextGraphSwmFromPeer(PEER_A, 'cg-a');
     expect(recovery).toEqual({
       replacedRoots: 0,
+      replacedGraphs: 0,
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,

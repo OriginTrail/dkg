@@ -673,6 +673,35 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.syncAgentsMeta).toBe(false);
   });
 
+  it('round-trips sync snapshot limits and Context Graph priorities', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      syncResponderSnapshotLimits: {
+        global: { rows: 500_000, bytesEstimate: 268_435_456 },
+        local: { rows: 150_000, bytesEstimate: 67_108_864 },
+      },
+      syncContextGraphPriorities: {
+        'realtime-operations': 100,
+        'default-workload': 0,
+        'bulk-archive': -20,
+      },
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.syncResponderSnapshotLimits).toEqual({
+      global: { rows: 500_000, bytesEstimate: 268_435_456 },
+      local: { rows: 150_000, bytesEstimate: 67_108_864 },
+    });
+    expect(loaded.syncContextGraphPriorities).toEqual({
+      'realtime-operations': 100,
+      'default-workload': 0,
+      'bulk-archive': -20,
+    });
+  });
+
   it('round-trips logging.kaPublishLifecycleDebug through saveConfig/loadConfig', async () => {
     await saveConfig({
       name: 'test-node',

@@ -46,7 +46,11 @@ describe('source worker daemon client (real daemon)', () => {
     const jobId = publish.jobId;
     expect(jobId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(publish.shareOperationId).toBe(share.shareOperationId);
-    expect(publish.rootsCount).toBeGreaterThan(0);
+    expect(publish.contentScopeVersion).toBe(2);
+    expect(publish.kaUal).toMatch(/^did:dkg:/);
+    expect(publish.assertionVersion).toBe('1');
+    expect(publish.publicTripleCount).toBe(1);
+    expect(publish.privateTripleCount).toBe(0);
     expect(publish.intentKey).toMatch(/^sha256:[0-9a-f]{64}$/);
 
     const status = await client.getJobStatus(jobId);

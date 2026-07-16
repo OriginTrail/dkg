@@ -30,7 +30,11 @@ interface AgentInternals {
   ): Promise<string | null>;
   handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
-  reconcileCoalescer: { trigger: (cg: string) => void } | null;
+  vmReconcileDispatcher: {
+    triggerLive: (cg: string) => void;
+    triggerPeriodic: (cg: string) => void;
+    tryTriggerPeriodic: (cg: string) => boolean;
+  } | null;
   store: TripleStore;
 }
 
@@ -72,7 +76,14 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(LOCAL, { subscribed: true });
 
     const triggered: string[] = [];
-    internals.reconcileCoalescer = { trigger: (cg: string) => { triggered.push(cg); } };
+    internals.vmReconcileDispatcher = {
+      triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
+      triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
+      tryTriggerPeriodic: (cg: string) => {
+        triggered.push(`periodic:${cg}`);
+        return true;
+      },
+    };
 
     // Precondition: unbound before the sweep (so the assertion below is meaningful).
     expect(internals.subscribedContextGraphs.get(LOCAL)?.onChainId).toBeUndefined();
@@ -82,7 +93,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     // Post-fix: the sweep self-primed onChainId from the ontology quad and then
     // — no longer skipped by the `!onChainId` guard — triggered its reconcile.
     expect(internals.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe(ONCHAIN);
-    expect(triggered).toContain(LOCAL);
+    expect(triggered).toEqual([`periodic:${LOCAL}`]);
   });
 
   it('KACG nudge targeting: binds ONLY the unbound CG whose on-chain id matches the event, not an unrelated one', async () => {
@@ -147,7 +158,11 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_MISS_B, { subscribed: true });
 
     const triggered: string[] = [];
-    internals.reconcileCoalescer = { trigger: (cg: string) => { triggered.push(cg); } };
+    internals.vmReconcileDispatcher = {
+      triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
+      triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
+      tryTriggerPeriodic: () => true,
+    };
 
     // The event names ON_HIT's on-chain id. None is bound yet.
     const reconciled = await internals.handleKARegisteredNudge(ON_HIT, 99n, createOperationContext('system'));
@@ -157,7 +172,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     // The other two pre-subscribed CGs were NOT bound and NOT reconciled.
     expect(internals.subscribedContextGraphs.get(CG_MISS_A)?.onChainId).toBeUndefined();
     expect(internals.subscribedContextGraphs.get(CG_MISS_B)?.onChainId).toBeUndefined();
-    expect(triggered).toEqual([CG_HIT]);
+    expect(triggered).toEqual([`live:${CG_HIT}`]);
   });
 
   it('live KACG nudge handler: an already-bound CG reconciles directly without a self-prime scan', async () => {
@@ -174,10 +189,14 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_BOUND, { subscribed: true, onChainId: ON_BOUND });
 
     const triggered: string[] = [];
-    internals.reconcileCoalescer = { trigger: (cg: string) => { triggered.push(cg); } };
+    internals.vmReconcileDispatcher = {
+      triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
+      triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
+      tryTriggerPeriodic: () => true,
+    };
 
     const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'));
     expect(reconciled).toBe(CG_BOUND);
-    expect(triggered).toEqual([CG_BOUND]);
+    expect(triggered).toEqual([`live:${CG_BOUND}`]);
   });
 });

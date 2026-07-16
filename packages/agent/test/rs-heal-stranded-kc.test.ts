@@ -218,6 +218,72 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     expect(legacyStill.type === 'boolean' && legacyStill.value).toBe(true);
   });
 
+  it('repairs a stranded KC inside the admitted current-watermark reconcile path', async () => {
+    await expect(extractV10KCFromStore(store, BigInt(TEST_ONCHAIN), KA_ID)).rejects.toBeTruthy();
+
+    const priorities: string[] = [];
+    const ordinalAttempts: number[] = [];
+    const agentLike = makeAgentLike(store) as any;
+    agentLike.subscribedContextGraphs = new Map([[
+      TEST_CG,
+      {
+        subscribed: true,
+        synced: true,
+        onChainId: TEST_ONCHAIN,
+        lastReconciledOrdinal: 0,
+      },
+    ]]);
+    agentLike.reconcileCursors = new Map();
+    agentLike.vmReconcileDispatcher = {
+      dispatch: async <T>(_key: string, source: string): Promise<T> => {
+        priorities.push(source === 'periodic' ? 'background' : 'foreground');
+        return SwmHostModeMethods.prototype.executeVmReconcileForCg.call(
+          agentLike,
+          TEST_CG,
+          source,
+        ) as Promise<T>;
+      },
+    };
+    agentLike.vmReconcileEnabled = () => true;
+    agentLike.chain = { getContextGraphKCCount: async () => 0n };
+    agentLike.ensureVmReconcileDispatcher = SwmHostModeMethods.prototype.ensureVmReconcileDispatcher;
+    agentLike.resolveVmReconcileTarget = SwmHostModeMethods.prototype.resolveVmReconcileTarget;
+    agentLike.createVmReconcileDeps = SwmHostModeMethods.prototype.createVmReconcileDeps;
+    agentLike.toContextGraphReconcileResult = SwmHostModeMethods.prototype.toContextGraphReconcileResult;
+    agentLike.emitVmReconcileTelemetry = SwmHostModeMethods.prototype.emitVmReconcileTelemetry;
+    agentLike.healStrandedScopedKCs = SwmHostModeMethods.prototype.healStrandedScopedKCs;
+    agentLike.reconcileChainOrdinal = async (_lcg: string, _ocg: bigint, ordinal: number) => {
+      ordinalAttempts.push(ordinal);
+      throw new Error('current watermark must not enter ordinal reconciliation');
+    };
+    agentLike.persistContextGraphSubscription = () => {
+      throw new Error('current watermark must not be persisted again');
+    };
+    agentLike.emitReplication = () => {
+      throw new Error('current watermark must not emit reconcile progress');
+    };
+
+    const result = await SwmHostModeMethods.prototype.runVmReconcileForCg.call(
+      agentLike,
+      TEST_CG,
+      'manual',
+    );
+
+    expect(result).toMatchObject({
+      status: 'current',
+      attempted: false,
+      headOrdinal: 0,
+      watermarkBefore: 0,
+      watermarkAfter: 0,
+    });
+    expect(priorities).toEqual(['foreground']);
+    expect(ordinalAttempts).toEqual([]);
+
+    const ctrl = await extractV10KCFromStore(store, BigInt(CTRL_ONCHAIN), KA_ID);
+    const healed = await extractV10KCFromStore(store, BigInt(TEST_ONCHAIN), KA_ID);
+    expect(new V10MerkleTree(healed.leaves).root).toEqual(new V10MerkleTree(ctrl.leaves).root);
+  });
+
   it('is a version-equal no-op on a second run (no duplication / no throw)', async () => {
     await runHeal(store, TEST_CG, TEST_ONCHAIN);
     const countAfterFirst = await scopedTripleCount(store, TEST_CG, TEST_ONCHAIN);

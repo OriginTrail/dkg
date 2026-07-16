@@ -74,6 +74,8 @@ export class MockChainAdapter implements ChainAdapter {
     kaCount: number;
     /** V10 flat-KC merkle leaf count (sorted + deduped). 0 for legacy V8 entries. */
     merkleLeafCount: number;
+    /** Number of committed Merkle roots, including the initial publish. */
+    merkleRootCount: bigint;
     /** Publisher EOA from `createKnowledgeAssets`; default to mock signer for V8 paths. */
     publisherAddress: string;
     /**
@@ -283,18 +285,33 @@ export class MockChainAdapter implements ChainAdapter {
 
     return {
       batchId: BigInt(String(created.data.kaId ?? created.data.batchId ?? '0')),
+      kaId: created.data.kaId != null ? BigInt(String(created.data.kaId)) : undefined,
+      merkleRoot: created.data.merkleRoot != null ? fromHex(String(created.data.merkleRoot)) : undefined,
       startKAId: created.data.startKAId != null ? BigInt(String(created.data.startKAId)) : undefined,
       endKAId: created.data.endKAId != null ? BigInt(String(created.data.endKAId)) : undefined,
       txHash,
       blockNumber: created.blockNumber,
       blockTimestamp: Math.floor(Date.now() / 1000),
       publisherAddress: String(created.data.publisherAddress ?? this.signerAddress),
+      authorAddress: created.data.authorAddress != null
+        ? String(created.data.authorAddress)
+        : created.data.publisherAddress != null
+          ? String(created.data.publisherAddress)
+          : undefined,
       tokenAmount: created.data.tokenAmount != null ? BigInt(String(created.data.tokenAmount)) : undefined,
     };
   }
 
   async getRequiredPublishTokenAmount(_publicByteSize: bigint, _epochs: number): Promise<bigint> {
     return 1n;
+  }
+
+  async getKnowledgeAssetOwner(kaId: bigint): Promise<string> {
+    const collection = this.collections.get(kaId);
+    if (!collection || collection.authorAddress === ethers.ZeroAddress) {
+      throw new Error(`Mock Knowledge Asset ${kaId.toString()} does not exist`);
+    }
+    return ethers.getAddress(collection.authorAddress);
   }
 
   async verifyPublisherOwnsRange(
@@ -343,6 +360,7 @@ export class MockChainAdapter implements ChainAdapter {
     if (collection) {
       collection.merkleRoot = params.newMerkleRoot;
       collection.merkleLeafCount = params.newMerkleLeafCount;
+      collection.merkleRootCount += 1n;
     }
     const hintedPublisherAddress = params.publisherAddress
       ? ethers.getAddress(params.publisherAddress)
@@ -359,6 +377,7 @@ export class MockChainAdapter implements ChainAdapter {
       publisherAddress,
       txHash,
       txIndex,
+      merkleRootCount: collection?.merkleRootCount?.toString(),
     });
 
     return {
@@ -381,6 +400,9 @@ export class MockChainAdapter implements ChainAdapter {
       onChainMerkleRoot: fromHex(match.data.newMerkleRoot as string),
       blockNumber: match.blockNumber,
       txIndex: typeof match.data.txIndex === 'number' ? match.data.txIndex : 0,
+      merkleRootCount: match.data.merkleRootCount
+        ? BigInt(String(match.data.merkleRootCount))
+        : undefined,
     };
   }
 
@@ -392,6 +414,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
       merkleLeafCount: 0,
+      merkleRootCount: 1n,
       publisherAddress: this.signerAddress,
       // Legacy V8 path — no attestation, mirror the on-chain `address(0)`.
       authorAddress: ethers.ZeroAddress,
@@ -828,8 +851,8 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
-   * Mock owner-lookup for the daemon's curated-CG registration
-   * preflight (`local curator == ownerOf(pcaAccountId)`).
+   * Mock owner lookup for the daemon's curated-CG registration coherence
+   * preflight. Caller authorization (owner or exact-PCA agent) is separate.
    */
   async getPublishingConvictionAccountOwner(accountId: bigint): Promise<string> {
     const acct = this.convictionAccounts.get(accountId);
@@ -1487,6 +1510,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
       merkleLeafCount: params.merkleLeafCount,
+      merkleRootCount: 1n,
       publisherAddress,
       authorAddress: ethers.getAddress(params.author.address),
       cgId: params.contextGraphId,
@@ -1698,6 +1722,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: fromHex(input.merkleRootHex),
       kaCount: input.chunks.length,
       merkleLeafCount: input.merkleLeafCount ?? input.chunks.length,
+      merkleRootCount: 1n,
       publisherAddress: input.publisherAddress ?? this.signerAddress,
       // `__registerKC` is a Random-Sampling test bridge that bypasses the
       // V10 publish path entirely; no attestation is signed, so mirror

@@ -244,11 +244,25 @@ function classifyKaIdentifier(
 ): { kind: "kaId"; kaId: bigint } | { kind: "name" } {
   const includeCompact = opts.includeCompact ?? true;
   if (seg.startsWith("did:dkg:")) {
-    // The kaId is the last `/`-delimited segment of the UAL.
+    // Rootless V2 uses the author-scoped identity
+    //   did:dkg:<chain>/<author>/<per-author-number>
+    // while the legacy/canonical on-chain form carries an already-packed id
+    // in the last segment. Reconstruct the packed id for the rootless form so
+    // resolveByKaId can recover the lifecycle author after a cross-node sync.
+    // A value larger than the 96-bit per-author range is already packed and
+    // must remain byte-for-byte unchanged.
     const idPart = seg.slice(seg.lastIndexOf("/") + 1);
     if (/^[0-9]+$/.test(idPart)) {
       try {
-        return { kind: "kaId", kaId: BigInt(idPart) };
+        const numericId = BigInt(idPart);
+        if (numericId <= ((1n << 96n) - 1n)) {
+          const withoutId = seg.slice(0, seg.lastIndexOf("/"));
+          const authorPart = withoutId.slice(withoutId.lastIndexOf("/") + 1);
+          if (/^0x[0-9a-fA-F]{40}$/.test(authorPart)) {
+            return { kind: "kaId", kaId: (BigInt(authorPart) << 96n) | numericId };
+          }
+        }
+        return { kind: "kaId", kaId: numericId };
       } catch {
         /* fall through to name */
       }
@@ -316,12 +330,18 @@ export function resolveFinalizeOptions(
     schemeVersion,
     layer,
   } = raw;
-  // #1116: optional `layer` selects WHERE the content to seal lives. "wm"
-  // (default) seals the Working-Memory draft; "swm" seals content already
-  // shared to SWM (reconstructs a transient WM draft from SWM, then finalizes)
-  // — mirrors the body-field `layer` precedent on pull-from.
-  if (layer != null && layer !== "wm" && layer !== "swm") {
-    jsonResponse(res, 400, { error: 'finalize "layer" must be "wm" or "swm" when supplied' });
+  // Rootless KAs are sealed in WM and shared atomically. Retain a deliberate,
+  // stable response for older clients that still send `layer:"swm"`, while
+  // rejecting the request before any legacy SWM read or mutation.
+  if (layer === "swm") {
+    jsonResponse(res, 409, {
+      code: "LEGACY_KA_READ_ONLY",
+      error: "Legacy root-scoped Knowledge Assets are read-only",
+    });
+    return null;
+  }
+  if (layer != null && layer !== "wm") {
+    jsonResponse(res, 400, { error: 'finalize "layer" must be "wm" when supplied' });
     return null;
   }
   if (authorAgentAddress != null && preSignedAuthorAttestation != null) {
@@ -383,7 +403,6 @@ export function resolveFinalizeOptions(
     ...(typeof effectiveAuthorAgentAddress === "string" ? { authorAgentAddress: effectiveAuthorAgentAddress } : {}),
     ...(resolvedPreSignedAttestation ? { preSignedAuthorAttestation: resolvedPreSignedAttestation } : {}),
     ...(schemeVersion != null ? { schemeVersion } : {}),
-    ...(layer === "swm" ? { layer } : {}),
   };
 }
 
@@ -1155,26 +1174,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           finalizeOptions,
           writePreflightCallerAgentAddress,
         );
-        let seal;
-        try {
-          seal = await agent.assertion.finalize(contextGraphId, name, {
-            ...finalizeOptions,
-            ...finalizeStorageLane,
-          });
-        } catch (e: any) {
-          // #1116 (review A1): a finalize(layer:"swm") on an asset that was only
-          // SUBSET-shared is rejected — subset shares are SWM-only, not
-          // publishable. Map it to a 409 (parity with the swm/share
-          // UNSEALED_SHARE_BLOCKED mapping) carrying the recovery hint in the
-          // message; everything else propagates to the outer handler unchanged.
-          if (e?.code === "SWM_SUBSET_NOT_SEALABLE") {
-            return jsonResponse(res, 409, { code: "SWM_SUBSET_NOT_SEALABLE", error: e.message });
-          }
-          throw e;
-        }
-        // #1116: a layer:"swm" finalize touches SWM (it reconstructs a WM draft
-        // from SWM, then seals), so reflect both layers in the change event.
-        emitMemoryGraphChanged?.({ contextGraphId, layers: finalizeOptions.layer === "swm" ? ["wm", "swm"] : ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
+        const seal = await agent.assertion.finalize(contextGraphId, name, {
+          ...finalizeOptions,
+          ...finalizeStorageLane,
+        });
+        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
         // Full seal payload (PR #971) — clients inspect the attestation.
         return jsonResponse(res, 200, {
           assertionUri: seal.assertionUri,
@@ -1216,14 +1220,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           if (e?.code === "WM_DRAFT_CONFLICT") {
             return jsonResponse(res, 409, { code: "WM_DRAFT_CONFLICT", error: e.message });
           }
-          // #1116 (round 5): the seal-less SWM reconstruction is also reachable
-          // here (pull-from swm + a plain finalize bypasses the finalize(layer:
-          // "swm") wrapper guard). The publisher now rejects a subset-only asset
-          // at the source with SWM_SUBSET_NOT_SEALABLE — map it to 409 (parity
-          // with the wm/finalize verb's mapping) so a partial asset can't be
-          // reconstructed/published under the KA name.
-          if (e?.code === "SWM_SUBSET_NOT_SEALABLE") {
-            return jsonResponse(res, 409, { code: "SWM_SUBSET_NOT_SEALABLE", error: e.message });
+          if (
+            e?.code === "UNSEALED_PULL_FROM_BLOCKED"
+            || e?.code === "PULL_FROM_EMPTY_SOURCE"
+            || e?.code === "LEGACY_KA_READ_ONLY"
+          ) {
+            return jsonResponse(res, 409, { code: e.code, error: e.message });
           }
           throw e; // -> outer catch -> 500
         }
@@ -1236,13 +1238,26 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // agent config default (`swmAwaitCuratorAck`). The promote aborts with 503
       // (mapped in respondAssertionError) if the curator doesn't confirm.
       const awaitCuratorAck = typeof parsed?.awaitCuratorAck === "boolean" ? parsed.awaitCuratorAck : undefined;
-      // #1116: a full share SEALS BY DEFAULT; `skipSeal:true` opts out into an
-      // unsealed SWM share. Strict-boolean: a stray "false" string must 400, not
-      // silently flip the default.
+      if (!validateEntities(parsed.entities, res)) return;
+      if (Array.isArray(parsed.entities)) {
+        return jsonResponse(res, 400, {
+          code: "KA_ATOMIC_SHARE_REQUIRED",
+          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+        });
+      }
+      // Graph-scoped KAs are seal-before-share. Retain strict parsing and accept
+      // an explicit false for older clients, but reject the removed true mode
+      // before any lifecycle mutation.
       let skipSeal: boolean | undefined;
       if (parsed?.skipSeal !== undefined) {
         if (typeof parsed.skipSeal !== "boolean") {
           return jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
+        }
+        if (parsed.skipSeal === true) {
+          return jsonResponse(res, 400, {
+            code: "UNSEALED_SHARE_UNSUPPORTED",
+            error: "skipSeal:true is not supported for graph-scoped Knowledge Assets; finalize and share the complete KA atomically",
+          });
         }
         skipSeal = parsed.skipSeal;
       }
@@ -1258,10 +1273,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
           recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
         }
-        // #1116: ownership conflicts are advisory skips. A zero-row outcome is
-        // still HTTP 200, but it did not create an SWM share and must not report
-        // the pre-share WM seal as a sealed share.
-        const swmShared = share.promotedCount > 0;
+        // A durable idempotent replay returns zero newly-promoted rows together
+        // with the original shareOperationId. That is an already-completed share,
+        // not an ownership skip, so preserve its sealed/publish-ready status.
+        const durableReplay = share.promotedCount === 0 && Boolean(share.shareOperationId);
+        const swmShared = share.promotedCount > 0 || durableReplay;
         return jsonResponse(res, 200, {
           swmShared,
           promotedCount: share.promotedCount,
@@ -1270,8 +1286,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
         });
       } catch (e: any) {
-        // #1116 D1: a default full share that can't seal (a residual capability
-        // gap, no skipSeal) fails CLOSED with WM preserved — map to a 409 that
+        // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
         // carries the recovery hint. Everything else (e.g. the curator-ack 503)
         // propagates to the outer handler unchanged.
         if (e?.code === "UNSEALED_SHARE_BLOCKED") {
@@ -1302,6 +1317,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (asyncPromoteUnavailable(res)) return;
       const entities = parsed.entities;
       if (!validateEntities(entities, res)) return;
+      if (Array.isArray(entities)) {
+        return jsonResponse(res, 400, {
+          code: "KA_ATOMIC_SHARE_REQUIRED",
+          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+        });
+      }
       // #1116 (round 5): the sync swm/share validates `skipSeal` as a strict
       // boolean; the async queue ALWAYS seals (the safe default) and can't carry
       // skipSeal through the job, so it was silently dropped — a footgun where a
@@ -1313,7 +1334,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           return jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
         }
         if (parsed.skipSeal === true) {
-          return jsonResponse(res, 400, { error: "skipSeal is not supported for async share; use swm/share (the synchronous route) to share without sealing" });
+          return jsonResponse(res, 400, { error: "skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share" });
         }
       }
       try {
@@ -1379,7 +1400,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           contextGraphId,
           name,
           shareOperationId: intent.shareOperationId,
-          rootsCount: intent.roots.length,
+          contentScopeVersion: intent.contentScopeVersion,
+          kaUal: intent.kaUal,
+          assertionVersion: intent.assertionVersion,
+          publicTripleCount: intent.publicTripleCount,
+          privateTripleCount: intent.privateTripleCount,
           sealMerkleRoot: intent.sealMerkleRoot,
           intentKey: intent.intentKey,
           ...(subGraphName ? { subGraphName } : {}),

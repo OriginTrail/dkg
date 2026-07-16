@@ -8,16 +8,12 @@ import { createResponderSyncRowListMemo } from '../src/sync/responder/snapshot-c
  * `[ProtocolRouter] handler error on /dkg/x/sync from <peer>: Maximum call
  * stack size exceeded`.
  *
- * The TTL-cutoff shared-memory data path (`readFreshSwmDataRows`) materialises
- * every fresh row of a data graph into one array. When a single shared-memory
- * graph holds more rows than V8's argument-spread limit (~1.25e5), the former
- * `rows.push(...graphRows.filter(...))` threw `RangeError: Maximum call stack
- * size exceeded`, the stream was aborted, and a large member never received the
- * data (it retried and backed off forever).
+ * The TTL-cutoff shared-memory data path formerly materialised every fresh row
+ * of a data graph into one array before applying its snapshot budget. When a
+ * graph exceeded V8's argument-spread limit (~1.25e5), the responder crashed.
  *
- * This drives the real `readSwmDataPage` snapshot (cached) path with a store
- * that returns a single fresh shared-memory graph far larger than that limit
- * and asserts the responder returns the full row set instead of crashing.
+ * This drives the real paged path against a logical 200k-row graph and proves
+ * no individual store response or responder page exceeds 500 rows.
  */
 describe('sync responder tolerates a shared-memory graph larger than the spread limit', () => {
   it('serves a >limit fresh SWM-data graph without a stack overflow', async () => {
@@ -38,36 +34,58 @@ describe('sync responder tolerates a shared-memory graph larger than the spread 
 
     const store = {
       async query(sparql: string) {
-        // fresh SWM roots (readFreshSwmRoots)
+        if (sparql.includes('SELECT DISTINCT ?g ?root')) {
+          return {
+            type: 'bindings' as const,
+            bindings: [{ g: dataGraph, root }],
+          };
+        }
+        if (sparql.includes('SELECT ?g ?count')) {
+          return {
+            type: 'bindings' as const,
+            bindings: [{ g: dataGraph, count: String(rowCount) }],
+          };
+        }
+        if (sparql.includes('SELECT DISTINCT ?s ?p ?o')) {
+          const offset = Number(/OFFSET (\d+)/.exec(sparql)?.[1] ?? 0);
+          const limit = Number(/LIMIT (\d+)/.exec(sparql)?.[1] ?? rowCount);
+          return {
+            type: 'bindings' as const,
+            bindings: bigRows.slice(offset, offset + limit),
+          };
+        }
+        // Legacy helper shape retained defensively; the new snapshot loader
+        // reaches the combined store-side FILTER EXISTS query above.
         if (sparql.includes('WorkspaceOperation')) {
           return { type: 'bindings' as const, bindings: [{ root }] };
-        }
-        // rows across graphs (readRowsAcrossGraphs)
-        if (sparql.includes('GRAPH ?g') && sparql.includes('?s ?p ?o')) {
-          return { type: 'bindings' as const, bindings: bigRows };
         }
         return { type: 'bindings' as const, bindings: [] };
       },
     } as unknown as TripleStore;
 
-    // No budget → the snapshot is cached unconditionally, so the request
-    // exercises the in-memory snapshot (spread) path, not the paged fallback.
+    // No explicit budget still gets the hard 10k/32MiB build cap. Once crossed,
+    // this session is remembered as store-paged and never retries a full load.
     const memo = createResponderSyncRowListMemo(120_000, 32, { phase: 'durable_data' });
 
-    const rows = await readSwmDataPage({
-      store,
-      graphList: [dataGraph, metaGraph],
-      registeredSubGraphNames: [],
-      contextGraphId: cg,
-      cutoffIso: '2020-01-01T00:00:00.000Z',
-      offset: 0,
-      limit: rowCount + 10,
-      rowListMemo: memo,
-      rowListCacheKey: `${cg}:swm-data`,
-      refreshRowList: true,
-    });
+    let received = 0;
+    for (let offset = 0; offset < rowCount; offset += 500) {
+      const rows = await readSwmDataPage({
+        store,
+        graphList: [dataGraph, metaGraph],
+        registeredSubGraphNames: [],
+        contextGraphId: cg,
+        cutoffIso: '2020-01-01T00:00:00.000Z',
+        offset,
+        limit: 500,
+        rowListMemo: memo,
+        rowListCacheKey: `${cg}:swm-data`,
+        refreshRowList: offset === 0,
+      });
+      expect(rows.length).toBeLessThanOrEqual(500);
+      expect(rows.every((r) => r.s === root)).toBe(true);
+      received += rows.length;
+    }
 
-    expect(rows).toHaveLength(rowCount);
-    expect(rows.every((r) => r.s === root)).toBe(true);
+    expect(received).toBe(rowCount);
   }, 20_000);
 });

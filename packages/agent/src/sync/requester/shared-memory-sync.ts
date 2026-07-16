@@ -26,6 +26,8 @@ export interface SharedMemorySyncSummary {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure: number;
 }
 
 interface SharedMemorySyncContext {
@@ -111,14 +113,26 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     failedPeers: 0,
     failedPhases: 0,
     backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
   };
 
-  const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint?: boolean } = {}) => {
+  const recordPhaseOutcome = (
+    result: SyncPageResult,
+    options: { updateCheckpoint?: boolean; emptyPhase?: boolean } = {},
+  ) => {
     const updateCheckpoint = options.updateCheckpoint ?? true;
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
     if (!updateCheckpoint) return;
-    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+    if (
+      result.completed &&
+      !result.timedOut &&
+      (
+        options.emptyPhase === true ||
+        result.resumedFromOffset > 0 ||
+        result.nextOffset > result.resumedFromOffset
+      )
+    ) {
       summary.completedPhases += 1;
     }
     if (result.nextOffset > result.resumedFromOffset) {
@@ -178,8 +192,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.emptyResponses += processed.emptyResponses;
 
       if (processed.emptyResponses > 0) {
-        recordPhaseOutcome(wsMetaResult);
-        recordPhaseOutcome(wsDataResult);
+        // Count a genuinely empty public graph as complete without requiring
+        // cursor movement. Each phase still owns its outcome, so a timeout in
+        // one phase cannot be hidden by the sibling's clean empty response.
+        recordPhaseOutcome(wsMetaResult, { emptyPhase: true });
+        recordPhaseOutcome(wsDataResult, { emptyPhase: true });
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
         }
@@ -328,13 +345,13 @@ export function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGr
   return `${contextGraphId}\0${subGraphName}`;
 }
 
-interface PublicSnapshotMetadata {
+export interface PublicSnapshotMetadata {
   ref: string;
   digest: string;
   count: number;
 }
 
-async function syncPublicSnapshotsForMeta(params: {
+export async function syncPublicSnapshotsForMeta(params: {
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
@@ -395,13 +412,16 @@ async function syncPublicSnapshotsForMeta(params: {
     if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
       completedPhases += 1;
     }
-    if (result.nextOffset > result.resumedFromOffset) {
-      checkpointAdvances += 1;
-    }
-
     if (result.completed) params.deleteCheckpoint(result.checkpointKey);
     else {
-      params.setCheckpoint(result.checkpointKey, result.nextOffset);
+      // `fetchSyncPages` returns only the quads fetched during THIS call. We do
+      // not persist an unverified prefix, so resuming a snapshot at nextOffset
+      // would validate only the tail against the full digest/count and can never
+      // succeed. Restart this one immutable KA at offset zero on the next round;
+      // already completed snapshots remain cached and are skipped, preserving
+      // monotonic recovery progress across the CG without accepting a partial
+      // asset.
+      params.deleteCheckpoint(result.checkpointKey);
       return {
         bytesReceived,
         resumedPhases,
@@ -433,7 +453,7 @@ async function syncPublicSnapshotsForMeta(params: {
   };
 }
 
-function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
+export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
   const bySubject = new Map<string, { ref?: string; digest?: string; count?: number; hasSnapshotGraph?: boolean }>();
   for (const quad of metaQuads) {
     if (

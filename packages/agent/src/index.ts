@@ -48,6 +48,18 @@ export {
 } from './p2p/multiaddr-peer-target.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
+export {
+  VmReconcileDispatcher,
+} from './chain-reconciler.js';
+export {
+  ContextGraphOnChainIdUnresolvedError,
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+  VmReconcileUnavailableError,
+  type ContextGraphReconcileResult,
+  type ContextGraphReconcileStatus,
+  type VmReconcileSource,
+} from './vm-reconcile-service.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,
@@ -81,6 +93,18 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
+export {
+  contextGraphPriority,
+  countSyncPriorityClasses,
+  normalizeSyncContextGraphPriorities,
+  orderContextGraphIdsByPriority,
+  syncPriorityClass,
+  validateSyncResponderSnapshotLimitsConfig,
+  type SyncContextGraphPriorityConfig,
+  type SyncPriorityClass,
+  type SyncResponderSnapshotLimitsConfig,
+  type SyncSchedulerLane,
+} from './sync/policy.js';
 export type { PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 export {
   verifyBatch,
@@ -124,12 +148,20 @@ export {
   type VerifyMemberAttestationResult,
 } from './swm/member-attestation.js';
 export {
+  ROOTLESS_UPDATE_ERROR_CODES,
+  RootlessUpdateError,
+  isRootlessUpdateError,
+  type RootlessUpdateErrorCode,
+} from './rootless-update-error.js';
+export {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
+  type ContextGraphDiscoveryMetadata,
+  type ContextGraphDiscoveryOptions,
   type PublishOpts,
   type PublishAsyncContent,
   type PublishAsyncOpts,
@@ -138,6 +170,12 @@ export {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type ContextGraphJoinPolicyMode,
+  type ContextGraphJoinPolicyRecord,
+  type ContextGraphJoinPolicyAuditEventType,
+  type ContextGraphJoinPolicyAuditEvent,
+  type ContextGraphJoinPolicyRateReservation,
+  type ContextGraphJoinPolicyStore,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
@@ -231,6 +269,11 @@ export {
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
 export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
+export {
+  classifyDurableProgress,
+  type DurableProgressClassification,
+  type DurableProgressSummary,
+} from './sync/durable-progress.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.

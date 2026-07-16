@@ -43,6 +43,13 @@ function fakeAgent(config: { nodeRole?: 'core' | 'edge'; syncAgentsMeta?: boolea
     // The legacy lane the changelog dispatch delegates to; it owns the
     // syncAgentsMeta resolution + the (stubbed) runDurableSync call.
     runLegacyDurableSync: LifecycleSyncMethods.prototype.runLegacyDurableSync,
+    runContextGraphSyncWithBackpressure: async (
+      _ctx: unknown,
+      _contextGraphId: string,
+      _lane: string,
+      _label: string,
+      work: () => Promise<unknown>,
+    ) => work(),
     createContextGraphSyncDeadline: () => Date.now() + 60_000,
     fetchSyncPages: async () => ({}),
     processDurableBatchInWorker: async () => ({}),

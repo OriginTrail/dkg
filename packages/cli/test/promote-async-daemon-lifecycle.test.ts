@@ -203,7 +203,7 @@ describe('promote-async daemon lifecycle wiring', () => {
     const enqueued = await post('/api/knowledge-assets/daemon-lifecycle/swm/share-async', {
       contextGraphId: 'graphify',
       subGraphName: 'code',
-      entities: ['urn:dkg:entity:a'],
+      entities: 'all',
     });
     // Spec §3.1: enqueue replies 200 OK with `{ jobId, state: "queued" }`.
     // (Routes return 503 when the worker flag is off — the test arms it
@@ -234,7 +234,7 @@ describe('promote-async daemon lifecycle wiring', () => {
     expect(promoteCalls[0]).toEqual({
       contextGraphId: 'graphify',
       name: 'daemon-lifecycle',
-      opts: { entities: ['urn:dkg:entity:a'], subGraphName: 'code' },
+      opts: { entities: 'all', subGraphName: 'code' },
     });
 
     let stopSettled = false;

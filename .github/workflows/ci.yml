@@ -1,13 +1,10 @@
 name: CI
 
-# Trigger rules — chosen so the same SHA is never tested twice:
-#   * push to main/v10-rc/release/rc.12 : always runs (merge-gate safety
-#     net, full Solidity coverage, required status checks for protected
-#     branches). `release/rc.12` is the active release-stabilisation
-#     branch that feature/fix work currently lands on (and where bugs
-#     are reproduced/fixed), so it gets the same gate as main/v10-rc —
-#     otherwise the Node test suites only run once rc.12 merges upward.
-#   * pull_request         : runs on every open/synchronize/reopen event.
+# Trigger rules:
+#   * pull_request : fail-closed delta plan for fast iteration. Label changes
+#                    retrigger the workflow so `ci:full` is an override.
+#   * merge_group : full CI against the exact pre-merge candidate.
+#   * protected push / manual dispatch : full CI safety net.
 #   * No `push` trigger on feature branches (e.g. `test/**`). When a PR
 #     is open, the `pull_request` event already covers every new commit;
 #     when a PR is not open yet, developers can either open a draft PR
@@ -17,6 +14,11 @@ on:
     branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
   pull_request:
     branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  # When merge queue is enabled, this is the pre-merge full-CI safety net.
+  # It validates the exact candidate that will land, without introducing a
+  # develop branch that batches unrelated failures into one large PR.
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -38,56 +40,114 @@ permissions:
 
 jobs:
   # ------------------------------------------------------------------
-  # Detect which surface changed so we can gate the heavy Solidity
-  # coverage+ratchet run to contract-touching PRs. On `push` events (merges
-  # into v10-rc / main) the safety net always runs regardless of filters.
+  # Produce one fail-closed test plan for every workflow in this repository.
+  # PRs run the affected package lane plus declared downstream consumers.
+  # Protected pushes, manual runs, and merge queue candidates select every
+  # lane. Global/unknown changes, package manifests, large changes, and
+  # `ci:full` run every Node/EVM lane; Solidity retains its independent PR
+  # path gate.
   # ------------------------------------------------------------------
   changes:
-    name: Detect changes
+    name: Plan CI delta
     runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      contents: read
-      # `dorny/paths-filter` on a `pull_request` event reads the PR file
-      # list via the Pull Requests REST API (`GET /repos/{owner}/{repo}/
-      # pulls/{number}/files`). Without `pull-requests: read` here, the
-      # action fails with `Resource not accessible by integration` and
-      # the whole CI run dies before the test matrix starts. Scoped to
-      # this job only — every other job in this workflow does not call
-      # the API and stays read-only on `contents`.
-      pull-requests: read
+    timeout-minutes: 5
     outputs:
-      contracts: ${{ steps.filter.outputs.contracts }}
+      full_ci: ${{ steps.plan.outputs.full_ci }}
+      run_node: ${{ steps.plan.outputs.run_node }}
+      tornado_core: ${{ steps.plan.outputs.tornado_core }}
+      tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
+      tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
+      tornado_agent: ${{ steps.plan.outputs.tornado_agent }}
+      bura_cli: ${{ steps.plan.outputs.bura_cli }}
+      bura_blazegraph_arm64: ${{ steps.plan.outputs.bura_blazegraph_arm64 }}
+      bura_query: ${{ steps.plan.outputs.bura_query }}
+      kosava_node_ui: ${{ steps.plan.outputs.kosava_node_ui }}
+      kosava_node_ui_e2e: ${{ steps.plan.outputs.kosava_node_ui_e2e }}
+      kosava_supporting: ${{ steps.plan.outputs.kosava_supporting }}
+      kosava_hardhat_plugins: ${{ steps.plan.outputs.kosava_hardhat_plugins }}
+      contracts: ${{ steps.plan.outputs.contracts }}
+      evm_matrix: ${{ steps.plan.outputs.evm_matrix }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # The merge candidate is untrusted input: use it only to calculate the
+      # changed-file set, and never execute its CI planner or validator here.
+      - name: Checkout merge candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
-        id: filter
+          # The PR checkout is a synthetic merge commit; depth 2 normally
+          # includes that commit and both parents without cloning full history.
+          fetch-depth: 2
+          path: candidate
+      # This immutable controller is the authority for test selection. A
+      # policy update intentionally uses a new reviewed commit SHA; never use
+      # the merge candidate or a mutable branch here.
+      - name: Checkout trusted CI controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          filters: |
-            contracts:
-              - 'packages/evm-module/contracts/**'
-              - 'packages/evm-module/test/**'
-              - 'packages/evm-module/deploy/**'
-              - 'packages/evm-module/scripts/**'
-              - 'packages/evm-module/hardhat.*'
-              - 'packages/evm-module/package.json'
-              - 'packages/evm-module/slither.config.json'
-              - 'packages/evm-module/.solhint.json'
-              - 'packages/evm-module/.solhintignore'
-              - 'packages/evm-module/aderyn.toml'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - '.github/workflows/ci.yml'
+          repository: OriginTrail/dkg
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          persist-credentials: false
+          path: trusted-ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/lib
+          sparse-checkout-cone-mode: false
+      - name: Compute fail-closed CI plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_SHA: ${{ github.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Initial rollout is main-only. Release/RC PRs stay full until they
+          # have equivalent required-gate + merge-queue protection.
+          DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && github.base_ref == 'main' }}
+        run: |
+          set -euo pipefail
+          CHANGES_FILE="${RUNNER_TEMP}/ci-name-status.z"
+          : > "${CHANGES_FILE}"
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            if [[ -z "${MERGE_SHA}" ]]; then
+              echo "::error::Missing pull-request merge SHA"
+              exit 1
+            fi
+            git -C candidate cat-file -e "${MERGE_SHA}^{commit}"
+            # Diff the synthetic merge candidate against its FIRST PARENT: the
+            # base-branch tip GitHub merged against when it built the candidate
+            # (fetch-depth 2 above always includes it). The event payload's
+            # pull_request.base.sha is a STALE snapshot — after any unrelated
+            # merge to base it drags those files into this diff and misroutes
+            # the PR to full CI (observed on PR #1690 right after #1687 landed).
+            BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"
+            git -C candidate diff --name-status -z \
+              "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
+          fi
+
+          PLAN_EVENT="${EVENT_NAME}"
+          if [[ "${EVENT_NAME}" == "pull_request" && "${DELTA_ENABLED}" != "true" ]]; then
+            PLAN_EVENT="pull_request_delta_disabled"
+          fi
+
+          node trusted-ci/scripts/ci/plan-ci.mjs \
+            --event "${PLAN_EVENT}" \
+            --changes-z "${CHANGES_FILE}" \
+            --labels-json "${PR_LABELS:-[]}" \
+            --sample-key "${SAMPLE_KEY}" \
+            --github-output "${GITHUB_OUTPUT}" \
+            --summary "${GITHUB_STEP_SUMMARY}"
+      # Package README files are documentation for routing purposes, but they
+      # are also npm metadata. Candidate code runs only after the trusted plan
+      # has finalized its outputs, so it cannot influence test selection.
+      - name: Validate npm metadata points to v10
+        run: node candidate/scripts/check-npm-metadata.mjs
 
   # ------------------------------------------------------------------
   # One canonical build. Every test job downloads this artifact instead
   # of rebuilding from scratch (saves ~3-4 min per job).
   #
-  # IMPORTANT — two optimizations here make the sub-5-min wall-clock
-  # possible:
+  # IMPORTANT — two optimizations keep this shared build short:
   #
   # 1. `--filter='!@dkg-evm-module'` skips the 1m 54s hardhat compile
   #    (Solidity→bytecode + typechain). No Node test lane consumes its
@@ -113,6 +173,8 @@ jobs:
   # ------------------------------------------------------------------
   build:
     name: Build packages
+    needs: changes
+    if: needs.changes.outputs.run_node == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -233,14 +295,95 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------------------
-  # Tornado core lane: core + storage + chain unit tests. These are all
-  # sub-minute suites so we keep them bundled on one runner.
+  # Compile each EVM flavor ONCE, in parallel with the shared Node build.
+  # Several downstream jobs previously repeated the same 65-90 second
+  # compile on every runner. The immutable workflow artifact lets all shards
+  # consume byte-for-byte identical outputs without putting Solidity compile
+  # time on their critical path.
   # ------------------------------------------------------------------
-  tornado-core:
-    name: "Tornado: core + storage + chain"
-    needs: build
+  evm-node-test-artifacts:
+    name: Compile EVM test artifacts (0.8.20/london)
+    needs: changes
+    if: needs.changes.outputs.tornado_core == 'true' || needs.changes.outputs.bura_cli == 'true' || needs.changes.outputs.kosava_hardhat_plugins == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Compile EVM contracts for shared Hardhat harnesses
+        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.node.config.ts
+      - name: Package EVM test artifacts
+        run: tar -czf /tmp/evm-node-test-artifacts.tgz packages/evm-module/artifacts packages/evm-module/cache
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp/evm-node-test-artifacts.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  evm-devnet-test-artifacts:
+    name: Compile devnet EVM artifacts (0.8.24/cancun)
+    needs: changes
+    if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Compile EVM contracts for the real-node devnet
+        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.devnet.config.ts
+      - name: Package devnet EVM artifacts
+        run: tar -czf /tmp/evm-devnet-test-artifacts.tgz packages/evm-module/artifacts-devnet packages/evm-module/cache-devnet
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evm-devnet-test-artifacts
+          path: /tmp/evm-devnet-test-artifacts.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Tornado core lane. Pure core/RDF/storage tests share one runner; the
+  # serial real-Hardhat chain suite is split across isolated runners. Every
+  # chain shard gets its own node and test context, so no state is shared.
+  # ------------------------------------------------------------------
+  tornado-core:
+    name: "Tornado: ${{ matrix.label }}"
+    needs: [changes, build, evm-node-test-artifacts]
+    if: needs.changes.outputs.tornado_core == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: core + RDF + storage
+            suite: core
+            shard: 0
+          - label: chain [1/3]
+            suite: chain
+            shard: 1
+          - label: chain [2/3]
+            suite: chain
+            shard: 2
+          - label: chain [3/3]
+            suite: chain
+            shard: 3
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -258,13 +401,30 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.suite == 'chain'
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp
+      - name: Restore EVM test artifacts
+        if: matrix.suite == 'chain'
+        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
 
-      - name: "Core (442 tests)"
-        run: pnpm --filter @origintrail-official/dkg-core test
-      - name: "Storage (78 tests)"
-        run: pnpm --filter @origintrail-official/dkg-storage test
-      - name: "Chain unit (46 tests)"
-        run: pnpm --filter @origintrail-official/dkg-chain test
+      - name: Core, RDF utilities, and storage tests
+        if: matrix.suite == 'core'
+        run: |
+          pnpm --filter @origintrail-official/dkg-core test
+          pnpm --filter @origintrail-official/dkg-rdf-utils test
+          pnpm --filter @origintrail-official/dkg-storage test
+      - name: "Chain tests (shard ${{ matrix.shard }}/3)"
+        if: matrix.suite == 'chain'
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs chain "$SHARD_ID")
+          test "${#SHARD_FILES[@]}" -gt 0
+          pnpm --filter @origintrail-official/dkg-chain exec vitest run "${SHARD_FILES[@]}"
 
   # ------------------------------------------------------------------
   # Tornado Blazegraph integration lane — runs the storage adapter's
@@ -291,7 +451,8 @@ jobs:
   # ------------------------------------------------------------------
   tornado-blazegraph:
     name: "Tornado: storage Blazegraph integration (live server)"
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.tornado_blazegraph == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -358,7 +519,8 @@ jobs:
   # ------------------------------------------------------------------
   tornado-publisher:
     name: "Tornado: publisher [${{ matrix.shard }}/4]"
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.tornado_publisher == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -412,7 +574,8 @@ jobs:
   # ------------------------------------------------------------------
   tornado-agent:
     name: "Tornado: agent [${{ matrix.shard }}/10]"
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -448,18 +611,25 @@ jobs:
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
-  # auth, keystore, migration, indexer) so it owns a runner. The
-  # remaining BURA package (`query`) runs on its own runner.
+  # auth, keystore, migration, indexer). It is intentionally configured with
+  # one Vitest worker because every file shares a real Hardhat harness, so we
+  # parallelize safely across isolated CI runners instead. The remaining BURA
+  # package (`query`) runs on its own runner.
   #
   # Tier: BURA — `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1. Packages
   # on the critical path for users/operators; auth & quorum bugs here
   # degrade service but do not threaten protocol consensus.
   # ------------------------------------------------------------------
   bura-cli:
-    name: "Bura: cli"
-    needs: build
+    name: "Bura: cli [${{ matrix.shard }}/4]"
+    needs: [changes, build, evm-node-test-artifacts]
+    if: needs.changes.outputs.bura_cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -477,13 +647,28 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp
+      - name: Restore EVM test artifacts
+        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
       - name: "Verify provisioned Blazegraph image contract"
+        if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
-      - name: "CLI tests"
-        run: pnpm --filter @origintrail-official/dkg test
+      - name: "CLI tests (shard ${{ matrix.shard }}/4)"
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mapfile -t SHARD_FILES < <(node scripts/ci/plan-vitest-shard.mjs cli "$SHARD_ID")
+          test "${#SHARD_FILES[@]}" -gt 0
+          pnpm --filter @origintrail-official/dkg exec vitest run "${SHARD_FILES[@]}"
 
   bura-blazegraph-arm64:
     name: "Bura: Blazegraph arm64 image (native)"
+    needs: changes
+    if: needs.changes.outputs.bura_blazegraph_arm64 == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
@@ -495,7 +680,8 @@ jobs:
 
   bura-supporting:
     name: "Bura: query"
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.bura_query == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -529,7 +715,8 @@ jobs:
   # ------------------------------------------------------------------
   kosava-node-ui:
     name: "Kosava: node-ui"
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.kosava_node_ui == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -554,12 +741,14 @@ jobs:
       - name: "node-ui tests"
         run: pnpm --filter @origintrail-official/dkg-node-ui test
 
-  # node-ui Playwright e2e — REAL NODE, NO MOCKS. The suite boots a live
-  # 4-node devnet (Hardhat + four DKG daemons) via Playwright's `webServer`
-  # (see `e2e/bootstrap-devnet.ts`, chained `bootstrap && pnpm dev:ui`),
-  # drives the real UI against node 1's live `/api`, and tears the devnet
-  # down in `e2e/global-teardown.ts` when the run finishes. There is no
-  # route-mock lane anymore: every test exercises real daemon round-trips.
+  # node-ui Playwright e2e — REAL NODE, NO MOCKS. Each shard boots its OWN
+  # isolated 4-node devnet (Hardhat + four DKG daemons) via Playwright's
+  # `webServer` (see `e2e/bootstrap-devnet.ts`, chained `bootstrap && pnpm
+  # dev:ui`), drives the real UI against node 1's live `/api`, and tears that
+  # devnet down in `e2e/global-teardown.ts`. There is no route-mock lane:
+  # every test still exercises real daemon round-trips. Sharding across
+  # runners preserves the one-worker-per-devnet contention guard in
+  # playwright.config.ts while removing the 326-test serial wall-clock tail.
   #
   # Why 4 nodes: VM publishing needs StorageACK quorum, and scripts/devnet.sh
   # pins `minimumRequiredSignatures = 3` (the real mainnet 3-of-N quorum — DO
@@ -572,14 +761,18 @@ jobs:
   # Channel is pinned to bundled chromium in playwright.config.ts under CI
   # (see `ciChromium`) since we only `playwright install chromium`.
   kosava-node-ui-e2e:
-    name: "Kosava: node-ui e2e (Playwright real-node devnet)"
-    needs: build
+    name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
+    needs: [changes, build, evm-devnet-test-artifacts]
+    if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
     runs-on: ubuntu-latest
-    # Cold devnet boot (Solidity compile + 2-node bring-up + on-chain
-    # staking/CG registration) + the full real-node suite at 1 worker with
-    # retries. Generous so a slow runner or a publish retry never flakes the
-    # whole lane on a timeout.
+    # Cold 4-node bring-up + on-chain staking/CG registration + one seventh of
+    # the real-node suite at one worker, with retries. Generous so a slow
+    # runner or a publish retry never flakes the whole lane on a timeout.
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -597,30 +790,23 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      # The shared `build` artifact skips the Solidity compile (DKG_SKIP_EVM_BUILD=1),
-      # so the EVM artifacts/typechain bindings the devnet's `hardhat node` +
-      # `hardhat deploy` need aren't present. Compile them HERE — in a dedicated,
-      # observable step — so the devnet boot inside Playwright's `webServer`
-      # reuses cached artifacts and stays well inside the webServer timeout
-      # (and a compile failure is localised to this step, not buried in a
-      # webServer timeout). devnet.sh now compiles + boots with the DEVNET
-      # hardhat config (`--config hardhat.devnet.config.ts`: solc 0.8.24 +
-      # cancun), so warm the SAME config here — otherwise this step compiles the
-      # default 0.8.20/london bytecode and the real devnet-config compile moves
-      # back into the webServer boot (otReviewAgent #1403 P2).
-      - name: Compile EVM contracts (for the devnet boot)
-        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.devnet.config.ts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: evm-devnet-test-artifacts
+          path: /tmp
+      - name: Restore devnet EVM artifacts
+        run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
       - name: Install Playwright Chromium
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
-      - name: "node-ui real-node Playwright e2e (boots + tears down a live devnet)"
-        run: pnpm --filter @origintrail-official/dkg-node-ui test:e2e
+      - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
+        run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
       # Upload the HTML report + traces so intermittent browser/devnet failures
       # are diagnosable from the Actions UI (Codex review on PR #832).
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: node-ui-playwright-report
+          name: node-ui-playwright-report-${{ matrix.shard }}-of-7
           path: |
             packages/node-ui/playwright-report/
             packages/node-ui/test-results/
@@ -634,7 +820,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: node-ui-devnet-logs
+          name: node-ui-devnet-logs-${{ matrix.shard }}-of-7
           path: |
             .devnet/node*/daemon.log
             .devnet/hardhat/node.log
@@ -643,8 +829,9 @@ jobs:
           if-no-files-found: ignore
 
   kosava-supporting:
-    name: "Kosava: adapters + epcis + graph-viz + mcp-server + network-sim"
-    needs: build
+    name: "Kosava: adapters + utilities + demo"
+    needs: [changes, build]
+    if: needs.changes.outputs.kosava_supporting == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -691,9 +878,11 @@ jobs:
             --filter @origintrail-official/dkg-mcp \
             --filter @origintrail-official/dkg-network-sim \
             --filter @origintrail-official/dkg-graph-viz \
+            --filter @origintrail-official/dkg-okf \
             --filter @origintrail-official/dkg-adapter-elizaos \
             --filter @origintrail-official/dkg-adapter-hermes \
             --filter @origintrail-official/dkg-adapter-openclaw \
+            --filter @origintrail-official/dkg-demo \
             run test
 
   # ------------------------------------------------------------------
@@ -705,13 +894,14 @@ jobs:
   # node via the shared `../chain/test/hardhat-global-setup.ts`
   # (hardhat-harness deploys with `hardhat.node.config.ts`) on every
   # vitest run — that needs the Solidity artifacts the shared `build`
-  # deliberately skips (DKG_SKIP_EVM_BUILD=1). So they get their own
-  # lane with an explicit compile step, mirroring the node-ui e2e lane.
+  # deliberately skips (DKG_SKIP_EVM_BUILD=1). The parallel EVM artifact
+  # producer above compiles them once for this and the other harness users.
   # No mocks: real contracts, real chain.
   # ------------------------------------------------------------------
   kosava-hardhat-plugins:
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
-    needs: build
+    needs: [changes, build, evm-node-test-artifacts]
+    if: needs.changes.outputs.kosava_hardhat_plugins == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -731,14 +921,12 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      # The shared build skips the Solidity compile (DKG_SKIP_EVM_BUILD=1),
-      # so the artifacts the Hardhat globalSetup's `hardhat deploy` needs
-      # aren't present. Compile them HERE — same config the harness deploys
-      # with — in a dedicated, observable step so the globalSetup reuses
-      # cached artifacts and a compile failure is localised here rather
-      # than buried inside a test timeout.
-      - name: Compile EVM contracts (for the Hardhat globalSetup)
-        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.node.config.ts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: evm-node-test-artifacts
+          path: /tmp
+      - name: Restore EVM test artifacts
+        run: tar -xzf /tmp/evm-node-test-artifacts.tgz
       - name: "random-sampling tests (real Hardhat, no mocks)"
         run: pnpm --filter @origintrail-official/dkg-random-sampling test
       - name: "kafka-plugin tests (real Hardhat, no mocks)"
@@ -753,16 +941,18 @@ jobs:
   #
   # This job catches the only way that contract can break: a contributor
   # changes a `.sol` file and forgets to commit the regenerated ABIs.
-  # Runs only when `changes.outputs.contracts == 'true'` so PRs that
-  # don't touch contracts pay zero cost. On failure prints an explicit
-  # remediation command so the fix is one copy-paste away.
+  # The controller changes in this PR are not trusted until they land on the
+  # protected default branch. During that first rollout phase, run this cheap
+  # gate unconditionally instead of pinning workflows to candidate history.
+  # A follow-up may rotate the immutable controller and restore path selection.
+  # On failure prints an explicit remediation command so the fix is one
+  # copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: needs.changes.outputs.contracts == 'true'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -825,11 +1015,13 @@ jobs:
   # Tornado Solidity lane — `packages/evm-module` is TORNADO-tier
   # (`dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1): bugs in the
   # contracts mean financial loss or consensus divergence.
-  #   - PR + no contract changes : no-op fast pass (keeps the required
-  #     check green without spinning up Hardhat).
+  #   - PR + no contract changes : matrix is skipped before runner fan-out;
+  #                                the always-present CI gate stays green.
   #   - PR + contract changes    : 4-way sharded hardhat test, no
   #                                coverage (~5-6 min per shard in
   #                                parallel; previously ~20 min single).
+  #   - merge queue candidate    : same sharded suite against the exact
+  #                                combined commit that is about to land.
   #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
   #                                single job (coverage reports don't
   #                                compose across shards, so we keep
@@ -840,9 +1032,9 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # PR lane only — sharded 4 ways. Push lane runs the separate
-    # solidity-coverage job below (full coverage + ratchet check).
-    if: github.event_name == 'pull_request'
+    # Candidate lane — sharded 4 ways. Protected pushes and manual runs use the
+    # separate coverage+ratchet job below.
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -851,25 +1043,18 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - name: Skip — no contract changes on this PR
-        if: needs.changes.outputs.contracts != 'true'
-        run: echo "::notice::No contracts/*/test/hardhat changes detected — skipping Solidity shard ${{ matrix.shard }}/4. Full coverage still runs on push to main/v10-rc."
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-        if: needs.changes.outputs.contracts == 'true'
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        if: needs.changes.outputs.contracts == 'true'
         with:
           node-version-file: .nvmrc
           cache: pnpm
 
       - name: Install dependencies
-        if: needs.changes.outputs.contracts == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Cache Hardhat artifacts (NOT typechain)
-        if: needs.changes.outputs.contracts == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # `packages/evm-module/typechain` is INTENTIONALLY omitted.
@@ -903,12 +1088,10 @@ jobs:
           key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
 
       - name: Compile contracts
-        if: needs.changes.outputs.contracts == 'true'
         run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
       - name: Generate TypeChain bindings (always fresh)
-        if: needs.changes.outputs.contracts == 'true'
         # Typechain is never cached (see Cache Hardhat artifacts step),
         # so the output dir is always empty here on a cache hit and
         # we generate from scratch against the artifacts that were
@@ -940,7 +1123,6 @@ jobs:
         working-directory: packages/evm-module
 
       - name: "Hardhat tests (shard ${{ matrix.shard }}/4)"
-        if: needs.changes.outputs.contracts == 'true'
         # Round-robin distribute the 48 .test.ts files across 4
         # shards. `sort` gives deterministic ordering so the same file
         # always lands in the same shard across runs — makes failure
@@ -965,8 +1147,8 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=8192
 
   # ------------------------------------------------------------------
-  # Tornado Solidity coverage lane — safety net on push to main/v10-rc
-  # only. Full Solidity suite + solidity-coverage + coverage ratchet.
+  # Tornado Solidity coverage lane — safety net on protected push or manual
+  # dispatch. Full Solidity suite + solidity-coverage + coverage ratchet.
   # Not sharded because solidity-coverage's instrumentation state
   # doesn't compose across parallel runners. Wall-clock on push is
   # not on the critical path so ~20-25 min here is acceptable.
@@ -976,7 +1158,7 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -1180,3 +1362,52 @@ jobs:
         with:
           sarif_file: packages/evm-module/solhint.sarif
           category: solhint
+
+  # One stable branch-protection check. It also verifies that every lane the
+  # planner selected actually ran successfully, so a typo in a job-level `if`
+  # cannot silently turn a required test into a green skip.
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs:
+      - changes
+      - build
+      - evm-node-test-artifacts
+      - evm-devnet-test-artifacts
+      - tornado-core
+      - tornado-blazegraph
+      - tornado-publisher
+      - tornado-agent
+      - bura-cli
+      - bura-blazegraph-arm64
+      - bura-supporting
+      - kosava-node-ui
+      - kosava-node-ui-e2e
+      - kosava-supporting
+      - kosava-hardhat-plugins
+      - abi-freshness
+      - solidity
+      - solidity-coverage
+      - tornado-static-analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      # The aggregate verdict must come from the same immutable controller as
+      # the planner, never from the merge candidate being evaluated.
+      - name: Checkout trusted CI controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: OriginTrail/dkg
+          ref: c441bd6766ace67e331c0dfc6e22cb1325a6e1f6
+          persist-credentials: false
+          path: trusted-ci
+          sparse-checkout: |
+            scripts/ci
+            scripts/lib
+          sparse-checkout-cone-mode: false
+      - name: Verify selected lanes completed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node trusted-ci/scripts/ci/assert-ci-results.mjs --workflow primary

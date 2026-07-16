@@ -7,18 +7,50 @@
  * is unchanged — this module is a 1:1 move.
  */
 
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import {
+  DEFAULT_MAX_READ_BYTES,
+  JAVA_WRITE_UTF_MAX_BYTES,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 
 /** Anchor predicate stamped on every root entity that has a private partition. */
 export const PRIVATE_DATA_ANCHOR = 'http://dkg.io/ontology/privateDataAnchor';
 
 // ── Sync ──────────────────────────────────────────────────────────────
+/** Legacy responder-side maximum accepted row limit. Keep at 500 so a new
+ * responder remains compatible with requesters from an older rolling node. */
 export const SYNC_PAGE_SIZE = 500;
+/**
+ * Requester page size derived from the wire frame cap, not only row count.
+ *
+ * A legal RDF literal may occupy JAVA_WRITE_UTF_MAX_BYTES. At the historical
+ * 500-row request size, 32 KiB literals already produced ~16 MiB responses and
+ * tripped ProtocolRouter's 10 MiB read limit before page parsing. Reserve six
+ * MiB for subjects, predicates, graph IRIs, N-Quads syntax, and framing; the
+ * remaining four MiB admits 64 maximum-sized literal rows. That value remains
+ * the retry floor for pathological payloads. Normal RDF rows are far smaller,
+ * so request 256 rows first and let the requester halve the limit on transport
+ * retries (256 -> 128 -> 64). New requesters work with old responders because
+ * `limit` was already part of the wire request; keeping SYNC_PAGE_SIZE above
+ * unchanged preserves old-requester compatibility.
+ */
+export const SYNC_RESPONSE_FRAME_HEADROOM_BYTES = 6 * 1024 * 1024;
+export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
+  1,
+  Math.floor(
+    (DEFAULT_MAX_READ_BYTES - SYNC_RESPONSE_FRAME_HEADROOM_BYTES) /
+    JAVA_WRITE_UTF_MAX_BYTES,
+  ),
+);
+export const SYNC_REQUEST_PAGE_SIZE = Math.min(
+  SYNC_PAGE_SIZE,
+  Math.max(SYNC_REQUEST_SAFE_PAGE_SIZE, 256),
+);
 export const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 export const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 /** Per-page timeout for sync when we have budget (relay links can be slow). */
 export const SYNC_PAGE_TIMEOUT_MS = 45_000;
-/** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
+/** Fresh signed request attempts; each envelope is marked single-use at the ProtocolRouter boundary. */
 export const SYNC_ROUTER_ATTEMPTS = 3;
 export const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 export const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;

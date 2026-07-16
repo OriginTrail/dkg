@@ -60,7 +60,12 @@ const FIXED_MSG_ID = '00000000-0000-4000-8000-000000000001';
 
 interface RouterDouble {
   send: ReturnType<typeof recorder<[string, string, Uint8Array, ...unknown[]], Promise<Uint8Array>>>;
-  register: ReturnType<typeof recorder<[string, StreamHandler], void>>;
+  register: ReturnType<
+    typeof recorder<
+      [string, StreamHandler, { maxReadBytes: number }?],
+      void
+    >
+  >;
   /** Inbound stream handler captured from `register` for tests that invoke it. */
   inboundHandler?: StreamHandler;
 }
@@ -73,7 +78,11 @@ function makeRouter(
       ...args: [string, string, Uint8Array, ...unknown[]]
     ) => Promise<Uint8Array>,
   );
-  const register = recorder((_protocol: string, handler: StreamHandler): void => {
+  const register = recorder((
+    _protocol: string,
+    handler: StreamHandler,
+    _options?: { maxReadBytes: number },
+  ): void => {
     router.inboundHandler = handler;
   });
   const router: RouterDouble = { send, register };
@@ -178,6 +187,28 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
     const check = idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out');
     expect(check.seen).toBe(true);
     expect(check.seen && Array.from(check.cachedResponse ?? [])).toEqual([0x42]);
+  });
+
+  it('queues a protocol-invalid response and validates it again before retry completion', async () => {
+    let valid = false;
+    const router = makeRouter(async () => valid ? new Uint8Array([0x42]) : new Uint8Array());
+    const { messenger, idempotencyStore, outboxStore, clock } = makeSubstrate({ router });
+    messenger.setResponseAcceptanceValidator(PROTO, (response) => response.byteLength > 0);
+
+    const first = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID,
+    });
+
+    expect(first).toMatchObject({ delivered: false, queued: true });
+    expect(outboxStore.size()).toBe(1);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(false);
+
+    valid = true;
+    await messenger.processOutboxTick(clock() + 100);
+
+    expect(router.send.calls).toHaveLength(2);
+    expect(outboxStore.size()).toBe(0);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(true);
   });
 
   it('generates a UUID when no messageId is supplied', async () => {
@@ -509,6 +540,20 @@ describe('Messenger outbox snapshots', () => {
 });
 
 describe('Messenger.register (receiver-side idempotency)', () => {
+  it('forwards a reliable-envelope wire cap to the protocol router', () => {
+    const { messenger, router } = makeSubstrate();
+
+    messenger.register(PROTO, async () => new Uint8Array([0xaa]), {
+      maxWireBytes: 80 * 1024,
+    });
+
+    expect(router.register.calls.at(-1)).toEqual([
+      PROTO,
+      expect.any(Function),
+      { maxReadBytes: 80 * 1024 },
+    ]);
+  });
+
   it('decodes the envelope and invokes the handler with the inner payload', async () => {
     const { messenger, router } = makeSubstrate();
     const handler = recorder(async (req: Uint8Array, _peer: string) => {
@@ -635,6 +680,45 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
 
     await messenger.processOutboxTick(clock() + 100);
     expect(outboxStore.size()).toBe(0);
+  });
+
+  it('keeps a delivered retry queued until its response handler succeeds', async () => {
+    const payload = new Uint8Array([0x11, 0x22]);
+    const response = new Uint8Array([0x42]);
+    let wireAvailable = false;
+    let reconcileAvailable = false;
+    const router = makeRouter(async () => {
+      if (!wireAvailable) throw new Error('no valid addresses for peer');
+      return response;
+    });
+    const { messenger, outboxStore, idempotencyStore, clock } = makeSubstrate({ router });
+    const handled: Array<{ request: number[]; response: number[] }> = [];
+    messenger.setOutboxResponseHandler(PROTO, async (result) => {
+      handled.push({
+        request: Array.from(result.requestPayload),
+        response: Array.from(result.response),
+      });
+      if (!reconcileAvailable) throw new Error('state store unavailable');
+    });
+
+    await messenger.sendReliable(PEER_A, PROTO, payload, {
+      messageId: FIXED_MSG_ID,
+    });
+    expect(outboxStore.size()).toBe(1);
+
+    wireAvailable = true;
+    await messenger.processOutboxTick(clock() + 100);
+    expect(outboxStore.size()).toBe(1);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(false);
+
+    reconcileAvailable = true;
+    await messenger.processOutboxTick(clock() + 200);
+    expect(outboxStore.size()).toBe(0);
+    expect(idempotencyStore.check(PEER_A, PROTO, FIXED_MSG_ID, 'out').seen).toBe(true);
+    expect(handled).toEqual([
+      { request: [0x11, 0x22], response: [0x42] },
+      { request: [0x11, 0x22], response: [0x42] },
+    ]);
   });
 
   it('honours the stale-snapshot guard (rc.9 #538) — markDelivered in between aborts the retry', async () => {

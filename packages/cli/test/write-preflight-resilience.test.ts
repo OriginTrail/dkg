@@ -46,7 +46,9 @@ import {
 } from '@origintrail-official/dkg-core';
 
 const CG = 'resilience-cg';
+const CALLER = '0x2222222222222222222222222222222222222222';
 const UNSCOPED = { callerAgentAddress: undefined, allowLocalExactFallback: true } as const;
+const SCOPED = { callerAgentAddress: CALLER, allowLocalExactFallback: false } as const;
 
 // Real prototype methods from the agent mixin — the exact code the daemon
 // runs, bound to a narrow harness instead of a full DKGAgent (which would
@@ -552,6 +554,86 @@ describe('resolveRequiredWriteContextGraphId — healthy-store paths unchanged',
     const probe = await harness.probeContextGraphWritePreflight(seededCg);
     expect(probe.storeUnavailable).toBeUndefined();
     expect(probe.exists).toBe(true);
+  });
+
+  it('fast-accepts an exact private synced CG for a trusted local caller without listing every CG', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/private-fast-path';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: ontologyGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      seededCg,
+      res,
+      UNSCOPED,
+    );
+
+    expect(resolved).toBe(seededCg);
+    expect(out.status).toBeUndefined();
+    expect(listCalls).toEqual([]);
+    await expect(harness.probeContextGraphWritePreflight(seededCg)).resolves.toMatchObject({
+      storeAvailable: true,
+      exists: true,
+      accessPolicy: 'private',
+    });
+  });
+
+  it('does not extend the trusted local private fast path to a scoped unauthorized agent', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/private-scoped-deny';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: ontologyGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      seededCg,
+      res,
+      SCOPED,
+    );
+
+    expect(resolved).toBeNull();
+    expect(out.status).toBe(400);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+    expect(listCalls).toEqual([]);
   });
 
   it('(e) a storeUnavailable exact probe does not poison a healthy list leg (list evidence still accepts)', async () => {

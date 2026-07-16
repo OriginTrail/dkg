@@ -68,6 +68,31 @@ export function createKnowledgeAssetVmPublishSnapshotRequest(
     shareOperationId: request.shareOperationId,
     roots: request.roots,
     contextGraphId: request.contextGraphId,
+    ...(request.contentScopeVersion !== undefined
+      ? { contentScopeVersion: request.contentScopeVersion }
+      : {}),
+    ...(request.kaUal !== undefined ? { kaUal: request.kaUal } : {}),
+    ...(request.assertionVersion !== undefined
+      ? { assertionVersion: request.assertionVersion }
+      : {}),
+    ...(request.publicTripleCount !== undefined
+      ? { publicTripleCount: request.publicTripleCount }
+      : {}),
+    ...(request.privateMerkleRoot !== undefined
+      ? { privateMerkleRoot: request.privateMerkleRoot }
+      : {}),
+    ...(request.privateTripleCount !== undefined
+      ? { privateTripleCount: request.privateTripleCount }
+      : {}),
+    ...(request.accessPolicy !== undefined
+      ? { accessPolicy: request.accessPolicy }
+      : {}),
+    ...(request.allowedPeers !== undefined
+      ? { allowedPeers: [...request.allowedPeers] }
+      : {}),
+    ...(request.entityProofs !== undefined
+      ? { entityProofs: request.entityProofs }
+      : {}),
     ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
     ...(request.publisherNodeIdentityIdOverride !== undefined
@@ -193,6 +218,12 @@ function parseRawLiftRequest(value: unknown, path: string): RawLiftRequest {
     shareOperationId: expectString(record, 'shareOperationId', path),
     roots: expectStringArray(record, 'roots', path),
     contextGraphId: expectString(record, 'contextGraphId', path),
+    ...optionalNumberField(record, 'contentScopeVersion', path),
+    ...optionalStringField(record, 'kaUal', path),
+    ...optionalStringField(record, 'assertionVersion', path),
+    ...optionalNumberField(record, 'publicTripleCount', path),
+    ...optionalHexStringField(record, 'privateMerkleRoot', path),
+    ...optionalNumberField(record, 'privateTripleCount', path),
     namespace: expectString(record, 'namespace', path),
     scope: expectString(record, 'scope', path),
     transitionType: expectEnum(record, 'transitionType', LIFT_TRANSITION_TYPES, path),
@@ -217,6 +248,15 @@ function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): Know
     ...optionalStringField(record, 'subGraphName', path),
     shareOperationId: expectString(record, 'shareOperationId', path),
     roots: expectStringArray(record, 'roots', path),
+    ...optionalNumberField(record, 'contentScopeVersion', path),
+    ...optionalStringField(record, 'kaUal', path),
+    ...optionalStringField(record, 'assertionVersion', path),
+    ...optionalNumberField(record, 'publicTripleCount', path),
+    ...optionalHexStringField(record, 'privateMerkleRoot', path),
+    ...optionalNumberField(record, 'privateTripleCount', path),
+    ...optionalAccessPolicyField(record, 'accessPolicy', path),
+    ...optionalStringArrayField(record, 'allowedPeers', path),
+    ...optionalBooleanField(record, 'entityProofs', path),
     seal: parseSeal(record.seal, `${path}.seal`),
     sealChainId: expectBigIntString(record, 'sealChainId', path),
     sealKav10Address: expectHexString(record, 'sealKav10Address', path),
@@ -378,6 +418,17 @@ function optionalBigIntStringField<T extends string>(
 ): Partial<Record<T, `${bigint}`>> {
   if (record[field] === undefined) return {};
   return { [field]: expectBigIntString(record, field, path) } as Partial<Record<T, `${bigint}`>>;
+}
+
+function optionalHexStringField<T extends string>(
+  record: Record<string, unknown>,
+  field: T,
+  path: string,
+): Partial<Record<T, `0x${string}`>> {
+  if (record[field] === undefined) return {};
+  return {
+    [field]: expectHexString(record, field, path),
+  } as Partial<Record<T, `0x${string}`>>;
 }
 
 function optionalAccessPolicyField(

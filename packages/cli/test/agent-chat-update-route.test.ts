@@ -205,6 +205,22 @@ describe('POST /api/update — kaId + attestation contract (KC→KA), real daemo
     expect(res.body.error).toMatch(/precomputedUpdateAttestation/);
   });
 
+  it('accepts private-only update content at the HTTP boundary', async () => {
+    const res = await postJson(daemon, '/api/update', {
+      kaId: '7',
+      contextGraphId: CG,
+      privateQuads: [{
+        subject: 'urn:private:only',
+        predicate: 'http://schema.org/value',
+        object: '"updated"',
+      }],
+    });
+    // Reaching the attestation precondition proves the route did not reject a
+    // valid fully-private replacement merely because `quads` is empty.
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/precomputedUpdateAttestation/);
+  });
+
   it('maps an expectedNewMerkleRoot mismatch in the seal to 422 (real recompute guard)', async () => {
     // A present, structurally-valid seal whose expectedNewMerkleRoot does not
     // match the root the daemon recomputes from the real KA state is a caller

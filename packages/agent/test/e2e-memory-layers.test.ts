@@ -15,6 +15,7 @@ import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
@@ -24,6 +25,8 @@ import {
   contextGraphAssertionUri,
   contextGraphLayerUri,
   ASSERTION_SEAL_PREDICATES,
+  ASSERTION_PUBLISH_RECEIPT_PREDICATES,
+  createGraphKnowledgeAssetScope,
   createOperationContext,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
@@ -179,6 +182,31 @@ describe('Memory layer isolation (single agent)', () => {
 });
 
 describe('WM → SWM → VM pipeline (single agent)', () => {
+  it('replays an exact SWM share idempotently after the first response is lost', async () => {
+    const agent = await createAgent('AtomicShareReplayBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Atomic Share Replay E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'atomic-share-replay';
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: `${ENTITY_BASE}:replay`, predicate: 'http://schema.org/name', object: '"Replay"' },
+    ]);
+
+    const first = await agent.assertion.promote(CG_ID, name);
+    expect(first.promotedCount).toBeGreaterThan(0);
+    expect(first.publishReady).toBe(true);
+    expect(first.shareOperationId).toBeTruthy();
+
+    const replay = await agent.assertion.promote(CG_ID, name);
+    expect(replay).toMatchObject({
+      promotedCount: 0,
+      sealed: true,
+      publishReady: true,
+      shareOperationId: first.shareOperationId,
+    });
+  }, 60_000);
+
   it('promotes assertion to SWM, then publishes SWM to verifiable memory', async () => {
     const agent = await createAgent('PipelineBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Pipeline E2E' });
@@ -339,14 +367,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(second.promotedCount).toBe(0);
   }, 30_000);
 
-  it('selective promote does NOT auto-finalize (avoids the seal-all vs promote-subset merkleRoot mismatch)', async () => {
-    // Regression for the #1004 review: auto-finalize seals the WHOLE assertion
-    // (all root entities), but a SELECTIVE promote (opts.entities subset) ships
-    // only the chosen roots to SWM. If promote auto-sealed ALL roots here,
-    // publishFromFinalizedAssertion would reload SWM scoped to the sealed (full)
-    // root set, recompute a different merkleRoot, and fail the seal guard. So a
-    // selective promote must NOT auto-finalize — the assertion stays unsealed
-    // until an explicit, matching-scope finalize.
+  it('rejects selective promote because a graph-scoped KA is atomic', async () => {
     const agent = await createAgent('SelectivePromoteBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Selective Promote E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -357,18 +378,32 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
       { subject: `${ENTITY_BASE}:b`, predicate: 'http://schema.org/name', object: '"Entity B"' },
     ]);
 
-    // Promote ONLY entity A — a subset of the assertion's roots.
-    const promoteResult = await agent.assertion.promote(CG_ID, 'selective', {
-      entities: [`${ENTITY_BASE}:a`],
-    });
-    expect(promoteResult.promotedCount).toBeGreaterThan(0);
-
-    // The selective promote must have left the assertion UNSEALED, so publish
-    // surfaces the explicit-finalize requirement — NOT a (pre-fix) seal-all-vs-
-    // promote-subset merkleRoot mismatch.
+    const publicDraftProbe = vi.spyOn(agent.publisher, 'assertionQuery');
+    const privateDraftProbe = vi.spyOn(agent.publisher, 'assertionQueryPrivate');
+    const finalize = vi.spyOn(agent as any, 'assertionFinalize');
+    const publisherPromote = vi.spyOn(agent.publisher, 'assertionPromote');
     await expect(
-      agent.publishFromFinalizedAssertion(CG_ID, 'selective'),
-    ).rejects.toThrow(/not finalized/i);
+      agent.assertion.promote(CG_ID, 'selective', { entities: [`${ENTITY_BASE}:a`] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(publicDraftProbe).not.toHaveBeenCalled();
+    expect(privateDraftProbe).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+    expect(publisherPromote).not.toHaveBeenCalled();
+    publicDraftProbe.mockRestore();
+    privateDraftProbe.mockRestore();
+    finalize.mockRestore();
+    publisherPromote.mockRestore();
+
+    // Rejection is pre-commit: the complete draft remains available and no
+    // subject subset can escape into SWM under the KA identity.
+    expect(await agent.assertion.query(CG_ID, 'selective')).toHaveLength(2);
+    expect(
+      await agent.publisher.hasSwmShareComplete(
+        CG_ID,
+        'selective',
+        agent.defaultAgentAddress ?? agent.peerId,
+      ),
+    ).toBe(false);
   }, 20_000);
 
   it('promote fails fast when the draft was edited after finalize (stale seal, not a silent publish mismatch)', async () => {
@@ -396,7 +431,9 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
 
     // promote must fail fast (assertionFinalize detects the mutation), NOT
     // silently promote the stale-sealed content.
-    await expect(agent.assertion.promote(CG_ID, 'stale')).rejects.toThrow(/different merkleRoot/i);
+    await expect(agent.assertion.promote(CG_ID, 'stale')).rejects.toThrow(
+      /differs from its existing seal|different merkleRoot/i,
+    );
 
     // WM is intact — the failed promote did not empty it.
     const wm = await agent.assertion.query(CG_ID, 'stale');
@@ -436,11 +473,8 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
   }, 20_000);
 });
 
-describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM', () => {
-  // B1: a FULL share seals by default (sealed:true / publishReady:true) and the
-  // asset publishes; a skipSeal:true full share leaves it UNSEALED
-  // (sealed:false / publishReady:false) so publishFromFinalizedAssertion rejects.
-  it('full share seals by default and publishes; skipSeal share stays unsealed and is unpublishable', async () => {
+describe('rootless graph-scoped KA lifecycle', () => {
+  it('full share seals and publishes; skipSeal is rejected before SWM mutation', async () => {
     const agent = await createAgent('SealDefaultBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Seal Default E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -460,33 +494,19 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(pub.ual).toBeDefined();
     expect(pub.seal).toBeDefined();
 
-    // --- skipSeal share: stays unsealed ---
+    // A new graph-scoped KA may not enter SWM without its v2 seal. The old
+    // skipSeal staging path depended on root/member metadata and is read-only.
     await agent.assertion.create(CG_ID, 'unsealed-share');
     await agent.assertion.write(CG_ID, 'unsealed-share', [
       { subject: `${ENTITY_BASE}:unsealed`, predicate: 'http://schema.org/name', object: '"Unsealed Share"' },
     ]);
-    const skipShare = await agent.assertion.promote(CG_ID, 'unsealed-share', { skipSeal: true });
-    expect(skipShare.promotedCount).toBeGreaterThan(0);
-    expect(skipShare.sealed).toBe(false);
-    expect(skipShare.publishReady).toBe(false);
-
-    // The content reached SWM despite no seal...
-    const swm = await agent.query(
-      `SELECT ?name WHERE { <${ENTITY_BASE}:unsealed> <http://schema.org/name> ?name }`,
-      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
-    );
-    expect(swm.bindings.length).toBe(1);
-
-    // ...but with no seal, publishFromFinalizedAssertion refuses it.
     await expect(
-      agent.publishFromFinalizedAssertion(CG_ID, 'unsealed-share'),
-    ).rejects.toThrow(/not finalized/i);
-    await expect(
-      agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, 'unsealed-share'),
-    ).rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+      agent.assertion.promote(CG_ID, 'unsealed-share', { skipSeal: true }),
+    ).rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
+    expect(await agent.assertion.query(CG_ID, 'unsealed-share')).toHaveLength(1);
   }, 30_000);
 
-  it('async publish intent resolves roots when provenance events are disabled', async () => {
+  it('async publish intent is graph-scoped when provenance events are disabled', async () => {
     const agent = await createAgent('LiteProvenanceAsyncIntentBot', { metadataProvenanceEvents: false });
     await agent.createContextGraph({ id: CG_ID, name: 'Lite Provenance Async Intent E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -507,7 +527,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
 
     const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
     expect(intent.shareOperationId).toBe(share.shareOperationId);
-    expect(intent.roots).toEqual([root]);
+    expect(intent.roots).toEqual([]);
     expect(intent.sealMerkleRoot).toMatch(/^0x[0-9a-f]+$/);
   }, 30_000);
 
@@ -528,6 +548,21 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
     expect(intent.shareOperationId).toBe(share.shareOperationId);
 
+    // Rootless metadata trimming consumes the lifecycle-level operation row
+    // once the immutable SWM snapshot and head are durable. The promoted
+    // event remains the canonical lifecycle reference. Revalidation must read
+    // that same shape instead of rejecting an otherwise unchanged queued job.
+    const author = agent.defaultAgentAddress ?? agent.peerId;
+    await (agent as any).store.deleteByPattern({
+      graph: contextGraphMetaUri(CG_ID),
+      subject: assertionLifecycleUri(CG_ID, author, name),
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+    });
+    const trimmedHistory = await agent.assertion.history(CG_ID, name);
+    expect(trimmedHistory?.currentShareOperationId).toBeUndefined();
+    expect(trimmedHistory?.events.find((event) => event.type === 'promoted')?.shareOperationId)
+      .toBe(share.shareOperationId);
+
     await (agent as any).publisher.clearPublishedSwmRoots(
       CG_ID,
       [...intent.roots],
@@ -539,9 +574,11 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
     );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishPreflight: preflight,
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      knowledgeAssetVmPublishHandler: {
+        preflight,
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -563,6 +600,232 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     );
     expect(vmRows.bindings.map((row) => row['name'])).toContain('"Queued Async VM"');
   }, 60_000);
+
+  it('repairs a named lifecycle after its async publish transaction confirmed during downtime', async () => {
+    const agent = await createAgent('QueuedAsyncVmRecoveryBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Recovery E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-recovery';
+    const root = `${ENTITY_BASE}:queued-async-recovery`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Recovered Async VM"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const confirmed = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(confirmed.status).toBe('confirmed');
+    expect(confirmed.onChainResult).toBeDefined();
+
+    const lifecycleAgent = intent.agentAddress ?? agent.defaultAgentAddress ?? agent.peerId;
+    const lifecycleUri = assertionLifecycleUri(CG_ID, lifecycleAgent, name);
+    const assertionUri = contextGraphAssertionUri(CG_ID, lifecycleAgent, name);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const store = (agent as any).store;
+    const DKG = 'http://dkg.io/ontology/';
+
+    // Recreate the exact #1669 post-restart split-brain: chain/VM data exists,
+    // while the named descriptor and receipt still look merely promoted.
+    for (const predicate of [
+      `${DKG}vmCurrentAssertion`,
+      `${DKG}publishedUal`,
+      `${DKG}assertionGraph`,
+      `${DKG}memoryLayer`,
+      `${DKG}state`,
+    ]) {
+      await store.deleteByPattern({ subject: lifecycleUri, predicate, graph: metaGraph });
+    }
+    await store.deleteByPattern({ subject: assertionUri, predicate: `${DKG}memoryLayer`, graph: metaGraph });
+    for (const predicate of Object.values(ASSERTION_PUBLISH_RECEIPT_PREDICATES)) {
+      await store.deleteByPattern({ subject: assertionUri, predicate, graph: metaGraph });
+    }
+    await store.insert([
+      { subject: lifecycleUri, predicate: `${DKG}state`, object: '"promoted"', graph: metaGraph },
+      { subject: lifecycleUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+      { subject: assertionUri, predicate: `${DKG}memoryLayer`, object: `"${MemoryLayer.SharedWorkingMemory}"`, graph: metaGraph },
+    ]);
+
+    const onChain = confirmed.onChainResult!;
+    const kaId = BigInt(intent.seal.reservedKaId!);
+    const txHash = onChain.txHash as `0x${string}`;
+    const recoveryChain = (agent as unknown as { chain: {
+      chainId: string;
+      getDKGKnowledgeAssetsAddress(): Promise<string>;
+    } }).chain;
+    const knowledgeAssetsContract = onChain.knowledgeAssetsContract
+      ?? await recoveryChain.getDKGKnowledgeAssetsAddress();
+    const receiptUal = buildKnowledgeAssetUal(
+      recoveryChain.chainId,
+      knowledgeAssetsContract,
+      kaId,
+    );
+    expect(receiptUal).not.toBe(intent.kaUal);
+    const recoveryPublisher = (agent as any).publisher;
+    const recoveryCleanup = vi.spyOn(recoveryPublisher, 'clearPublishedKnowledgeAssetSwm');
+    const recoveryInput = {
+      walletId: 'wallet-1',
+      request: intent,
+      job: {
+        jobId: 'recovery-job',
+        jobSlug: 'recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: intent },
+        status: 'broadcast',
+        broadcast: {
+          txHash,
+          walletId: 'wallet-1',
+          merkleRoot: intent.sealMerkleRoot,
+        },
+        timestamps: { acceptedAt: 1, broadcastAt: 2, updatedAt: 2 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+      recovery: {
+        inclusion: {
+          txHash,
+          blockNumber: onChain.blockNumber,
+          blockTimestamp: onChain.blockTimestamp,
+        },
+        finalization: {
+          mode: 'published',
+          txHash,
+          // Production recovery resolver shape: contract + packed KA id. The
+          // finalizer must keep using intent.kaUal for the local exact graph.
+          ual: receiptUal,
+          batchId: kaId.toString(),
+          startKAId: kaId.toString(),
+          endKAId: kaId.toString(),
+          publisherAddress: onChain.publisherAddress as `0x${string}`,
+        },
+        publishProof: {
+          merkleRoot: intent.sealMerkleRoot,
+          authorAddress: intent.seal.authorAddress,
+        },
+      },
+      publisher: recoveryPublisher,
+    } as const;
+
+    for (const invalidReceiptUal of [
+      buildKnowledgeAssetUal(
+        recoveryChain.chainId,
+        '0x0000000000000000000000000000000000000001',
+        kaId,
+      ),
+      buildKnowledgeAssetUal('evm:1', knowledgeAssetsContract, kaId),
+      buildKnowledgeAssetUal(recoveryChain.chainId, knowledgeAssetsContract, kaId + 1n),
+    ]) {
+      await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+        ...recoveryInput,
+        recovery: {
+          ...recoveryInput.recovery,
+          finalization: {
+            ...recoveryInput.recovery.finalization,
+            ual: invalidReceiptUal,
+          },
+        },
+      } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    }
+    const queuedScope = createGraphKnowledgeAssetScope(
+      intent.kaUal!,
+      intent.assertionVersion!,
+    );
+    for (const invalidGraphUal of [
+      `did:dkg:${queuedScope.chainId}/0x0000000000000000000000000000000000000001/${queuedScope.kaNumber}`,
+      `did:dkg:${queuedScope.chainId}/${queuedScope.agentAddress}/${BigInt(queuedScope.kaNumber) + 1n}`,
+    ]) {
+      await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+        ...recoveryInput,
+        request: { ...recoveryInput.request, kaUal: invalidGraphUal },
+      } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    }
+
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      recovery: {
+        ...recoveryInput.recovery,
+        finalization: {
+          ...recoveryInput.recovery.finalization,
+          endKAId: (kaId + 1n).toString(),
+        },
+      },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      recovery: {
+        ...recoveryInput.recovery,
+        publishProof: {
+          ...recoveryInput.recovery.publishProof,
+          merkleRoot: `0x${'ff'.repeat(32)}`,
+        },
+      },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      recovery: {
+        ...recoveryInput.recovery,
+        publishProof: {
+          ...recoveryInput.recovery.publishProof,
+          authorAddress: '0x0000000000000000000000000000000000000001',
+        },
+      },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    expect(recoveryCleanup).not.toHaveBeenCalled();
+
+    const history = await agent.assertion.history(CG_ID, name);
+    expect(history?.state).toBe('published');
+    expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
+    expect(history?.status).toBe('vm-confirmed');
+    expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
+    expect(history?.publishedUal).toBe(receiptUal);
+    expect(history?.assertionGraph).toBe(contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.VerifiableMemory,
+      queuedScope.agentAddress,
+      BigInt(queuedScope.kaNumber),
+    ));
+    expect(intent.accessPolicy).toBe('public');
+    const recoveredAccessPolicy = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${intent.kaUal}> <${DKG}accessPolicy> "public" .
+    } }`);
+    expect(recoveredAccessPolicy).toMatchObject({ type: 'boolean', value: true });
+
+    const receipt = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> "${txHash}" .
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_BLOCK}> ?block .
+    } }`);
+    expect(receipt).toMatchObject({ type: 'boolean', value: true });
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent)).resolves.toMatchObject({
+      action: 'noop',
+      reason: 'already-published',
+    });
+
+    // A later update must not invalidate recovery of the original confirmed
+    // transaction, and replaying that recovery must not regress the VM pointer.
+    await agent.assertion.pullFrom(CG_ID, name, 'vm', { onConflict: 'replace' });
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Recovered Async VM v2"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.promote(CG_ID, name);
+    const updateIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const updated = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(updated.status).toBe('confirmed');
+    expect(updateIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
+
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    const afterSupersededRecovery = await agent.assertion.history(CG_ID, name);
+    expect(afterSupersededRecovery?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
+  }, 90_000);
 
   it('async VM publish no-ops when the queued seal is already current in VM', async () => {
     const agent = await createAgent('QueuedAsyncVmAlreadyPublishedBot');
@@ -586,8 +849,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
     );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishPreflight: preflight,
-      knowledgeAssetVmPublishExecutor: executor,
+      knowledgeAssetVmPublishHandler: { preflight, execute: executor },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
 
@@ -624,8 +886,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
     );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishPreflight: preflight,
-      knowledgeAssetVmPublishExecutor: executor,
+      knowledgeAssetVmPublishHandler: { preflight, execute: executor },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(staleIntent);
 
@@ -763,8 +1024,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       clearSharedMemoryAfter: false,
     });
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      knowledgeAssetVmPublishHandler: {
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -877,10 +1140,12 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       clearSharedMemoryAfter: true,
     });
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishPreflight: async ({ request }) =>
-        agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      knowledgeAssetVmPublishHandler: {
+        preflight: async ({ request }) =>
+          agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -927,10 +1192,12 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       clearRemainingSharedMemory: vi.fn(),
     };
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions, {
-          publisherOverride: fakePublisher as any,
-        }),
+      knowledgeAssetVmPublishHandler: {
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions, {
+            publisherOverride: fakePublisher as any,
+          }),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -979,8 +1246,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name, { subGraphName });
     expect(intent.vmCurrentAssertion).toBeDefined();
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
-      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
-        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      knowledgeAssetVmPublishHandler: {
+        execute: async ({ request, publishOptions }) =>
+          agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      },
     });
     const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     const processed = await asyncPublisher.processNext('wallet-1');
@@ -1062,12 +1331,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(history?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
   }, 120_000);
 
-  // B2: SEAL-IN-SWM round trip. An asset shared UNSEALED (stuck, unpublishable)
-  // is made publishable by finalize(layer:'swm') WITHOUT recreating it:
-  // pull-from reconstructs a transient WM draft, finalize seals it, then the
-  // transient WM draft is dropped so the asset is left PURELY in SWM (now
-  // sealed) and publishes.
-  it('finalize(layer:swm) seals a stuck unsealed SWM asset, empties the WM draft, and makes it publishable', async () => {
+  it('rejects unsealed SWM recovery and preserves the complete WM draft', async () => {
     const agent = await createAgent('SealInSwmBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Seal-in-SWM E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1078,86 +1342,16 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       { subject: `${ENTITY_BASE}:sis`, predicate: 'http://schema.org/name', object: '"Seal In SWM"' },
     ]);
 
-    // Share UNSEALED: content moves to SWM, WM draft is emptied, no seal exists.
-    const share = await agent.assertion.promote(CG_ID, name, { skipSeal: true });
-    expect(share.sealed).toBe(false);
-    const wmAfterShare = await agent.assertion.query(CG_ID, name);
-    expect(wmAfterShare.length).toBe(0); // WM emptied by promote
-    // Unsealed => not yet publishable.
     await expect(
-      agent.publishFromFinalizedAssertion(CG_ID, name),
-    ).rejects.toThrow(/not finalized/i);
+      agent.assertion.promote(CG_ID, name, { skipSeal: true }),
+    ).rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
+    await expect(
+      agent.assertion.finalize(CG_ID, name, { layer: 'swm' }),
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
 
-    // Seal in SWM: reconstruct from SWM, finalize, drop the transient WM draft.
-    const seal = await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
-    expect(seal.merkleRoot).toBeDefined();
-    expect(seal.authorAddress).toBeDefined();
-
-    // Current D1 creates already allocate a KA number, so this fresh skipSeal
-    // share starts in the deterministic named lifecycle graph and never needs
-    // the legacy bucket. Separate storage migration regressions cover upgraded
-    // pre-D1 bucket data, including two lifecycles that share one root.
-    const historyAfterSeal = await agent.assertion.history(CG_ID, name);
-    expect(historyAfterSeal?.kaNumber).toBeDefined();
-    const legacySwmGraph = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
-    const namedSwmGraph = contextGraphLayerUri(
-      CG_ID,
-      MemoryLayer.SharedWorkingMemory,
-      seal.authorAddress.toLowerCase(),
-      BigInt(historyAfterSeal!.kaNumber!),
-    );
-    const legacyAfterSeal = await (agent as any).store.query(
-      `ASK { GRAPH <${legacySwmGraph}> { <${ENTITY_BASE}:sis> ?p ?o } }`,
-    );
-    const namedAfterSeal = await (agent as any).store.query(
-      `ASK { GRAPH <${namedSwmGraph}> { <${ENTITY_BASE}:sis> ?p ?o } }`,
-    );
-    expect(legacyAfterSeal).toMatchObject({ type: 'boolean', value: false });
-    expect(namedAfterSeal).toMatchObject({ type: 'boolean', value: true });
-
-    // Post-condition #1: the asset is left PURELY in SWM: the WM draft is empty
-    // again (the transient reconstruction draft was dropped).
-    const wmAfterSeal = await agent.assertion.query(CG_ID, name);
-    expect(wmAfterSeal.length).toBe(0);
-
-    // Post-condition #2: the SWM content is still present (the seal never
-    // modified the SWM copy).
-    const swmAfterSeal = await agent.query(
-      `SELECT ?name WHERE { <${ENTITY_BASE}:sis> <http://schema.org/name> ?name }`,
-      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
-    );
-    expect(swmAfterSeal.bindings.length).toBe(1);
-
-    // Post-condition #2b (#1116 FIX 2): the WM data was dropped, so the lifecycle
-    // descriptor must report the asset as SWM-resident with NO open WM draft —
-    // the stale dkg:wmCurrentAssertion pointer that finalize stamped on the
-    // transient WM draft has been retired by clearWmDraftDataGraph.
-    const descAfterSeal = await agent.assertion.history(CG_ID, name);
-    expect(descAfterSeal).toBeTruthy();
-    expect(descAfterSeal!.status).toBe('swm-shared');
-    // The SWM pointer must be set (SWM-resident); divergence-only stamping means
-    // the WM pointer row is GONE from the lifecycle URN (it would otherwise make
-    // the WM-layer status read 'wm-sealed' for a draft that no longer exists).
-    expect(descAfterSeal!.swmCurrentAssertion).toBeTruthy();
-    const defaultAuthor = agent.defaultAgentAddress ?? agent.peerId;
-    const lifecycleUri = assertionLifecycleUri(CG_ID, defaultAuthor, name);
-    const metaGraph = contextGraphMetaUri(CG_ID);
-    const wmPointerRows = await (agent as any).store.query(
-      `SELECT ?wm WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <http://dkg.io/ontology/wmCurrentAssertion> ?wm } }`,
-    );
-    expect(wmPointerRows.type).toBe('bindings');
-    expect(wmPointerRows.bindings.length).toBe(0);
-
-    // Post-condition #3: the seal now exists, so the previously-stuck asset
-    // publishes WITHOUT being recreated.
-    const pub = await agent.publishFromFinalizedAssertion(CG_ID, name);
-    expect(pub.status).toBe('confirmed');
-    expect(pub.ual).toBeDefined();
-    expect(pub.seal).toBeDefined();
-    const namedAfterPublish = await (agent as any).store.query(
-      `ASK { GRAPH <${namedSwmGraph}> { <${ENTITY_BASE}:sis> ?p ?o } }`,
-    );
-    expect(namedAfterPublish).toMatchObject({ type: 'boolean', value: false });
+    const wm = await agent.assertion.query(CG_ID, name);
+    expect(wm).toHaveLength(1);
+    expect(wm[0]?.subject).toBe(`${ENTITY_BASE}:sis`);
   }, 30_000);
 
   it('strips the generated private-CG catalog floor on pre-registration product-path promote', async () => {
@@ -1293,12 +1487,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(onChainId == null).toBe(true);
   }, 30_000);
 
-  // A1 (review): a SUBSET share is SWM-ONLY — NOT publishable. It stamps the
-  // dkg:rootEntity member rows (the seal-independent recovery source) but does
-  // NOT set the full-SWM-share marker, so finalize(layer:"swm") must REJECT with
-  // SWM_SUBSET_NOT_SEALABLE — otherwise a {A,B} KA only subset-shared (A) could be
-  // sealed and published as a PARTIAL asset under the KA name.
-  it('finalize(layer:swm) REJECTS a subset-shared asset (subset shares are not publishable)', async () => {
+  it('rejects a subject-subset share before any partial KA reaches SWM', async () => {
     const agent = await createAgent('SubsetNotSealableBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Subset Not Sealable E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1310,33 +1499,20 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       { subject: `${ENTITY_BASE}:b`, predicate: 'http://schema.org/name', object: '"Entity B"' },
     ]);
 
-    // SUBSET share — only entity A reaches SWM (a selective promote never seals).
-    const subset = await agent.assertion.promote(CG_ID, name, { entities: [`${ENTITY_BASE}:a`] });
-    expect(subset.promotedCount).toBeGreaterThan(0);
-    expect(subset.sealed).toBe(false);
-
-    // The marker was NOT set (this was a subset share), so seal-in-SWM is refused.
-    let thrown: any;
-    try {
-      await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('SWM_SUBSET_NOT_SEALABLE');
-
-    // The asset is NOT sealed ⇒ stays unpublishable (no partial asset escapes).
     await expect(
-      agent.publishFromFinalizedAssertion(CG_ID, name),
-    ).rejects.toThrow(/not finalized/i);
+      agent.assertion.promote(CG_ID, name, { entities: [`${ENTITY_BASE}:a`] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(await agent.assertion.query(CG_ID, name)).toHaveLength(2);
+    expect(
+      await agent.publisher.hasSwmShareComplete(
+        CG_ID,
+        name,
+        agent.defaultAgentAddress ?? agent.peerId,
+      ),
+    ).toBe(false);
   }, 30_000);
 
-  // A1' (round 5): the round-4 marker was SET-only, so a full-share → discard →
-  // recreate → SUBSET-share cycle kept a STALE marker (A2_PRESERVE re-armed it on
-  // recreate) and would let finalize(layer:"swm") publish the subset {A} as the
-  // full {A,B} KA. Round 5 CLEARS the marker on discard and on a subset share, so
-  // this cycle is correctly rejected.
-  it('finalize(layer:swm) REJECTS after full-share -> discard -> recreate -> SUBSET-share (no stale marker)', async () => {
+  it('discard and recreate cannot resurrect a stale complete-share marker for a subset request', async () => {
     const agent = await createAgent('StaleMarkerBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Stale Marker E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1358,12 +1534,12 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     await agent.assertion.create(CG_ID, name);
     await writeAB();
 
-    // 3. SUBSET share {A} only — must NOT inherit the prior full-share marker.
-    const subset = await agent.assertion.promote(CG_ID, name, { entities: [`${ENTITY_BASE}:a`] });
-    expect(subset.sealed).toBe(false);
+    await expect(
+      agent.assertion.promote(CG_ID, name, { entities: [`${ENTITY_BASE}:a`] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
 
-    // 4. Seal-in-SWM is refused: the marker was cleared at discard AND on the
-    // subset share, so a partial asset can't be published under the KA name.
+    // 4. SWM reconstruction/resealing is refused unconditionally. Legacy
+    // root-scoped data remains readable but is never migrated by a write path.
     let thrown: any;
     try {
       await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
@@ -1371,18 +1547,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       thrown = e;
     }
     expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('SWM_SUBSET_NOT_SEALABLE');
+    expect(thrown.code).toBe('LEGACY_KA_READ_ONLY');
   }, 30_000);
 
-  // A1''' (round 6 — ISOLATES the promote() subset-clear branch): the A1' cycle
-  // above ALSO goes through discard (which independently clears the marker), so it
-  // doesn't pin the `else { clearSwmShareComplete(...) }` line in promote(). This
-  // one re-shares as a SUBSET on the SAME name WITHOUT an intervening discard — so
-  // the prior full-share marker SURVIVES the re-create (A2_PRESERVE carries it),
-  // and ONLY the subset-clear branch can re-arm the gate. If that line is removed,
-  // the stale full-share marker survives and finalize(layer:"swm") WRONGLY succeeds;
-  // this test catches that regression.
-  it('finalize(layer:swm) REJECTS after full-share -> RE-share SUBSET on same name (NO discard) — isolates the subset-clear', async () => {
+  it('a rejected subset re-share preserves the prior sealed exact SWM version', async () => {
     const agent = await createAgent('SubsetReshareNoDiscardBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Subset Reshare No Discard E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1405,28 +1573,17 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     await agent.assertion.create(CG_ID, name);
     await writeAB();
 
-    // 3. SUBSET re-share {A} only — the ONLY thing that re-arms the gate now is
-    // promote()'s `else { clearSwmShareComplete(...) }` branch (no discard fired).
-    const subset = await agent.assertion.promote(CG_ID, name, { entities: [`${ENTITY_BASE}:a`] });
-    expect(subset.sealed).toBe(false);
+    await expect(
+      agent.assertion.promote(CG_ID, name, { entities: [`${ENTITY_BASE}:a`] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
 
-    // 4. Seal-in-SWM MUST be refused — a partial asset can't be published as the KA.
-    let thrown: any;
-    try {
-      await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('SWM_SUBSET_NOT_SEALABLE');
+    const recovered = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
+    expect(recovered.seeded).toBe(2);
+    const wm = await agent.assertion.query(CG_ID, name);
+    expect(wm.map((quad) => quad.object).sort()).toEqual(['"Entity A"', '"Entity B"']);
   }, 30_000);
 
-  // A1'' (round 5): the gate keys on COMPLETENESS, not on sealed. A FULL skipSeal
-  // share is publishable-by-construction (all roots reached SWM) — it sets the
-  // marker — so seal-in-SWM (finalize layer:"swm") must SUCCEED, the legit
-  // unsealed-recovery path. (Regression guard: the new subset guard must not
-  // block a genuine full share.)
-  it('finalize(layer:swm) SUCCEEDS on a FULL skipSeal share (completeness, not sealed, gates it)', async () => {
+  it('rejects a full skipSeal share because v2 SWM content must be seal-bound', async () => {
     const agent = await createAgent('FullSkipSealBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Full SkipSeal E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1437,28 +1594,13 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       { subject: `${ENTITY_BASE}:fs`, predicate: 'http://schema.org/name', object: '"Full SkipSeal"' },
     ]);
 
-    // FULL share, but skipSeal — unsealed yet COMPLETE (sets the full-share marker).
-    const share = await agent.assertion.promote(CG_ID, name, { skipSeal: true });
-    expect(share.sealed).toBe(false);
-
-    // Seal-in-SWM reconstructs from SWM and seals — allowed because the asset was
-    // fully shared. (A subset share would have been rejected; see A1/A1'.)
-    const seal = await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
-    expect(seal.merkleRoot).toBeDefined();
-    expect(seal.authorAddress).toBeDefined();
-
-    // And it now publishes (proves the reconstruction produced a real, mintable seal).
-    const pub = await agent.publishFromFinalizedAssertion(CG_ID, name);
-    expect(pub.status).toBe('confirmed');
+    await expect(
+      agent.assertion.promote(CG_ID, name, { skipSeal: true }),
+    ).rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
+    expect(await agent.assertion.query(CG_ID, name)).toHaveLength(1);
   }, 30_000);
 
-  // round 7 (reviewer's EXACT scenario — member-row staleness): the member rows
-  // are APPEND-ONLY and survive discard+recreate via A2_PRESERVE, so full share
-  // {A,C} → discard → recreate → full skipSeal {A,B} left rows {A,B,C} and the
-  // seal-less reconstruction sealed the stale SUPERSET {A,B,C}. Round 7 CLEARS the
-  // rows on discard and REPLACES them on a full-complete share, so the seal-in-SWM
-  // covers EXACTLY {A,B} and the publish never carries the stale C.
-  it('round 7: full {A,C} -> discard -> recreate -> full skipSeal {A,B} seals/publishes EXACTLY {A,B}, NOT C', async () => {
+  it('discard and recreate publishes only the new exact graph, without stale subjects', async () => {
     const agent = await createAgent('StaleSupersetBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Stale Superset E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1467,7 +1609,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const A = `${ENTITY_BASE}:a`;
     const B = `${ENTITY_BASE}:b`;
     const C = `${ENTITY_BASE}:c`;
-    // 1. FULL share {A, C} (seal-by-default) — stamps member rows {A, C}.
+    // First exact version contains {A,C} but is discarded before publication.
     await agent.assertion.create(CG_ID, name);
     await agent.assertion.write(CG_ID, name, [
       { subject: A, predicate: 'http://schema.org/name', object: '"Entity A"' },
@@ -1476,7 +1618,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const first = await agent.assertion.promote(CG_ID, name);
     expect(first.sealed).toBe(true);
 
-    // 2. Discard (clears member rows — round 7) and recreate the SAME name.
+    // Recreate the same lifecycle name with the replacement atomic graph {A,B}.
     await agent.assertion.discard(CG_ID, name);
     await agent.assertion.create(CG_ID, name);
     await agent.assertion.write(CG_ID, name, [
@@ -1484,13 +1626,9 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       { subject: B, predicate: 'http://schema.org/name', object: '"Entity B"' },
     ]);
 
-    // 3. FULL skipSeal share {A, B} — unsealed but COMPLETE; REPLACES member rows
-    // with EXACTLY {A, B} (the round-7 fix; pre-fix they were the union {A,B,C}).
-    const reshare = await agent.assertion.promote(CG_ID, name, { skipSeal: true });
-    expect(reshare.sealed).toBe(false);
-
-    // 4. Seal-in-SWM reconstructs from the member rows + SWM → must cover {A,B} only.
-    await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
+    const reshare = await agent.assertion.promote(CG_ID, name);
+    expect(reshare.sealed).toBe(true);
+    expect(reshare.publishReady).toBe(true);
     const pub = await agent.publishFromFinalizedAssertion(CG_ID, name);
     expect(pub.status).toBe('confirmed');
 
@@ -1500,13 +1638,10 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const pubC = await agent.query(`SELECT ?n WHERE { <${C}> <http://schema.org/name> ?n }`, CG_ID);
     expect(pubA.bindings.length).toBeGreaterThan(0);
     expect(pubB.bindings.length).toBeGreaterThan(0);
-    expect(pubC.bindings.length).toBe(0); // the stale superset member never escapes
+    expect(pubC.bindings.length).toBe(0);
   }, 40_000);
 
-  // round 7 (no-discard variant): full {A,C} -> full {A,B} re-share on the SAME
-  // name WITHOUT a discard. The REPLACE-on-full-complete branch (not discard) is
-  // what drops the stale C here, so this isolates the promote-side fix.
-  it('round 7: full {A,C} -> full {A,B} re-share (NO discard) seals EXACTLY {A,B}, NOT C', async () => {
+  it('rejects an overwrite under a stale seal until the prior exact graph is explicitly recovered', async () => {
     const agent = await createAgent('StaleSupersetNoDiscardBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Stale Superset No Discard E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1516,7 +1651,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const B = `${ENTITY_BASE}:b`;
     const C = `${ENTITY_BASE}:c`;
 
-    // 1. FULL share {A, C} — member rows {A, C}.
+    // First exact version is sealed and resident in SWM.
     await agent.assertion.create(CG_ID, name);
     await agent.assertion.write(CG_ID, name, [
       { subject: A, predicate: 'http://schema.org/name', object: '"Entity A"' },
@@ -1531,30 +1666,17 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       { subject: B, predicate: 'http://schema.org/name', object: '"Entity B"' },
     ]);
 
-    // 3. FULL skipSeal re-share {A, B} — REPLACE drops the stale C member row.
-    const reshare = await agent.assertion.promote(CG_ID, name, { skipSeal: true });
-    expect(reshare.sealed).toBe(false);
+    await expect(agent.assertion.promote(CG_ID, name)).rejects.toThrow(
+      /differs from its existing seal|different merkleRoot/i,
+    );
 
-    // 4. Seal-in-SWM + publish cover {A,B} only.
-    await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
-    const pub = await agent.publishFromFinalizedAssertion(CG_ID, name);
-    expect(pub.status).toBe('confirmed');
-
-    const pubB = await agent.query(`SELECT ?n WHERE { <${B}> <http://schema.org/name> ?n }`, CG_ID);
-    const pubC = await agent.query(`SELECT ?n WHERE { <${C}> <http://schema.org/name> ?n }`, CG_ID);
-    expect(pubB.bindings.length).toBeGreaterThan(0);
-    expect(pubC.bindings.length).toBe(0);
+    const recovered = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
+    expect(recovered.seeded).toBe(2);
+    const recoveredWm = await agent.assertion.query(CG_ID, name);
+    expect(recoveredWm.map((quad) => quad.subject).sort()).toEqual([A, C].sort());
   }, 40_000);
 
-  // round 8 (SCENARIO-G — direct wm/pull-from route closes the subset bypass):
-  // a full {A,B} share leaves a marker + seal; a SUBSET {A} re-share on the SAME
-  // name (no discard) CLEARS the marker but never re-seals, so a STALE full seal
-  // {A,B} survives. Pre-round-8 the direct pull-from read that seal for scope and
-  // SUCCEEDED (then a plain finalize + publish emitted the stale {A,B}). Round 8
-  // resolves SWM scope from the marker-gated member rows at the publisher
-  // chokepoint, so the DIRECT pull-from (not just the finalize(layer:swm) wrapper)
-  // now REJECTS — the subset asset can never be reconstructed/published.
-  it('round 8: a direct pullFrom(swm) REJECTS after a subset re-share, even with a stale full seal', async () => {
+  it('a rejected subset request cannot alter exact-graph pullFrom recovery', async () => {
     const agent = await createAgent('DirectPullSubsetBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Direct Pull Subset E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1579,21 +1701,14 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       { subject: B, predicate: 'http://schema.org/name', object: '"Entity B"' },
     ]);
 
-    // 3. SUBSET re-share {A} — CLEARS the marker (round 6); never re-seals, so the
-    // stale full seal {A,B} survives (the round-8 bypass precondition).
-    const subset = await agent.assertion.promote(CG_ID, name, { entities: [A] });
-    expect(subset.sealed).toBe(false);
+    await expect(
+      agent.assertion.promote(CG_ID, name, { entities: [A] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
 
-    // 4. The DIRECT pull-from route (NOT finalize(layer:swm)) must REJECT — the
-    // stale seal no longer short-circuits the gate at the publisher chokepoint.
-    let thrown: any;
-    try {
-      await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('SWM_SUBSET_NOT_SEALABLE');
+    const pulled = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
+    expect(pulled.seeded).toBe(2);
+    const wm = await agent.assertion.query(CG_ID, name);
+    expect(wm.map((quad) => quad.object).sort()).toEqual(['"Entity A"', '"Entity B"']);
   }, 40_000);
 
   // ── round 9: ONE seal-lifecycle invariant (the seal exists IFF a sealed,
@@ -1610,14 +1725,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     return false;
   }
 
-  // (a) full-sealed {A,B} → subset {A} re-share → the NON-SEALING share CLEARS the
-  // seal (round 9 step 1), so publishFromFinalizedAssertion REJECTS at the seal-read
-  // precondition ("not finalized" — no seal survives the subset share). This is the
-  // primary defense; the marker gate (step 2) is the backstop for the seal-present-
-  // marker-absent case (exercised by round 9 (d) and the FIX 2 test). Together they
-  // close the "publish a subset via a stale full seal" path. Also asserts the marker
-  // is cleared, so even a re-finalize-then-publish would hit the marker gate.
-  it('round 9 (a): a subset re-share clears the seal AND the marker, making it unpublishable', async () => {
+  it('a rejected subset re-share preserves the prior seal and complete-share marker', async () => {
     const agent = await createAgent('Round9SubsetBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Round9 Subset E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1639,21 +1747,20 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       { subject: A, predicate: 'http://schema.org/name', object: '"A2"' },
       { subject: B, predicate: 'http://schema.org/name', object: '"B2"' },
     ]);
-    const subset = await agent.assertion.promote(CG_ID, name, { entities: [A] });
-    expect(subset.sealed).toBe(false);
-    // step 1: the non-sealing (subset) share cleared the seal...
-    expect(await sealExists(agent, CG_ID, name)).toBe(false);
-    // ...and the marker is cleared too (step 5: assertionPromote clears on a subset).
-    expect(await agent.publisher.hasSwmShareComplete(CG_ID, name, agent.defaultAgentAddress ?? agent.peerId)).toBe(false);
-
-    // No seal survives → publish rejects at the seal-read precondition.
-    await expect(agent.publishFromFinalizedAssertion(CG_ID, name)).rejects.toThrow(/not finalized/i);
+    await expect(
+      agent.assertion.promote(CG_ID, name, { entities: [A] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(await sealExists(agent, CG_ID, name)).toBe(true);
+    expect(
+      await agent.publisher.hasSwmShareComplete(
+        CG_ID,
+        name,
+        agent.defaultAgentAddress ?? agent.peerId,
+      ),
+    ).toBe(true);
   }, 40_000);
 
-  // (b) full-sealed {A,B} → skipSeal full re-share → the skipSeal share CLEARS the
-  // seal (step 1); publish REJECTS until re-finalized (no seal → "not finalized";
-  // and even after seal-in-SWM the gate needs the marker, which the full skipSeal set).
-  it('round 9 (b): a skipSeal full re-share clears the seal; publish rejects until re-finalized', async () => {
+  it('a rejected skipSeal re-share preserves the prior sealed exact graph', async () => {
     const agent = await createAgent('Round9SkipSealBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Round9 SkipSeal E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1668,30 +1775,24 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     await agent.assertion.promote(CG_ID, name);
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
 
-    // Re-open (no discard) + FULL skipSeal re-share — clears the seal.
+    // Re-open (no discard) and attempt the removed unsealed mutation path.
     await agent.assertion.create(CG_ID, name);
     await agent.assertion.write(CG_ID, name, [
       { subject: A, predicate: 'http://schema.org/name', object: '"A2"' },
       { subject: B, predicate: 'http://schema.org/name', object: '"B2"' },
     ]);
-    const reshare = await agent.assertion.promote(CG_ID, name, { skipSeal: true });
-    expect(reshare.sealed).toBe(false);
-    expect(await sealExists(agent, CG_ID, name)).toBe(false); // step 1: seal cleared
-
-    // No seal now → publish rejects with "not finalized" (the seal-read precondition).
-    await expect(agent.publishFromFinalizedAssertion(CG_ID, name)).rejects.toThrow(/not finalized/i);
-
-    // Re-finalize via seal-in-SWM (full skipSeal set the marker) → now publishes.
-    await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
+    await expect(
+      agent.assertion.promote(CG_ID, name, { skipSeal: true }),
+    ).rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
-    const pub = await agent.publishFromFinalizedAssertion(CG_ID, name);
-    expect(pub.status).toBe('confirmed');
+    const recovered = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
+    expect(recovered.seeded).toBe(2);
+    expect((await agent.assertion.query(CG_ID, name)).map((quad) => quad.object).sort()).toEqual(['"A"', '"B"']);
   }, 40_000);
 
-  // (d) a CONFIRMED publish CLEARS the marker (step 3); a subsequent
-  // finalize(layer:swm) REJECTS (SWM_SUBSET_NOT_SEALABLE — the marker is gone)
-  // WITHOUT stranding the seal (the wrapper pre-clear is gone, step 4).
-  it('round 9 (d): confirmed publish clears the marker; a later finalize(layer:swm) rejects without stranding the seal', async () => {
+  // A confirmed publish clears the marker; a later legacy SWM-finalize request
+  // is read-only and cannot strand the surviving seal.
+  it('confirmed publish clears the marker; legacy SWM finalize rejects without stranding the seal', async () => {
     const agent = await createAgent('Round9PostPublishBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Round9 PostPublish E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1708,20 +1809,18 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     // step 3: the confirmed publish consumed the SWM share → marker cleared.
     expect(await agent.publisher.hasSwmShareComplete(CG_ID, name, agent.defaultAgentAddress ?? agent.peerId)).toBe(false);
 
-    // A post-publish seal-in-SWM must REJECT (no live full share) and must NOT
-    // strand the seal (the published seal survives for VM ops).
+    // The deprecated write bridge must reject before touching the published seal.
     const sealBefore = await sealExists(agent, CG_ID, name);
     let thrown: any;
     try { await agent.assertion.finalize(CG_ID, name, { layer: 'swm' }); } catch (e) { thrown = e; }
     expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('SWM_SUBSET_NOT_SEALABLE');
+    expect(thrown.code).toBe('LEGACY_KA_READ_ONLY');
     expect(await sealExists(agent, CG_ID, name)).toBe(sealBefore); // seal not stranded
   }, 40_000);
 
-  // (e) finalize(layer:swm) whose SWM is EMPTY but the marker survived (simulate by
-  // clearing SWM after a full share) no longer strands the seal — the wrapper
-  // pre-clear is gone (step 4), so a PULL_FROM_EMPTY_SOURCE leaves the seal intact.
-  it('round 9 (e): finalize(layer:swm) on an empty-SWM (marker survived) does NOT strand the seal', async () => {
+  // Even inconsistent legacy metadata (empty SWM with a surviving marker) is
+  // never repaired through a write-side root migration; the seal stays intact.
+  it('legacy SWM finalize on empty SWM rejects read-only without stranding the seal', async () => {
     const agent = await createAgent('Round9NoStrandBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Round9 NoStrand E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1738,12 +1837,11 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     // (without clearing the marker), mimicking a consumed/missing SWM slice.
     await agent.publisher.clearPublishedSwmRoots(CG_ID, [A], undefined, createOperationContext('publishFromSWM'));
 
-    // finalize(layer:swm) passes the marker gate, runs pull-from which finds an
-    // EMPTY source → PULL_FROM_EMPTY_SOURCE. The seal must SURVIVE (atomic-on-failure).
+    // Rejection happens before source inspection or mutation.
     let thrown: any;
     try { await agent.assertion.finalize(CG_ID, name, { layer: 'swm' }); } catch (e) { thrown = e; }
     expect(thrown).toBeTruthy();
-    expect(thrown.code).toBe('PULL_FROM_EMPTY_SOURCE');
+    expect(thrown.code).toBe('LEGACY_KA_READ_ONLY');
     expect(await sealExists(agent, CG_ID, name)).toBe(true); // NOT stranded (step 4)
   }, 40_000);
 
@@ -1886,9 +1984,7 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
   }, 30_000);
 
-  // round 11 (reviewer 🔴 #1): the converse — a non-sealing share that SUCCEEDS
-  // DOES clear the prior seal (the clear now runs AFTER the committed promote).
-  it('round 11: a non-sealing share that SUCCEEDS clears the prior seal (after commit)', async () => {
+  it('a selective share is rejected before commit and cannot clear the prior seal', async () => {
     const agent = await createAgent('TxnSealClearOkBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Txn Seal Clear Ok E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1903,15 +1999,16 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     await agent.assertion.promote(CG_ID, name);
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
 
-    // Re-open + a successful SUBSET (non-sealing) share → seal cleared after commit.
+    // Re-open + a selective request. Atomic v2 rejects it before commit.
     await agent.assertion.create(CG_ID, name);
     await agent.assertion.write(CG_ID, name, [
       { subject: A, predicate: 'http://schema.org/name', object: '"A2"' },
       { subject: B, predicate: 'http://schema.org/name', object: '"B2"' },
     ]);
-    const subset = await agent.assertion.promote(CG_ID, name, { entities: [A] });
-    expect(subset.sealed).toBe(false);
-    expect(await sealExists(agent, CG_ID, name)).toBe(false);
+    await expect(
+      agent.assertion.promote(CG_ID, name, { entities: [A] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(await sealExists(agent, CG_ID, name)).toBe(true);
   }, 30_000);
 });
 

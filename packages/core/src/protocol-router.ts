@@ -66,6 +66,16 @@ export interface SendOptions {
   /** Overall send timeout (resolver + dial + write + read). Default {@link DEFAULT_SEND_TIMEOUT_MS}. */
   timeoutMs?: number;
   /**
+   * Whether these exact payload bytes may be reused by router-level delivery
+   * optimizations. Defaults to `reusable`.
+   *
+   * `single-use` forces the one-shot transport, disables internal retries, and
+   * rejects multi-path fan-out. Use it for authenticated envelopes containing
+   * a single-use nonce; any retry must happen above `ProtocolRouter` after the
+   * caller rebuilds the payload.
+   */
+  payloadReuse?: 'reusable' | 'single-use';
+  /**
    * Race up to N parallel `newStream` attempts across the peer's live
    * connections (different relay paths where the natural connection
    * list provides them). First successful response wins; loser
@@ -146,6 +156,15 @@ export interface ProtocolRouterOptions {
     options?: AdmissionCheckOptions,
   ) => boolean | Promise<boolean>;
   admissionExemptProtocols?: Iterable<string>;
+}
+
+/** Per-protocol overrides applied to an inbound registration. */
+export interface ProtocolRegistrationOptions {
+  /**
+   * Maximum request bytes buffered before the inbound stream is aborted.
+   * Defaults to the router-wide {@link ProtocolRouter.maxReadBytes} value.
+   */
+  maxReadBytes?: number;
 }
 
 export class QuietRetryableHandlerError extends Error {
@@ -412,11 +431,15 @@ export class ProtocolRouter {
     }
   }
 
-  register(protocolId: string, handler: DKGStreamHandler): void {
+  register(
+    protocolId: string,
+    handler: DKGStreamHandler,
+    options?: ProtocolRegistrationOptions,
+  ): void {
     this.handlers.set(protocolId, handler);
     const libp2p = this.node.libp2p;
 
-    const limit = this.maxReadBytes;
+    const limit = options?.maxReadBytes ?? this.maxReadBytes;
     libp2p.handle(protocolId, async (stream: Stream, connection) => {
       // Codex (#669#discussion_r3302188320): cache the stopSignal once at
       // handler entry and reuse it for every step of the inbound lifecycle.
@@ -573,7 +596,12 @@ export class ProtocolRouter {
     const opts: SendOptions =
       typeof timeoutMsOrOpts === 'number' ? { timeoutMs: timeoutMsOrOpts } : timeoutMsOrOpts;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+    const singleUsePayload = opts.payloadReuse === 'single-use';
+    const maxAttempts = singleUsePayload ? 1 : 3;
     const parallelPaths = Math.max(1, Math.floor(opts.parallelPaths ?? 1));
+    if (singleUsePayload && parallelPaths > 1) {
+      throw new Error('single-use payloads cannot use parallelPaths > 1');
+    }
     const overallStartedAt = Date.now();
     const overallDeadline = AbortSignal.timeout(timeoutMs);
     const stopSignal = this.node.stopSignal;
@@ -610,7 +638,7 @@ export class ProtocolRouter {
     // is exhausted.
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
-    if (overlay && memoizedVariant !== 'one-shot') {
+    if (!singleUsePayload && overlay && memoizedVariant !== 'one-shot') {
       try {
         const remainingForPool = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
         const response = await overlay.pool.send(peerIdStr, data, {
@@ -734,8 +762,9 @@ export class ProtocolRouter {
     // libp2p internally upgrades relay connections to direct during
     // dialProtocol/newStream (peerStore.merge triggers the connection manager
     // to dial the peer directly, closing the relay and any in-flight streams).
-    // We retry up to 3 times with back-off so the direct connection can
-    // stabilise before the next attempt.
+    // By default we retry up to 3 times with back-off so the direct connection
+    // can stabilise before the next attempt. A single-use payload gets exactly
+    // one one-shot attempt and must be rebuilt by its caller before retrying.
     //
     // Per-call exclude-set for the fast path: when an existing-connection
     // reuse hits a recoverable failure (stream came back live but
@@ -750,7 +779,7 @@ export class ProtocolRouter {
     // specifically to recover from this case.
     const triedConnections = new WeakSet<ReusableConnection>();
     let lastErr: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const remaining = timeoutMs - (Date.now() - startedAt);
       if (remaining <= 0) {
         lastErr = new Error('send timeout elapsed');
@@ -937,7 +966,7 @@ export class ProtocolRouter {
           triedConnections.add(pickedConnection);
         }
         if (attemptSignal.aborted || overallSignal.aborted) throw err;
-        if (!isRecoverableSendError(err) || attempt >= 2) throw err;
+        if (!isRecoverableSendError(err) || attempt >= maxAttempts - 1) throw err;
         const backoff = (attempt + 1) * 500;
         // Make the backoff abortable so the overall deadline is
         // honored. Codex PR #560 round-5 caught: if the pool burned

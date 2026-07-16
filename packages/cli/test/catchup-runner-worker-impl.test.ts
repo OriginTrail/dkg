@@ -59,6 +59,7 @@ function durableResult() {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
+    deferredBackpressure: 0,
   };
 }
 
@@ -79,6 +80,7 @@ function sharedResult() {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
+    deferredBackpressure: 0,
   };
 }
 
@@ -179,6 +181,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersTried).toBe(peerIds.length);
     expect(result.peersResponded).toBe(peerIds.length);
     expect(result.peersSucceeded).toBe(peerIds.length);
+    expect(result.deferredBackpressure).toBe(0);
     expect(result.dataSynced).toBe(peerIds.length);
     expect(result.sharedMemorySynced).toBe(peerIds.length);
     expect(result.denied).toBe(false);
@@ -227,5 +230,268 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.sharedMemorySynced).toBe(0);
     expect(result.diagnostics?.noProtocolPeers).toBe(1);
     expect(result.diagnostics?.durable.failedPeers).toBe(1);
+  });
+
+  it('surfaces partial progress followed by local deferral without finalizing the catch-up', async () => {
+    const finalizeCalls: unknown[][] = [];
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-deferred', includeSharedMemory: true }, async (method) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds: ['peer-1'], connectedPeers: 1 };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          return durableResult();
+        case 'syncSharedMemory':
+          return {
+            ...sharedResult(),
+            insertedTriples: 0,
+            fetchedDataTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            completedPhases: 0,
+            deferredBackpressure: 1,
+          };
+        case 'finalizeCatchup':
+          finalizeCalls.push([]);
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(result.peersResponded).toBe(1);
+    expect(result.peersSucceeded).toBe(0);
+    expect(result.deferredBackpressure).toBe(1);
+    expect(result.dataSynced).toBe(1);
+    expect(result.sharedMemorySynced).toBe(0);
+    expect(result.diagnostics?.sharedMemory.deferredBackpressure).toBe(1);
+    expect(finalizeCalls).toEqual([]);
+  });
+
+  it('propagates durable and shared-memory denied phases from the real worker result', async () => {
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-denied', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: undefined,
+              isPrivateContextGraph: true,
+              peerIds: ['peer-denied'],
+              connectedPeers: 1,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return { ...durableResult(), deniedPhases: 1 };
+          case 'syncSharedMemory':
+            return { ...sharedResult(), deniedPhases: 1 };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result).toMatchObject({
+      denied: true,
+      deniedPeers: 1,
+      peersResponded: 1,
+      peersSucceeded: 0,
+      dataSynced: 1,
+      sharedMemorySynced: 1,
+    });
+    expect(result.diagnostics?.durable.deniedPhases).toBe(1);
+    expect(result.diagnostics?.sharedMemory.deniedPhases).toBe(1);
+    expect(result.cleanPlaneCompletions).toEqual({
+      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+    });
+    expect(result.diagnostics?.durable.verifiedPrivateOnlyResponses).toBe(0);
+  });
+
+  it('retains clean per-plane completion when another peer denies and times out', async () => {
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-mixed', includeSharedMemory: false },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: undefined,
+              isPrivateContextGraph: true,
+              peerIds: ['peer-clean', 'peer-partial'],
+              connectedPeers: 2,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return args[0] === 'peer-clean'
+              ? durableResult()
+              : { ...durableResult(), deniedPhases: 1, timedOutPhases: 1 };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result).toMatchObject({
+      denied: true,
+      deniedPeers: 1,
+      peersSucceeded: 1,
+      dataSynced: 2,
+    });
+    expect(result.diagnostics?.durable).toMatchObject({
+      deniedPhases: 1,
+      timedOutPhases: 1,
+    });
+    expect(result.cleanPlaneCompletions?.durable).toEqual({
+      verifiedDataPeers: 1,
+      verifiedPrivateOnlyPeers: 0,
+      emptyPeers: 0,
+    });
+  });
+
+  it('records a clean verified private-only durable response as peer progress', async () => {
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-private-only', includeSharedMemory: false },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: undefined,
+              isPrivateContextGraph: true,
+              peerIds: ['peer-private-only'],
+              connectedPeers: 1,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return {
+              ...durableResult(),
+              insertedTriples: 8,
+              fetchedMetaTriples: 8,
+              fetchedDataTriples: 0,
+              insertedMetaTriples: 8,
+              insertedDataTriples: 0,
+              verifiedPrivateOnlyResponses: 1,
+            };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result).toMatchObject({
+      peersResponded: 1,
+      peersSucceeded: 1,
+      dataSynced: 0,
+    });
+    expect(result.diagnostics?.durable.verifiedPrivateOnlyResponses).toBe(1);
+    expect(result.cleanPlaneCompletions?.durable).toEqual({
+      verifiedDataPeers: 0,
+      verifiedPrivateOnlyPeers: 1,
+      emptyPeers: 0,
+    });
+  });
+
+  it.each([
+    ['rejectedKcs'],
+    ['dataRejectedMissingMeta'],
+  ] as const)('does not emit clean completion evidence when durable sync reports %s', async (field) => {
+    const result = await runWorkerCatchup(
+      { contextGraphId: `cg-${field}`, includeSharedMemory: false },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: undefined,
+              isPrivateContextGraph: true,
+              peerIds: ['peer-integrity-reject'],
+              connectedPeers: 1,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return { ...durableResult(), [field]: 1 };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result).toMatchObject({
+      peersResponded: 1,
+      peersSucceeded: 0,
+      dataSynced: 1,
+    });
+    expect(result.diagnostics?.durable[field]).toBe(1);
+    expect(result.cleanPlaneCompletions?.durable).toEqual({
+      verifiedDataPeers: 0,
+      verifiedPrivateOnlyPeers: 0,
+      emptyPeers: 0,
+    });
+  });
+
+  it('records each distinct responder that cleanly completes both planes empty', async () => {
+    const peerIds = ['peer-empty-1', 'peer-empty-2', 'peer-empty-3', 'peer-empty-4'];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-empty-public', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: undefined,
+              isPrivateContextGraph: false,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return {
+              ...durableResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              completedPhases: 2,
+              emptyResponses: 2,
+            };
+          case 'syncSharedMemory':
+            return {
+              ...sharedResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              completedPhases: 2,
+              emptyResponses: 2,
+            };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result).toMatchObject({
+      peersResponded: peerIds.length,
+      peersSucceeded: peerIds.length,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+    });
+    expect(result.cleanPlaneCompletions).toEqual({
+      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: peerIds.length },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: peerIds.length },
+    });
   });
 });

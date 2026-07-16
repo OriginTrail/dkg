@@ -255,7 +255,7 @@ modes auto-renewal can't recover from:
 | `dkg ka write <name> -c <cg> --input-file <rdf>` | Append RDF payload quads into WM |
 | `dkg ka import-file <name> -c <cg> --input-file <file>` | Import a document into WM through extraction |
 | `dkg ka extraction-status <name> -c <cg>` | Check document extraction status |
-| `dkg ka finalize <name> -c <cg> [--layer wm\|swm]` | Seal a WM draft, or seal SWM content with `--layer swm` |
+| `dkg ka finalize <name> -c <cg>` | Seal a WM draft; existing root-scoped SWM assets remain read-only |
 | `dkg ka share <name> -c <cg> [--entity <uri...>]` | Share finalized WM to Shared Working Memory |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
 | `dkg ka share-jobs [--context-graph-id <cg>]` | List async SWM share jobs |

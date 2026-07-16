@@ -57,11 +57,13 @@ function durableProcessResult() {
   return {
     verifiedData: [] as Quad[],
     verifiedMeta: [] as Quad[],
+    droppedSyncControlTriples: 0,
     totalFetchedDataQuads: 0,
     totalFetchedMetaQuads: 0,
     rejectedKcs: 0,
     emptyResponses: 1,
     metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
   };
 }
@@ -79,7 +81,7 @@ function sharedMemoryProcessResult() {
 }
 
 describe('sync requester progress accounting', () => {
-  it('continues durable sync after a denied context graph and records only that CG as denied', async () => {
+  it('does not count a denied durable graph but counts the subsequent clean-empty graph', async () => {
     const deniedCgs: string[] = [];
     const fetchSyncPages = recorder(async (
       _ctx: OperationContext,
@@ -111,11 +113,11 @@ describe('sync requester progress accounting', () => {
     expect(deniedCgs).toEqual(['pending-join']);
     expect(summary.deniedPhases).toBe(1);
     expect(summary.failedPeers).toBe(0);
-    expect(summary.completedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-cg', false, 'meta', expect.any(String), expect.any(Number)]);
   });
 
-  it('continues durable sync after a transport failure and preserves next-CG progress', async () => {
+  it('does not count a transport-failed durable graph but counts the subsequent clean-empty graph', async () => {
     const fetchSyncPages = recorder(async (
       _ctx: OperationContext,
       _peer: string,
@@ -145,7 +147,7 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(1);
     expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
-    expect(summary.completedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined]);
   });
 
@@ -179,10 +181,11 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(1);
     expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined]);
   });
 
-  it('continues durable sync after a verification failure and closes the active phase', async () => {
+  it('does not count a verification-failed durable graph but counts the subsequent clean-empty graph', async () => {
     const phases: string[] = [];
     const fetchSyncPages = recorder(async (
       _ctx: OperationContext,
@@ -191,7 +194,9 @@ describe('sync requester progress accounting', () => {
       _includeSharedMemory: boolean,
       phase: 'data' | 'meta',
     ) => pageResult(contextGraphId, phase, {
-      quads: phase === 'data' ? [quad(contextGraphId)] : [],
+      quads: phase === 'data' && contextGraphId === 'verify-fails'
+        ? [quad(contextGraphId)]
+        : [],
     }));
 
     const summary = await runDurableSync({
@@ -218,12 +223,12 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(0);
     expect(summary.failedPhases).toBe(1);
     expect(summary.deniedPhases).toBe(0);
-    expect(summary.completedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined]);
     expect(phases.slice(0, 4)).toEqual(['fetch:start', 'fetch:end', 'verify:start', 'verify:end']);
   });
 
-  it('continues durable sync after a post-response store failure without marking the peer unreachable', async () => {
+  it('does not count a store-failed durable graph but counts the subsequent clean-empty graph', async () => {
     const fetchSyncPages = recorder(async (
       _ctx: OperationContext,
       _peer: string,
@@ -231,7 +236,9 @@ describe('sync requester progress accounting', () => {
       _includeSharedMemory: boolean,
       phase: 'data' | 'meta',
     ) => pageResult(contextGraphId, phase, {
-      quads: phase === 'data' ? [quad(contextGraphId)] : [],
+      quads: phase === 'data' && contextGraphId === 'store-fails'
+        ? [quad(contextGraphId)]
+        : [],
     }));
 
     const summary = await runDurableSync({
@@ -242,7 +249,7 @@ describe('sync requester progress accounting', () => {
       fetchSyncPages,
       processDurableBatchInWorker: async (dataQuads) => ({
         ...durableProcessResult(),
-        emptyResponses: 0,
+        emptyResponses: dataQuads.length === 0 ? 1 : 0,
         verifiedData: dataQuads,
         totalFetchedDataQuads: dataQuads.length,
       }),
@@ -260,11 +267,12 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.failedPhases).toBe(1);
-    expect(summary.insertedDataTriples).toBe(1);
+    expect(summary.insertedDataTriples).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined]);
   });
 
-  it('does not count zero-offset empty durable completions as progress', async () => {
+  it('counts both clean zero-offset empty durable phases as complete', async () => {
     const summary = await runDurableSync({
       ctx,
       remotePeerId: 'peer-a',
@@ -286,7 +294,7 @@ describe('sync requester progress accounting', () => {
       logDebug: noop,
     });
 
-    expect(summary.completedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(summary.checkpointAdvances).toBe(0);
   });
 
@@ -317,7 +325,7 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
   });
 
-  it('counts timeout with an advanced durable checkpoint as progress', async () => {
+  it('counts only the clean-empty durable phase when its sibling times out', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = recorder(async (
@@ -346,7 +354,7 @@ describe('sync requester progress accounting', () => {
     });
 
     expect(summary.timedOutPhases).toBe(1);
-    expect(summary.completedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(1);
     expect(summary.checkpointAdvances).toBe(1);
     expect(deleteCheckpoint.calls).toContainEqual(['large-cg:meta']);
     expect(setCheckpoint.calls).toContainEqual(['large-cg:data', 500]);
@@ -387,6 +395,54 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(deleteCheckpoint.calls).toEqual([]);
     expect(setCheckpoint.calls).toEqual([]);
+  });
+
+  it('does not advance durable checkpoints when integrity verification rejects a KA', async () => {
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const logWarn = recorder((_ctx: OperationContext, _message: string) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, {
+      nextOffset: phase === 'data' ? 500 : 5,
+    }));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['rejected-integrity-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        rejectedKcs: 1,
+        totalFetchedDataQuads: 500,
+        totalFetchedMetaQuads: 5,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn,
+      logDebug: noop,
+    });
+
+    expect(summary.rejectedKcs).toBe(1);
+    expect(summary.completedPhases).toBe(0);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([]);
+    expect(logWarn.calls).toContainEqual([
+      ctx,
+      expect.stringContaining('failed durable integrity verification'),
+    ]);
   });
 
   it('advances only the durable meta checkpoint after storing metadata-only responses', async () => {
@@ -435,6 +491,86 @@ describe('sync requester progress accounting', () => {
     expect(setCheckpoint.calls).toContainEqual(['meta-only-cg:meta', 5]);
   });
 
+  it('advances the meta cursor when every fetched metadata row was deliberately discarded', async () => {
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['discarded-controls'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        droppedSyncControlTriples: 3,
+        totalFetchedMetaQuads: 3,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.metaOnlyResponses).toBe(1);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([['discarded-controls:meta', 3]]);
+  });
+
+  it('keeps the meta cursor pinned when discarded rows do not account for the whole page', async () => {
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
+      : pageResult(contextGraphId, phase));
+
+    await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['partially-discarded-controls'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        droppedSyncControlTriples: 2,
+        totalFetchedMetaQuads: 3,
+      }),
+      storeInsert: async () => {},
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([]);
+  });
+
   it('deletes only the durable meta checkpoint after completing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-complete-meta');
     const storeInsert = recorder(async (_quads: Quad[]) => {});
@@ -479,7 +615,63 @@ describe('sync requester progress accounting', () => {
     expect(setCheckpoint.calls).toEqual([]);
   });
 
-  it('continues shared-memory sync after a denied context graph', async () => {
+  it('stores verified private-only metadata and advances both durable checkpoints cleanly', async () => {
+    const metaQuad = quad('verified-private-only-meta');
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, {
+      quads: phase === 'meta' ? [metaQuad] : [],
+      nextOffset: phase === 'meta' ? 1 : 0,
+    }));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['verified-private-only-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        verifiedPrivateOnlyResponses: 1,
+        verifiedMeta: [metaQuad],
+        totalFetchedMetaQuads: 1,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary).toMatchObject({
+      insertedTriples: 1,
+      insertedMetaTriples: 1,
+      insertedDataTriples: 0,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 1,
+      completedPhases: 1,
+      checkpointAdvances: 1,
+      rejectedKcs: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    expect(storeInsert.calls).toEqual([[[metaQuad]]]);
+    expect(deleteCheckpoint.calls).toEqual([
+      ['verified-private-only-cg:meta'],
+      ['verified-private-only-cg:data'],
+    ]);
+    expect(setCheckpoint.calls).toEqual([]);
+  });
+
+  it('does not count a denied shared-memory graph but counts the subsequent clean-empty graph', async () => {
     const fetchSyncPages = recorder(async (
       _ctx: OperationContext,
       _peer: string,
@@ -510,7 +702,7 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.deniedPhases).toBe(1);
     expect(summary.failedPeers).toBe(0);
-    expect(summary.completedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
   });
 
@@ -546,6 +738,7 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(1);
     expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
   });
 
@@ -584,6 +777,7 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.failedPhases).toBe(1);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
   });
 
@@ -649,10 +843,11 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.failedPhases).toBe(1);
+    expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
   });
 
-  it('does not count zero-offset empty shared-memory completions as progress', async () => {
+  it('counts both clean zero-offset empty shared-memory phases as complete', async () => {
     const summary = await runSharedMemorySync({
       ctx,
       remotePeerId: 'peer-a',
@@ -676,11 +871,46 @@ describe('sync requester progress accounting', () => {
       logDebug: noop,
     });
 
-    expect(summary.completedPhases).toBe(0);
+    expect(summary.completedPhases).toBe(2);
     expect(summary.checkpointAdvances).toBe(0);
   });
 
-  it('reports resume-capable shared-memory snapshot timeouts as checkpoint progress', async () => {
+  it('counts only the clean-empty shared-memory phase when its sibling times out', async () => {
+    const summary = await runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['partial-empty-swm'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: OperationContext,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: 'data' | 'meta',
+      ) => phase === 'data'
+        ? pageResult(contextGraphId, phase, {
+            completed: false,
+            timedOut: true,
+            nextOffset: 500,
+          })
+        : pageResult(contextGraphId, phase),
+      processSharedMemoryBatch: async () => sharedMemoryProcessResult(),
+      ensureContextGraph: async () => {},
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.timedOutPhases).toBe(1);
+    expect(summary.completedPhases).toBe(1);
+    expect(summary.checkpointAdvances).toBe(1);
+  });
+
+  it('restarts incomplete shared-memory snapshots because their unverified prefix is not persisted', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_quads: Quad[]) => {});
@@ -748,10 +978,10 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.timedOutPhases).toBe(1);
-    expect(summary.checkpointAdvances).toBe(1);
+    expect(summary.checkpointAdvances).toBe(0);
     expect(summary.insertedTriples).toBe(0);
-    expect(setCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref', 500]);
-    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref']);
     expect(storeInsert.calls).toEqual([]);
     expect(ensureContextGraph.calls).toEqual([]);
   });
@@ -841,15 +1071,15 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(0);
     expect(summary.timedOutPhases).toBe(2);
-    expect(summary.checkpointAdvances).toBe(2);
+    expect(summary.checkpointAdvances).toBe(1);
     expect(summary.insertedDataTriples).toBe(1);
     expect(summary.insertedMetaTriples).toBe(0);
     expect(ensureContextGraph.calls).toContainEqual(['large-swm']);
     expect(storeInsert.calls).toHaveLength(1);
     expect(storeInsert.calls).toContainEqual([[dataQuad]]);
-    expect(setCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref', 500]);
+    expect(setCheckpoint.calls).not.toContainEqual(['large-swm:snapshot:snapshot-ref', expect.any(Number)]);
     expect(setCheckpoint.calls).toContainEqual(['large-swm:data', 7]);
     expect(setCheckpoint.calls).not.toContainEqual(['large-swm:meta', expect.any(Number)]);
-    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref']);
   });
 });

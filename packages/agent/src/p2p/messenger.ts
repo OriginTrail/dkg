@@ -11,6 +11,7 @@ import {
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
   type ProtocolRouter,
+  type SendOptions,
 } from '@origintrail-official/dkg-core';
 import {
   OutboxDrainer,
@@ -109,8 +110,17 @@ function shouldTriggerDhtWalk(errMsg: string): boolean {
   return DHT_WALK_TRIGGER_ERRORS.some((needle) => lower.includes(needle));
 }
 
+class MessengerResponseRejectedError extends Error {
+  constructor(protocolId: string, reason: string) {
+    super(`[Messenger] invalid response on ${protocolId}: ${reason}`);
+    this.name = 'MessengerResponseRejectedError';
+  }
+}
+
 function isRecoverableMessengerSendError(err: unknown, errMsg: string): boolean {
-  return isRecoverableSendError(err) || shouldTriggerDhtWalk(errMsg);
+  return err instanceof MessengerResponseRejectedError ||
+    isRecoverableSendError(err) ||
+    shouldTriggerDhtWalk(errMsg);
 }
 
 export interface MessengerDeps {
@@ -175,10 +185,8 @@ export interface MessengerDeps {
   outboxDrain?: OutboxDrainerOptions;
 }
 
-export interface SendOpts {
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}
+/** Router options exposed by Messenger's legacy pass-through send. */
+export type SendOpts = Pick<SendOptions, 'timeoutMs' | 'payloadReuse' | 'signal'>;
 
 export interface SendReliableOpts {
   /**
@@ -279,6 +287,28 @@ export type ReliableHandler = (
   payload: Uint8Array,
   peerId: string,
 ) => Promise<Uint8Array>;
+
+export interface OutboxResponseContext {
+  peerId: string;
+  protocolId: string;
+  messageId: string;
+  requestPayload: Uint8Array;
+  response: Uint8Array;
+}
+
+export type OutboxResponseHandler = (
+  context: OutboxResponseContext,
+) => Promise<void> | void;
+
+/** Per-protocol inbound limits for reliable messenger registrations. */
+export interface MessengerRegisterOptions {
+  /**
+   * Maximum encoded `ReliableEnvelope` bytes accepted from the wire.
+   * This limit is enforced by `ProtocolRouter` before envelope decoding.
+   */
+  maxWireBytes?: number;
+}
+
 
 /**
  * The Universal Messenger substrate.
@@ -431,6 +461,26 @@ export class Messenger {
    * be pure (no side effects) and cheap (microseconds).
    */
   private readonly deliveredResponseClassifiers = new Map<string, (response: Uint8Array) => boolean>();
+  /**
+   * Per-protocol wire-response validators. Unlike delivered-response
+   * classifiers (metrics only), rejection here keeps the exact envelope in
+   * the durable outbox. This is needed for protocols where a remote handler
+   * abort can surface as clean EOF rather than a stream-reset error.
+   */
+  private readonly responseAcceptanceValidators = new Map<
+    string,
+    (response: Uint8Array) => boolean
+  >();
+  /**
+   * Per-protocol completion hooks for responses that arrive on a durable
+   * outbox retry after the original caller has already returned. Hooks run
+   * before sender idempotency is recorded and before the outbox row is
+   * removed; throwing therefore keeps the exact request queued for retry.
+   */
+  private readonly outboxResponseHandlers = new Map<
+    string,
+    OutboxResponseHandler
+  >();
 
   constructor(deps: MessengerDeps & { sloWindowSamples?: number }) {
     this.router = deps.router;
@@ -470,6 +520,39 @@ export class Messenger {
     classifier: (response: Uint8Array) => boolean,
   ): void {
     this.deliveredResponseClassifiers.set(protocolId, classifier);
+  }
+
+  /**
+   * Require an application-valid response before sender idempotency is
+   * recorded or an outbox row is removed. A rejected response is treated as
+   * recoverable so the identical ReliableEnvelope is retried after backoff.
+   */
+  setResponseAcceptanceValidator(
+    protocolId: string,
+    validator: (response: Uint8Array) => boolean,
+  ): void {
+    this.responseAcceptanceValidators.set(protocolId, validator);
+  }
+
+  setOutboxResponseHandler(
+    protocolId: string,
+    handler: OutboxResponseHandler,
+  ): void {
+    this.outboxResponseHandlers.set(protocolId, handler);
+  }
+
+  private assertResponseAccepted(protocolId: string, response: Uint8Array): void {
+    const validator = this.responseAcceptanceValidators.get(protocolId);
+    if (!validator) return;
+    try {
+      if (validator(response)) return;
+    } catch (error) {
+      throw new MessengerResponseRejectedError(
+        protocolId,
+        `validator threw: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    throw new MessengerResponseRejectedError(protocolId, 'validator returned false');
   }
 
   private shouldCountResponseAsDelivered(protocolId: string, response: Uint8Array): boolean {
@@ -729,6 +812,7 @@ export class Messenger {
         envelope,
         opts.timeoutMs,
       );
+      this.assertResponseAccepted(protocolId, response);
       idem.record(peerId, protocolId, messageId, 'out', response);
       outbox.markDelivered(peerId, protocolId, messageId);
       this.noteDeliveredForSlo(protocolId, peerId, messageId, response);
@@ -786,12 +870,18 @@ export class Messenger {
    * Throws `MessengerNotConfiguredError` if `idempotencyStore` was
    * omitted at construction.
    */
-  register(protocolId: string, handler: ReliableHandler): void {
+  register(
+    protocolId: string,
+    handler: ReliableHandler,
+    options?: MessengerRegisterOptions,
+  ): void {
     this.requireSubstrate('register');
     const idem = this.idempotencyStore!;
     this.handlers.set(protocolId, handler);
 
-    this.router.register(protocolId, async (data, peerIdObj) => {
+    const reliableHandler = async (data: Uint8Array, peerIdObj: {
+      toString(): string;
+    }): Promise<Uint8Array> => {
       const peerKey = peerIdObj.toString();
 
       let envelope: { messageId: string; payload: Uint8Array };
@@ -839,7 +929,15 @@ export class Messenger {
       } finally {
         this.inboundInFlight.delete(inFlightKey);
       }
-    });
+    };
+
+    if (options?.maxWireBytes === undefined) {
+      this.router.register(protocolId, reliableHandler);
+    } else {
+      this.router.register(protocolId, reliableHandler, {
+        maxReadBytes: options.maxWireBytes,
+      });
+    }
   }
 
   /**
@@ -895,6 +993,18 @@ export class Messenger {
         entry.protocol,
         entry.payload,
       );
+      this.assertResponseAccepted(entry.protocol, response);
+      const responseHandler = this.outboxResponseHandlers.get(entry.protocol);
+      if (responseHandler) {
+        const requestPayload = decodeReliableEnvelope(entry.payload).payload;
+        await responseHandler({
+          peerId: entry.peer,
+          protocolId: entry.protocol,
+          messageId: entry.messageId,
+          requestPayload,
+          response,
+        });
+      }
       this.idempotencyStore!.record(
         entry.peer,
         entry.protocol,
