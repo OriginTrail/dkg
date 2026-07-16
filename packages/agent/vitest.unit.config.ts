@@ -51,6 +51,7 @@ export default defineConfig({
       "test/sync-responder-oversized-fallback.test.ts",
       "test/sync-responder-large-graph-stack-overflow.test.ts",
       "test/sync-page-frame-budget.test.ts",
+      "test/sync-byte-budget-pages.test.ts",
       "test/sync-append-in-place.test.ts",
       "test/sync-memory-metrics.test.ts",
       "test/sync-responder-metrics.test.ts",

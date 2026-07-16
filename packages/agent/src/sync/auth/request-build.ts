@@ -1,4 +1,9 @@
 import { ethers } from 'ethers';
+import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_PAGE_SIZE,
+} from '../../dkg-agent-constants.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -28,6 +33,16 @@ export interface SyncRequestEnvelope {
   snapshotRef?: string;
   authPurpose?: string;
   authSelector?: string;
+  /**
+   * Additive, UNSIGNED response-shaping capability. The signed `limit` remains
+   * at or below the legacy 500-row cap, so old responders can authenticate and
+   * serve the request unchanged. New responders may honor `pageRowsHint`, but
+   * only under their own hard row and byte caps. This cannot expand the caller's
+   * authorization scope; it only changes how much already-authorized durable
+   * data is returned in one response.
+   */
+  pageMode?: typeof SYNC_BYTE_BUDGET_PAGE_MODE;
+  pageRowsHint?: number;
   /**
    * Phase C — optional, UNSIGNED delta-sync hint. When set, the responder
    * returns only Knowledge Assets whose KC `dkg:batchId` is strictly greater
@@ -154,6 +169,11 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     throw new Error(`Cannot build agent-signed sync request for "${contextGraphId}": forced agent signing requires an authenticated envelope`);
   }
 
+  const requestedLimit = Number.isSafeInteger(limit)
+    ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
+    : SYNC_PAGE_SIZE;
+  const useByteBudgetPage = !includeSharedMemory && phase === 'data' && requestedLimit > SYNC_PAGE_SIZE;
+
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
     const phaseSuffix = phase === 'meta'
@@ -171,13 +191,17 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     // Trailing keyed tokens are additive; old responders ignore the extra parts.
     const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
     const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
-    return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}${sessionSuffix}${sinceSuffix}`);
+    return new TextEncoder().encode(`${prefix}|${offset}|${requestedLimit}${phaseSuffix}${sessionSuffix}${sinceSuffix}`);
   }
 
   const request: SyncRequestEnvelope = {
     contextGraphId,
     offset,
-    limit,
+    // Keep this signed field within the legacy cap. An old responder clamps to
+    // the same value before verifying the digest, so rolling upgrades remain
+    // wire-compatible even when the additive hint below asks a new responder
+    // for a larger byte-bounded page.
+    limit: Math.min(requestedLimit, SYNC_PAGE_SIZE),
     includeSharedMemory,
     targetPeerId,
     requesterPeerId,
@@ -217,6 +241,10 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // authorization; only narrows the responder's result set).
   if (syncSessionId) request.syncSessionId = syncSessionId;
   if (sinceBatchId) request.sinceBatchId = sinceBatchId;
+  if (useByteBudgetPage) {
+    request.pageMode = SYNC_BYTE_BUDGET_PAGE_MODE;
+    request.pageRowsHint = requestedLimit;
+  }
   // R9: unsigned recovery marker (only ever escalates strictness — see field
   // docs). The responder authorizes against the recovered signer, not this flag.
   if (recovery) request.recovery = true;

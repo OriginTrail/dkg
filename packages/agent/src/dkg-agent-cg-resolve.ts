@@ -281,6 +281,8 @@ import {
 } from './dkg-agent-utils.js';
 import {
   PRIVATE_DATA_ANCHOR,
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
   SYNC_TOTAL_TIMEOUT_MS,
@@ -941,6 +943,14 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         snapshotRef: typeof parsed.snapshotRef === 'string' ? parsed.snapshotRef : undefined,
         authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
         authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
+        pageMode: parsed.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE
+          ? SYNC_BYTE_BUDGET_PAGE_MODE
+          : undefined,
+        pageRowsHint: parsed.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
+          Number.isSafeInteger(parsed.pageRowsHint) &&
+          Number(parsed.pageRowsHint) > SYNC_PAGE_SIZE
+          ? Math.min(Number(parsed.pageRowsHint), SYNC_BYTE_BUDGET_MAX_ROWS)
+          : undefined,
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,

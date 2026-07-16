@@ -16,7 +16,10 @@ import {
 import {
   createRequesterPhaseTelemetry,
 } from '../memory-telemetry.js';
-import { SYNC_REQUEST_SAFE_PAGE_SIZE } from '../../dkg-agent-constants.js';
+import {
+  SYNC_PAGE_SIZE,
+  SYNC_REQUEST_SAFE_PAGE_SIZE,
+} from '../../dkg-agent-constants.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -238,6 +241,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // A transient failure merely makes the remainder of this phase conservative;
   // it never changes offsets or responder-session identity.
   const safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
+  const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
   let activePageSize = syncPageSize;
   let successfulPageSize = syncPageSize;
   const syncSessionId = usesPageSession
@@ -297,7 +301,13 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         onRetry: (attempt, delay, err) => {
           const priorPageSize = activePageSize;
           if (activePageSize > safePageSize) {
-            activePageSize = Math.max(safePageSize, Math.floor(activePageSize / 2));
+            // A failed multi-thousand-row response should not spend two more
+            // attempts walking down through still-large pages. Drop directly
+            // to the proven frame-safe floor. Legacy-sized callers retain the
+            // historical halving behaviour used by mixed-version tests.
+            activePageSize = usesByteBudgetPagination
+              ? safePageSize
+              : Math.max(safePageSize, Math.floor(activePageSize / 2));
           }
           const pageSizeNote = activePageSize < priorPageSize
             ? `; reducing page size ${priorPageSize}->${activePageSize}`
@@ -352,6 +362,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
       appendInPlace(allQuads, parsed.quads);
       offset += parsed.totalQuads;
+      // One conservative retry must not throttle the rest of a healthy phase.
+      // The next request returns to the byte-budget hint; if it fails again the
+      // same bounded fallback applies independently.
+      if (usesByteBudgetPagination) activePageSize = syncPageSize;
 
       if (debugSyncProgress) {
         logInfo(
@@ -359,7 +373,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           `Sync progress for "${contextGraphId}" ${includeSharedMemory ? 'shared-memory' : 'durable'} ${phase}: transferred=${allQuads.length} bytes=${bytesReceived} offset=${offset}`,
         );
       }
-      if (parsed.totalQuads < successfulPageSize) break;
+      // A new responder may deliberately return a short prefix to stay inside
+      // its byte budget, while an old responder returns at most its legacy
+      // 500-row cap. Therefore short pages are not EOF in negotiated mode; an
+      // explicit empty response is. Legacy pagination keeps the old shortcut.
+      if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;

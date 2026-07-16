@@ -7,6 +7,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+} from '../../dkg-agent-constants.js';
+import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
@@ -25,6 +30,7 @@ import {
   readSwmDataPage,
   readSwmMetaPage,
   serializeResponderRows,
+  serializeResponderRowsWithinByteBudget,
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
 import {
@@ -523,6 +529,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const phase = request.phase ?? 'data';
     const isWorkspace = request.includeSharedMemory;
     const contextGraphId = request.contextGraphId;
+    const hintedPageRows = typeof request.pageRowsHint === 'number' &&
+      Number.isSafeInteger(request.pageRowsHint)
+      ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
+      : 0;
+    const usesByteBudgetPage = !isWorkspace &&
+      phase === 'data' &&
+      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
+      hintedPageRows > limit;
+    const durableDataLimit = usesByteBudgetPage ? hintedPageRows : limit;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -763,17 +778,23 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           contextGraphId,
           sinceBatchId,
           offset,
-          limit,
+          limit: durableDataLimit,
           signal,
           rowListMemo: session ? durableDataRowsMemo : undefined,
           rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
           exactGraphPlanMemo: durableDataExactGraphPlanMemo,
+          // A byte-bounded response may contain only a prefix of the row slice
+          // loaded above. Do not release the immutable session snapshot merely
+          // because that slice was short; the explicit empty request is EOF.
+          releaseCacheOnShortPage: !usesByteBudgetPage,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
-        const serialized = serializeResponderRows(rows);
+        const serialized = usesByteBudgetPage
+          ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+          : serializeResponderRows(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
         logFirstPageDetail(() => `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);

@@ -156,6 +156,13 @@ export interface SyncRequestEnvelope {
   snapshotRef?: string;
   authPurpose?: string;
   authSelector?: string;
+  /**
+   * Additive unsigned response-shaping capability. The authenticated legacy
+   * `limit` remains capped at 500; upgraded responders may honor this hint only
+   * under their own hard row/byte caps. Kept in lockstep with request-build.ts.
+   */
+  pageMode?: 'byte-budget-v1';
+  pageRowsHint?: number;
   targetPeerId?: string;
   requesterPeerId?: string;
   requestId?: string;
