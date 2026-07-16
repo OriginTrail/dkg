@@ -396,7 +396,8 @@ function auditModesSelfTest() {
     git('init', '-q');
     git('config', 'user.email', 'selftest@example.invalid');
     git('config', 'user.name', 'test-disable-lint-selftest');
-    const fixturePath = path.join(fixtureRoot, 'test/debt.test.ts');
+    const relativeFixturePath = 'test/café\tdebt.test.ts';
+    const fixturePath = path.join(fixtureRoot, relativeFixturePath);
     mkdirSync(path.dirname(fixturePath), { recursive: true });
     writeFileSync(fixturePath, "it.todo('audit debt');\n");
     git('add', '-A');
@@ -415,7 +416,7 @@ function auditModesSelfTest() {
     const pass = fileAudit.status === 0
       && fileAudit.stdout.trim() === `${fixturePath}:1:1: D1 it.todo`
       && fullAudit.status === 0
-      && fullAudit.stdout.trim() === 'test/debt.test.ts:1:1: D1 it.todo';
+      && fullAudit.stdout.trim() === `${relativeFixturePath}:1:1: D1 it.todo`;
     if (!pass) {
       process.stderr.write(
         'SELF-TEST FAIL: audit modes did not report debt without failure\n'
