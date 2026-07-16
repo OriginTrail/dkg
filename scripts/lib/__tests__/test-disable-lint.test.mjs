@@ -68,6 +68,21 @@ test('analysis resolves exclusion constants through lexical scope', () => {
   );
 });
 
+test('analysis resolves exclusion constants declared in for initializers', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    "for (const EXCLUSION = 'tests/loop/**'; enabled;) {",
+    '  const config = { test: { exclude: [EXCLUSION] } };',
+    '  break;',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 3, value: 'tests/loop/**' }],
+  );
+});
+
 test('analysis recognizes custom Vitest configuration filenames', () => {
   const source = [
     "import { defineConfig } from 'vitest/config';",
