@@ -103,6 +103,22 @@ function lexicalBinding(scope, identifier) {
       };
     }
   }
+  if (ts.isCaseBlock(scope)) {
+    for (const clause of scope.clauses) {
+      for (const statement of clause.statements) {
+        if (!ts.isVariableStatement(statement)) continue;
+        const declaration = statement.declarationList.declarations.find(
+          ({ name }) => bindingNameIncludes(name, identifier),
+        );
+        if (declaration) {
+          return {
+            declaration,
+            isConst: Boolean(statement.declarationList.flags & ts.NodeFlags.Const),
+          };
+        }
+      }
+    }
+  }
   if (!ts.isSourceFile(scope) && !ts.isBlock(scope)) return undefined;
   for (const statement of scope.statements) {
     if (!ts.isVariableStatement(statement)) continue;
