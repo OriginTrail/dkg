@@ -4,6 +4,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
+import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -240,16 +241,59 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
 
+      let effectiveDataResult = dataResult;
+      let dataForVerification = dataResult.quads;
+      let verificationMode: DurableBatchVerificationMode = sinceBatchId === undefined
+        ? { kind: 'fullSnapshot' }
+        : { kind: 'sinceBatchId', sinceBatchId };
+
+      // A rootless full snapshot is a deterministic concatenation of complete
+      // exact graphs. When the deadline cuts the final graph mid-page, verify
+      // and persist only the preceding complete graphs, then checkpoint their
+      // absolute row boundary. The partial graph is deliberately discarded and
+      // retried. This gives large V2 snapshots bounded memory and monotonic
+      // progress without weakening legacy/mixed-layout fail-closed behaviour.
+      if (
+        sinceBatchId === undefined
+        && !isSystemContextGraph
+        && (dataResult.timedOut || dataResult.resumedFromOffset > 0)
+      ) {
+        const bounded = planBoundedGraphScopedDurableBatch(
+          dataResult.quads,
+          metaResult.quads,
+          dataResult.resumedFromOffset,
+          dataResult.nextOffset,
+          dataResult.completed,
+        );
+        if (bounded) {
+          dataForVerification = bounded.dataQuads;
+          effectiveDataResult = {
+            ...dataResult,
+            quads: bounded.dataQuads,
+            nextOffset: bounded.safeNextOffset,
+          };
+          verificationMode = {
+            kind: 'changelogPage',
+            changedDataGraphs: bounded.changedDataGraphs,
+          };
+          logInfo(
+            ctx,
+            `Rootless durable progress for "${pid}": `
+              + `${bounded.completedGraphCount} complete graph(s), `
+              + `safe offset ${dataResult.resumedFromOffset}->${bounded.safeNextOffset} `
+              + `(raw ${dataResult.nextOffset})`,
+          );
+        }
+      }
+
       startPhase('verify');
       const verifyStartedAt = Date.now();
       const processed = await processDurableBatchInWorker(
-        dataResult.quads,
+        dataForVerification,
         metaResult.quads,
         ctx,
         isSystemContextGraph,
-        sinceBatchId === undefined
-          ? { kind: 'fullSnapshot' }
-          : { kind: 'sinceBatchId', sinceBatchId },
+        verificationMode,
       );
       endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
@@ -283,9 +327,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           || sinceBatchId !== undefined
           || !batchVerifiedCleanly
           || processed.dataRejectedMissingMeta !== 0
-          || !dataResult.completed
-          || dataResult.timedOut
-          || dataResult.resumedFromOffset !== 0
+          || !effectiveDataResult.completed
+          || effectiveDataResult.timedOut
+          || effectiveDataResult.resumedFromOffset !== 0
           || (!skipAgentsMeta && (!metaResult.completed || metaResult.timedOut))
           || (!skipAgentsMeta && metaResult.resumedFromOffset !== 0)
         ) return;
@@ -337,11 +381,11 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           countProgress: !metadataOnlyResponse,
           emptyPhase,
         });
-        recordPhaseOutcome(dataResult, {
+        recordPhaseOutcome(effectiveDataResult, {
           updateCheckpoint: updateDataCheckpoint,
           emptyPhase,
         });
-        if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+        if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
         }
         continue;
@@ -361,9 +405,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
       await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-      recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
+      recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
       endPhase();
-      if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+      if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
       const storeDurationMs = Date.now() - storeStartedAt;
