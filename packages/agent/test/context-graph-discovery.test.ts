@@ -2922,12 +2922,14 @@ describe('runImmediatePostApprovalSync', () => {
       peersSucceeded: number;
       dataSynced: number;
       sharedMemorySynced: number;
+      sharedMemoryCompletedCleanly?: boolean;
       denied: boolean;
     };
     runCatchupResults?: Array<{
       peersSucceeded: number;
       dataSynced: number;
       sharedMemorySynced: number;
+      sharedMemoryCompletedCleanly?: boolean;
       denied: boolean;
     }>;
     runCatchupThrows?: Error;
@@ -3005,6 +3007,8 @@ describe('runImmediatePostApprovalSync', () => {
         peersSucceeded: configuredResult?.peersSucceeded ?? 0,
         dataSynced: configuredResult?.dataSynced ?? 0,
         sharedMemorySynced: configuredResult?.sharedMemorySynced ?? 0,
+        sharedMemoryCompletedCleanly:
+          configuredResult?.sharedMemoryCompletedCleanly ?? false,
         denied: configuredResult?.denied ?? false,
         diagnostics: { noProtocolPeers: 0 } as any,
       };
@@ -3062,7 +3066,13 @@ describe('runImmediatePostApprovalSync', () => {
     const calls = installStubs(agent, {
       connectedPeers: [CURATOR_PEER],
       runCatchupResults: [
-        { peersSucceeded: 0, dataSynced: 32_000, sharedMemorySynced: 50_000, denied: false },
+        {
+          peersSucceeded: 0,
+          dataSynced: 32_000,
+          sharedMemorySynced: 50_000,
+          sharedMemoryCompletedCleanly: true,
+          denied: false,
+        },
         { peersSucceeded: 1, dataSynced: 18_000, sharedMemorySynced: 0, denied: false },
       ],
     });
@@ -3076,6 +3086,44 @@ describe('runImmediatePostApprovalSync', () => {
     expect(calls.runCatchupCalls).toEqual([
       { cg: 'test-cg-bounded-progress', includeSwm: true, peers: [CURATOR_PEER] },
       { cg: 'test-cg-bounded-progress', includeSwm: false, peers: [CURATOR_PEER] },
+    ]);
+    expect(calls.broadcastCalls).toHaveLength(0);
+  }, 15000);
+
+  it('keeps requesting SWM after partial inserts until the curator completes it cleanly', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      runCatchupResults: [
+        {
+          peersSucceeded: 0,
+          dataSynced: 32_000,
+          sharedMemorySynced: 50_000,
+          sharedMemoryCompletedCleanly: false,
+          denied: false,
+        },
+        {
+          peersSucceeded: 1,
+          dataSynced: 18_000,
+          sharedMemorySynced: 10_000,
+          sharedMemoryCompletedCleanly: true,
+          denied: false,
+        },
+      ],
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-partial-swm',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-partial-swm', CURATOR_PEER);
+
+    expect(calls.runCatchupCalls).toEqual([
+      { cg: 'test-cg-partial-swm', includeSwm: true, peers: [CURATOR_PEER] },
+      { cg: 'test-cg-partial-swm', includeSwm: true, peers: [CURATOR_PEER] },
     ]);
     expect(calls.broadcastCalls).toHaveLength(0);
   }, 15000);

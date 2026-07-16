@@ -4821,6 +4821,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     deferredBackpressure: number;
     dataSynced: number;
     sharedMemorySynced: number;
+    /** A selected peer completed a non-empty SWM snapshot without failure. */
+    sharedMemoryCompletedCleanly: boolean;
     /**
      * `true` iff at least one peer in this run explicitly denied the sync
      * by emitting a denial sentinel (`syncDenied` marker raised from
@@ -4999,6 +5001,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     deferredBackpressure: number;
     dataSynced: number;
     sharedMemorySynced: number;
+    /** A selected peer completed a non-empty SWM snapshot without failure. */
+    sharedMemoryCompletedCleanly: boolean;
     denied: boolean;
     deniedPeers: number;
     diagnostics: CatchupSyncDiagnostics;
@@ -5318,6 +5322,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       deferredBackpressure,
       dataSynced,
       sharedMemorySynced,
+      sharedMemoryCompletedCleanly,
       denied: accessDeniedPeers > 0,
       deniedPeers: accessDeniedPeers,
       diagnostics,
@@ -5429,7 +5434,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
             totalDataSynced += result.dataSynced;
             totalSharedMemorySynced += result.sharedMemorySynced;
-            if (result.sharedMemorySynced > 0) includeSharedMemory = false;
+            // An insert count only proves partial progress: the SWM requester
+            // may have stored early pages before timing out. Stop requesting
+            // SWM only after this curator completed the plane cleanly; until
+            // then a durable-only success must not suppress SWM bootstrap.
+            if (result.sharedMemoryCompletedCleanly) includeSharedMemory = false;
 
             // A transient first meta read must not turn a successful payload/SWM
             // transfer into a false-ready subscription. Retry once after each
