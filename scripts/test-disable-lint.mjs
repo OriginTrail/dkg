@@ -182,6 +182,40 @@ export function auditFiles(filePaths) {
   });
 }
 
+function git(args, cwd = process.cwd()) {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function findingsAt(revision, cwd) {
+  return git(['ls-tree', '-r', '--name-only', revision], cwd)
+    .split('\n')
+    .filter(isD1ScannableFile)
+    .flatMap((filePath) => analyzeD1Source(
+      git(['show', `${revision}:${filePath}`], cwd),
+      filePath,
+    ));
+}
+
+export function computeDiffFindings(baseRevision, headRevision, cwd = process.cwd()) {
+  const baseline = new Map();
+  for (const finding of findingsAt(baseRevision, cwd)) {
+    baseline.set(finding.fingerprint, (baseline.get(finding.fingerprint) ?? 0) + 1);
+  }
+
+  const results = findingsAt(headRevision, cwd).map((finding) => {
+    const remaining = baseline.get(finding.fingerprint) ?? 0;
+    if (remaining === 0) return { ...finding, verdict: 'new' };
+    baseline.set(finding.fingerprint, remaining - 1);
+    return { ...finding, verdict: 'grandfathered' };
+  });
+  return { results };
+}
+
 function semanticMoveSelfTest() {
   const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-move-'));
   const git = (...args) => execFileSync('git', args, {
