@@ -156,23 +156,52 @@ function lexicalBinding(scope, identifier) {
   return undefined;
 }
 
-function staticStringConstant(node) {
+function staticConstantInitializer(node) {
   for (let scope = node.parent; scope; scope = scope.parent) {
     const binding = lexicalBinding(scope, node.text);
     if (!binding) continue;
     return binding.isConst
       && binding.declaration.initializer
-      && ts.isStringLiteralLike(binding.declaration.initializer)
-      ? binding.declaration.initializer.text
+      ? binding.declaration.initializer
       : undefined;
   }
   return undefined;
 }
 
-function staticExclusionValue(node) {
-  if (ts.isStringLiteralLike(node)) return node.text;
-  if (ts.isIdentifier(node)) return staticStringConstant(node);
-  return undefined;
+function staticExclusionValues(node, arraysAllowed = false, seen = new Set()) {
+  if (ts.isStringLiteralLike(node)) return [node.text];
+  if (ts.isIdentifier(node)) {
+    const initializer = staticConstantInitializer(node);
+    if (!initializer || seen.has(initializer)) return undefined;
+    return staticExclusionValues(
+      initializer,
+      arraysAllowed,
+      new Set([...seen, initializer]),
+    );
+  }
+  if (!arraysAllowed || !ts.isArrayLiteralExpression(node)) return undefined;
+
+  const values = [];
+  for (const element of node.elements) {
+    const resolved = ts.isSpreadElement(element)
+      ? staticExclusionValues(element.expression, true, seen)
+      : staticExclusionValues(element, false, seen);
+    if (resolved) values.push(...resolved);
+  }
+  return values;
+}
+
+function exclusionElements(node) {
+  if (ts.isArrayLiteralExpression(node)) return node.elements;
+  return [node];
+}
+
+function exclusionElementValues(element, arrayInitializer) {
+  if (ts.isSpreadElement(element)) {
+    return staticExclusionValues(element.expression, true) ?? [];
+  }
+  if (!arrayInitializer) return staticExclusionValues(element, true) ?? [];
+  return staticExclusionValues(element) ?? [];
 }
 
 function isTestTargetingExclusion(value) {
@@ -334,20 +363,22 @@ export function analyzeD2Source(source, filePath) {
         (property) => ts.isPropertyAssignment(property)
           && propertyNameText(property.name) === 'exclude',
       );
-      if (exclude && ts.isArrayLiteralExpression(exclude.initializer)) {
-        for (const element of exclude.initializer.elements) {
-          const value = staticExclusionValue(element);
-          if (value === undefined || !isTestTargetingExclusion(value)) continue;
-          const location = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile));
-          findings.push({
-            rule: 'D2',
-            api: 'vitest.exclude',
-            value,
-            fingerprint: d2Fingerprint(value),
-            filePath,
-            line: location.line + 1,
-            column: location.character + 1,
-          });
+      if (exclude) {
+        const arrayInitializer = ts.isArrayLiteralExpression(exclude.initializer);
+        for (const element of exclusionElements(exclude.initializer)) {
+          for (const value of exclusionElementValues(element, arrayInitializer)) {
+            if (!isTestTargetingExclusion(value)) continue;
+            const location = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile));
+            findings.push({
+              rule: 'D2',
+              api: 'vitest.exclude',
+              value,
+              fingerprint: d2Fingerprint(value),
+              filePath,
+              line: location.line + 1,
+              column: location.character + 1,
+            });
+          }
         }
       }
     }
