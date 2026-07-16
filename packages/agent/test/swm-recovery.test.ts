@@ -16,6 +16,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
 import {
   recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
@@ -125,6 +126,46 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
 
     expect(result).toMatchObject({ completed: false, readySnapshots: 3, totalSnapshots: 100 });
     expect(calls).toBe(3);
+  });
+});
+
+describe('syncPublicSnapshotsForMeta', () => {
+  it('retries a cleanly-closed short snapshot response without caching its prefix', async () => {
+    const expected: Quad[] = [
+      { subject: 'urn:snapshot:a', predicate: STATUS, object: '"one"', graph: '' },
+      { subject: 'urn:snapshot:b', predicate: STATUS, object: '"two"', graph: '' },
+    ];
+    const digest = workspacePublicQuadsDigest(expected);
+    const snapshotSubject = 'urn:dkg:share:short-snapshot';
+    const snapshotStore = new MemorySnapshotStore();
+    let deletedCheckpoints = 0;
+
+    const result = await syncPublicSnapshotsForMeta({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      metaQuads: [
+        { subject: snapshotSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
+        { subject: snapshotSubject, predicate: `${DKG}publicQuadsCount`, object: `"${expected.length}"^^<${XSD_INTEGER}>`, graph: WS_META },
+      ],
+      publicSnapshotStore: snapshotStore,
+      fetchSyncPages: async () => ({
+        ...page([expected[0]!]),
+        checkpointKey: `snapshot:${digest}`,
+      }),
+      deleteCheckpoint: () => { deletedCheckpoints += 1; },
+      setCheckpoint: () => {},
+    });
+
+    expect(result).toMatchObject({
+      completed: false,
+      readySnapshots: 0,
+      totalSnapshots: 1,
+      completedPhases: 0,
+    });
+    expect(deletedCheckpoints).toBeGreaterThan(0);
+    await expect(snapshotStore.getSnapshot(digest)).resolves.toBeNull();
   });
 });
 const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7';

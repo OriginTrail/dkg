@@ -417,9 +417,6 @@ export async function syncPublicSnapshotsForMeta(params: {
     bytesReceived += result.bytesReceived;
     resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     timedOutPhases += result.timedOut ? 1 : 0;
-    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
-      completedPhases += 1;
-    }
     if (result.completed) params.deleteCheckpoint(result.checkpointKey);
     else {
       // `fetchSyncPages` returns only the quads fetched during THIS call. We do
@@ -443,6 +440,26 @@ export async function syncPublicSnapshotsForMeta(params: {
     }
 
     const snapshotQuads = result.quads.map((quad) => ({ ...quad, graph: '' }));
+    if (snapshotQuads.length < snapshot.count) {
+      // A relayed stream can terminate cleanly after returning a prefix. The
+      // requester then sees `completed=true`, but the signed metadata gives us
+      // an authoritative expected count and proves that this is incomplete,
+      // not corrupt. Never cache or apply the prefix; retry it from offset zero
+      // in a later bounded recovery round. Equal-count digest mismatches remain
+      // fatal below so a complete but tampered snapshot is never softened into
+      // a transport retry.
+      params.deleteCheckpoint(result.checkpointKey);
+      return {
+        bytesReceived,
+        resumedPhases,
+        timedOutPhases,
+        completedPhases,
+        checkpointAdvances,
+        readySnapshots,
+        totalSnapshots: snapshots.length,
+        completed: false,
+      };
+    }
     const actualDigest = workspacePublicQuadsDigest(snapshotQuads);
     if (actualDigest !== snapshot.digest || snapshotQuads.length !== snapshot.count) {
       throw new Error(
@@ -451,6 +468,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       );
     }
     await params.publicSnapshotStore.putSnapshot({ digest: snapshot.digest, quads: snapshotQuads });
+    completedPhases += 1;
     readySnapshots += 1;
   }
 
