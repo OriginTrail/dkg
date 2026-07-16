@@ -63,8 +63,9 @@ function d1Fingerprint(pattern, titleNode, fallbackNode, sourceFile) {
   return createHash('sha1').update(`D1:${pattern}:${identity}`).digest('hex');
 }
 
-function d2Fingerprint(value) {
-  return createHash('sha1').update(`D2:vitest.exclude:${value}`).digest('hex');
+function d2Fingerprint(value, opaque) {
+  const pattern = opaque ? 'opaque' : 'static';
+  return createHash('sha1').update(`D2:vitest.exclude:${pattern}:${value}`).digest('hex');
 }
 
 function propertyNameText(name) {
@@ -168,27 +169,33 @@ function staticConstantInitializer(node) {
   return undefined;
 }
 
-function staticExclusionValues(node, arraysAllowed = false, seen = new Set()) {
-  if (ts.isStringLiteralLike(node)) return [node.text];
+function exclusionEntries(node, sourceFile, arraysAllowed = false, seen = new Set()) {
+  if (ts.isOmittedExpression(node)) return [];
+  if (ts.isStringLiteralLike(node)) return [{ value: node.text, opaque: false }];
   if (ts.isIdentifier(node)) {
     const initializer = staticConstantInitializer(node);
-    if (!initializer || seen.has(initializer)) return undefined;
-    return staticExclusionValues(
+    if (!initializer || seen.has(initializer)) {
+      return [{ value: normalizedFragment(node, sourceFile), opaque: true }];
+    }
+    return exclusionEntries(
       initializer,
+      sourceFile,
       arraysAllowed,
       new Set([...seen, initializer]),
     );
   }
-  if (!arraysAllowed || !ts.isArrayLiteralExpression(node)) return undefined;
+  if (!arraysAllowed || !ts.isArrayLiteralExpression(node)) {
+    return [{ value: normalizedFragment(node, sourceFile), opaque: true }];
+  }
 
-  const values = [];
+  const entries = [];
   for (const element of node.elements) {
     const resolved = ts.isSpreadElement(element)
-      ? staticExclusionValues(element.expression, true, seen)
-      : staticExclusionValues(element, false, seen);
-    if (resolved) values.push(...resolved);
+      ? exclusionEntries(element.expression, sourceFile, true, seen)
+      : exclusionEntries(element, sourceFile, false, seen);
+    entries.push(...resolved);
   }
-  return values;
+  return entries;
 }
 
 function exclusionElements(node) {
@@ -196,12 +203,12 @@ function exclusionElements(node) {
   return [node];
 }
 
-function exclusionElementValues(element, arrayInitializer) {
+function resolvedExclusionEntries(element, sourceFile, arrayInitializer) {
   if (ts.isSpreadElement(element)) {
-    return staticExclusionValues(element.expression, true) ?? [];
+    return exclusionEntries(element.expression, sourceFile, true);
   }
-  if (!arrayInitializer) return staticExclusionValues(element, true) ?? [];
-  return staticExclusionValues(element) ?? [];
+  if (!arrayInitializer) return exclusionEntries(element, sourceFile, true);
+  return exclusionEntries(element, sourceFile);
 }
 
 function isTestTargetingExclusion(value) {
@@ -351,6 +358,7 @@ export function analyzeD2Source(source, filePath) {
     true,
     scriptKindFor(filePath),
   );
+  const comments = sourceComments(source, sourceFile, filePath);
   const findings = [];
 
   const visit = (node) => {
@@ -366,14 +374,15 @@ export function analyzeD2Source(source, filePath) {
       if (exclude) {
         const arrayInitializer = ts.isArrayLiteralExpression(exclude.initializer);
         for (const element of exclusionElements(exclude.initializer)) {
-          for (const value of exclusionElementValues(element, arrayInitializer)) {
-            if (!isTestTargetingExclusion(value)) continue;
+          const entries = resolvedExclusionEntries(element, sourceFile, arrayInitializer);
+          for (const entry of entries) {
+            if (!entry.opaque && !isTestTargetingExclusion(entry.value)) continue;
             const location = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile));
             findings.push({
               rule: 'D2',
               api: 'vitest.exclude',
-              value,
-              fingerprint: d2Fingerprint(value),
+              value: entry.value,
+              fingerprint: d2Fingerprint(entry.value, entry.opaque),
               filePath,
               line: location.line + 1,
               column: location.character + 1,
@@ -386,7 +395,7 @@ export function analyzeD2Source(source, filePath) {
   };
 
   visit(sourceFile);
-  return findings;
+  return findings.filter((finding) => !isAllowed(finding, comments));
 }
 
 export function auditFiles(filePaths) {
