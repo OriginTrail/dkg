@@ -191,40 +191,53 @@ export function makeNodeClient(baseUrl, token) {
         accessPolicy: opts.accessPolicy ?? 0,
         publishPolicy: opts.publishPolicy ?? 1,
       }).then((r) => r.data),
-    // subscribe to (and sync) a context graph this node does not host. Returns
-    // { subscribed, catchup: { status: queued|running|done, jobId } }. Re-calling
-    // returns the current catchup status, so it doubles as a poll.
+    // Subscribe to (and sync) a context graph this node does not host. The POST
+    // enqueues catch-up; status must be polled through the read-only endpoint so
+    // parallel Jenkins stages cannot keep re-queuing the same work.
     subscribe: (contextGraphId, includeSharedMemory = true) =>
       req('POST', '/api/context-graph/subscribe', { contextGraphId, includeSharedMemory }, { acceptStatuses: [200, 202] }).then((r) => r.data),
+    catchupStatus: (contextGraphId) =>
+      req('GET', `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`).then((r) => r.data),
   };
 }
 
 // Subscribe a node to a private CG and wait until its catch-up sync reports done
 // (or timeout). Idempotent: a node already synced returns done immediately.
-async function subscribeAndWait(client, contextGraphId, nodeName, timeoutMs) {
+export async function subscribeAndWait(
+  client,
+  contextGraphId,
+  nodeName,
+  timeoutMs,
+  pollIntervalMs = 3000,
+) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
+  let res;
+  try {
+    res = await client.subscribe(contextGraphId);
+  } catch (error) {
+    throw new Error(`subscribe to "${contextGraphId}" on ${nodeName} failed: ${error.message}`);
+  }
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    let res;
-    try {
-      res = await client.subscribe(contextGraphId);
-    } catch (error) {
-      throw new Error(`subscribe to "${contextGraphId}" on ${nodeName} failed: ${error.message}`);
-    }
-    const status = res?.catchup?.status || 'unknown';
+    const status = res?.catchup?.status || res?.status || 'unknown';
     if (status !== last) {
       console.log(`   ↪ ${nodeName} subscribe/catchup: ${status}`);
       last = status;
     }
     if (status === 'done') return res;
-    if (status === 'failed' || status === 'error') {
+    if (['failed', 'error', 'denied', 'deferred', 'unreachable'].includes(status)) {
       throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} reported ${status}`);
     }
     if (Date.now() > deadline) {
       throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} did not finish within ${timeoutMs}ms (last status: ${status}) — is the curator node reachable on the DKG network?`);
     }
-    await sleep(3000);
+    await sleep(pollIntervalMs);
+    try {
+      res = await client.catchupStatus(contextGraphId);
+    } catch (error) {
+      throw new Error(`read catch-up status for "${contextGraphId}" on ${nodeName} failed: ${error.message}`);
+    }
   }
 }
 
