@@ -200,19 +200,23 @@ function git(args, cwd = process.cwd()) {
 
 function changedD1Entries(baseRevision, headRevision, cwd) {
   const entries = [];
-  const lines = git([
+  const fields = git([
     'diff',
     '--name-status',
+    '-z',
     '--find-renames',
     '--find-copies-harder',
     '--diff-filter=ACDMR',
     baseRevision,
     headRevision,
-  ], cwd).split('\n');
+  ], cwd).split('\0');
 
-  for (const line of lines) {
-    if (!line) continue;
-    const [status, firstPath, secondPath] = line.split('\t');
+  for (let index = 0; index < fields.length - 1;) {
+    const status = fields[index++];
+    const firstPath = fields[index++];
+    const secondPath = status.startsWith('R') || status.startsWith('C')
+      ? fields[index++]
+      : undefined;
     if (status.startsWith('R')) {
       if (isD1ScannableFile(firstPath) || isD1ScannableFile(secondPath)) {
         entries.push({
