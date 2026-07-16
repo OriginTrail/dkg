@@ -22,7 +22,7 @@ const ts = require('typescript');
 const SOURCE_EXTENSION = /\.[cm]?[jt]sx?$/i;
 const TEST_FILE_NAME = /(?:^|\.)(?:test|spec)\.[cm]?[jt]sx?$/i;
 const TEST_DIRECTORY = /(^|\/)(?:test|tests|__tests__|e2e)(?:\/|$)/;
-const VITEST_CONFIG_FILE = /(^|\/)vitest(?:\.[^/]+)*\.config\.[cm]?[jt]sx?$/i;
+const VITEST_CONFIG_FILE = /(^|\/)vitest(?:[.-][^/]*)?\.[cm]?[jt]sx?$/i;
 const TEST_EXCLUSION_PATH = /(^|\/)(?:test|tests|__tests__|spec|e2e)(?:\/|$)/i;
 const TEST_EXCLUSION_FILE = /\.(?:test|spec)\.[^/]+$/i;
 const EXCLUDED_TREE = /(^|\/)(?:node_modules|dist|build|out|generated|coverage|\.nyc_output|\.turbo)(?:\/|$)/;
@@ -151,7 +151,9 @@ export function isD1ScannableFile(filePath) {
 
 export function isD2ScannableFile(filePath) {
   const candidate = normalizedPath(filePath);
-  return VITEST_CONFIG_FILE.test(candidate) && !EXCLUDED_TREE.test(candidate);
+  return VITEST_CONFIG_FILE.test(candidate)
+    && !TEST_FILE_NAME.test(path.posix.basename(candidate))
+    && !EXCLUDED_TREE.test(candidate);
 }
 
 function isScannableFile(filePath) {
