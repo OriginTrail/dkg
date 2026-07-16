@@ -113,6 +113,17 @@ test('analysis does not fall through catch bindings to outer constants', () => {
   assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
 });
 
+test('analysis does not fall through for-of bindings to outer constants', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    'for (const EXCLUSION of exclusions) {',
+    '  const config = { test: { exclude: [EXCLUSION] } };',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
+});
+
 test('analysis recognizes custom Vitest configuration filenames', () => {
   const source = [
     "import { defineConfig } from 'vitest/config';",
