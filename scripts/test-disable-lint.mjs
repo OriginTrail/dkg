@@ -22,6 +22,9 @@ const ts = require('typescript');
 const SOURCE_EXTENSION = /\.[cm]?[jt]sx?$/i;
 const TEST_FILE_NAME = /(?:^|\.)(?:test|spec)\.[cm]?[jt]sx?$/i;
 const TEST_DIRECTORY = /(^|\/)(?:test|tests|__tests__|e2e)(?:\/|$)/;
+const VITEST_CONFIG_FILE = /(^|\/)(?:vitest(?:[.-][^/]*)?|vite\.config)\.[cm]?[jt]sx?$/i;
+const TEST_EXCLUSION_PATH = /(^|\/)(?:test|tests|__tests__|spec|e2e)(?:\/|$)/i;
+const TEST_EXCLUSION_FILE = /\.(?:test|spec)\.[^/]+$/i;
 const EXCLUDED_TREE = /(^|\/)(?:node_modules|dist|build|out|generated|coverage|\.nyc_output|\.turbo)(?:\/|$)/;
 const D1_ARCHIVE_TREE = /(^|\/)(?:test|tests)\/archive(?:\/|$)/;
 const DIRECT_BASES = new Set(['describe', 'it', 'suite', 'test']);
@@ -58,6 +61,123 @@ function d1Fingerprint(pattern, titleNode, fallbackNode, sourceFile) {
   const identity = normalizedStaticTitle(titleNode)
     ?? normalizedFragment(fallbackNode, sourceFile);
   return createHash('sha1').update(`D1:${pattern}:${identity}`).digest('hex');
+}
+
+function d2Fingerprint(value) {
+  return createHash('sha1').update(`D2:vitest.exclude:${value}`).digest('hex');
+}
+
+function propertyNameText(name) {
+  return name && (ts.isIdentifier(name) || ts.isStringLiteralLike(name))
+    ? name.text
+    : undefined;
+}
+
+function bindingNameIncludes(name, identifier) {
+  if (ts.isIdentifier(name)) return name.text === identifier;
+  return name.elements.some(
+    (element) => !ts.isOmittedExpression(element)
+      && bindingNameIncludes(element.name, identifier),
+  );
+}
+
+function lexicalBinding(scope, identifier) {
+  if (ts.isFunctionLike(scope)) {
+    const parameter = scope.parameters.find(
+      ({ name }) => bindingNameIncludes(name, identifier),
+    );
+    if (parameter) return { declaration: parameter, isConst: false };
+  }
+  if (
+    ts.isCatchClause(scope)
+    && scope.variableDeclaration
+    && bindingNameIncludes(scope.variableDeclaration.name, identifier)
+  ) {
+    return { declaration: scope.variableDeclaration, isConst: false };
+  }
+  if (
+    ts.isForStatement(scope)
+    && scope.initializer
+    && ts.isVariableDeclarationList(scope.initializer)
+  ) {
+    const declaration = scope.initializer.declarations.find(
+      ({ name }) => bindingNameIncludes(name, identifier),
+    );
+    if (declaration) {
+      return {
+        declaration,
+        isConst: Boolean(scope.initializer.flags & ts.NodeFlags.Const),
+      };
+    }
+  }
+  if (
+    (ts.isForOfStatement(scope) || ts.isForInStatement(scope))
+    && ts.isVariableDeclarationList(scope.initializer)
+  ) {
+    const declaration = scope.initializer.declarations.find(
+      ({ name }) => bindingNameIncludes(name, identifier),
+    );
+    if (declaration) {
+      return {
+        declaration,
+        isConst: Boolean(scope.initializer.flags & ts.NodeFlags.Const),
+      };
+    }
+  }
+  if (ts.isCaseBlock(scope)) {
+    for (const clause of scope.clauses) {
+      for (const statement of clause.statements) {
+        if (!ts.isVariableStatement(statement)) continue;
+        const declaration = statement.declarationList.declarations.find(
+          ({ name }) => bindingNameIncludes(name, identifier),
+        );
+        if (declaration) {
+          return {
+            declaration,
+            isConst: Boolean(statement.declarationList.flags & ts.NodeFlags.Const),
+          };
+        }
+      }
+    }
+  }
+  if (!ts.isSourceFile(scope) && !ts.isBlock(scope)) return undefined;
+  for (const statement of scope.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    const declaration = statement.declarationList.declarations.find(
+      ({ name }) => bindingNameIncludes(name, identifier),
+    );
+    if (declaration) {
+      return {
+        declaration,
+        isConst: Boolean(statement.declarationList.flags & ts.NodeFlags.Const),
+      };
+    }
+  }
+  return undefined;
+}
+
+function staticStringConstant(node) {
+  for (let scope = node.parent; scope; scope = scope.parent) {
+    const binding = lexicalBinding(scope, node.text);
+    if (!binding) continue;
+    return binding.isConst
+      && binding.declaration.initializer
+      && ts.isStringLiteralLike(binding.declaration.initializer)
+      ? binding.declaration.initializer.text
+      : undefined;
+  }
+  return undefined;
+}
+
+function staticExclusionValue(node) {
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isIdentifier(node)) return staticStringConstant(node);
+  return undefined;
+}
+
+function isTestTargetingExclusion(value) {
+  const candidate = value.replaceAll('\\', '/');
+  return TEST_EXCLUSION_PATH.test(candidate) || TEST_EXCLUSION_FILE.test(candidate);
 }
 
 function sourceComments(source, sourceFile, filePath) {
@@ -107,6 +227,17 @@ export function isD1ScannableFile(filePath) {
     && !EXCLUDED_TREE.test(candidate)
     && !D1_ARCHIVE_TREE.test(candidate)
     && (TEST_FILE_NAME.test(path.posix.basename(candidate)) || TEST_DIRECTORY.test(candidate));
+}
+
+export function isD2ScannableFile(filePath) {
+  const candidate = normalizedPath(filePath);
+  return VITEST_CONFIG_FILE.test(candidate)
+    && !TEST_FILE_NAME.test(path.posix.basename(candidate))
+    && !EXCLUDED_TREE.test(candidate);
+}
+
+function isScannableFile(filePath) {
+  return isD1ScannableFile(filePath) || isD2ScannableFile(filePath);
 }
 
 export function analyzeD1Source(source, filePath) {
@@ -182,10 +313,61 @@ export function analyzeD1Source(source, filePath) {
   return findings.filter((finding) => !isAllowed(finding, comments));
 }
 
+export function analyzeD2Source(source, filePath) {
+  if (!isD2ScannableFile(filePath)) return [];
+  const sourceFile = ts.createSourceFile(
+    filePath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindFor(filePath),
+  );
+  const findings = [];
+
+  const visit = (node) => {
+    if (
+      ts.isPropertyAssignment(node)
+      && propertyNameText(node.name) === 'test'
+      && ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      const exclude = node.initializer.properties.find(
+        (property) => ts.isPropertyAssignment(property)
+          && propertyNameText(property.name) === 'exclude',
+      );
+      if (exclude && ts.isArrayLiteralExpression(exclude.initializer)) {
+        for (const element of exclude.initializer.elements) {
+          const value = staticExclusionValue(element);
+          if (value === undefined || !isTestTargetingExclusion(value)) continue;
+          const location = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile));
+          findings.push({
+            rule: 'D2',
+            api: 'vitest.exclude',
+            value,
+            fingerprint: d2Fingerprint(value),
+            filePath,
+            line: location.line + 1,
+            column: location.character + 1,
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return findings;
+}
+
 export function auditFiles(filePaths) {
   return filePaths.flatMap((filePath) => {
-    if (!isD1ScannableFile(filePath)) return [];
-    return analyzeD1Source(readFileSync(filePath, 'utf8'), filePath);
+    const scansD1 = isD1ScannableFile(filePath);
+    const scansD2 = isD2ScannableFile(filePath);
+    if (!scansD1 && !scansD2) return [];
+    const source = readFileSync(filePath, 'utf8');
+    return [
+      ...(scansD1 ? analyzeD1Source(source, filePath) : []),
+      ...(scansD2 ? analyzeD2Source(source, filePath) : []),
+    ];
   });
 }
 
@@ -198,7 +380,7 @@ function git(args, cwd = process.cwd()) {
   });
 }
 
-function changedD1Entries(baseRevision, headRevision, cwd) {
+function changedEntries(baseRevision, headRevision, cwd) {
   const entries = [];
   const fields = git([
     'diff',
@@ -218,17 +400,17 @@ function changedD1Entries(baseRevision, headRevision, cwd) {
       ? fields[index++]
       : undefined;
     if (status.startsWith('R')) {
-      if (isD1ScannableFile(firstPath) || isD1ScannableFile(secondPath)) {
+      if (isScannableFile(firstPath) || isScannableFile(secondPath)) {
         entries.push({
-          basePath: isD1ScannableFile(firstPath) ? firstPath : null,
-          headPath: isD1ScannableFile(secondPath) ? secondPath : null,
+          basePath: isScannableFile(firstPath) ? firstPath : null,
+          headPath: isScannableFile(secondPath) ? secondPath : null,
         });
       }
     } else if (status.startsWith('C')) {
-      if (isD1ScannableFile(secondPath)) {
+      if (isScannableFile(secondPath)) {
         entries.push({ basePath: null, headPath: secondPath });
       }
-    } else if (isD1ScannableFile(firstPath)) {
+    } else if (isScannableFile(firstPath)) {
       entries.push({
         basePath: status === 'A' ? null : firstPath,
         headPath: status === 'D' ? null : firstPath,
@@ -240,11 +422,15 @@ function changedD1Entries(baseRevision, headRevision, cwd) {
 
 function findingsAt(revision, filePath, cwd) {
   if (!filePath) return [];
-  return analyzeD1Source(git(['show', `${revision}:${filePath}`], cwd), filePath);
+  const source = git(['show', `${revision}:${filePath}`], cwd);
+  return [
+    ...(isD1ScannableFile(filePath) ? analyzeD1Source(source, filePath) : []),
+    ...(isD2ScannableFile(filePath) ? analyzeD2Source(source, filePath) : []),
+  ];
 }
 
 export function computeDiffFindings(baseRevision, headRevision, cwd = process.cwd()) {
-  const entries = changedD1Entries(baseRevision, headRevision, cwd);
+  const entries = changedEntries(baseRevision, headRevision, cwd);
   const baseline = new Map();
   for (const entry of entries) {
     for (const finding of findingsAt(baseRevision, entry.basePath, cwd)) {
@@ -273,10 +459,10 @@ function runDiff(baseRevision, headRevision) {
   return blocking.length === 0 ? 0 : 1;
 }
 
-function listTrackedD1Files() {
+function listTrackedFiles() {
   return git(['ls-files', '-z'])
     .split('\0')
-    .filter(isD1ScannableFile);
+    .filter(isScannableFile);
 }
 
 function semanticMoveSelfTest() {
@@ -465,7 +651,7 @@ export function runCli(argv = process.argv.slice(2)) {
   if (argv[0] === '--all') {
     const selfTestResult = validateScanner();
     if (selfTestResult !== 0) return selfTestResult;
-    for (const finding of auditFiles(listTrackedD1Files())) {
+    for (const finding of auditFiles(listTrackedFiles())) {
       process.stdout.write(
         `${finding.filePath}:${finding.line}:${finding.column}: ${finding.rule} ${finding.api}\n`,
       );

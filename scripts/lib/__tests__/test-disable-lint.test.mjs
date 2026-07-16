@@ -5,10 +5,262 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { analyzeD1Source } from '../../test-disable-lint.mjs';
+import { analyzeD1Source, analyzeD2Source } from '../../test-disable-lint.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const LINT_SCRIPT = path.join(REPO_ROOT, 'scripts/test-disable-lint.mjs');
+
+test('analysis reports only static test-targeting Vitest discovery exclusions', () => {
+  const source = [
+    "import { defineConfig } from 'vitest/config';",
+    "const TEST_FILE = '**/*.test.ts';",
+    "const SPEC_DIRECTORY = 'spec/**';",
+    "const DISTRIBUTION = '**/dist/**';",
+    '',
+    'export default defineConfig({',
+    '  test: {',
+    '    exclude: [',
+    "      'test/unit/slow.test.ts',",
+    "      '**/*.spec.ts',",
+    '      TEST_FILE,',
+    '      SPEC_DIRECTORY,',
+    "      '**/node_modules/**',",
+    '      DISTRIBUTION,',
+    "      'build/**',",
+    "      'coverage/**',",
+    '    ],',
+    "    coverage: { exclude: ['src/generated.test.ts'] },",
+    '  },',
+    '});',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ api, line, value }) => ({
+      api,
+      line,
+      value,
+    })),
+    [
+      { api: 'vitest.exclude', line: 9, value: 'test/unit/slow.test.ts' },
+      { api: 'vitest.exclude', line: 10, value: '**/*.spec.ts' },
+      { api: 'vitest.exclude', line: 11, value: '**/*.test.ts' },
+      { api: 'vitest.exclude', line: 12, value: 'spec/**' },
+    ],
+  );
+});
+
+test('analysis resolves exclusion constants through lexical scope', () => {
+  const source = [
+    "import { defineConfig } from 'vitest/config';",
+    "const OUTER_EXCLUSION = 'tests/top-level/**';",
+    'export default defineConfig(() => {',
+    "  const NESTED_EXCLUSION = 'spec/callback/**';",
+    '  return { test: { exclude: [NESTED_EXCLUSION] } };',
+    '});',
+    'export const parameterized = defineConfig((OUTER_EXCLUSION) => ({',
+    '  test: { exclude: [OUTER_EXCLUSION] },',
+    '}));',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 5, value: 'spec/callback/**' }],
+  );
+});
+
+test('analysis resolves exclusion constants declared in for initializers', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    "for (const EXCLUSION = 'tests/loop/**'; enabled;) {",
+    '  const config = { test: { exclude: [EXCLUSION] } };',
+    '  break;',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 3, value: 'tests/loop/**' }],
+  );
+});
+
+test('analysis resolves exclusion constants declared in switch cases', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    'switch (mode) {',
+    "  case 'unit':",
+    "    const EXCLUSION = 'spec/case/**';",
+    '    const config = { test: { exclude: [EXCLUSION] } };',
+    '    break;',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 5, value: 'spec/case/**' }],
+  );
+});
+
+test('analysis does not fall through catch bindings to outer constants', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    'try {',
+    '  configure();',
+    '} catch (EXCLUSION) {',
+    '  const config = { test: { exclude: [EXCLUSION] } };',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
+});
+
+test('analysis does not fall through for-of bindings to outer constants', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    'for (const EXCLUSION of exclusions) {',
+    '  const config = { test: { exclude: [EXCLUSION] } };',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
+});
+
+test('analysis does not fall through for-in bindings to outer constants', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    'for (const EXCLUSION in exclusions) {',
+    '  const config = { test: { exclude: [EXCLUSION] } };',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(analyzeD2Source(source, 'vitest.config.ts'), []);
+});
+
+test('analysis recognizes custom Vitest configuration filenames', () => {
+  const source = [
+    "import { defineConfig } from 'vitest/config';",
+    'export default defineConfig({',
+    "  test: { exclude: ['e2e/**'] },",
+    '});',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.evm-integration.ts').map(({ value }) => value),
+    ['e2e/**'],
+  );
+});
+
+test('analysis recognizes standard Vite configuration filenames', () => {
+  const source = [
+    "import { defineConfig } from 'vite';",
+    'export default defineConfig({',
+    "  test: { exclude: ['tests/integration/**'] },",
+    '});',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vite.config.ts').map(({ value }) => value),
+    ['tests/integration/**'],
+  );
+});
+
+test('full-tree audit reports tracked static D2 baseline without failing', (t) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-d2-audit-'));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const configPath = 'packages/example/vitest.config.ts';
+  const configSource = [
+    "import { defineConfig } from 'vitest/config';",
+    "const LEGACY_TESTS = 'tests/legacy/**';",
+    'export default defineConfig({',
+    '  test: {',
+    '    exclude: [',
+    "      'test/e2e.test.ts',",
+    '      LEGACY_TESTS,',
+    "      '**/dist/**',",
+    '    ],',
+    '  },',
+    '});',
+  ].join('\n');
+  fs.mkdirSync(path.join(fixtureRoot, 'packages/example'), { recursive: true });
+  fs.writeFileSync(path.join(fixtureRoot, configPath), configSource);
+  fs.mkdirSync(path.join(fixtureRoot, 'build'), { recursive: true });
+  fs.writeFileSync(path.join(fixtureRoot, 'build/vitest.config.ts'), configSource);
+
+  for (const args of [
+    ['init', '-q'],
+    ['config', 'user.email', 'audit@example.invalid'],
+    ['config', 'user.name', 'audit'],
+    ['add', '-A'],
+  ]) {
+    const git = spawnSync('git', args, { cwd: fixtureRoot, encoding: 'utf8' });
+    assert.equal(git.status, 0, git.stderr);
+  }
+
+  const result = spawnSync(process.execPath, [LINT_SCRIPT, '--all'], {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split('\n'), [
+    `${configPath}:6:7: D2 vitest.exclude`,
+    `${configPath}:7:7: D2 vitest.exclude`,
+  ]);
+});
+
+test('diff mode fails only for net-new static D2 exclusions', (t) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-d2-diff-'));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: fixtureRoot, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git('init', '-q');
+  git('config', 'user.email', 'diff@example.invalid');
+  git('config', 'user.name', 'diff');
+  fs.writeFileSync(path.join(fixtureRoot, 'vitest.config.ts'), [
+    "import { defineConfig } from 'vitest/config';",
+    'export default defineConfig({',
+    '  test: {',
+    '    exclude: [',
+    "      'test/existing.test.ts',",
+    "      '**/dist/**',",
+    '    ],',
+    '  },',
+    '});',
+  ].join('\n'));
+  git('add', '-A');
+  git('commit', '-qm', 'base');
+  const base = git('rev-parse', 'HEAD');
+
+  fs.writeFileSync(path.join(fixtureRoot, 'vitest.config.ts'), [
+    "import { defineConfig } from 'vitest/config';",
+    'export default defineConfig({',
+    '  test: {',
+    '    exclude: [',
+    "      'test/existing.test.ts',",
+    "      '**/dist/**',",
+    "      'coverage/**',",
+    "      'test/new.test.ts',",
+    '    ],',
+    '  },',
+    '});',
+  ].join('\n'));
+  git('add', '-A');
+  git('commit', '-qm', 'head');
+  const head = git('rev-parse', 'HEAD');
+
+  const result = spawnSync(process.execPath, [LINT_SCRIPT, '--diff', base, head], {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout.trim(), 'vitest.config.ts:8:7: D2 vitest.exclude');
+});
 
 test('analysis reports every conditional test suppression occurrence', () => {
   const source = [
