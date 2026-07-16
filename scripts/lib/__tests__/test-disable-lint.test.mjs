@@ -5,9 +5,70 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { analyzeD1Source } from '../../test-disable-lint.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const LINT_SCRIPT = path.join(REPO_ROOT, 'scripts/test-disable-lint.mjs');
+
+test('analysis reports every conditional test suppression occurrence', () => {
+  const source = [
+    "test.skipIf(isWindows)('Windows test', () => {});",
+    "it.runIf(hasDatabase)('database test', () => {});",
+    "describe.skipIf(isCi)('CI suite', () => {});",
+    "suite.runIf(hasDocker)('Docker suite', () => {});",
+    "test('browser test', async ({ browserName }) => {",
+    "  test.skip(browserName === 'webkit', 'WebKit is unsupported');",
+    '});',
+    "test.skipIf(isWindows)('Windows test', () => {});",
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD1Source(source, 'test/conditional.test.ts').map(({ api, line }) => ({ api, line })),
+    [
+      { api: 'test.skipIf', line: 1 },
+      { api: 'it.runIf', line: 2 },
+      { api: 'describe.skipIf', line: 3 },
+      { api: 'suite.runIf', line: 4 },
+      { api: 'test.skip', line: 6 },
+      { api: 'test.skipIf', line: 8 },
+    ],
+  );
+});
+
+test('analysis reports indirect skip references with stable fallback fingerprints', () => {
+  const source = [
+    'const skippedTest = test.skip;',
+    'const maybeTest = disabled ? it.skip : it;',
+    'const maybeSuite = enabled ? describe : describe.skip;',
+  ].join('\n');
+  const reformattedSource = [
+    'const skippedTest=test . skip;',
+    'const maybeTest = disabled',
+    '  ? it . skip',
+    '  : it;',
+    'const maybeSuite=enabled?describe:describe . skip;',
+  ].join('\n');
+  const findings = analyzeD1Source(source, 'test/indirect.test.ts');
+  const reformattedFindings = analyzeD1Source(reformattedSource, 'test/indirect.test.ts');
+
+  assert.deepEqual({
+    references: findings.map(({ api, line }) => ({ api, line })),
+    fingerprintsPresent: findings.every(
+      ({ fingerprint }) => typeof fingerprint === 'string' && fingerprint.length > 0,
+    ),
+    stableAfterFormatting: findings.map(
+      ({ fingerprint }, index) => fingerprint === reformattedFindings[index]?.fingerprint,
+    ),
+  }, {
+    references: [
+      { api: 'test.skip', line: 1 },
+      { api: 'it.skip', line: 2 },
+      { api: 'describe.skip', line: 3 },
+    ],
+    fingerprintsPresent: true,
+    stableAfterFormatting: [true, true, true],
+  });
+});
 
 test('file audit reports direct disabled declarations at their source locations', (t) => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-lint-'));
