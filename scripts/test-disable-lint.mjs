@@ -250,6 +250,10 @@ function semanticMoveSelfTest() {
       path.join(fixtureRoot, 'test/original.test.ts'),
       "test.skip('existing debt', () => {});\n",
     );
+    writeFileSync(
+      path.join(fixtureRoot, 'test/untouched.test.ts'),
+      "it.todo('untouched debt');\n",
+    );
     git('add', '-A');
     git('commit', '-qm', 'base');
     const base = git('rev-parse', 'HEAD').trim();
