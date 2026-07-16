@@ -2778,6 +2778,7 @@ function durableDeltaWhereClauseForGraphs(
       GRAPH ?g { ?s ?p ?o }
     `;
   }
+  // sparql-scan-allow: R2 -- ?g is bound by a finite VALUES list of pre-admitted exact graph IRIs
   return `
       VALUES ?g { ${graphValuesClause} }
       GRAPH ?g { ?s ?p ?o }
